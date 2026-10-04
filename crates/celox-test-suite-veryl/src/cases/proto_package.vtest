@@ -1,0 +1,91 @@
+(group proto_package (category hierarchy))
+
+(case test_proto_package_builtin_comparison
+  (source "test.veryl" #"
+proto package ItemProto {
+type Item;
+}
+package ItemU16 for ItemProto {
+type Item = logic<16>;
+}
+module Comparator::<PKG: ItemProto> (
+a    : input  PKG::Item,
+b    : input  PKG::Item,
+a_lt : output logic    ,
+) {
+assign a_lt = a <: b;
+}
+pub module ComparatorU16 (
+a    : input  logic<16>,
+b    : input  logic<16>,
+a_lt : output logic    ,
+) {
+inst c: Comparator::<ItemU16> (a, b, a_lt);
+}
+"#)
+  (top ComparatorU16)
+  ; 10 < 20 → true
+  (modify
+    (set a 10)
+    (set b 20))
+  (assert_eq a_lt 1)
+  ; 20 < 10 → false
+  (modify
+    (set a 20)
+    (set b 10))
+  (assert_eq a_lt 0)
+  ; 10 < 10 → false (strict less-than)
+  (modify
+    (set a 10)
+    (set b 10))
+  (assert_eq a_lt 0))
+
+(case test_proto_package_with_custom_function
+  (source "test.veryl" #"
+proto package ItemProto {
+type Item;
+function lt(
+a: input Item,
+b: input Item,
+) -> logic;
+}
+package ItemU16 for ItemProto {
+type Item = logic<16>;
+function lt(
+a: input Item,
+b: input Item,
+) -> logic {
+return a <: b;
+}
+}
+module Comparator::<PKG: ItemProto> (
+a    : input  PKG::Item,
+b    : input  PKG::Item,
+a_lt : output logic    ,
+) {
+assign a_lt = PKG::lt(a, b);
+}
+pub module ComparatorU16 (
+a    : input  logic<16>,
+b    : input  logic<16>,
+a_lt : output logic    ,
+) {
+inst c: Comparator::<ItemU16> (a, b, a_lt);
+}
+"#)
+  (top ComparatorU16)
+  ; 10 < 20 → true
+  (modify
+    (set a 10)
+    (set b 20))
+  (assert_eq a_lt 1)
+  ; 20 < 10 → false
+  (modify
+    (set a 20)
+    (set b 10))
+  (assert_eq a_lt 0)
+  ; 10 < 10 → false
+  (modify
+    (set a 10)
+    (set b 10))
+  (assert_eq a_lt 0))

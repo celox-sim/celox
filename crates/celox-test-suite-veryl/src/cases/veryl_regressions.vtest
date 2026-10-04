@@ -1,0 +1,279 @@
+(group veryl_regressions (category regression))
+
+(case unary_minus_as_shift_amount
+  (source "test.veryl" #"
+    module Top (
+        base: input  logic<28>,
+        exp:  input  logic<10>,
+        r:    output logic<28>,
+    ) {
+        assign r = base << -exp;
+    }
+    "#)
+  (top Top)
+  (for value (list 0 1 0x05555555 0x0fffffff)
+    (for exponent (list 0 1 2 1023)
+      (modify
+        (set base value)
+        (set exp exponent))
+      (let shift (& (trunc 16 (- 0 exponent)) 1023))
+      (let expected (? (>= shift 28) 0 (& (trunc 32 (<< value shift)) 0x0fffffff)))
+      (assert_eq r expected))))
+
+(case struct_bit_field_rhs_no_spill
+  (source "test.veryl" #"
+    module Top (
+        a: input  logic<8> ,
+        b: input  logic<8> ,
+        o: output logic<10>,
+    ) {
+        struct s_t {
+            lo : logic<4>,
+            ext: logic<2>,
+            hi : logic<4>,
+        }
+        var m: s_t;
+        assign m.lo     = 4'hf;
+        assign m.ext[0] = ~(a == b);
+        assign m.ext[1] = 1'b0;
+        assign m.hi     = 4'hf;
+        assign o        = m;
+    }
+    "#)
+  (top Top)
+  (for (left right) (list (0 1) (1 1) (0xff 0) (0 0))
+    (modify
+      (set a left)
+      (set b right))
+    (let expected (| 0x3cf (trunc 16 (<< (!= left right) 4))))
+    (assert_eq o expected)))
+
+(case wide_ternary_narrow_branch_no_spill
+  (source "test.veryl" #"
+    module Top (
+        sel:  input  logic     ,
+        data: input  logic<64> ,
+        o:    output logic<256>,
+    ) {
+        assign o = if sel ? {data, {1'b0 repeat 72}} : 256'd0;
+    }
+    "#)
+  (top Top)
+  (for value (list 0 1 0xf7f6f5f4f3f2f1f0 0xffffffffffffffff)
+    (for selected (list 0 1 0)
+      (modify
+        (set sel selected)
+        (set data value))
+      (let expected (? (== selected 1) (<< value 72) 0))
+      (assert_eq o expected))))
+
+(case nested_array_index_const_array
+  (source "test.veryl" #"
+    module Top (
+        idx:    input  logic<8>,
+        nested: output logic<8>,
+        inner:  output logic<8>,
+    ) {
+        const A:   logic<8> [2] = '{1, 3};
+        var   mem: logic<8> [8];
+        always_comb {
+            mem[0] = 0;
+            mem[1] = 11;
+            mem[2] = 22;
+            mem[3] = 33;
+            mem[4] = 44;
+            mem[5] = 55;
+            mem[6] = 66;
+            mem[7] = 77;
+        }
+        assign inner  = A[idx];
+        assign nested = mem[A[idx]];
+    }
+    "#)
+  (top Top)
+  (for index (list 1 0 1 0)
+    (modify (set idx index))
+    (let mapped (? (== index 0) 1 3))
+    (assert_eq inner mapped)
+    (assert_eq nested (* mapped 11))))
+
+(case inst_port_default_value_connected_not_folded
+  (source "test.veryl" #"
+    module Sub (
+        i_cfg : input  logic<5>  = 5'd0,
+        o_mask: output logic<16>,
+    ) {
+        assign o_mask = (16'd1 << i_cfg) - 16'd1;
+    }
+
+    module Top (
+        o_conn: output logic<16>,
+        o_open: output logic<16>,
+    ) {
+        inst s_conn: Sub (
+            i_cfg : 5'd2  ,
+            o_mask: o_conn,
+        );
+        inst s_open: Sub (
+            o_mask: o_open,
+        );
+    }
+    "#)
+  (top Top)
+  (assert_eq o_conn 3)
+  (assert_eq o_open 0))
+
+(case inlined_function_per_callsite_scratch_in_continuous_assign
+  (source "test.veryl" #"
+    module Top (
+        x: input  logic<32>,
+        y: input  logic<32>,
+        o: output logic<12>,
+    ) {
+        function clz32 (
+            val: input logic<32>,
+        ) -> logic<6> {
+            var ret: logic<6>;
+            ret = 6'd32;
+            for i in 0..32 {
+                if val[31 - i] == 1'b1 && ret == 6'd32 {
+                    ret = i as 6;
+                }
+            }
+            return ret;
+        }
+        assign o = {clz32(x), clz32(y)};
+    }
+    "#)
+  (top Top)
+  (for (left right) (list (0x00800000 0x10) (0x10 0x00800000) (0 0xffffffff) (1 0) (0x80000000 0x80000000))
+    (modify
+      (set x left)
+      (set y right))
+    (let expected (| (trunc 32 (<< (- 32 (bitlen (trunc 32 left))) 6)) (- 32 (bitlen (trunc 32 right)))))
+    (assert_eq o expected)))
+
+(case wide_shift_amount_out_of_range
+  (source "test.veryl" #"
+    module Top (
+        v:   input  logic<8>,
+        amt: input  logic<70>,
+        r:   output logic<8>,
+    ) {
+        assign r = v >> amt;
+    }
+    "#)
+  (top Top)
+  (for value (list 0 0xa5 0xff)
+    (for amount (list 0 1 7 8 256 (+ (<< 1 64) 1))
+      (modify
+        (set v value)
+        (set amt amount))
+      (assert_eq r (? (>= amount 8) 0 (>> value amount)) "r"))))
+
+(case wide_struct_bit_field_rhs_no_spill
+  (source "test.veryl" #"
+    module Top (
+        a: input  logic<8>  ,
+        b: input  logic<8>  ,
+        o: output logic<200>,
+    ) {
+        struct w_t {
+            lo : logic<100>,
+            ext: logic<2>  ,
+            hi : logic<98> ,
+        }
+        var m: w_t;
+        assign m.lo     = '1;
+        assign m.ext[0] = ~(a == b);
+        assign m.ext[1] = 1'b0;
+        assign m.hi     = '1;
+        assign o        = m;
+    }
+    "#)
+  (top Top)
+  (let all (- (<< 1 200) 1))
+  (for (left right) (list (0 1) (1 1) (0xff 0) (0 0))
+    (modify
+      (set a left)
+      (set b right))
+    ; IEEE 1800-2023 7.2.1: the first packed member is most significant.
+    (assert_eq o (| (& all (~ (<< 3 98))) (<< (!= left right) 98)))))
+
+(case wide_shift_count_preserves_unknowns_and_sign_fill
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    value: input logic<130>,
+    signed_value: input signed logic<8>,
+    amount: input logic<70>,
+    left: output logic<130>,
+    right: output logic<130>,
+    arithmetic: output signed logic<8>,
+) {
+    assign left = value << amount;
+    assign right = value >> amount;
+    assign arithmetic = signed_value >>> amount;
+}
+"#)
+  (top Top)
+  (let all (- (<< 1 130) 1))
+  (let high (<< 1 129))
+  (for payload (list 0x55 (| high 0x55))
+    (for count (list 0 1 129 130 256 (+ (<< 1 64) 1))
+      (modify
+        (set value payload)
+        (set signed_value 0x85)
+        (set amount count))
+      ; The shift uses the low 32-bit digit of the count.
+      (let shift (trunc 32 count))
+      (let oversized (>= count 130))
+      (assert_eq left (? oversized 0 (& (<< payload shift) all)) "left")
+      (assert_eq right (? oversized 0 (>> payload shift)) "right")
+      (assert_eq arithmetic (trunc 8 (>> -123 (? (>= count 8) 7 shift))) "arithmetic"))
+    (for low (list 0 0xffff_ffff_ffff_ffff)
+      (for unknown_bit (list 2 64 69)
+        (let mask (<< 1 unknown_bit))
+        (for unknown_payload (list 0 mask)
+          (modify
+            (set value payload)
+            (set signed_value 0x85)
+            (set amount
+              (fourstate (| (& low (^ (- (<< 1 70) 1) mask)) unknown_payload) mask)))
+          (assert_eq left (fourstate all all) "unknown count: left")
+          (assert_eq right (fourstate all all) "unknown count: right")
+          (assert_eq arithmetic (fourstate 255 255) "unknown count: arithmetic"))))))
+
+(case constant_arrays_initialize_comb_and_ff_reads
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    index: input logic<2>,
+    comb: output logic<3>,
+    registered: output logic<3>,
+    repeated: output logic<3>,
+    nested: output logic<3>,
+    known: output bit<3>,
+) {
+    const TABLE: logic<3> [4] = '{3'b111, 3'b010, 3'bx01, 3'bz10};
+    const REPEATED: logic<3> [4] = '{default: 3'b101};
+    const NESTED: logic<3> [2, 2] = '{'{1, 2}, '{3, 4}};
+    const KNOWN: bit<3> [4] = '{0, 1, 2, 7};
+    assign comb = TABLE[index];
+    assign repeated = REPEATED[index];
+    assign nested = NESTED[index[1]][index[0]];
+    assign known = KNOWN[index];
+    always_ff (clk) { registered = TABLE[index]; }
+}
+"#)
+  (top Top)
+  (for (idx payload mask known_value)
+      (list (3 2 4 7) (0 7 0 0) (2 5 4 2) (1 2 0 1) (3 2 4 7) (2 5 4 2) (0 7 0 0))
+    (modify (set index idx))
+    (assert_eq comb (fourstate payload mask))
+    (assert_eq repeated 5)
+    (assert_eq nested (+ idx 1))
+    (assert_eq known known_value)
+    (tick clk)
+    (assert_eq registered (fourstate payload mask))))

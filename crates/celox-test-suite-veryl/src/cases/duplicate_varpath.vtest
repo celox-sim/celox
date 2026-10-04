@@ -1,0 +1,89 @@
+(group duplicate_varpath (category regression))
+
+(case test_duplicate_scoped_var_in_always_comb
+  (source "test.veryl" #"
+        module Top (
+            sel : input  logic   ,
+            a   : input  logic<4>,
+            b   : input  logic<4>,
+            o   : output logic<4>,
+        ) {
+            var result: logic<4>;
+            always_comb {
+                result = 0 as 4;
+                for i in 0..2 {
+                    var tmp: logic<4>;
+                    tmp = a + i as 4;
+                    if sel && i == 1 {
+                        result = tmp;
+                    }
+                }
+                for j in 0..2 {
+                    var tmp: logic<4>;
+                    tmp = b + j as 4;
+                    if !sel && j == 1 {
+                        result = tmp;
+                    }
+                }
+            }
+            assign o = result;
+        }
+    "#)
+  (top Top)
+  ; sel=1: result = a + 1
+  (modify
+    (set sel 1)
+    (set a 5)
+    (set b 0))
+  (assert_eq o 6)
+  ; 5 + 1
+  ; sel=0: result = b + 1
+  (modify
+    (set sel 0)
+    (set a 0)
+    (set b 10))
+  (assert_eq o 11))
+  ; 10 + 1
+
+(case test_duplicate_scoped_var_with_generate_for
+  (source "test.veryl" #"
+        module Top (
+            clk   : input  clock  ,
+            rst   : input  reset  ,
+            i_data: input  logic<8>,
+            o_a   : output logic<8>,
+            o_b   : output logic<8>,
+        ) {
+            for g in 0..2 :g_ch {
+                var mem: logic<8>;
+
+                always_ff (clk, rst) {
+                    if_reset { mem = 0; }
+                    else     { mem = i_data + g as 8; }
+                }
+
+                always_comb {
+                    for k in 0..2 {
+                        var flag: logic;
+                        flag = k == g;
+                        if flag {
+                            if g == 0 { o_a = mem; }
+                            if g == 1 { o_b = mem; }
+                        }
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Reset (AsyncLow: active when rst=0)
+  (modify (set rst 0))
+  (tick clk)
+  ; Deactivate reset, set input
+  (modify
+    (set rst 1)
+    (set i_data 10))
+  (tick clk)
+  ; g_ch[0].mem = 10 + 0 = 10, g_ch[1].mem = 10 + 1 = 11
+  (assert_eq o_a 10)
+  (assert_eq o_b 11))

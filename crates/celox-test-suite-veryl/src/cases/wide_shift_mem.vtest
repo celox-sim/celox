@@ -1,0 +1,472 @@
+(group wide_shift_mem (category operators))
+
+(case test_256bit_shift_left_by_zero
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Shift by 0 → identity
+  (let val 0xDEADBEEFCAFEBABE)
+  (modify
+    (set a val)
+    (set amt 0))
+  (assert_eq o val "256-bit shl by 0 should be identity"))
+
+(case test_256bit_shift_left_within_chunk
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Shift by 4 (within a single chunk)
+  (let val 0xFF)
+  (modify
+    (set a val)
+    (set amt 4))
+  (assert_eq o 0xFF0 "256-bit shl by 4 failed"))
+
+(case test_256bit_shift_left_exact_chunk_boundary
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Shift by exactly 64 → moves to next chunk
+  (let val 1)
+  (modify
+    (set a val)
+    (set amt 64))
+  (assert_eq o (<< 1 64) "256-bit shl by 64 should move value to chunk 1")
+  ; Shift by 128 → moves to chunk 2
+  (modify (set amt 128))
+  (assert_eq o (<< 1 128) "256-bit shl by 128 should move value to chunk 2")
+  ; Shift by 192 → moves to chunk 3 (highest)
+  (modify (set amt 192))
+  (assert_eq o (<< 1 192) "256-bit shl by 192 should move value to chunk 3"))
+
+(case test_256bit_shift_left_cross_chunk
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; 0xFFFF_FFFF shifted by 48 → crosses chunk boundary (bits 48..79)
+  (let val 0xFFFFFFFF)
+  (modify
+    (set a val)
+    (set amt 48))
+  (assert_eq o (<< 0xFFFFFFFF 48) "256-bit shl by 48 should cross chunk boundary"))
+
+(case test_256bit_shift_left_overflow
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Shift by 256 → everything falls off
+  (let val 0xFFFFFFFFFFFFFFFF)
+  (modify
+    (set a val)
+    (set amt 256))
+  (assert_eq o 0 "256-bit shl by 256 should produce zero"))
+
+(case test_256bit_shift_right_logical
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a >> amt;
+}
+"#)
+  (top Top)
+  ; Value in chunk 3, shift right by 192 → should land in chunk 0
+  (let val (<< 0xABCD 192))
+  (modify
+    (set a val)
+    (set amt 192))
+  (assert_eq o 0xABCD "256-bit shr by 192 failed")
+  ; Cross-chunk shift right
+  (let val (<< 0xFF 60))
+  (modify
+    (set a val)
+    (set amt 4))
+  (let expected_cross (<< 0xFF 56))
+  (assert_eq o expected_cross "256-bit shr by 4 (cross-chunk) failed"))
+
+(case test_256bit_arithmetic_shift_right
+  (source "test.veryl" #"
+module Top (
+a:   input  signed logic<256>,
+amt: input  logic<9>,
+o:   output signed logic<256>
+) {
+assign o = a >>> amt;
+}
+"#)
+  (top Top)
+  ; Positive value: sar behaves like shr
+  (let val 0x100)
+  (modify
+    (set a val)
+    (set amt 4))
+  (assert_eq o 0x10 "256-bit sar of positive value should zero-fill")
+  ; Negative value (MSB set): should sign-extend
+  ; Set all 256 bits (represents -1)
+  (let neg_one (- (<< 1 256) 1))
+  (modify
+    (set a neg_one)
+    (set amt 100))
+  (assert_eq o neg_one "256-bit sar of -1 by any amount should remain -1")
+  ; -2 >>> 1 = -1
+  (let neg_two (- neg_one 1))
+  (modify
+    (set a neg_two)
+    (set amt 1))
+  (assert_eq o neg_one "256-bit sar of -2 by 1 should be -1"))
+
+(case test_512bit_shift_left
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Shift 1 by various amounts
+  (let one 1)
+  (for shift (list 0 1 32 63 64 65 128 255 256 384 448 511)
+    (modify
+      (set a one)
+      (set amt shift))
+    (let expected (<< one shift))
+    (assert_eq o expected "512-bit shl of 1 by failed")))
+
+(case test_512bit_shift_right
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a >> amt;
+}
+"#)
+  (top Top)
+  ; Put a bit at position 511 (MSB), shift right
+  (let msb (<< 1 511))
+  (for shift (list 0 1 63 64 128 256 511)
+    (modify
+      (set a msb)
+      (set amt shift))
+    (let expected (>> msb shift))
+    (assert_eq o expected "512-bit shr of MSB by failed")))
+
+(case test_512bit_arithmetic_shift_right
+  (source "test.veryl" #"
+module Top (
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+assign o = a >>> amt;
+}
+"#)
+  (top Top)
+  (let all_ones (- (<< 1 512) 1))
+  ; -1 in 512-bit
+  ; -1 >>> N = -1 for all N
+  (for shift (list 1 64 128 256 511)
+    (modify
+      (set a all_ones)
+      (set amt shift))
+    (assert_eq o all_ones "512-bit sar of -1 by should remain -1"))
+  ; MSB set, rest zero (minimum value): sar by 1 → sign extends
+  ; 0x8000...0000 >>> 1 = 0xC000...0000
+  (let min_val (<< 1 511))
+  (modify
+    (set a min_val)
+    (set amt 1))
+  ; Expected: bit 511 and bit 510 set, rest 0
+  (let expected (| (<< 1 511) (<< 1 510)))
+  (assert_eq o expected "512-bit sar of MIN_VALUE by 1 should sign-extend"))
+
+(case test_512bit_shift_left_multiword_pattern
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  ; Fill all chunks with a recognizable pattern
+  (let val 0)
+  (for i (range 0 8)
+    (set! val (| val (<< (* 0x0101010101010101 (+ i 1)) (* i 64)))))
+  (let mask (- (<< 1 512) 1))
+  ; Shift by 1 word (64 bits)
+  (modify
+    (set a val)
+    (set amt 64))
+  (let expected (& (<< val 64) mask))
+  (assert_eq o expected "512-bit shl of multi-word pattern by 64 failed")
+  ; Shift by 65 (word + 1 bit)
+  (modify (set amt 65))
+  (let expected (& (<< val 65) mask))
+  (assert_eq o expected "512-bit shl of multi-word pattern by 65 failed"))
+
+(case test_512bit_shift_left_ff
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+always_ff {
+o = a << amt;
+}
+}
+"#)
+  (top Top)
+  (let val 0xCAFE)
+  (let mask (- (<< 1 512) 1))
+  (modify
+    (set a val)
+    (set amt 200))
+  (tick clk)
+  (let expected (& (<< val 200) mask))
+  (assert_eq o expected "512-bit shl by 200 in always_ff failed"))
+
+(case test_512bit_sar_ff
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+always_ff {
+o = a >>> amt;
+}
+}
+"#)
+  (top Top)
+  ; -1 >>> 200 = -1
+  (let neg_one (- (<< 1 512) 1))
+  (modify
+    (set a neg_one)
+    (set amt 200))
+  (tick clk)
+  (assert_eq o neg_one "512-bit sar of -1 by 200 in always_ff should remain -1"))
+
+(case test_1024bit_shift_left
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<1024>,
+amt: input  logic<11>,
+o:   output logic<1024>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  (let mask (- (<< 1 1024) 1))
+  ; Shift 1 across various positions
+  (let one 1)
+  (for shift (list 0 64 128 512 1000 1023)
+    (modify
+      (set a one)
+      (set amt shift))
+    (let expected (& (<< one shift) mask))
+    (assert_eq o expected "1024-bit shl of 1 by failed")))
+
+(case test_1024bit_shift_right
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<1024>,
+amt: input  logic<11>,
+o:   output logic<1024>
+) {
+assign o = a >> amt;
+}
+"#)
+  (top Top)
+  ; MSB at bit 1023
+  (let msb (<< 1 1023))
+  (for shift (list 0 1 64 512 1023)
+    (modify
+      (set a msb)
+      (set amt shift))
+    (let expected (>> msb shift))
+    (assert_eq o expected "1024-bit shr of MSB by failed")))
+
+(case test_1024bit_sar_sign_extension
+  (source "test.veryl" #"
+module Top (
+a:   input  signed logic<1024>,
+amt: input  logic<11>,
+o:   output signed logic<1024>
+) {
+assign o = a >>> amt;
+}
+"#)
+  (top Top)
+  (let all_ones (- (<< 1 1024) 1))
+  ; -1 >>> 512 = -1
+  (modify
+    (set a all_ones)
+    (set amt 512))
+  (assert_eq o all_ones "1024-bit sar of -1 by 512 should remain -1"))
+
+(case test_256bit_all_ones_shift_left_one
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+o:   output logic<256>
+) {
+assign o = a << 1;
+}
+"#)
+  (top Top)
+  (let all_ones (- (<< 1 256) 1))
+  (let mask all_ones)
+  (modify (set a all_ones))
+  ; (all_ones << 1) & mask = all_ones - 1 (MSB lost, LSB becomes 0)
+  (let expected (& (<< all_ones 1) mask))
+  (assert_eq o expected "256-bit shl of all-ones by 1 failed"))
+
+(case test_512bit_shift_right_complete_overflow
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<512>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = a >> amt;
+}
+"#)
+  (top Top)
+  ; All ones >> 512 → 0
+  (let all_ones (- (<< 1 512) 1))
+  (modify
+    (set a all_ones)
+    (set amt 512))
+  (assert_eq o 0 "512-bit shr by 512 should produce zero"))
+
+(case test_256bit_shift_right_cross_chunk
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<9>,
+o:   output logic<256>
+) {
+assign o = a >> amt;
+}
+"#)
+  (top Top)
+  ; Place 0xFF at bits 68..60 (spans chunk boundary between chunk 0 and 1)
+  (let val (<< 0xFF 60))
+  (modify
+    (set a val)
+    (set amt 8))
+  (let expected (>> val 8))
+  (assert_eq o expected "256-bit shr of cross-chunk value by 8 failed"))
+
+(case test_narrow_source_wide_dest_shift_left
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = (a as 512) << amt;
+}
+"#)
+  (top Top)
+  (let mask_512 (- (<< 1 512) 1))
+  ; Shift by 0: upper chunks should be zero, not garbage
+  (let val 0xDEADBEEFCAFEBABE)
+  (modify
+    (set a val)
+    (set amt 0))
+  (assert_eq o val "Narrow→wide shl by 0: upper bits should be zero")
+  ; Shift by 256: value should move into the upper half cleanly
+  (modify (set amt 256))
+  (let expected (& (<< val 256) mask_512))
+  (assert_eq o expected "Narrow→wide shl by 256 failed")
+  ; Shift by 300: crosses into upper chunks
+  (modify (set amt 300))
+  (let expected (& (<< val 300) mask_512))
+  (assert_eq o expected "Narrow→wide shl by 300 failed"))
+
+(case test_narrow_source_wide_dest_shift_right
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<256>,
+amt: input  logic<10>,
+o:   output logic<512>
+) {
+assign o = (a as 512) >> amt;
+}
+"#)
+  (top Top)
+  ; All 256 bits set, shift right by 1: upper 256 bits should remain zero
+  (let val (- (<< 1 256) 1))
+  (modify
+    (set a val)
+    (set amt 1))
+  (let expected (>> val 1))
+  (assert_eq o expected "Narrow→wide shr by 1: upper bits should stay zero"))
+
+(case test_narrow_source_wide_dest_sar
+  (source "test.veryl" #"
+module Top (
+a:   input  signed logic<512>,
+amt: input  logic<10>,
+o:   output signed logic<512>
+) {
+assign o = a >>> amt;
+}
+"#)
+  (top Top)
+  ; Positive value (fits in lower 256 bits, upper 256 bits are 0):
+  ; sar should zero-fill, not produce garbage from uninitialised memory.
+  (let val 0x123456789ABCDEF0)
+  (modify
+    (set a val)
+    (set amt 4))
+  (assert_eq o (>> val 4) "512-bit sar of small positive value should zero-fill"))

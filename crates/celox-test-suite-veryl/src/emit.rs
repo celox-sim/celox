@@ -13,7 +13,24 @@ use veryl_parser::Parser;
 pub struct EmittedSources {
     sources: Vec<(String, PathBuf)>,
     events: BTreeMap<String, BTreeMap<String, bool>>,
+    modules: BTreeMap<String, ModuleInfo>,
+    max_width: usize,
     testbench: bool,
+}
+
+/// Port and signal shapes of an emitted module, for generated testbenches.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleInfo {
+    /// Input ports that are packed values or one-dimensional unpacked
+    /// arrays: name, (element) width and element count for an array.
+    pub inputs: Vec<(String, usize, Option<usize>)>,
+    /// Output ports.
+    pub outputs: Vec<String>,
+    /// Ports a testbench cannot drive with a packed value: unpacked arrays,
+    /// interfaces and inouts.
+    pub other_ports: Vec<String>,
+    /// Unpacked one-dimensional signals: element width and count.
+    pub arrays: BTreeMap<String, (usize, usize)>,
 }
 
 impl EmittedSources {
@@ -26,6 +43,16 @@ impl EmittedSources {
     /// child modules. `true` means a rising edge, `false` a falling edge.
     pub fn event_edges(&self, top: &str) -> Option<&BTreeMap<String, bool>> {
         self.events.get(top)
+    }
+
+    /// Port and signal shapes of `module`.
+    pub fn module_info(&self, module: &str) -> Option<&ModuleInfo> {
+        self.modules.get(module)
+    }
+
+    /// The widest signal (or array element) in any emitted module.
+    pub fn max_width(&self) -> usize {
+        self.max_width
     }
 
     /// Borrow the emitted sources in the form accepted by SV compiler adapters.
@@ -142,8 +169,50 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
         .collect();
 
     let mut events = BTreeMap::new();
+    let mut modules = BTreeMap::new();
+    let mut max_width = 1;
     for component in &ir.components {
         if let veryl_analyzer::ir::Component::Module(module) = component {
+            use veryl_analyzer::ir::VarKind;
+            let mut info = ModuleInfo::default();
+            for variable in module.variables.values() {
+                let width = variable.r#type.total_width().unwrap_or(1);
+                max_width = max_width.max(width);
+                if variable.path.0.len() == 1
+                    && variable.r#type.array.dims() == 1
+                    && let Some(count) = variable.r#type.array.total()
+                {
+                    info.arrays
+                        .insert(variable.path.to_string(), (width, count));
+                }
+            }
+            for (path, id) in &module.ports {
+                let name = path.to_string();
+                let simple = path.0.len() == 1;
+                match module.variables.get(id) {
+                    Some(variable)
+                        if simple
+                            && variable.kind == VarKind::Input
+                            && variable.r#type.array.dims() <= 1 =>
+                    {
+                        let width = variable.r#type.total_width().unwrap_or(1);
+                        let count = if variable.r#type.array.dims() == 1 {
+                            variable.r#type.array.total()
+                        } else {
+                            None
+                        };
+                        info.inputs.push((name, width, count));
+                    }
+                    Some(variable) if simple && variable.kind == VarKind::Output => {
+                        info.outputs.push(name)
+                    }
+                    _ => info.other_ports.push(name),
+                }
+            }
+            info.inputs.sort();
+            info.outputs.sort();
+            info.other_ports.sort();
+            modules.insert(module.name.to_string(), info);
             let mut ports = BTreeMap::new();
             for (path, (ty, _)) in &module.port_types {
                 use veryl_analyzer::ir::TypeKind;
@@ -160,6 +229,8 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
     EmittedSources {
         sources: emitted,
         events,
+        modules,
+        max_width,
         testbench: native_testbench,
     }
 }

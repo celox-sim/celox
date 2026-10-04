@@ -1,0 +1,137 @@
+(group ff_event_snapshot (category sequential))
+
+(case ff_read_array_uses_previous_index
+  ; Veryl 0.21.0 misses reads used only in indices/selects during FF
+  ; classification. Re-enable its reference run when read tracking is fixed.
+  (source "test.veryl" #"
+            module Top (
+                clk: input clock, rst_n: input reset_async_low,
+                addr: input logic<2>, q: output logic<8>,
+            ) {
+                var addr_q: logic<2>;
+                var mem: logic<8> [4];
+                assign mem[0] = 8'h10;
+                assign mem[1] = 8'h11;
+                assign mem[2] = 8'h12;
+                assign mem[3] = 8'h13;
+
+                always_ff (clk) { addr_q = addr; }
+                // Separate reset groups exercise dependency-based FF scheduling.
+                always_ff (clk, rst_n) {
+                    if_reset { q = 0; }
+                    else { q = mem[addr_q]; }
+                }
+            }
+        "#)
+  (top Top)
+  ; Seed addr_q without relying on its initial value. It must only be read
+  ; as an index: a counter's self-read could mask missing index dependencies.
+  (modify
+    (set rst_n 0)
+    (set addr 0))
+  (tick clk)
+  (modify (set rst_n 1))
+  (for (next_addr expected) (list (3 0x10) (1 0x13) (2 0x11) (0 0x12))
+    (modify (set addr next_addr))
+    (tick clk)
+    (assert_eq q expected "new addr input"))
+  (tick clk)
+  (assert_eq q 0x10))
+
+(case ff_read_bit_select_uses_previous_index
+  ; Veryl 0.21.0 misses bit-select index reads during FF classification.
+  ; The SV frontend rejects this dynamic bit-select in always_ff lowering.
+  (source "test.veryl" #"
+            module Top (
+                clk: input clock, rst_n: input reset_async_low,
+                index: input logic<2>, q: output logic,
+            ) {
+                var index_q: logic<2>;
+                var bits: logic<4>;
+                assign bits = 4'b1010;
+
+                always_ff (clk) { index_q = index; }
+                // Separate reset groups exercise dependency-based FF scheduling.
+                always_ff (clk, rst_n) {
+                    if_reset { q = 0; }
+                    else { q = bits[index_q]; }
+                }
+            }
+        "#)
+  (top Top)
+  (modify
+    (set rst_n 0)
+    (set index 0))
+  (tick clk)
+  (modify (set rst_n 1))
+  (for (next_index expected) (list (3 0) (0 1) (1 0) (2 1))
+    (modify (set index next_index))
+    (tick clk)
+    (assert_eq q expected "new bit index"))
+  (tick clk)
+  (assert_eq q 0))
+
+(case ff_read_part_select_uses_previous_index
+  ; Veryl 0.21.0 misses part-select index reads during FF classification.
+  ; The SV frontend does not support indexed part-selects yet.
+  (source "test.veryl" #"
+            module Top (
+                clk: input clock, rst_n: input reset_async_low,
+                index: input logic<2>, q: output logic<8>,
+            ) {
+                var index_q: logic<2>;
+                var word: logic<32>;
+                assign word = 32'h44332211;
+
+                always_ff (clk) { index_q = index; }
+                // Separate reset groups exercise dependency-based FF scheduling.
+                always_ff (clk, rst_n) {
+                    if_reset { q = 0; }
+                    else { q = word[index_q * 8+:8]; }
+                }
+            }
+        "#)
+  (top Top)
+  ; Keep bit and part selects in separate designs: either read could
+  ; otherwise order the whole reader group before the writer group.
+  (modify
+    (set rst_n 0)
+    (set index 0))
+  (tick clk)
+  (modify (set rst_n 1))
+  (for (next_index expected) (list (2 0x11) (1 0x33) (3 0x22) (0 0x44))
+    (modify (set index next_index))
+    (tick clk)
+    (assert_eq q expected "new byte index"))
+  (tick clk)
+  (assert_eq q 0x11))
+
+(case reset_groups_sample_the_same_pre_edge_state
+  (source "test.veryl" #"
+            module Top #(param UNUSED: u32 = 0,) (
+                clk: input clock,
+                rst_n: input reset_async_low,
+                a: output logic<8>,
+                b: output logic<8>,
+            ) {
+                always_ff (clk, rst_n) {
+                    if_reset { a = 8'h13; }
+                    else { a = b; }
+                }
+                always_ff (clk) {
+                    if !rst_n { b = 8'h57; }
+                    else { b = a; }
+                }
+            }
+        "#)
+  (top Top)
+  (modify (set rst_n 0))
+  (tick clk)
+  (assert_eq a 0x13)
+  (assert_eq b 0x57)
+  (modify (set rst_n 1))
+  (for cycle (range 0 8)
+    (tick clk)
+    (let even (== (% cycle 2) 0))
+    (assert_eq a (? even 0x57 0x13) "cycle")
+    (assert_eq b (? even 0x13 0x57) "cycle")))

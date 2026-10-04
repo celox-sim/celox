@@ -9,5 +9,10 @@ fn main() -> celox_test_suite_veryl::Result<()> {
                 design, directory,
             )?))
         },
+        |case, directory| {
+            Ok(Box::new(
+                celox_test_suite_veryl::icarus::Icarus::build_script(case, directory)?,
+            ))
+        },
     )
 }

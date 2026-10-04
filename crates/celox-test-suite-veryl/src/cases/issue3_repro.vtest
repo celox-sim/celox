@@ -1,0 +1,44 @@
+(group issue3_repro (category regression))
+
+(case test_comb_mux_i8_vs_i16_correctness
+  (source "test.veryl" #"
+module Top (
+    en: input logic,
+    a9: input logic<9>,
+    out: output logic<9>,
+) {
+    assign out = if en ? en : a9;
+}
+"#)
+  (top Top)
+  ; en=0: output is a9
+  (modify
+    (set en 0)
+    (set a9 0x155))
+  (assert_eq out 0x155 "en=0: out should equal a9")
+  ; en=1: output is en (1-bit=1) zero-extended to 9 bits → 1
+  (modify
+    (set en 1)
+    (set a9 0x155))
+  (assert_eq out 1 "en=1: out should be 1 (en zero-extended)"))
+
+(case test_comb_mux_i8_vs_i16_four_state
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    en: input logic,
+    a9: input logic<9>,
+    out: output logic<9>,
+) {
+    assign out = if en ? en : a9;
+}
+"#)
+  (top Top)
+  ; en=0: output is a9
+  (modify
+    (set en 0)
+    (set a9 0x155))
+  (assert_eq out 0x155 "4-state en=0: out should equal a9")
+  ; en=1: output is 1 (en zero-extended)
+  (modify (set en 1))
+  (assert_eq out 1 "4-state en=1: out should be 1"))

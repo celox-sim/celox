@@ -1,0 +1,117 @@
+(group for_loop_unroll (category control_flow))
+
+(case test_for_loop_unroll_shift_register
+  (source "test.veryl" #"
+        module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
+            i_clk: input clock,
+            i_rst: input reset,
+            i_d:   input  logic<WIDTH>,
+            o_d:   output logic<WIDTH>,
+        ) {
+            var delay: logic<WIDTH> [DELAY];
+            assign o_d = delay[DELAY - 1];
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    delay = '{default: 8'h0};
+                } else {
+                    delay[0] = i_d;
+                    for i in 1..DELAY {
+                        delay[i] = delay[i - 1];
+                    }
+                }
+            }
+        }
+    "#)
+  (top Delay)
+  ; Apply reset (AsyncLow default: rst=0 is active)
+  (modify (set i_rst 0))
+  (tick i_clk)
+  (modify (set i_rst 1))
+  ; Shift 0xAA, 0xBB, 0xCC through the 3-stage delay
+  (modify (set i_d 0xAA))
+  (tick i_clk)
+  (modify (set i_d 0xBB))
+  (tick i_clk)
+  (modify (set i_d 0xCC))
+  (tick i_clk)
+  ; After 3 cycles the first value propagates to the output
+  (assert_eq o_d 0xAA))
+
+(case test_for_loop_unroll_break_in_always_ff
+  (source "test.veryl" #"
+        module Top (
+            i_clk: input clock,
+            i_rst: input reset,
+            o0:    output logic,
+            o1:    output logic,
+            o2:    output logic,
+            o3:    output logic,
+        ) {
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    o0 = 0;
+                    o1 = 0;
+                    o2 = 0;
+                    o3 = 0;
+                } else {
+                    for i in 0..8 {
+                        if i == 3 {
+                            break;
+                        }
+                        if i == 0 { o0 = 1; }
+                        if i == 1 { o1 = 1; }
+                        if i == 2 { o2 = 1; }
+                        if i == 3 { o3 = 1; }
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set i_rst 0))
+  (tick i_clk)
+  (modify (set i_rst 1))
+  (tick i_clk)
+  (assert_eq o0 1)
+  (assert_eq o1 1)
+  (assert_eq o2 1)
+  (assert_eq o3 0))
+
+(case test_for_loop_unroll_with_default_zero_reset
+  ; The SV frontend does not yet lower array assignment patterns in always_ff.
+  (source "test.veryl" #"
+        module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
+            i_clk: input clock,
+            i_rst: input reset,
+            i_d:   input  logic<WIDTH>,
+            o_d:   output logic<WIDTH>,
+        ) {
+            var delay: logic<WIDTH> [DELAY];
+            assign o_d = delay[DELAY - 1];
+            always_ff (i_clk, i_rst) {
+                if_reset {
+                    delay = '{default: 0};
+                } else {
+                    delay[0] = i_d;
+                    for i in 1..DELAY {
+                        delay[i] = delay[i - 1];
+                    }
+                }
+            }
+        }
+    "#)
+  (top Delay)
+  (modify
+    (set i_rst 0)
+    (set i_d 0xAB))
+  (tick i_clk)
+  (assert_eq o_d 0)
+  (modify (set i_rst 1))
+  (for _ (range 0 2)
+    (tick i_clk)
+    (assert_eq o_d 0))
+  (tick i_clk)
+  (assert_eq o_d 0xAB)
+  (modify (set i_rst 0))
+  (tick i_clk)
+  (assert_eq o_d 0))

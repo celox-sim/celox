@@ -11,7 +11,7 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
         include_str!("../verification/icarus.json"),
     ] {
         let report: serde_json::Value = serde_json::from_str(contents).unwrap();
-        assert_eq!(report["schema_version"], 2);
+        assert_eq!(report["schema_version"], 3);
         assert!(report["include_ignored"].is_boolean());
         let rows = report["cases"].as_array().unwrap();
         let names: BTreeSet<_> = rows

@@ -1,0 +1,41 @@
+(group generic_identity (category hierarchy))
+
+(case nested_value_generics_keep_distinct_bodies
+  (source "test.veryl" #"
+module Leaf::<FLAG: u32> (a: input logic, y: output logic) {
+    always_comb { y = 1'b0; if FLAG != 0 { y = a; } }
+}
+module Wrapped(a: input logic, y: output logic) {
+    inst leaf: Leaf::<1>(a, y);
+}
+module Repro(a: input logic, one: output logic, zero: output logic) {
+    inst wrapped: Wrapped(a, y: one);
+    inst disabled: Leaf::<0>(a, y: zero);
+}
+"#)
+  (top Repro)
+  (for value (list 0 1 0 1)
+    (modify (set a value))
+    (assert_eq one value)
+    (assert_eq zero 0)))
+
+(case default_and_explicit_value_generics_preserve_instance_inputs
+  (source "test.veryl" #"
+module Select::<ENABLED: u32 = 1> (a: input logic, y: output logic) {
+    always_comb { y = 1'b0; if ENABLED != 0 { y = a; } }
+}
+module Repro(a: input logic, b: input logic, first: output logic,
+    second: output logic, disabled: output logic) {
+    inst off: Select::<0>(a, y: disabled);
+    inst default_on: Select(a, y: first);
+    inst explicit_on: Select::<1>(a: b, y: second);
+}
+"#)
+  (top Repro)
+  (for value (range 0 4)
+    (modify
+      (set a (& value 1))
+      (set b (& (>> value 1) 1)))
+    (assert_eq first (& value 1))
+    (assert_eq second (& (>> value 1) 1))
+    (assert_eq disabled 0)))

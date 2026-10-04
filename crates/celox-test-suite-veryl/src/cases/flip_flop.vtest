@@ -1,0 +1,3017 @@
+(group flip_flop (category sequential))
+
+(case test_ff_nonblocking
+  (source "test.veryl" #"
+        module Top (clk: input clock, a: input logic<32>, q: output logic<32>) {
+            var r: logic<32>;
+            always_ff (clk) {
+                r = a;
+                q = r;
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set a 0x11111111))
+  (tick clk)
+  ; After 1st tick: r = 0x11111111, q = 0x0
+  (assert_eq q 0x0)
+  (tick clk)
+  ; After 2nd tick: q = 0x11111111
+  (assert_eq q 0x11111111))
+
+(case test_ff_statement_after_if_reset_keeps_source_order
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            rearm: input logic,
+            o_pending: output logic,
+            o_filling: output logic
+        ) {
+            var pending: logic;
+            var filling: logic;
+            always_ff (clk, rst) {
+                if_reset {
+                    pending = 1'b0;
+                    filling = 1'b0;
+                } else {
+                    if filling {
+                        filling = 1'b0;
+                    } else if pending {
+                        filling = 1'b1;
+                        pending = 1'b0;
+                    }
+                }
+                if rearm {
+                    pending = 1'b1;
+                }
+            }
+            assign o_pending = pending;
+            assign o_filling = filling;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set rearm 0))
+  (tick clk)
+  (modify
+    (set rst 1)
+    (set rearm 1))
+  (tick clk)
+  (assert_eq o_pending 1)
+  (assert_eq o_filling 0)
+  (tick clk)
+  (assert_eq o_pending 1)
+  (assert_eq o_filling 1))
+
+(case test_ff_static_and_dynamic_writes_share_sparse_state
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            use_static: input logic,
+            index: input logic<2>,
+            value: input logic<8>,
+            q: output logic<8>
+        ) {
+            var state: logic<8> [4];
+            always_ff (clk) {
+                if use_static {
+                    state[0] = value;
+                } else {
+                    state[index] = value;
+                }
+                q = state[0];
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set use_static 1)
+    (set value 0x5a))
+  (tick clk)
+  (assert_eq q 0)
+  (modify
+    (set use_static 0)
+    (set index 1)
+    (set value 0xa5))
+  (tick clk)
+  (assert_eq q 0x5a))
+
+(case test_ff_assert_message_output_argument_is_eager
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags eager_assertion_messages)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            ok: input logic,
+            d: input logic<8>,
+            effect: output logic<8>
+        ) {
+            function message_value (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            always_ff (clk) {
+                $assert_continue(ok, "value=%0d", message_value(d, effect));
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set ok 1)
+    (set d 10))
+  (tick clk)
+  (assert_eq effect 11)
+  (modify
+    (set ok 0)
+    (set d 20))
+  (tick clk)
+  (assert_eq effect 21))
+
+(case test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update_global (value: input logic<8>) -> logic<8> {
+                global_value = 8'd9;
+                if value == 8'd1 {
+                    return 8'd7;
+                } else {
+                    return 8'd8;
+                }
+            }
+
+            always_ff (clk) {
+                q = update_global(global_value);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set global_value 1))
+  (tick clk)
+  (assert_eq global_value 9)
+  (assert_eq q 7))
+
+(case test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function read_global () -> logic<8> {
+                return global_value;
+            }
+
+            function update_global (value: input logic<8>) -> logic<8> {
+                global_value = 8'd9;
+                if value == 8'd1 {
+                    return 8'd7;
+                } else {
+                    return 8'd8;
+                }
+            }
+
+            always_ff (clk) {
+                q = update_global(read_global());
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set global_value 1))
+  (tick clk)
+  (assert_eq global_value 9)
+  (assert_eq q 7))
+
+(case test_ff_statement_function_direct_nonlocal_assignment_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            global_value: output logic<8>
+        ) {
+            function set_global (value: input logic<8>) {
+                global_value = value;
+            }
+
+            always_ff (clk) {
+                set_global(d);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set d 0x5a))
+  (tick clk)
+  (assert_eq global_value 0x5a))
+
+(case test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            global_value: output logic<8>
+        ) {
+            function maybe_write (gate: input logic) {
+                if gate {
+                    global_value = 8'h01;
+                }
+            }
+
+            always_ff (clk) {
+                global_value = 8'h05;
+                maybe_write(gate);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set gate 0))
+  (tick clk)
+  (assert_eq global_value 5)
+  (modify (set gate 1))
+  (tick clk)
+  (assert_eq global_value 1))
+
+(case test_ff_nonlocal_write_precedes_aliased_formal_output_copyout
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic
+        ) {
+            function update (written: output logic<8>) -> logic {
+                global_value = 8'h01;
+                written = 8'h02;
+                return 0;
+            }
+
+            always_ff (clk) {
+                q = update(global_value);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq global_value 2))
+
+(case test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (written: output logic<8>) {
+                written = 8'h5a;
+            }
+
+            function outer () {
+                set(global_value);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq global_value 0x5a))
+
+(case test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer () {
+                var ignored: logic;
+                ignored = set(8'h5a, global_value);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq global_value 0x5a))
+
+(case test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (
+                value: input logic,
+                written: output logic
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer () {
+                var ignored: logic;
+                ignored = set(1'b1, global_value[0]);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq global_value 1))
+
+(case test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            global_value: output logic<8>
+        ) {
+            function set (
+                value: input logic,
+                written: output logic
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer (index: input logic) {
+                var ignored: logic;
+                ignored = set(1'b1, global_value[index]);
+            }
+
+            always_ff (clk) {
+                outer(index);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set index 1))
+  (tick clk)
+  (assert_eq global_value 2))
+
+(case test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            value: input logic,
+            global_value: output logic<8>
+        ) {
+            function write_at (
+                index: input logic<3>,
+                value: input logic
+            ) -> logic {
+                global_value[index] = value;
+                return 1'b0;
+            }
+
+            function outer (
+                index: input logic<3>,
+                value: input logic
+            ) {
+                var ignored: logic;
+                ignored = write_at(index, value);
+            }
+
+            always_ff (clk) {
+                outer(index, value);
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set index 2)
+    (set value 1))
+  (tick clk)
+  (assert_eq global_value 4))
+
+(case test_ff_dynamic_nonlocal_store_follows_pending_whole_write
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function write_at (index: input logic<3>) {
+                global_value = 8'hff;
+                global_value[index] = 1'b0;
+            }
+
+            always_ff (clk) {
+                write_at(index);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set index 1))
+  (tick clk)
+  (assert_eq global_value 0xfd))
+
+(case test_ff_nonlocal_source_ternary_preserves_unknown_merge
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            select: input logic,
+            global_value: output logic<8>
+        ) {
+            function write_selected (select: input logic) {
+                global_value = if select ? 8'hf0 : 8'h0f;
+            }
+
+            always_ff (clk) {
+                write_selected(select);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set select (fourstate 0 1)))
+  (tick clk)
+  (assert_eq global_value (fourstate 0xff 0xff)))
+
+(case test_ff_function_output_index_uses_final_nonlocal_state
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: output logic,
+            entries: output logic<8>[2]
+        ) {
+            function set (written: output logic<8>) {
+                index = 1'b1;
+                written = 8'ha5;
+            }
+
+            always_ff (clk) {
+                set(entries[index]);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq index 1)
+  (assert_eq entries 0xa500))
+
+(case test_ff_short_circuit_runtime_write_preserves_later_state_source
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            d: input logic<8>,
+            state: output logic<8>,
+            q: output logic<8>
+        ) {
+            var ignored: logic;
+
+            function write_state (x: input logic<8>) -> logic {
+                state = x;
+                return 1'b1;
+            }
+
+            always_ff (clk) {
+                ignored = gate && write_state(d);
+                q = state;
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set gate 1)
+    (set d 0x5a))
+  (tick clk)
+  (assert_eq state 0x5a)
+  (assert_eq q 0)
+  (modify
+    (set gate 0)
+    (set d 0xa5))
+  (tick clk)
+  (assert_eq state 0x5a)
+  (assert_eq q 0x5a))
+
+(case test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            q: output logic<8>
+        ) {
+            var samples: logic<8>[2];
+
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            function pick (
+                values: input logic<8>[2],
+                shape: input logic<32>
+            ) -> logic<8> {
+                return values[0] + shape[0];
+            }
+
+            always_ff (clk) {
+                samples = '{8'h12, 8'h34};
+                q = pick(
+                    samples,
+                    $bits(update(samples[0], samples[0]))
+                        + $size(update(samples[0], samples[0]))
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq q 0)
+  (tick clk)
+  (assert_eq q 0x12))
+
+(case test_ff_bits_and_size_array_dependencies_do_not_alias_later_write
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            q: output logic<32>
+        ) {
+            var samples: logic<8>[2];
+
+            function set_sample (written: output logic<8>) -> logic<32> {
+                written = 8'h5a;
+                return 0;
+            }
+
+            function pick (
+                values: input logic<32>[2],
+                ignored: input logic<32>
+            ) -> logic<32> {
+                return values[0];
+            }
+
+            always_ff (clk) {
+                q = pick(
+                    '{$bits(samples), default: 0},
+                    set_sample(samples[0])
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq q 16))
+
+(case test_ff_pure_input_is_snapshotted_before_later_effectful_input
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags evaluation_order deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            function combine (
+                first: input logic<8>,
+                second: input logic<8>
+            ) -> logic<8> {
+                return first;
+            }
+
+            always_ff (clk) {
+                q = combine(effect, update(effect, effect));
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set effect 5))
+  (tick clk)
+  (assert_eq effect 6)
+  (assert_eq q 5))
+
+(case test_ff_effectful_array_item_output_is_not_a_read_alias
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function make (written: output logic<8>) -> logic<8> {
+                written = 8'h5a;
+                return 8'h11;
+            }
+
+            function pick (
+                values: input logic<8>[1],
+                written: output logic<8>
+            ) -> logic<8> {
+                written = 8'ha5;
+                return values[0];
+            }
+
+            always_ff (clk) {
+                q = pick('{make(effect)}, effect);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq effect 0xa5)
+  (assert_eq q 0x11))
+
+(case test_ff_runtime_for_bounds
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            step_start: input logic<32>,
+            q_fwd: output logic<8>,
+            q_rev: output logic<8>,
+            q_inc: output logic<8>,
+            q_step: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_fwd = 8'hee;
+                for i in 0..count {
+                    q_fwd = i as 8;
+                }
+
+                q_rev = 8'hee;
+                for i in rev 0..count {
+                    q_rev = i as 8;
+                }
+
+                q_inc = 8'hee;
+                for i in 0..=count {
+                    q_inc = i as 8;
+                }
+
+                q_step = 8'hee;
+                for i in step_start..(count + 4) step *= 2 {
+                    q_step = i as 8;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set count 4)
+    (set step_start 1))
+  (tick clk)
+  (assert_eq q_fwd 3)
+  (assert_eq q_rev 0)
+  (assert_eq q_inc 4)
+  (assert_eq q_step 4)
+  (modify (set count 5))
+  (tick clk)
+  (assert_eq q_fwd 4)
+  (assert_eq q_rev 0)
+  (assert_eq q_inc 5)
+  (assert_eq q_step 8))
+
+(case test_ff_runtime_for_bitwise_steps
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            or_end: input logic<8>,
+            xor_end: input logic<8>,
+            q_or: output logic<8>,
+            q_xor: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_or = 0;
+                for i in 3..=or_end step |= 6 {
+                    q_or = i as 8;
+                    if i == or_end {
+                        break;
+                    }
+                }
+
+                q_xor = 0;
+                for i in 3..=xor_end step ^= 6 {
+                    q_xor = i as 8;
+                    if i == xor_end {
+                        break;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set or_end 7)
+    (set xor_end 5))
+  (tick clk)
+  (assert_eq q_or 7)
+  (assert_eq q_xor 5))
+
+(case test_ff_signed_xor_step_uses_loop_counter_width
+  ; The Veryl simulator currently converts the signed dynamic start bound to an
+  ; unsigned runtime counter and executes zero iterations.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            wide_start: input signed logic<32>,
+            wide_end: input signed logic<128>,
+            q: output signed logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in wide_start..=wide_end step ^= 2147483648 {
+                    q = i;
+                    if i == 2147483640 {
+                        break;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set wide_start (trunc 32 -8))
+    (set wide_end 2147483640))
+  (tick clk)
+  (assert_eq q 0x7ffffff8))
+
+(case test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<32>,
+            or_end: input signed logic<128>,
+            xor_end: input signed logic<128>,
+            q_or: output signed logic<32>,
+            q_xor: output signed logic<32>
+        ) {
+            always_ff (clk) {
+                q_or = 0;
+                for i in start..=or_end step |= 4294967302 {
+                    q_or = i;
+                    if i == 7 {
+                        break;
+                    }
+                }
+
+                q_xor = 0;
+                for i in start..=xor_end step ^= 4294967302 {
+                    q_xor = i;
+                    if i == 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start (trunc 32 3))
+    (set or_end 7)
+    (set xor_end 5))
+  (tick clk)
+  (assert_eq q_or 7)
+  (assert_eq q_xor 5))
+
+(case test_ff_runtime_for_break
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'hee;
+                for i in 0..count {
+                    if i == 3 {
+                        break;
+                    }
+                    q = i as 8;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set count 8))
+  (tick clk)
+  (assert_eq q 2))
+
+(case test_ff_constant_signed_bounds_in_unrolled_loops
+  ; Constant signed reverse bounds are currently broken in the upstream
+  ; Veryl analyzer unroller, so this regression is parked until upstream
+  ; Veryl is fixed.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            q_fwd: output logic<32>,
+            q_rev_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_fwd = 0;
+                for i in (0 - 1)..=1 {
+                    q_fwd += i as 32;
+                }
+
+                q_rev_last = 32'hdead_beef;
+                for i in rev (0 - 1)..=1 {
+                    q_rev_last = (i + 1) as 32;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq q_fwd 0)
+  (assert_eq q_rev_last 0))
+
+(case test_ff_runtime_for_zero_iteration_mul_loop_is_allowed
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'haa;
+                for i in 0..0 step *= 2 {
+                    q = i;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq q 0xaa))
+
+(case test_ff_runtime_reverse_step_matches_emitted_sv_order
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound step += 2 {
+                    q = i as 32;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start 0)
+    (set end_bound 10))
+  (tick clk)
+  ; The last iteration is i = 1 for the emitted 9,7,5,3,1 order.
+  (assert_eq q 1))
+
+(case test_ff_runtime_reverse_exclusive_i32_upper_sentinel
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start 2147483640)
+    (set end_bound 2147483648))
+  (tick clk)
+  (assert_eq q 2147483640))
+
+(case test_ff_runtime_reverse_min_i32_end_wraps_before_range_check
+  ; veryl-simulator 0.20.2's non-JIT interpreter evaluates `end - 1` as i64
+  ; without truncating it to the signed 32-bit loop-counter width. It therefore
+  ; gets -2147483649 instead of wrapping to i32::MAX and skips the loop body.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                    break;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start (trunc 64 -2147483648))
+    (set end_bound (trunc 64 -2147483648)))
+  (tick clk)
+  (assert_eq q 0x7fffffff))
+
+(case test_ff_runtime_for_reverse_singleton_exits_cleanly
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            count: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff (clk) {
+                q = 8'hee;
+                for i in rev start..=count {
+                    q = i as 8;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start 4)
+    (set count 4))
+  (tick clk)
+  (assert_eq q 4))
+
+(case test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<32>,
+            count: input signed logic<32>,
+            q_last: output logic<32>
+        ) {
+            always_ff (clk) {
+                q_last = 32'hdead_beef;
+                for i in start..=count {
+                    q_last = i as 32;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set start 0xffffffff)
+    (set count 1))
+  (tick clk)
+  (assert_eq q_last 1))
+
+(case test_ff_runtime_for_forward_overshoot_exits_without_wraparound
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input logic<8>,
+            q_hits: output logic<8>,
+            q_last: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                q_last = 8'hee;
+                for i in start..255 step += 10 {
+                    q_hits += 1;
+                    q_last = i;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set start 250))
+  (tick clk)
+  (assert_eq q_hits 1)
+  (assert_eq q_last 250))
+
+(case test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            start: input signed logic<16>,
+            q_last: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_last = 8'hee;
+                for i in start[7:0]..=8'hff {
+                    q_last = i as 8;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set start 0xffff))
+  (tick clk)
+  (assert_eq q_last 255))
+
+(case test_ff_if_reset_basic
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst: input reset, d: input logic<8>, q: output logic<8>) {
+            always_ff (clk, rst) {
+                if_reset {
+                    q = 0;
+                } else {
+                    q = d;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Reset (AsyncLow: active when rst=0)
+  (modify
+    (set rst 0)
+    (set d 0xAA))
+  (tick clk)
+  (assert_eq q 0x0)
+  ; Normal operation (deactivate reset)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0xAA))
+
+(case test_async_reset
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst: input reset_async_high, d: input logic<8>, q: output logic<8>) {
+            always_ff (clk, rst) {
+                if_reset {
+                    q = 8'h55;
+                } else {
+                    q = d;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Async reset trigger
+  (modify (set rst 1))
+  (tick rst)
+  (assert_eq q 0x55)
+  ; Stay reset even if d changes
+  (modify (set d 0xFF))
+  (assert_eq q 0x55)
+  ; Release reset (should stay 0x55 because no clock or active reset edge)
+  (modify (set rst 0))
+  (assert_eq q 0x55))
+
+(case test_ff_swap_correctness
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
+            var r1: logic<8>;
+            var r2: logic<8>;
+            always_ff (clk, rst) {
+                if_reset {
+                    r1 = 8'hAA;
+                    r2 = 8'h55;
+                } else {
+                    r1 = r2;
+                    r2 = r1;
+                }
+            }
+            assign a = r1;
+            assign b = r2;
+        }
+    "#)
+  (top Top)
+  ; Reset to initialize (AsyncLow: active when rst=0)
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq a 0xAA)
+  (assert_eq b 0x55)
+  ; Tick to swap (deactivate reset)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq a 0x55)
+  (assert_eq b 0xAA))
+
+(case test_multiple_clocks
+  (source "test.veryl" #"
+        module Top (clk1: input 'a clock, clk2: input 'b clock, d1: input 'a logic<8>, d2: input 'b logic<8>, q1: output 'a logic<8>, q2: output 'b logic<8>) {
+            always_ff (clk1) { q1 = d1; }
+            always_ff (clk2) { q2 = d2; }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set d1 0x11)
+    (set d2 0x22))
+  (tick clk1)
+  (assert_eq q1 0x11)
+  (assert_eq q2 0x0)
+  (tick clk2)
+  (assert_eq q2 0x22))
+
+(case test_hierarchical_clocks
+  (source "test.veryl" #"
+        module Sub (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            always_ff (clk) { q = d; }
+        }
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            inst s: Sub (clk, d, q);
+        }
+    "#)
+  (top Top)
+  (modify (set d 0xFE))
+  (tick clk)
+  (assert_eq q 0xFE))
+
+(case test_multiple_async_resets
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst1: input reset_async_high, rst2: input reset_async_high, d: input logic<8>, q: output logic<8>) {
+            var r1: logic<8>;
+            var r2: logic<8>;
+
+            always_ff (clk, rst1) {
+                if_reset {
+                    r1 = 8'h0A;
+                } else {
+                    r1 = d;
+                }
+            }
+            always_ff (clk, rst2) {
+                if_reset {
+                    r2 = 8'h0B;
+                } else {
+                    r2 = d;
+                }
+            }
+            assign q = r1 | r2; // dummy use
+        }
+    "#)
+  (top Top)
+  (modify (set rst2 1))
+  (tick rst2)
+  (assert_eq r2 0x0B)
+  (modify (set rst1 1))
+  (tick rst1)
+  (assert_eq r1 0x0A))
+
+(case test_ff_if_reset_multi_cycle
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst: input reset, q: output logic<8>) {
+            always_ff (clk, rst) {
+                if_reset {
+                    q = 0;
+                } else {
+                    q = q + 1;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Deactivate reset first (AsyncLow: rst=1 means inactive)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 1)
+  (tick clk)
+  (assert_eq q 2)
+  ; Activate reset (AsyncLow: rst=0 means active)
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq q 0))
+
+(case test_ff_if_reset_with_nested_if
+  (source "test.veryl" #"
+        module Top (clk: input clock, rst: input reset, en: input logic, q: output logic<8>) {
+            always_ff (clk, rst) {
+                if_reset {
+                    q = 0;
+                } else {
+                    if en {
+                        q = q + 1;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Deactivate reset (AsyncLow: rst=1 means inactive)
+  (modify
+    (set rst 1)
+    (set en 1))
+  (tick clk)
+  (assert_eq q 1)
+  (modify (set en 0))
+  (tick clk)
+  (assert_eq q 1))
+
+(case test_ff_struct_constructor_expression
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, in_b: input logic<8>, out_a: output logic<8>, out_b: output logic<8>) {
+            struct S {
+                a: logic<8>,
+                b: logic<8>,
+            }
+            var r: S;
+            always_ff (clk) {
+                r.a = in_a;
+                r.b = in_b;
+            }
+            assign out_a = r.a;
+            assign out_b = r.b;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set in_a 0x12)
+    (set in_b 0x34))
+  (tick clk)
+  (assert_eq out_a 0x12)
+  (assert_eq out_b 0x34))
+
+(case test_ff_struct_constructor_expression_literal_order
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_a: input logic<8>,
+            in_b: input logic<8>,
+            out_a: output logic<8>,
+            out_b: output logic<8>
+        ) {
+            struct S {
+                a: logic<8>,
+                b: logic<8>,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{a: in_a, b: in_b};
+            }
+            assign out_a = r.a;
+            assign out_b = r.b;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set in_a 0x12)
+    (set in_b 0x34))
+  (tick clk)
+  (assert_eq out_a 0x12)
+  (assert_eq out_b 0x34))
+
+(case test_ff_struct_constructor_signed_member_extension
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_neg: input i8,
+            out_pad: output i16
+        ) {
+            struct S {
+                x: i16,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{x: in_neg};
+            }
+            assign out_pad = r.x;
+        }
+    "#)
+  (top Top)
+  (modify (set in_neg 0xFF))
+  (tick clk)
+  (assert_eq out_pad 0xFFFF))
+
+(case test_ff_array_literal_expression_order
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            o0: output logic<8>,
+            o1: output logic<8>
+        ) {
+            var r: logic<8>[2];
+            always_ff (clk) {
+                r = '{8'h12, 8'h34};
+            }
+            assign o0 = r[0];
+            assign o1 = r[1];
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq o0 0x12)
+  (assert_eq o1 0x34))
+
+(case test_ff_array_literal_default_expression
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_data: input logic<8>, out_data: output logic<8>[4]) {
+            var r: logic<8>[4];
+            always_ff (clk) {
+                r = '{default: in_data};
+            }
+            assign out_data = r;
+        }
+    "#)
+  (top Top)
+  (modify (set in_data 0x55))
+  (tick clk)
+  (let q_val (get out_data))
+  (for i (range 0 4)
+    (let bit_val (& (>> q_val (* i 8)) 0xFF))
+    (assert (== bit_val 0x55))))
+
+(case test_ff_array_literal_nested_default_multidim_expression
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_data: input logic<8>,
+            o00: output logic<8>,
+            o01: output logic<8>,
+            o10: output logic<8>,
+            o11: output logic<8>
+        ) {
+            var r: logic<8> [2, 2];
+            always_ff (clk) {
+                r = '{default: '{default: in_data}};
+            }
+            assign o00 = r[0][0];
+            assign o01 = r[0][1];
+            assign o10 = r[1][0];
+            assign o11 = r[1][1];
+        }
+    "#)
+  (top Top)
+  (modify (set in_data 0xAA))
+  (tick clk)
+  (assert_eq o00 0xAA))
+
+(case test_ff_function_call_expression
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
+            function f (x: input logic<8>) -> logic<8> {
+                return x + 1;
+            }
+            always_ff (clk) {
+                out_q = f(in_a);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 10))
+  (tick clk)
+  (assert_eq out_q 11))
+
+(case test_ff_function_call_statement_with_output_argument
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
+            function f (x: input logic<8>, y: output logic<8>) {
+                y = x + 2;
+            }
+            var tmp: logic<8>;
+            always_ff (clk) {
+                f(in_a, tmp);
+                out_q = tmp;
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 10))
+  (tick clk)
+  ; 1st tick: tmp becomes (10+2)=12, out_q reads OLD tmp (0)
+  (assert_eq out_q 0)
+  (tick clk)
+  ; 2nd tick: out_q reads 12
+  (assert_eq out_q 12))
+
+(case test_ff_function_call_statement_with_output_argument_and_return_value
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q1: output logic<8>, out_q2: output logic<8>) {
+            function f (x: input logic<8>, y: output logic<8>) -> logic<8> {
+                y = x + 3;
+                return x + 4;
+            }
+            var tmp: logic<8>;
+            always_ff (clk) {
+                out_q1 = f(in_a, tmp);
+                out_q2 = tmp;
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 100))
+  (tick clk)
+  ; After 1st tick: out_q1=104, tmp=103, out_q2=0 (old tmp)
+  (assert_eq out_q1 104)
+  (assert_eq out_q2 0)
+  (tick clk)
+  (assert_eq out_q2 103))
+
+(case test_ff_function_call_expression_with_output_argument_and_return_value
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q1: output logic<8>, out_q2: output logic<8>) {
+            function f (x: input logic<8>, y: output logic<8>) -> logic<8> {
+                y = x + 5;
+                return x + 6;
+            }
+            var tmp: logic<8>;
+            always_ff (clk) {
+                out_q1 = f(in_a, tmp) + 1;
+                out_q2 = tmp + 1;
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 50))
+  (tick clk)
+  ; 1st tick: out_q1 = (50+6)+1 = 57, out_q2 = 0+1 = 1
+  (assert_eq out_q1 57)
+  (assert_eq out_q2 1)
+  (tick clk)
+  ; 2nd tick: out_q2 = (50+5)+1 = 56
+  (assert_eq out_q2 56))
+
+(case test_ff_function_call_expression_with_if
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, sel: input logic, out_q: output logic<8>) {
+            function f (x: input logic<8>) -> logic<8> {
+                return x + 1;
+            }
+            always_ff (clk) {
+                if sel {
+                    out_q = f(in_a);
+                } else {
+                    out_q = 0;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set in_a 20)
+    (set sel 1))
+  (tick clk)
+  (assert_eq out_q 21)
+  (modify (set sel 0))
+  (tick clk)
+  (assert_eq out_q 0))
+
+(case test_ff_nested_function_call_expression
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
+            function f (x: input logic<8>) -> logic<8> {
+                return x + 1;
+            }
+            function g (x: input logic<8>) -> logic<8> {
+                return f(x) * 2;
+            }
+            always_ff (clk) {
+                out_q = g(in_a);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 5))
+  (tick clk)
+  ; (5+1)*2 = 12
+  (assert_eq out_q 12))
+
+(case test_ff_function_call_multistatement_body
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
+            function f (x: input logic<8>) -> logic<8> {
+                var tmp: logic<8>;
+                tmp = x + 1;
+                tmp = tmp * 2;
+                return tmp;
+            }
+            always_ff (clk) {
+                out_q = f(in_a);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 3))
+  (tick clk)
+  ; (3+1)*2 = 8
+  (assert_eq out_q 8))
+
+(case test_ff_function_call_indexed_argument_access
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>[4], out_q: output logic<8>) {
+            function f (x: input logic<8>[4]) -> logic<8> {
+                return x[2];
+            }
+            always_ff (clk) {
+                out_q = f(in_a);
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (let val 0)
+    (set! val (| val (<< 0xBE 16)))
+    (set in_a val))
+  (tick clk)
+  (assert_eq out_q 0xBE))
+
+(case test_ff_function_call_nested_output_statement_in_function_body
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
+            function f (x: input logic<8>, y: output logic<8>) {
+                y = x + 1;
+            }
+            function g (x: input logic<8>, y: output logic<8>) {
+                f(x, y);
+            }
+            var tmp: logic<8>;
+            always_ff (clk) {
+                g(in_a, tmp);
+                out_q = tmp;
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 7))
+  (tick clk)
+  (assert_eq out_q 0)
+  (tick clk)
+  (assert_eq out_q 8))
+
+(case test_ff_function_call_indexed_nonvariable_argument_expression
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<4>, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 4'b0001);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 0b0010))
+  (tick clk)
+  (assert_eq out_q 1)
+  (modify (set in_a 0b0101))
+  (tick clk)
+  (assert_eq out_q 1))
+
+(case test_ff_function_call_chained_range_access_on_argument
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
+            function f (x: input logic<8>) -> logic<4> {
+                return x[5:2];
+            }
+            always_ff (clk) {
+                out_q = f(in_a[7:0]);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 0b11010110))
+  (tick clk)
+  (assert_eq out_q 0b0101))
+
+(case test_ff_function_call_step_access_on_nonvariable_argument
+  (source "test.veryl" #"
+        module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
+            function f (x: input logic<8>) -> logic<4> {
+                return x[1 step 4];
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 8'b0000_0001);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 0b10100100))
+  (tick clk)
+  (assert_eq out_q 0b1010))
+
+(case test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice
+  (source "test.veryl" #"
+        module Top (clk: input clock, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[3];
+            }
+            always_ff (clk) {
+                out_q = f('1);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 1))
+
+(case test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion
+  ; Legacy ID retained. IEEE 1800-2023 10.8 and 11.8.2 make the formal an
+  ; assignment-like context: widen the operands before adding, yielding 4.
+  (source "test.veryl" #"
+        module Top (clk: input clock, out_q: output logic) {
+            function f (x: input logic<4>) -> logic {
+                return x[2];
+            }
+            always_ff (clk) {
+                out_q = f(2'b11 + 2'b01);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 1))
+
+(case test_ff_function_call_part_select_of_signed_formal_is_unsigned
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_a: input signed logic<8>,
+            out_direct: output signed logic<8>,
+            out_expr: output signed logic<8>
+        ) {
+            function f (x: input signed logic<8>) -> signed logic<8> {
+                return x[7:0] >>> 1;
+            }
+            always_ff (clk) {
+                out_direct = f(in_a);
+                out_expr = f(in_a + 0);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 0xFE))
+  (tick clk)
+  ; A packed part-select is unsigned even when its base is signed, so >>>
+  ; performs a logical shift here.
+  (assert_eq out_direct 0x7F)
+  (assert_eq out_expr 0x7F))
+
+(case test_ff_function_call_sign_extends_narrow_signed_actual_before_slice
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<8>
+        ) {
+            function f (x: input signed logic<8>) -> signed logic<8> {
+                return x >>> 4;
+            }
+            always_ff (clk) {
+                out_q = f(4'shf);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0xFF))
+
+(case test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic
+        ) {
+            function f (x: input signed logic<8>) -> logic {
+                return x[7];
+            }
+            always_ff (clk) {
+                out_q = f(4'hf);
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0))
+
+(case test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_a: input signed logic<8>,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>) -> logic<8> {
+                return x[7:0] >>> 1;
+            }
+            always_ff (clk) {
+                out_q = f(in_a + 0);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in_a 0xFE))
+  (tick clk)
+  (assert_eq out_q 0x7F))
+
+(case test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_hi: input logic<4>,
+            in_lo: input logic<4>,
+            out_q: output logic<4>
+        ) {
+            function f (x: input logic<4>[2]) -> logic<4> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{in_hi, in_lo});
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set in_hi 0xA)
+    (set in_lo 0x3))
+  (tick clk)
+  (assert_eq out_q 0x3))
+
+(case test_ff_function_call_array_literal_element_uses_formal_context_width
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in0: input logic<4>,
+            in1: input logic<4>,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[1]) -> logic<8> {
+                return x[0];
+            }
+            always_ff (clk) {
+                out_q = f('{in0 + in1});
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set in0 0xF)
+    (set in1 0xF))
+  (tick clk)
+  (assert_eq out_q 0x1E))
+
+(case test_ff_function_call_array_literal_supports_dynamic_multidim_indexing
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            row: input logic,
+            col: input logic,
+            out_q: output logic<8>
+        ) {
+            function f (
+                x: input logic<8>[2, 2],
+                i: input logic,
+                j: input logic
+            ) -> logic<8> {
+                return x[i][j];
+            }
+            always_ff (clk) {
+                out_q = f(
+                    '{'{8'h11, 8'h22} repeat 1, default: '{8'h33, 8'h44}},
+                    row,
+                    col
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (for (i j expected) (list (0 0 0x11) (0 1 0x22) (1 0 0x33) (1 1 0x44))
+    (modify
+      (set row i)
+      (set col j))
+    (tick clk)
+    (assert_eq out_q expected)))
+
+(case test_ff_function_call_array_literal_view_dominates_conditional_access
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2], guard: input logic) -> logic<8> {
+                var first: logic<8>;
+                first = if guard ? x[0] : 8'h00;
+                return first + x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{8'h11, 8'h22}, guard);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 0))
+  (tick clk)
+  (assert_eq out_q 0x22)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x33))
+
+(case test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick_if (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[index] : 8'h00;
+            }
+            always_ff (clk) {
+                out_q = pick_if(
+                    '{observe(in0, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set guard 0)
+    (set in0 0x5a))
+  (tick clk)
+  (assert_eq out_q 0)
+  (assert_eq side 0x5a)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x5a)
+  (assert_eq side 0x5a))
+
+(case test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_and: output logic,
+            out_or: output logic,
+            and_side: output logic<8>,
+            or_side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick_and (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic {
+                return guard && x[index] != 0;
+            }
+            function pick_or (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic {
+                return guard || x[index] != 0;
+            }
+            always_ff (clk) {
+                and_side = 0;
+                or_side = 0;
+                out_and = pick_and(
+                    '{observe(in0, and_side), default: 8'h00},
+                    0,
+                    guard
+                );
+                out_or = pick_or(
+                    '{observe(in0, or_side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set guard 0)
+    (set in0 0x5a))
+  (tick clk)
+  (assert_eq out_and 0)
+  (assert_eq and_side 0x5a)
+  (assert_eq out_or 1)
+  (assert_eq or_side 0x5a)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_and 1)
+  (assert_eq and_side 0x5a)
+  (assert_eq out_or 1)
+  (assert_eq or_side 0x5a))
+
+(case test_ff_function_call_array_literal_view_preserves_expression_order
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags evaluation_order)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function ordered (
+                x: input logic<8>[2],
+                index: input logic,
+                left: input logic<8>
+            ) -> logic<8> {
+                return left + x[index];
+            }
+            always_ff (clk) {
+                out_q = ordered(
+                    '{observe(8'h22, side), default: 8'h00},
+                    0,
+                    observe(8'h11, side)
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x33)
+  (assert_eq side 0x11))
+
+(case test_ff_function_call_array_literal_snapshots_scalar_before_later_write
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags evaluation_order deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            changing: output logic<8>,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                values: input logic<8>[2],
+                ignored: input logic<8>
+            ) -> logic<8> {
+                return values[0];
+            }
+
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value + 8'd1;
+                return 8'h00;
+            }
+
+            always_ff (clk) {
+                out_q = pick('{changing, default: 8'h00}, update(changing, changing));
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set changing 5))
+  (tick clk)
+  (assert_eq changing 6)
+  (assert_eq out_q 5))
+
+(case test_ff_function_call_array_literal_snapshots_scalar_before_callee_write
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            out_q: output logic<8>
+        ) {
+            function mutate_global () -> logic {
+                global_value = 8'd9;
+                return 1'b0;
+            }
+
+            function pick (values: input logic<8>[2]) -> logic<8> {
+                var ignored: logic;
+                ignored = mutate_global();
+                return values[0];
+            }
+
+            always_ff (clk) {
+                out_q = pick('{global_value, default: 8'h00});
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set global_value 5))
+  (tick clk)
+  (assert_eq global_value 9)
+  (assert_eq out_q 5))
+
+(case test_ff_function_call_array_literal_branch_view_is_reused_after_merge
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>
+        ) {
+            function pick_then_first (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? x[index] : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                out_q = pick_then_first(
+                    '{in0, default: 8'h00},
+                    0,
+                    guard,
+                    first
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (for guard_value (list 0 1)
+    (modify
+      (set guard guard_value)
+      (set in0 0x5a))
+    (tick clk)
+    (assert_eq out_q 0x5a)))
+
+(case test_ff_function_call_effectful_array_items_are_eager_before_conditional_access
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side0: output logic<8>,
+            side1: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function static_then_dynamic (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = x[0];
+                return if guard ? x[index] : 8'h00;
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side0 = 0;
+                side1 = 0;
+                out_q = static_then_dynamic(
+                    '{observe(8'h11, side0), observe(8'h22, side1)},
+                    1,
+                    guard,
+                    first
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 0))
+  (tick clk)
+  (assert_eq out_q 0)
+  (assert_eq side0 0x11)
+  (assert_eq side1 0x22)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x22)
+  (assert_eq side0 0x11)
+  (assert_eq side1 0x22))
+
+(case test_ff_function_call_carries_branch_local_static_array_item_cache
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function branch_then_static (
+                x: input logic<8>[2],
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? x[0] : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side = 0;
+                out_q = branch_then_static(
+                    '{observe(side + 1, side), default: 8'h00},
+                    guard,
+                    first
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 1)
+  (assert_eq side 1))
+
+(case test_ff_function_call_tracks_nested_static_array_read_through_branch
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            function nested_then_static (
+                x: input logic<8>[2],
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? inner(x) : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side = 0;
+                out_q = nested_then_static(
+                    '{observe(side + 1, side), default: 8'h00},
+                    guard,
+                    first
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 1)
+  (assert_eq side 1))
+
+(case test_ff_function_call_tracks_array_view_hidden_in_bound_literal
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[index] : 8'h00;
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle('{y[index], default: 8'h00}, 0, guard) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 2)
+  (assert_eq side 1))
+
+(case test_ff_function_call_merges_nested_array_state_at_cache_completion
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return (if guard ? x[0] : 8'h00) + x[index];
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle(
+                    '{y[index], default: 8'h00},
+                    0,
+                    guard
+                ) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 3)
+  (assert_eq side 1))
+
+(case test_ff_function_call_merges_nested_array_state_at_static_cache_completion
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                guard: input logic
+            ) -> logic<8> {
+                return (if guard ? x[0] : 8'h00) + x[0];
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle(
+                    '{y[index], default: 8'h00},
+                    guard
+                ) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 3)
+  (assert_eq side 1))
+
+(case test_ff_function_call_merges_directly_forwarded_array_cache
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags evaluation_order)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (
+                x: input logic<8>[2],
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[0] : 8'h00;
+            }
+            function outer (
+                y: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return inner(y, guard) + middle + y[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h11, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 0))
+  (tick clk)
+  (assert_eq out_q 0x66)
+  (assert_eq side 0x55)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x77)
+  ; Both arguments are eager effects, so declaration order makes the
+  ; later scalar actual supply the final write.
+  (assert_eq side 0x55))
+
+(case test_ff_function_call_tracks_array_reads_in_output_indices
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            var scratch: logic<8>[2];
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function write (
+                value: input logic<8>,
+                dst: output logic<8>
+            ) -> logic<8> {
+                dst = value;
+                return 0;
+            }
+            function outer (
+                x: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return (if guard ? write(0, scratch[x[0]]) : 0) + middle + x[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h01, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 0))
+  (tick clk)
+  (assert_eq out_q 0x56)
+  (assert_eq side 0x55)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x56)
+  (assert_eq side 0x55))
+
+(case test_ff_function_call_tracks_nested_array_reads_in_output_indices
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            var scratch: logic<8>[2];
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function write (
+                value: input logic<8>,
+                dst: output logic<8>
+            ) -> logic<8> {
+                dst = value;
+                return 0;
+            }
+            function helper (x: input logic<8>[2]) -> logic<8> {
+                return write(0, scratch[x[0]]);
+            }
+            function outer (
+                x: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return (if guard ? helper(x) : 0) + middle + x[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h01, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set guard 0))
+  (tick clk)
+  (assert_eq out_q 0x56)
+  (assert_eq side 0x55)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x56)
+  (assert_eq side 0x55))
+
+(case test_ff_function_call_restores_initialized_forwarded_alias_view
+  ; https://github.com/veryl-lang/veryl/pull/3131
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            select: input logic,
+            out_q: output logic<8>
+        ) {
+            function alias_use (
+                a: input logic<8>[2],
+                b: input logic<8>[2],
+                index: input logic,
+                select: input logic,
+                clobber: input logic<8>
+            ) -> logic<8> {
+                return (if select ? a[index] : b[index])
+                    + clobber
+                    + (if select ? a[0] : b[0]);
+            }
+            function forward (
+                x: input logic<8>[2],
+                index: input logic,
+                select: input logic,
+                clobber: input logic<8>
+            ) -> logic<8> {
+                return alias_use(x, x, index, select, clobber);
+            }
+            always_ff (clk) {
+                out_q = forward(
+                    '{8'h11, 8'h22},
+                    1,
+                    select,
+                    forward('{8'haa, 8'hbb}, 1, 0, 0)
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (for select_value (list 0 1)
+    (modify (set select select_value))
+    (tick clk)
+    (assert_eq out_q 0x98)))
+
+(case test_ff_function_call_merges_outer_array_view_across_nested_short_circuit
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (y: input logic[2], index: input logic) -> logic {
+                return y[index];
+            }
+            function outer (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return inner('{guard && x[index] != 0, default: 0}, 0) + x[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(in0, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set guard 0)
+    (set in0 0x5a))
+  (tick clk)
+  (assert_eq out_q 0x5a)
+  (assert_eq side 0x5a)
+  (modify (set guard 1))
+  (tick clk)
+  (assert_eq out_q 0x5b)
+  (assert_eq side 0x5a))
+
+(case test_ff_function_call_forwards_array_literal_view_to_nested_call
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            function middle (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return inner(x, index);
+            }
+            function outer (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return middle(x, index);
+            }
+            always_ff (clk) {
+                out_q = outer('{8'h11, 8'h22}, index);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set index 0))
+  (tick clk)
+  (assert_eq out_q 0x11)
+  (modify (set index 1))
+  (tick clk)
+  (assert_eq out_q 0x22))
+
+(case test_ff_function_call_keeps_array_view_active_for_output_index
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                x: input logic<8>[2],
+                index: input logic,
+                selected: output logic<8>
+            ) -> logic<8> {
+                selected = x[index];
+                return x[0];
+            }
+            var selected: logic<8>[2];
+            var inner_selected: logic<8>;
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    1,
+                    selected[pick('{8'h01, 8'h00}, 0, inner_selected)]
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x11))
+
+(case test_ff_function_call_restores_array_literal_view_after_reentrant_call
+  ; https://github.com/veryl-lang/veryl/pull/3131
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick('{8'h11, 8'h22}, pick('{8'h00, 8'h01}, 0));
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x11))
+
+(case test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call
+  ; https://github.com/veryl-lang/veryl/pull/3131
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    pick(
+                        '{8'h00, 8'h00},
+                        pick('{8'h00, 8'h00}, 0)
+                    )
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x11))
+
+(case test_ff_function_call_bits_and_size_evaluate_effectful_array_argument
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in0: input logic<8>,
+            out_bits: output logic<32>,
+            out_size: output logic<32>,
+            bits_side: output logic<8>,
+            size_side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function array_bits (x: input logic<8>[2]) -> logic<32> {
+                return $bits(x);
+            }
+            function array_size (x: input logic<8>[2]) -> logic<32> {
+                return $size(x);
+            }
+            always_ff (clk) {
+                out_bits = array_bits('{observe(in0, bits_side), default: 0});
+                out_size = array_size('{observe(in0, size_side), default: 0});
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in0 0x5a))
+  (tick clk)
+  (assert_eq out_bits 16)
+  (assert_eq out_size 2)
+  (assert_eq bits_side 0x5a)
+  (assert_eq size_side 0x5a))
+
+(case test_ff_function_call_nested_bits_evaluates_effectful_array_argument
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in0: input logic<8>,
+            out_q: output logic<32>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (x: input logic<8>[2]) -> logic<32> {
+                return $bits(x);
+            }
+            function outer (x: input logic<8>[2]) -> logic<32> {
+                return inner(x);
+            }
+            always_ff (clk) {
+                out_q = outer('{observe(in0, side), default: 8'h00});
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set in0 0x5a))
+  (tick clk)
+  (assert_eq out_q 16)
+  (assert_eq side 0x5a))
+
+(case test_ff_function_call_array_literal_view_preserves_source_order
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags assignment_pattern_evaluation)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick(
+                    '{default: observe(8'h11, side), observe(8'h22, side)},
+                    index
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set index 0))
+  (tick clk)
+  (assert_eq side 0x22))
+
+(case test_ff_function_call_snapshots_pure_array_items_before_later_effect
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags assignment_pattern_evaluation deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (clk: input clock, q: output logic<8>, changing: output logic<8>) {
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value + 1;
+                return 0;
+            }
+            function pick (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            always_ff (clk) {
+                q = pick('{changing, update(changing, changing)});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (tick clk)
+  (assert_eq q 1)
+  (assert_eq changing 2))
+
+(case test_ff_function_call_converts_array_literal_view_for_wider_nested_formal
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            function outer (x: input logic<4>[2], index: input logic) -> logic<8> {
+                return inner(x, index);
+            }
+            always_ff (clk) {
+                out_q = outer('{4'ha, 4'h3}, index);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set index 0))
+  (tick clk)
+  (assert_eq out_q 0x0a)
+  (modify (set index 1))
+  (tick clk)
+  (assert_eq out_q 0x03))
+
+(case test_ff_function_call_converts_forwarded_static_array_element
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            function outer (x: input logic<4>[2]) -> logic<8> {
+                return inner(x);
+            }
+            always_ff (clk) {
+                out_q = outer('{4'ha, 4'h3});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x0a))
+
+(case test_ff_function_call_array_literal_element_uses_element_width
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<4>
+        ) {
+            function f (x: input signed logic<4>[2]) -> signed logic<4> {
+                return x[1] >>> 3;
+            }
+            always_ff (clk) {
+                out_q = f('{4'sh1, 4'sh8});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0xF))
+
+(case test_ff_function_array_element_assignment_preserves_signedness
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<8>
+        ) {
+            function f () -> signed logic<8> {
+                var values: signed logic<8>[2];
+                values[0] = 4'sh8;
+                return values[0] >>> 3;
+            }
+            always_ff (clk) {
+                out_q = f();
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0xff))
+
+(case test_ff_function_call_array_literal_default_fill_matches_formal_shape
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[3]) -> logic<8> {
+                return x[2];
+            }
+            always_ff (clk) {
+                out_q = f('{default: 8'h55});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x55))
+
+(case test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape
+  ; https://github.com/veryl-lang/veryl/pull/3131
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[1][1];
+            }
+            always_ff (clk) {
+                out_q = f('{default: 8'h55});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x55))
+
+(case test_ff_function_call_multidim_array_literal_indexing_preserves_element_order
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2, 2]) -> logic<8> {
+                return x[0][0];
+            }
+            always_ff (clk) {
+                out_q = f('{'{8'h11, 8'h22}, '{8'h33, 8'h44}});
+            }
+        }
+    "#)
+  (top Top)
+  (tick clk)
+  (assert_eq out_q 0x11))
+
+(case test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items
+  ; https://github.com/veryl-lang/veryl/pull/3131
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            row: input logic,
+            col: input logic,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                x: input logic<8>[2, 2],
+                row: input logic,
+                col: input logic
+            ) -> logic<8> {
+                return x[row][col];
+            }
+            function pass_rows (
+                row0: input logic<4>[2],
+                row1: input logic<4>[2],
+                row: input logic,
+                col: input logic
+            ) -> logic<8> {
+                return pick('{row0, row1}, row, col);
+            }
+            always_ff (clk) {
+                out_q = pass_rows(
+                    '{4'h1, 4'h2},
+                    '{4'h3, 4'h4},
+                    row,
+                    col
+                );
+            }
+        }
+    "#)
+  (top Top)
+  (for (i j expected) (list (0 0 0x01) (0 1 0x02) (1 0 0x03) (1 1 0x04))
+    (modify
+      (set row i)
+      (set col j))
+    (tick clk)
+    (assert_eq out_q expected)))

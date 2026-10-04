@@ -1,0 +1,102 @@
+(group veryl_language (category types))
+
+(case packed_union_members_alias
+  (source "test.veryl" #"
+module Top (
+    input_bits: input logic<8>,
+    raw: output logic<8>,
+    upper: output logic<4>,
+    lower: output logic<4>,
+) {
+    struct Nibbles { high: logic<4>, low: logic<4>, }
+    union Overlay { bits: logic<8>, parts: Nibbles, }
+    var data: Overlay;
+    assign data.bits = input_bits;
+    assign raw = data.bits;
+    assign upper = data.parts.high;
+    assign lower = data.parts.low;
+}
+"#)
+  (top Top)
+  (for value (range 0 (+ 255 1))
+    (modify (set input_bits value))
+    (assert_eq raw value)
+    (assert_eq upper (>> value 4))
+    (assert_eq lower (& value 15))))
+
+(case inside_outside_range_endpoints
+  (source "test.veryl" #"
+module Top (
+    value: input logic<8>,
+    included: output logic,
+    excluded: output logic,
+    low: input logic<8>,
+    high: input logic<8>,
+    dynamic_inside: output logic,
+    dynamic_outside: output logic,
+    inclusive_case: output logic,
+) {
+    assign included = inside value {0, 3..6, 9..=11};
+    assign excluded = outside value {0, 3..6, 9..=11};
+    assign dynamic_inside = inside value {low..=high};
+    assign dynamic_outside = outside value {low..=high};
+    always_comb {
+        case value {
+            low..=high: inclusive_case = 1'b1;
+            default: inclusive_case = 1'b0;
+        }
+    }
+}
+"#)
+  (top Top)
+  ; Veryl's half-open 3..6 includes 3,4,5; 9..=11 includes both ends.
+  (for input (range 0 256)
+    (modify (set value input))
+    (let expected (|| (== input 0) (&& (<= 3 input) (< input 6)) (&& (<= 9 input) (<= input 11))))
+    (assert_eq included expected "included")
+    (assert_eq excluded (! expected) "excluded"))
+  (for (lo hi) (list (0 0) (0 255) (5 9) (9 5) (255 255))
+    (modify
+      (set low lo)
+      (set high hi))
+    (for input (range 0 256)
+      (modify (set value input))
+      (let inclusive (&& (<= lo input) (<= input hi)))
+      (assert_eq dynamic_inside inclusive)
+      (assert_eq dynamic_outside (! inclusive))
+      (assert_eq inclusive_case inclusive))))
+
+(case parameter_expression_type_cast_widths
+  (source "test.veryl" #"
+module Top #(
+    param W: u32 = 8,
+    param Q: u32 = 16,
+) (
+    i_x: input logic<16>,
+    o_a: output logic<32>,
+    o_b: output logic<32>,
+    o_c: output logic<32>,
+    expr_a: output logic<32>,
+    expr_b: output logic<32>,
+    expr_c: output logic<32>,
+) {
+    // Check Veryl 0.22 expression casts against the equivalent named types.
+    type A = logic<W + 1>;
+    type B = logic<Q + 1>;
+    type C = logic<W * 2 - 3>;
+    assign o_a = i_x as A;
+    assign o_b = (i_x - 2) as B;
+    assign o_c = i_x as C;
+    assign expr_a = i_x as (W + 1);
+    assign expr_b = (i_x - 2) as (Q + 1);
+    assign expr_c = i_x as (W * 2 - 3);
+}
+"#)
+  (top Top)
+  (for value (list 0 1 2 0x1ff 0x200 0x1fff 0x2000 0xffff)
+    (modify (set i_x value))
+    (assert_eq o_a (& value 0x1ff))
+    (assert_eq o_b (& (trunc 32 (- value 2)) 0x1ffff))
+    (assert_eq o_c (& value 0x1fff))
+    (expand (name named) ((expr_a o_a) (expr_b o_b) (expr_c o_c))
+      (assert (== (get {name}) (get {named})) "{name}"))))
