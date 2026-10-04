@@ -145,7 +145,13 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     | "Output port expression must support a continuous assignment."
             ) || (error.starts_with("A reference to a net or variable (`")
                 && error.ends_with("') is not allowed in a constant expression."))
-                || (error.starts_with("Array ") && error.ends_with(" needs an array index here."));
+                || (error.starts_with("Array ") && error.ends_with(" needs an array index here."))
+                // IEEE 1800-2023 5.6.1, 23.9: a duplicate name in one scope.
+                || (error.starts_with('\'')
+                    && error.ends_with("' has already been declared in this scope."))
+                // IEEE 1800-2023 23.3.3.5: an instance array connection width.
+                || (error.starts_with("Port expression width ")
+                    && error.contains(" does not match expected width "));
             if invalid_source {
                 rejected = true;
             } else if !(error.starts_with("Function ") && error.ends_with(" is not an input port."))
@@ -157,6 +163,7 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
         } else if !(diagnostic.starts_with(": This expression violates that rule: ")
             || diagnostic.starts_with(": Port ")
             || diagnostic == ": Function arguments must be input ports."
+            || diagnostic.starts_with(": It was declared here as ")
             || diagnostic == "warning: always_comb process has no sensitivities.")
         {
             return false;

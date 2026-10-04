@@ -134,11 +134,14 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
         {
             source_context = false;
         } else if let Some(error) = line.strip_prefix("%Error: ") {
-            if source_diagnostic(error, sources)
-                != Some(
-                    "Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)",
-                )
-            {
+            let reviewed = source_diagnostic(error, sources).is_some_and(|diagnostic| {
+                diagnostic
+                    == "Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)"
+                    // IEEE 1800-2023 23.3.3.5: an instance array connection width.
+                    || (diagnostic.starts_with("Input port connection '")
+                        && diagnostic.contains("' as part of a module instance array requires "))
+            });
+            if !reviewed {
                 return false;
             }
             rejected = true;

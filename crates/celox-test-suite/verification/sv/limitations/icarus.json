@@ -1,0 +1,227 @@
+{
+  "schema_version": 3,
+  "tool": "icarus",
+  "scope": "Reviewed failures of the SystemVerilog suite retained before the exclusions.",
+  "include_ignored": false,
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 1,
+    "mismatch": 3,
+    "emission_error": 0,
+    "compile_error": 20,
+    "runtime_error": 2,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Unable to bind parameter `Q' in `celox_suite_tb.dut.g'\n<case>/source_0.sv:7:      : A symbol with that name was declared here. Check for declaration after use.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "generate::binds_generate_parameter_declarations_as_localparams",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "native testbench failed: signal: 6 (SIGABRT); see runtime.log and protocol.log\nvvp: vthread.cc:2671: bool of_DISABLE_FLOW(vthread_t, vvp_code_t): Assertion `cur' failed.\ntimeout: the monitored command dumped core\n",
+      "expectation": "Simulation",
+      "name": "generate::distinguishes_escaped_generate_scope_components",
+      "phase": "execute",
+      "status": "runtime_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "generate::ignores_type_aliases_in_inactive_generate_branches",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "generate::predeclares_generate_signals_and_functions at 140:5: assert_eq y: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "generate::predeclares_generate_signals_and_functions",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: Unable to bind wire/reg/memory `a' in `celox_suite_tb.dut.g'\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "generate::resolves_each_generate_signal_declarator_independently",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:5: error: Unable to bind parameter `WIDTH' in `celox_suite_tb.dut.constants'\n<case>/source_0.sv:7:      : A symbol with that name was declared here. Check for declaration after use.\n<case>/source_0.sv:5: error: Dimensions must be constant.\n<case>/source_0.sv:5       : This MSB expression violates the rule: (WIDTH)-('sd1)\n<case>/source_0.sv:6: error: Unable to bind parameter `C' in `celox_suite_tb.dut.constants'\n<case>/source_0.sv:6:      : A symbol with that name was declared here. Check for declaration after use.\n<case>/source_0.sv:15: error: Unable to bind parameter `C' in `celox_suite_tb.dut.lanes[0]'\n<case>/source_0.sv:16:      : A symbol with that name was declared here. Check for declaration after use.\n<case>/source_0.sv:15: error: Unable to bind parameter `C' in `celox_suite_tb.dut.lanes[1]'\n<case>/source_0.sv:16:      : A symbol with that name was declared here. Check for declaration after use.\n5 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "generate::resolves_forward_generate_localparam_dependencies",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: error: Unable to bind parameter `N' in `celox_suite_tb.dut.g[0]'\n<case>/source_0.sv:10:      : A symbol with that name was declared here. Check for declaration after use.\n<case>/source_0.sv:9: error: Dimensions must be constant.\n<case>/source_0.sv:9       : This MSB expression violates the rule: (N)-('sd1)\n<case>/source_0.sv:9: error: Unable to bind parameter `N' in `celox_suite_tb.dut.g[1]'\n<case>/source_0.sv:10:      : A symbol with that name was declared here. Check for declaration after use.\n<case>/source_0.sv:9: error: Dimensions must be constant.\n<case>/source_0.sv:9       : This MSB expression violates the rule: (N)-('sd1)\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "generate::resolves_generate_signal_size_parameter_dependencies",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "generate::restricts_generate_size_queries_to_visible_functions",
+      "phase": "execute",
+      "status": "runtime_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:14: error: Generate \"loop\" conditional expression cannot have undefined bits. given (X).\n<case>/source_0.sv:15: error: Generate \"loop\" conditional expression cannot have undefined bits. given (((i)==('sd0))?(2'b1z):(X)).\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "generate::treats_unknown_generate_truth_as_false",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "generate::uses_one_width_and_sign_context_for_generate_case at 663:3: assert_eq y: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "generate::uses_one_width_and_sign_context_for_generate_case",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Syntax error in continuous assignment\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in continuous assignment\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Syntax error in continuous assignment\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Syntax error in continuous assignment\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_constants_lower_selected_concatenations",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Syntax error in continuous assignment\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_constants_work_in_ordinary_selection_indices",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in continuous assignment\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Syntax error in continuous assignment\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Syntax error in continuous assignment\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_runtime_replications_preserve_attached_selections",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_select_multidimensional_packed_reads",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 139; see <case>/build.log\nSegmentation fault (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_select_parameterized_generate_and_ff",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:2: sorry: packed array parameters are not supported yet.\n<case>/source_0.sv:3: sorry: packed array parameters are not supported yet.\n<case>/source_0.sv:4: sorry: packed array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Operators",
+      "detail": "operators::propagates_child_input_width_into_connection_expressions at 1116:3: assert_eq y: expected 0x100, got 0x0",
+      "expectation": "Simulation",
+      "name": "operators::propagates_child_input_width_into_connection_expressions",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 139; see <case>/build.log\nSegmentation fault (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:33: error: Cast size expression must be constant and greater than zero.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:13: error: Function celox_suite_tb.dut.bump port v is not an input port.\n<case>/source_0.sv:13:      : Function arguments must be input ports.\n<case>/source_0.sv:9: error: Function celox_suite_tb.dut.clamp port l is not an input port.\n<case>/source_0.sv:9:      : Function arguments must be input ports.\n<case>/source_0.sv:9: error: Function celox_suite_tb.dut.clamp port h is not an input port.\n<case>/source_0.sv:9:      : Function arguments must be input ports.\n<case>/source_0.sv:16: error: Function celox_suite_tb.dut.invert port z is not an input port.\n<case>/source_0.sv:16:      : Function arguments must be input ports.\n<case>/source_0.sv:19: error: Function celox_suite_tb.dut.shift port z is not an input port.\n<case>/source_0.sv:19:      : Function arguments must be input ports.\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.sum_diff port s is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.sum_diff port d is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n<case>/source_0.sv:29: sorry: constant selects in always_* processes are not fully supported (the process will be sensitive to all bits in 'a[7:0]').\n7 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: vvp.tgt error: uwire \"lanes\" must have a single driver, found (4).\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_ascending_to_descending",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: vvp.tgt error: uwire \"lanes\" must have a single driver, found (4).\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_ascending",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: vvp.tgt error: uwire \"lanes\" must have a single driver, found (4).\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_descending",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: vvp.tgt error: uwire \"lanes\" must have a single driver, found (4).\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_offset_ranges",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "invalid design was accepted: synthesizable::instance_arrays_reject_a_fill_literal_tie_off",
+      "expectation": "CompilationError",
+      "name": "synthesizable::instance_arrays_reject_a_fill_literal_tie_off",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in continuous assignment\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+      "phase": "compile",
+      "status": "compile_error"
+    }
+  ]
+}

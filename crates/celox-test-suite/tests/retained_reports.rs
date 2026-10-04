@@ -89,3 +89,64 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
         }
     }
 }
+
+#[test]
+fn systemverilog_reports_cover_the_catalogue_and_explain_every_exclusion() {
+    let catalogue: BTreeSet<_> = celox_test_suite::sv::cases()
+        .map(|case| case.name)
+        .collect();
+    for (tool, contents) in [
+        (
+            "verilator",
+            include_str!("../verification/sv/verilator.json"),
+        ),
+        ("icarus", include_str!("../verification/sv/icarus.json")),
+    ] {
+        let report: serde_json::Value = serde_json::from_str(contents).unwrap();
+        assert_eq!(report["schema_version"], 3);
+        let rows = report["cases"].as_array().unwrap();
+        let names: BTreeSet<_> = rows
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), rows.len(), "duplicate results");
+        assert_eq!(
+            names, catalogue,
+            "refresh both reports after catalogue changes"
+        );
+        for row in rows {
+            let name = row["name"].as_str().unwrap();
+            let case = celox_test_suite::sv::case(name).unwrap();
+            let status = row["status"].as_str().unwrap();
+            // Every case passes, is rejected as expected, needs four-state
+            // simulation the tool lacks, or has a reviewed exclusion.
+            match status {
+                "passed" => {
+                    assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation)
+                }
+                "rejected" => assert_eq!(
+                    case.expectation,
+                    celox_test_suite::Expectation::CompilationError
+                ),
+                "unsupported" => assert!(case.script().four_state, "{name}"),
+                "ignored" => {
+                    let issue = &row["known_issue"];
+                    assert_eq!(row["detail"], issue["reason"]);
+                    assert_eq!(
+                        celox_test_suite::sv::verification::known_issue(tool, name).as_ref(),
+                        Some(issue)
+                    );
+                    for path in issue["evidence"].as_array().unwrap() {
+                        let file = path.as_str().unwrap().split('#').next().unwrap();
+                        assert!(
+                            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join(file)
+                                .is_file()
+                        );
+                    }
+                }
+                _ => panic!("{tool} {name}: {status}"),
+            }
+        }
+    }
+}
