@@ -232,8 +232,7 @@ sv_backends! {
         for value in [0x3cu8, 0xa5, 0xff, 0x01] {
             sim.modify(|io| io.set(a, value)).unwrap();
             assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
-            // The leftmost element takes the most significant slice; elements
-            // are addressed by their index minus the lower bound.
+            // The leftmost element, `u[0]`, takes the most significant slice.
             let high = sim.child_signal(&[("u", 0)], "a");
             let low = sim.child_signal(&[("u", 1)], "a");
             assert_eq!(sim.get(high), (value >> 4).into(), "a={value}");
@@ -257,13 +256,21 @@ sv_backends! {
         for value in [0x3cu8, 0xa5, 0xff, 0x01] {
             sim.modify(|io| io.set(a, value)).unwrap();
             assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
-            // The leftmost element takes the most significant slice; elements
-            // are addressed by their index minus the lower bound.
-            let high = sim.child_signal(&[("u", 1)], "a");
-            let low = sim.child_signal(&[("u", 0)], "a");
+            // The leftmost element, `u[3]`, takes the most significant slice;
+            // elements are addressed by their declared index.
+            let high = sim.child_signal(&[("u", 3)], "a");
+            let low = sim.child_signal(&[("u", 2)], "a");
             assert_eq!(sim.get(high), (value >> 4).into(), "a={value}");
             assert_eq!(sim.get(low), (value & 0xf).into(), "a={value}");
         }
+        let hierarchy = sim.named_hierarchy();
+        let (_, elements) = hierarchy
+            .children
+            .iter()
+            .find(|(name, _)| name == "u")
+            .expect("instance array `u`");
+        let indices: Vec<_> = elements.iter().map(|element| element.index).collect();
+        assert_eq!(indices, [2, 3]);
     }
 
     fn exponentiation_works_in_constant_expressions(sim) {

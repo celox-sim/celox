@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
+import type { HierarchyNode } from "./napi-helpers.js";
 import type {
 	FourStateSignalValue,
 	NativeSimulatorHandle,
@@ -1549,5 +1550,76 @@ describe("createDut — interface ports", () => {
 		expect(dut.bus.data).toBe(0xffn);
 		expect(dut.bus.ready).toBe(1n);
 		expect(handle.evalComb).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Child instances
+// ---------------------------------------------------------------------------
+
+describe("createDut — child instances", () => {
+	function child(index: number, offset: number): HierarchyNode {
+		const layout: SignalLayout = {
+			offset,
+			width: 8,
+			byteSize: 1,
+			is4state: false,
+			direction: "output",
+		};
+		return {
+			moduleName: "Child",
+			index,
+			signals: { y: { ...layout, typeKind: "logic" } },
+			forDut: { y: layout },
+			ports: { y: { direction: "output", type: "logic", width: 8 } },
+			children: {},
+		};
+	}
+
+	test("instance array elements sit at their declared index", () => {
+		const buffer = makeBuffer(64);
+		new Uint8Array(buffer)[0] = 0x22;
+		new Uint8Array(buffer)[1] = 0x33;
+		const hierarchy: HierarchyNode = {
+			moduleName: "Top",
+			index: 0,
+			signals: {},
+			forDut: {},
+			ports: {},
+			children: { u: [child(2, 0), child(3, 1)] },
+		};
+		const dut = createDut<{ u: Array<{ y: bigint }> }>(
+			buffer,
+			{},
+			{},
+			mockHandle(),
+			{ dirty: false },
+			hierarchy,
+		);
+		expect(dut.u[0]).toBeUndefined();
+		expect(dut.u[2]?.y).toBe(0x22n);
+		expect(dut.u[3]?.y).toBe(0x33n);
+	});
+
+	test("a lone element at a non-zero index is still an array", () => {
+		const buffer = makeBuffer(64);
+		new Uint8Array(buffer)[0] = 0x44;
+		const hierarchy: HierarchyNode = {
+			moduleName: "Top",
+			index: 0,
+			signals: {},
+			forDut: {},
+			ports: {},
+			children: { u: [child(1, 0)] },
+		};
+		const dut = createDut<{ u: Array<{ y: bigint }> }>(
+			buffer,
+			{},
+			{},
+			mockHandle(),
+			{ dirty: false },
+			hierarchy,
+		);
+		expect(dut.u[1]?.y).toBe(0x44n);
 	});
 });

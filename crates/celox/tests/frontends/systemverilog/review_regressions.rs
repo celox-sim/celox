@@ -5120,6 +5120,13 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "with a negative index",
+            r#"
+            module Child(input logic a); endmodule
+            module Top(input logic [1:0] a); Child child[0:-1](.a(a)); endmodule
+        "#,
+        ),
+        (
             "continuous assignment",
             r#"
             module Top(output logic y);

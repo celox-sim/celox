@@ -118,6 +118,8 @@ pub(crate) struct LoweredSvInstance {
     /// For an element of an instance array: its position in declaration order
     /// and the number of elements.
     pub array_element: Option<(usize, usize)>,
+    /// The lower bound of the instance array, which numbers its elements.
+    pub array_index_base: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1013,9 +1015,18 @@ fn lower_module_with_overrides(
             }
         }
         // An instance array is one instance per element, all under one name.
-        // Elements are listed from the lowest index up, so an element's place
-        // in the hierarchy is its index minus the lower bound; each keeps its
-        // position in declaration order, which decides its connections.
+        // Elements are listed from the lowest index up and numbered from the
+        // lower bound, so the hierarchy uses the declared indices; each keeps
+        // its position in declaration order, which decides its connections.
+        let array_index_base = match instance.array_range() {
+            Some((left, right)) => usize::try_from(left.min(right)).map_err(|_| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "module instance array `{}` with a negative index",
+                    instance.name()
+                ))
+            })?,
+            None => 0,
+        };
         let elements = instance.array_len().map_or(vec![None], |len| {
             let descending = instance
                 .array_range()
@@ -1046,6 +1057,7 @@ fn lower_module_with_overrides(
                     })
                     .collect(),
                 array_element,
+                array_index_base,
             });
         }
     }
@@ -1062,6 +1074,7 @@ fn lower_module_with_overrides(
             eval_apply_ff_blocks,
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
+            instance_index_bases: HashMap::default(),
             comb_blocks: Vec::new(),
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
             runtime_errors: HashMap::<i64, RuntimeErrorInfo<SourceVarId>>::default(),
@@ -1359,6 +1372,11 @@ pub(crate) fn attach_instance_glue(
                 module
                     .indexed_instance_names
                     .insert(instance.instance_name.clone());
+                if instance.array_index_base != 0 {
+                    module
+                        .instance_index_bases
+                        .insert(instance.instance_name.clone(), instance.array_index_base);
+                }
                 array_element_connections(
                     &instance.port_connections,
                     child,
