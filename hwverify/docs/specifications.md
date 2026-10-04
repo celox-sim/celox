@@ -388,3 +388,171 @@ so a passing response row alone does not override other failures in that result.
 Failed or Unknown implementation bindings also produce a blocking implementation-level
 editor diagnostic naming the outstanding obligations, even when every response
 obligation passes.
+
+## Reset-reachable failures and source RTL replay
+
+`hwverify-replay` adds bounded **failure** search and strict concrete replay for
+native v3 relational implementations. It is separate from both inductive checking
+and the positive acceptance cover above. Initial scope is scalar Bool/BV≤64,
+one synchronous positive-edge clock, canonical reset at edge 0 followed by
+1–32 nonreset edges, and direct top-level state/input bindings. Native v4, arrays,
+multiple clocks, asynchronous/typed reset ports, and four-state replay are not
+supported by this first source-replay route; existing checkers are unchanged.
+
+Build with `cargo build --release --locked -p hwverify-rs`. The executable accepts
+one JSON request on stdin; use `source` for native v3 text or `document` for its
+canonical JSON. For example, a request has `version: 1`, `mode: "search"`,
+`goal: "safety"`, `depth: 4`, and `source: "..."`. Goals are:
+
+- `safety`: the original reset, operation-exclusion, relational-step, invariant,
+  and stutter failure predicates shared with the inductive v3 binding checker.
+  Response input assumptions do not restrict this safety search.
+- `response_deadline`: a separate monitor for the sole declared response. It
+  starts on qualifying acceptance, permits same-edge completion, and fails if
+  completion is absent through the Bth subsequent nonreset edge. It maintains
+  its own outstanding-request bit and age, never trusting DUT `pending` or rank.
+  An assumption violation cancels the affected interval's guarantee, not later
+  qualifying requests. The monitor does not add request-to-acceptance, payload,
+  overlap, or unsolicited-completion guarantees; those are separate properties.
+
+Search statuses are `reset_reachable_failure`, `bounded_no_failure`, and `unknown`.
+Only the first carries an original-transition-and-property-validated witness.
+`bounded_no_failure` means no violation of the selected goal within the bound,
+not an unbounded proof. SAT states are compared against a fresh execution of the
+original reset/next expressions; supplied intermediate states are never inputs.
+The witness includes its complete canonical model and goal. `mode: "replay"`
+rechecks a supplied `witness` and rejects stale models, corrupt frames, wrong reset
+indexing, positive-cover records, and induction countermodels. `check_stimulus`
+executes explicit `inputs` against a selected goal and reports a concrete
+`trace_no_failure` or actual failure; it makes no universal claim.
+
+The [Celox replay gate](../conformance/celox-replay/run_ci.sh) performs the full
+source workflow. It compiles handwritten Veryl with the existing pinned frontend,
+lifts DUT reset/next expressions without importing expected values, searches for
+an actual failure, and drives only the resulting external inputs into an actual
+Celox native simulator. Inputs settle first; acceptance/completion are sampled
+before exactly one clock event; sequential state is sampled afterward. Celox's
+post-edge combinational settle is never substituted for the pre-edge sample.
+Reset must establish all selected state independently of power-on values.
+
+The simulator subprocess receives **no expected outputs or property oracle**.
+The independently authored native specification supplies the property, and the
+original transition replay supplies the trace to compare. A simulator/model
+mismatch is `simulator_divergence`, not a reproduced property failure. Celox and
+the lifter share frontend dependencies, so agreement is not an independent proof
+of frontend correctness. The source/property/binding/model hashes, pinned Celox
+revision and dependency patch identity are checked before saved stimuli run.
+Regressions retain stimuli and identities rather than simulator-generated goldens.
+
+The gate uses Celox `124a1315096d21b85d9d0d84fd7139363a181cad` (0.8.2), Veryl
+0.21.0, and the existing named frontend patches. No upstream files or original
+suite cases are changed. The adapter has a separate locked workspace retaining
+upstream package versions. Its host-runtime dependencies must be available; a
+missing simulator or build/runtime error fails CI rather than skipping replay.
+Run `./conformance/celox-replay/run_ci.sh /tmp/fresh-celox-replay` with Rust 1.98.1.
+
+Fixtures exercise an enabled counter's wrong update and a single-outstanding
+request's dropped/deadline failures. Every saved failure is replayed on both the
+mutant and correct source under identical stimuli. An unreachable-only fault
+retains its induction countermodel but has no bounded reset failure and passes
+concrete reset traces. Failure controls also reject internal-state writes,
+malformed/stale witnesses, bad sampling/reset indices, and simulation divergence.
+The mandatory `celox-replay` CI job uploads fresh evidence; `--record` is an
+explicit developer action for changing reviewed regressions and is never used
+by CI.
+
+### User project entry point
+
+The fixture gate and external projects use the same public CLI,
+[project.py](../conformance/celox-replay/project.py). No fixture name, source layout,
+or physical port naming convention is required. First build the pinned tools
+from the hwverify repository (Rust 1.98.1):
+
+```sh
+python3 conformance/veryl-proof/prepare.py
+cargo build --locked --manifest-path conformance/veryl-proof/frontend/Cargo.toml --target-dir conformance/veryl-proof/target
+cargo build --locked --manifest-path conformance/celox-replay/adapter/Cargo.toml --target-dir conformance/veryl-proof/target
+cargo build --release --locked -p hwverify-rs -p hwverify-sir
+```
+
+Place a manifest in your project directory. This example maps the canonical
+names in a native counter specification to differently named RTL pins:
+
+```json
+{
+  "version": 1,
+  "name": "my_counter",
+  "sources": ["rtl/counter.veryl"],
+  "top": "MyCounter",
+  "specification": "contracts/counter.hwv",
+  "clock": "clock_pin",
+  "reset": {"input": "rst", "active": 0},
+  "inputs": {"rst": "reset_pin", "en": "enable_pin"},
+  "state": {"count": "count_pin", "fault": "fault_pin"},
+  "signals": {},
+  "property": "safety",
+  "depth": 8
+}
+```
+
+All fields are required. `sources` may list multiple Veryl files; file paths are
+relative to the manifest directory and must remain inside it. `top` selects the
+module. `inputs` maps every specification input to exactly one external nonclock
+RTL input; the boolean `reset.input` must equal the specification's `reset_input`.
+`reset.active` is integer 0 or 1. `state` maps every implementation state variable
+to a distinct top-level sequential signal. Names on each side may differ.
+Types come from the native implementation declarations and must match the RTL
+widths exactly. The counter example needs a native declaration for both `count`
+and `fault`; adjust the mappings and declarations together for your design.
+
+The native v3 file contains the relational components, implementation state
+schema, abstraction binding, operation selectors, and optional response contract.
+Its implementation `reset`, `next`, and wire expressions are typechecked template
+fields, then **replaced by the expressions lifted from your source RTL**. They
+are not taken as an independently implemented DUT or used to supply expected
+outputs. The relational requirements and state/observation bindings remain the
+user-authored property.
+
+`signals` maps each declared implementation wire alias to a typed pre-edge DUT
+signal. For example, aliases used by a response contract can be mapped as
+`"accept": {"signal": "accepted_pin", "type": "bool"}` and
+`"complete": {"signal": "done_pin", "type": "bool"}`. Use `"property":
+"response_deadline"` to check the single declared response. Signal types are
+`"bool"` or `{"bv": N}` for N=1–64; they must match the RTL. All declared wire
+aliases must be mapped, with no extra aliases. These signals are also sampled
+before the simulator clock edge and compared against the deterministic lifted
+DUT expressions. No unique output is inferred from a relational-specification
+witness: a relation allowing several next values continues to allow all of them.
+
+Search and save a reproduced failure, then replay it without solver-generated
+stimulus selection:
+
+```sh
+python3 conformance/celox-replay/project.py search /path/to/project/replay.json --out /tmp/my-search --save-regression /path/to/project/failure.json
+python3 conformance/celox-replay/project.py replay /path/to/project/replay.json /path/to/project/failure.json --out /tmp/my-replay
+```
+
+Output directories must be fresh. `--save-regression` is optional and never
+replaces an existing file. It writes only after an actual failure passes both
+original-property replay and Celox simulation. A bounded no-failure or Unknown
+result does not create a regression. Saved version-2 regressions contain concrete
+inputs and hashes of the manifest, ordered sources, native specification,
+resolved bindings, compiled transition model and dependency identity. Moving an
+unchanged project directory is allowed; changing its relative layout, content,
+mappings, property or depth requires a new search instead of silently accepting
+an old regression.
+
+The CLI prints a JSON result and retains details in the output directory.
+Exit 0 means the request completed: inspect `status`, which can still be
+`reset_reachable_failure`, `bounded_no_failure`, or `unknown`. Malformed projects,
+stale regressions and tool failures return `project_error` with exit 2;
+`simulator_divergence` remains a separate result with exit 2. No simulator match
+is reported for a search with no executable failure witness.
+
+Unsupported mappings fail explicitly: missing or duplicate input/state mappings,
+hierarchical names, array lanes, width mismatches, state mapped to combinational
+outputs, clock-as-data, inouts, typed/asynchronous reset, arbitrary mapping
+expressions, unknown fields, duplicate JSON fields, and project paths escaping
+the manifest directory. The existing lifter additionally rejects unsupported
+SIR and reset equations depending on arbitrary prestate. This interface retains
+the scalar two-state, one-clock, synchronous-reset scope described above.

@@ -439,6 +439,7 @@ pub struct SpecImplementation {
     pub states: BTreeMap<String, Env>,
     pub observations: Env,
     pub responses: BTreeMap<String, BoundedResponse>,
+    pub wires: Env,
 }
 fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementation> {
     let path = "/implementation";
@@ -494,6 +495,13 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
         &mut lower,
     )?;
     let env = crate::design::model_wires(doc, "implementation", &state, spec.inputs(), &mut lower)?;
+    let wires = env
+        .iter()
+        .filter_map(|(name, term)| {
+            name.strip_prefix("w.")
+                .map(|n| (n.to_owned(), term.clone()))
+        })
+        .collect();
     let defs = at("/implementation/operations", named(&doc["operations"]))?;
     if defs.keys().cloned().collect::<BTreeSet<_>>() != *spec.operations() {
         return fail(
@@ -598,6 +606,7 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
         states,
         observations,
         responses,
+        wires,
     })
 }
 

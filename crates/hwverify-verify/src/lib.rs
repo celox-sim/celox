@@ -18,3 +18,5 @@ pub mod proof_program;
 
 mod acceptance_cover;
 mod progress;
+
+pub mod reachable;
