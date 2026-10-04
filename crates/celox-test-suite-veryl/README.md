@@ -3,7 +3,9 @@
 A reusable corpus of 695 Veryl language tests for compiler and simulator
 implementations. Each case's sources, input sequence, and assertions live
 together in a script file (`src/cases/*.vtest`), independent of any host
-language. The default dependency graph contains numeric support and Veryl standard
+language. The script language, the adapter contract and the external-simulator
+runners live in [`celox-test-suite-core`](../celox-test-suite-core) and are
+re-exported here. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
 
 ## Use from another project

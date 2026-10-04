@@ -235,6 +235,62 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
     }
 }
 
+/// Builds Veryl designs for the external simulators: emits them to
+/// SystemVerilog and reads the top module's ports from the analyzer.
+#[cfg(any(feature = "verilator", feature = "icarus"))]
+pub struct VerylFrontend;
+
+#[cfg(any(feature = "verilator", feature = "icarus"))]
+impl celox_test_suite_core::Frontend for VerylFrontend {
+    fn source_extension(&self) -> &'static str {
+        "veryl"
+    }
+
+    fn prepare(
+        &self,
+        design: &crate::Design,
+    ) -> crate::Result<celox_test_suite_core::PreparedDesign> {
+        use celox_test_suite_core::script::sv::{DesignInfo, Port};
+        let sources: Vec<_> = design
+            .sources
+            .iter()
+            .map(|source| (source.text.as_str(), source.path.as_path()))
+            .collect();
+        let emitted = emit_verification_sources(&sources, &design.top);
+        let edges = emitted
+            .event_edges(&design.top)
+            .cloned()
+            .ok_or_else(|| format!("top module {} not found in emitted design", design.top))?;
+        let info = emitted.module_info(&design.top).map(|module| DesignInfo {
+            top: design.top.clone(),
+            inputs: module
+                .inputs
+                .iter()
+                .map(|(name, width, count)| Port {
+                    name: name.clone(),
+                    width: *width,
+                    count: *count,
+                })
+                .collect(),
+            outputs: module.outputs.clone(),
+            edges: edges.clone(),
+            max_width: emitted.max_width(),
+            arrays: module.arrays.clone(),
+        });
+        Ok(celox_test_suite_core::PreparedDesign {
+            sources: emitted
+                .as_sv_sources()
+                .iter()
+                .map(|(source, _)| source.to_string())
+                .collect(),
+            top: design.top.clone(),
+            native_testbench: emitted.is_testbench(),
+            edges,
+            info,
+        })
+    }
+}
+
 fn emitted_path(index: usize, source_path: &Path) -> PathBuf {
     if source_path.as_os_str().is_empty() {
         PathBuf::from(format!("source_{index}.sv"))

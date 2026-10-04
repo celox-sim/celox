@@ -788,12 +788,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "celox-test-suite-veryl"
+name = "celox-test-suite-core"
 version = "0.10.1"
 dependencies = [
  "clap",
  "num-bigint",
  "num-traits",
+ "serde_json",
+]
+
+[[package]]
+name = "celox-test-suite-veryl"
+version = "0.10.1"
+dependencies = [
+ "celox-test-suite-core",
  "serde_json",
  "veryl-analyzer",
  "veryl-emitter",

@@ -1,0 +1,25 @@
+[package]
+name = "celox-test-suite-core"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Script language, adapter contract and external-simulator runners shared by the Celox test suites"
+readme = "README.md"
+
+[features]
+default = []
+# Verilator and Icarus adapters and the command-line runner they share.
+external = ["dep:clap", "dep:serde_json"]
+
+[dependencies]
+clap = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+num-bigint.workspace = true
+num-traits.workspace = true
+
+[lints]
+workspace = true

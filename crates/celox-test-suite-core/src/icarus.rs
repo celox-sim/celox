@@ -1,7 +1,9 @@
 //! Independent Icarus Verilog adapter with X/Z support.
 //! Requires `iverilog`, `iverilog-vpi`, `vvp`, C++, and GNU `timeout` on PATH.
+use crate::frontend::{Staged, stage};
 use crate::process::{ProcessBackend, write_if_changed};
 use crate::{Backend, BigUint, Design, Result, SignalPath};
+use crate::{Frontend, TestCase};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,65 +14,34 @@ pub struct Icarus {
 }
 
 impl Icarus {
-    pub fn build(design: &Design, directory: &Path) -> Result<Self> {
-        Self::build_inner(design, directory, None)
+    pub fn build(frontend: &dyn Frontend, design: &Design, directory: &Path) -> Result<Self> {
+        Self::build_inner(frontend, design, directory, None)
     }
 
     /// Build a script case as a generated testbench; run it with
     /// `run_testbench`. A failed assertion prints an `@suite assert` line to
     /// `protocol.log`.
-    pub fn build_script(case: &crate::script::ScriptCase, directory: &Path) -> Result<Self> {
-        Self::build_inner(&case.design(), directory, Some(case))
+    pub fn build_script(
+        frontend: &dyn Frontend,
+        case: &TestCase,
+        directory: &Path,
+    ) -> Result<Self> {
+        Self::build_inner(frontend, &case.design(), directory, Some(case.script()))
     }
 
     fn build_inner(
+        frontend: &dyn Frontend,
         design: &Design,
         directory: &Path,
         script: Option<&crate::script::ScriptCase>,
     ) -> Result<Self> {
-        fs::create_dir_all(directory)?;
-        let directory = fs::canonicalize(directory)?;
-        let sources: Vec<_> = design
-            .sources
-            .iter()
-            .map(|s| (s.text.as_str(), s.path.as_path()))
-            .collect();
-        for (index, (source, _)) in sources.iter().enumerate() {
-            write_if_changed(
-                &directory.join(format!("input_{index}.veryl")),
-                source.as_bytes(),
-            )?;
-        }
-        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::emit::emit_verification_sources(&sources, &design.top)
-        }))
-        .map_err(|error| {
-            crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
-        })?;
-        let mut testbench = emitted.is_testbench();
-        let edges = emitted
-            .event_edges(&design.top)
-            .cloned()
-            .ok_or("top module not found")?;
-        let mut paths = Vec::new();
-        for (index, (source, _)) in emitted.as_sv_sources().iter().enumerate() {
-            let path = directory.join(format!("source_{index}.sv"));
-            write_if_changed(&path, source.as_bytes())?;
-            paths.push(path);
-        }
-        let mut top = design.top.clone();
-        // A rejection needs only the design.
-        if let Some(case) =
-            script.filter(|case| case.expectation != crate::Expectation::CompilationError)
-        {
-            let info = crate::script::sv::DesignInfo::from_emitted(&emitted, &design.top)
-                .ok_or("top module not found")?;
-            let path = directory.join("testbench.sv");
-            write_if_changed(&path, crate::script::sv::testbench(case, &info)?.as_bytes())?;
-            paths.push(path);
-            top = crate::script::sv::TESTBENCH_TOP.to_string();
-            testbench = true;
-        }
+        let Staged {
+            directory,
+            paths,
+            top,
+            testbench,
+            edges,
+        } = stage(frontend, design, directory, script)?;
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
             include_bytes!("vpi_bits.hpp"),
@@ -133,7 +104,7 @@ impl Icarus {
             ProcessBackend::spawn
         };
         Ok(Self {
-            process: spawn(command, &directory, design.top.clone(), edges)?,
+            process: spawn(command, &directory, top, edges)?,
             four_state: design.four_state,
         })
     }
@@ -143,7 +114,9 @@ impl Icarus {
 // the source diagnostics observed in the negative fixtures, not just an error
 // count or a generic "error:" prefix. Unknown/mixed diagnostics fail closed:
 // they remain build failures until their source-rejection meaning is reviewed.
-fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> bool {
+/// Whether a failed build's log shows only reviewed source diagnostics,
+/// that is, a language rejection rather than a tool failure.
+pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> bool {
     if !matches!(code, Some(1..=123)) {
         return false;
     }
@@ -211,78 +184,5 @@ impl Backend for Icarus {
     }
     fn tick(&mut self, event: &str) -> Result<()> {
         self.process.tick(event)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retained_negative_diagnostics_are_source_rejections() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/icarus.json")).unwrap();
-        let mut checked = 0;
-        for case in report["cases"].as_array().unwrap() {
-            if case["status"] != "rejected" {
-                continue;
-            }
-            let (status, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
-            let code = status
-                .strip_prefix("Icarus build exit status: ")
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert!(
-                is_source_rejection(Some(code), log, &["<case>/source_0.sv".into()]),
-                "{}",
-                case["name"]
-            );
-            checked += 1;
-        }
-        assert_eq!(checked, 8);
-    }
-
-    #[test]
-    fn incomplete_or_unattributed_diagnostics_do_not_prove_rejection() {
-        let sources = [PathBuf::from("design.sv")];
-        for log in [
-            "",
-            "Elaboration failed",
-            "1 error(s) during elaboration.",
-            "design.sv:1: error: Function f port q is not an input port.\ndesign.sv:1:      : Function arguments must be input ports.\n1 error(s) during elaboration.",
-            "unknown.sv:1: error: Bit select expressions must be a constant integral value.",
-            "design.sv:1: error: internal compiler error",
-            "design.sv:1: error: failed to read input",
-        ] {
-            assert!(!is_source_rejection(Some(1), log, &sources), "{log}");
-        }
-        let source_error =
-            "design.sv:1: error: Bit select expressions must be a constant integral value.\n";
-        for code in [
-            None,
-            Some(0),
-            Some(124),
-            Some(125),
-            Some(126),
-            Some(127),
-            Some(137),
-        ] {
-            assert!(!is_source_rejection(code, source_error, &sources));
-        }
-        for failure in [
-            "internal compiler error",
-            "design.sv: No such file or directory",
-            "ivl: Assertion failed",
-        ] {
-            assert!(!is_source_rejection(
-                Some(1),
-                &format!("{source_error}{failure}"),
-                &sources
-            ));
-        }
     }
 }

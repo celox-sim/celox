@@ -1,6 +1,8 @@
 //! Independent Verilator adapter; requires Verilator, make, C++, and GNU timeout.
+use crate::frontend::{Staged, stage};
 use crate::process::{ProcessBackend, write_if_changed};
 use crate::{Backend, BigUint, Design, Result, SignalPath};
+use crate::{Frontend, TestCase};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,18 +11,23 @@ pub struct Verilator(ProcessBackend);
 impl Verilator {
     /// Build a fresh model. Four-state cases must be classified as unsupported
     /// by the runner; Verilator's two-state execution cannot validate them.
-    pub fn build(design: &Design, directory: &Path) -> Result<Self> {
-        Self::build_inner(design, directory, None)
+    pub fn build(frontend: &dyn Frontend, design: &Design, directory: &Path) -> Result<Self> {
+        Self::build_inner(frontend, design, directory, None)
     }
 
     /// Build a script case as a generated testbench; run it with
     /// `run_testbench`. A failed assertion prints an `@suite assert` line to
     /// `protocol.log`.
-    pub fn build_script(case: &crate::script::ScriptCase, directory: &Path) -> Result<Self> {
-        Self::build_inner(&case.design(), directory, Some(case))
+    pub fn build_script(
+        frontend: &dyn Frontend,
+        case: &TestCase,
+        directory: &Path,
+    ) -> Result<Self> {
+        Self::build_inner(frontend, &case.design(), directory, Some(case.script()))
     }
 
     fn build_inner(
+        frontend: &dyn Frontend,
         design: &Design,
         directory: &Path,
         script: Option<&crate::script::ScriptCase>,
@@ -28,49 +35,13 @@ impl Verilator {
         if design.four_state {
             return Err("Verilator cannot validate four-state expectations".into());
         }
-        fs::create_dir_all(directory)?;
-        let directory = fs::canonicalize(directory)?;
-        let sources = design
-            .sources
-            .iter()
-            .map(|s| (s.text.as_str(), s.path.as_path()))
-            .collect::<Vec<_>>();
-        for (index, (source, _)) in sources.iter().enumerate() {
-            write_if_changed(
-                &directory.join(format!("input_{index}.veryl")),
-                source.as_bytes(),
-            )?;
-        }
-        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::emit::emit_verification_sources(&sources, &design.top)
-        }))
-        .map_err(|error| {
-            crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
-        })?;
-        let mut testbench = emitted.is_testbench();
-        let mut paths = Vec::new();
-        let edges = emitted
-            .event_edges(&design.top)
-            .cloned()
-            .ok_or_else(|| format!("top module {} not found in emitted design", design.top))?;
-        for (index, (source, _)) in emitted.as_sv_sources().iter().enumerate() {
-            let path = directory.join(format!("source_{index}.sv"));
-            write_if_changed(&path, source.as_bytes())?;
-            paths.push(path);
-        }
-        let mut top = design.top.clone();
-        // A rejection needs only the design.
-        if let Some(case) =
-            script.filter(|case| case.expectation != crate::Expectation::CompilationError)
-        {
-            let info = crate::script::sv::DesignInfo::from_emitted(&emitted, &design.top)
-                .ok_or("top module not found")?;
-            let path = directory.join("testbench.sv");
-            write_if_changed(&path, crate::script::sv::testbench(case, &info)?.as_bytes())?;
-            paths.push(path);
-            top = crate::script::sv::TESTBENCH_TOP.to_string();
-            testbench = true;
-        }
+        let Staged {
+            directory,
+            paths,
+            top,
+            testbench,
+            edges,
+        } = stage(frontend, design, directory, script)?;
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
             include_bytes!("vpi_bits.hpp"),
@@ -138,7 +109,7 @@ impl Verilator {
         Ok(Self(spawn(
             command,
             &directory,
-            format!("TOP.{}", design.top),
+            format!("TOP.{top}"),
             edges,
         )?))
     }
@@ -147,7 +118,9 @@ impl Verilator {
 // A %Error prefix also covers internal failures, unsupported constructs and
 // build infrastructure. Accept only reviewed source diagnostics, checking the
 // whole log so a real language error cannot hide a second tool failure.
-fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> bool {
+/// Whether a failed build's log shows only reviewed source diagnostics,
+/// that is, a language rejection rather than a tool failure.
+pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> bool {
     if code != Some(1) {
         return false;
     }
@@ -230,29 +203,5 @@ impl Backend for Verilator {
     }
     fn tick(&mut self, event: &str) -> Result<()> {
         self.0.tick(event)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retained_negative_diagnostic_is_a_source_rejection() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/verilator.json")).unwrap();
-        let mut checked = 0;
-        for case in report["cases"].as_array().unwrap() {
-            if case["status"] != "rejected" {
-                continue;
-            }
-            let (_, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
-            let sources = [PathBuf::from("<case>/source_0.sv")];
-            assert!(is_source_rejection(Some(1), log, &sources));
-            assert!(!is_source_rejection(Some(1), log, &["other.sv".into()]));
-            assert!(!is_source_rejection(None, log, &sources));
-            checked += 1;
-        }
-        assert_eq!(checked, 1);
     }
 }

@@ -46,29 +46,6 @@ pub struct DesignInfo {
     pub arrays: BTreeMap<String, (usize, usize)>,
 }
 
-impl DesignInfo {
-    /// Collect the information for `top` from an emitted design.
-    pub fn from_emitted(emitted: &crate::emit::EmittedSources, top: &str) -> Option<Self> {
-        let module = emitted.module_info(top)?;
-        Some(Self {
-            top: top.to_string(),
-            inputs: module
-                .inputs
-                .iter()
-                .map(|(name, width, count)| Port {
-                    name: name.clone(),
-                    width: *width,
-                    count: *count,
-                })
-                .collect(),
-            outputs: module.outputs.clone(),
-            edges: emitted.event_edges(top)?.clone(),
-            max_width: emitted.max_width(),
-            arrays: module.arrays.clone(),
-        })
-    }
-}
-
 /// The name of the generated testbench module.
 pub const TESTBENCH_TOP: &str = "celox_suite_tb";
 

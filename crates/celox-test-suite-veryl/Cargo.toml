@@ -13,8 +13,8 @@ readme = "README.md"
 [features]
 default = []
 emit = ["dep:veryl-analyzer", "dep:veryl-emitter", "dep:veryl-parser", "dep:veryl-metadata"]
-verilator = ["emit", "dep:clap", "dep:serde_json"]
-icarus = ["emit", "dep:clap", "dep:serde_json"]
+verilator = ["emit", "dep:serde_json", "celox-test-suite-core/external"]
+icarus = ["emit", "dep:serde_json", "celox-test-suite-core/external"]
 
 [[bin]]
 name = "verify-verilator"
@@ -35,10 +35,8 @@ veryl-analyzer = { workspace = true, optional = true }
 veryl-emitter = { workspace = true, optional = true }
 veryl-parser = { workspace = true, optional = true }
 veryl-metadata = { workspace = true, optional = true }
-clap = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-num-bigint.workspace = true
-num-traits.workspace = true
+celox-test-suite-core.workspace = true
 veryl-std.workspace = true
 
 [lints]

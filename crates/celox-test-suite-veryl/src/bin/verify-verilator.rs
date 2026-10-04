@@ -1,18 +1,3 @@
 fn main() -> celox_test_suite_veryl::Result<()> {
-    celox_test_suite_veryl::verification::run(
-        "verilator",
-        "verilator",
-        "--version",
-        false,
-        |design, directory| {
-            Ok(Box::new(
-                celox_test_suite_veryl::verilator::Verilator::build(design, directory)?,
-            ))
-        },
-        |case, directory| {
-            Ok(Box::new(
-                celox_test_suite_veryl::verilator::Verilator::build_script(case, directory)?,
-            ))
-        },
-    )
+    celox_test_suite_veryl::verification::run(celox_test_suite_core::verification::Tool::Verilator)
 }

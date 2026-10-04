@@ -49,7 +49,6 @@
 pub mod ast;
 pub(crate) mod interp;
 pub mod sexpr;
-#[cfg(feature = "emit")]
 pub mod sv;
 
 pub use ast::{ScriptCase, ScriptError};
