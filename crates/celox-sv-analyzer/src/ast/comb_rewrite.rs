@@ -756,6 +756,7 @@ pub(super) fn selected_value_after_write(
                     target_lsb,
                     target_msb,
                     overlap_first.checked_sub(target_step)?,
+                    packed_dimensions,
                 )?);
             }
             parts.push(selected_value_read(
@@ -764,6 +765,7 @@ pub(super) fn selected_value_after_write(
                 write_lsb,
                 overlap_first,
                 overlap_last,
+                packed_dimensions,
             )?);
             if overlap_last != target_lsb {
                 parts.push(selected_value_read(
@@ -772,6 +774,7 @@ pub(super) fn selected_value_after_write(
                     target_lsb,
                     overlap_last.checked_add(target_step)?,
                     target_lsb,
+                    packed_dimensions,
                 )?);
             }
             let value = if parts.len() == 1 {
@@ -907,13 +910,106 @@ fn selected_value_read(
     value_lsb: i128,
     first_coordinate: i128,
     last_coordinate: i128,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
+    let msb = selected_target_bit(value_msb, value_lsb, first_coordinate)?;
+    let lsb = selected_target_bit(value_msb, value_lsb, last_coordinate)?;
+    if let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
+        && msb >= lsb
+        && let Some(narrowed) = narrow_bit_select(value, msb, lsb, packed_dimensions)
+    {
+        return Some(narrowed);
+    }
     Some(Expr::Select {
         expr: Box::new(value.clone()),
-        msb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, first_coordinate)?),
-        lsb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, last_coordinate)?),
+        msb: const_expr_from_i128(msb),
+        lsb: const_expr_from_i128(lsb),
         signed: false,
     })
+}
+
+/// Select `[msb:lsb]` of `value`, pushing the selection through concatenations
+/// and conditional merges so only the bits actually read are retained.
+///
+/// Successive partial writes build `{value[hi:k+1], new, value[k-1:0]}`, which
+/// references the previous value twice. Without narrowing, the tracked value
+/// doubles in size on every write, so an unrolled loop of N bit writes costs
+/// O(2^N).
+fn narrow_bit_select(
+    value: &Expr,
+    msb: usize,
+    lsb: usize,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let select = |expr: &Expr, msb: usize, lsb: usize| {
+        narrow_bit_select(expr, msb, lsb, packed_dimensions).unwrap_or_else(|| Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: const_expr_from_i128(msb as i128),
+            lsb: const_expr_from_i128(lsb as i128),
+            signed: false,
+        })
+    };
+    match value {
+        Expr::Concat(parts) => {
+            let widths = parts
+                .iter()
+                .map(|part| expr_static_width(part, packed_dimensions))
+                .collect::<Option<Vec<_>>>()?;
+            let total = widths
+                .iter()
+                .try_fold(0usize, |sum, width| sum.checked_add(*width))?;
+            if msb >= total {
+                return None;
+            }
+            let mut pieces = Vec::new();
+            let mut offset = 0usize;
+            for (part, width) in parts.iter().zip(&widths).rev() {
+                let end = offset + width;
+                if *width != 0 && offset <= msb && end > lsb {
+                    let low = lsb.max(offset);
+                    let high = msb.min(end - 1);
+                    let piece = if low == offset && high == end - 1 {
+                        part.clone()
+                    } else {
+                        select(part, high - offset, low - offset)
+                    };
+                    match piece {
+                        Expr::Concat(inner) => pieces.extend(inner.into_iter().rev()),
+                        piece => pieces.push(piece),
+                    }
+                }
+                offset = end;
+            }
+            pieces.reverse();
+            if pieces.len() == 1 {
+                Some(Expr::Resize {
+                    expr: Box::new(pieces.pop()?),
+                    width: msb - lsb + 1,
+                    signed: false,
+                })
+            } else {
+                Some(Expr::Concat(pieces))
+            }
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let covers = |arm: &Expr| {
+                expr_static_width(arm, packed_dimensions).is_some_and(|width| width > msb)
+            };
+            if !covers(then_expr) || !covers(else_expr) {
+                return None;
+            }
+            Some(Expr::Mux {
+                condition: condition.clone(),
+                then_expr: Box::new(select(then_expr, msb, lsb)),
+                else_expr: Box::new(select(else_expr, msb, lsb)),
+            })
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn comb_previous_value_placeholder() -> Expr {

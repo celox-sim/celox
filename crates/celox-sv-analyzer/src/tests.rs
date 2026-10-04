@@ -2195,6 +2195,31 @@ fn caps_aggregate_nested_static_loop_expansion() {
 }
 
 #[test]
+fn unrolled_bit_writes_do_not_grow_tracked_value_exponentially() {
+    // Each bit write used to reference the previously tracked value twice
+    // (upper and lower slice), so N writes built an O(2^N) expression tree.
+    let start = std::time::Instant::now();
+    analyze_source(
+        r#"
+            module Top(input logic [15:0] a, output logic [15:0] y);
+                always_comb begin
+                    y = 16'd0;
+                    for (int i = 0; i < 16; i++)
+                        y[i] = a[i];
+                end
+            endmodule
+        "#,
+        Path::new("unrolled_bit_writes.sv"),
+    )
+    .expect("a loop of constant-index bit writes must analyze");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "analysis took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn restricts_enum_alias_types_to_the_declared_base() {
     let ir = analyze_source(
         r#"
