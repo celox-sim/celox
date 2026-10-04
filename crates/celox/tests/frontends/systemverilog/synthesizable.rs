@@ -213,6 +213,44 @@ sv_backends! {
         }
     }
 
+    fn instance_arrays_with_ascending_range(sim) {
+        @setup {
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    Inv u[0:1](.a(a), .y(y));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("asc.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x3cu8, 0xa5, 0xff, 0x01] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
+        }
+    }
+
+    fn instance_arrays_with_non_zero_based_range(sim) {
+        @setup {
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    Inv u[3:2](.a(a), .y(y));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("nz.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x3cu8, 0xa5, 0xff, 0x01] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
+        }
+    }
+
     fn exponentiation_works_in_constant_expressions(sim) {
         @setup {
             let source = r#"
