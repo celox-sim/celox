@@ -27,6 +27,181 @@ pub(super) fn conditional_assignments_from_statement_or_null(
     Ok(())
 }
 
+fn push_procedural_assignment(
+    assignments: &mut Vec<ConditionalAssignment>,
+    condition: Option<Expr>,
+    lhs: LValue,
+    rhs: Expr,
+    packed_dimensions: &PackedDimensions,
+) {
+    if let Some(write) = dynamic_select_write(&lhs, &rhs, packed_dimensions) {
+        // A runtime-selected slice is written as one guarded write per
+        // possible position; an unmatched (e.g. unknown) index writes nothing.
+        let rhs = coerce_procedural_assignment_rhs(rhs, &write.full, packed_dimensions);
+        for (guard, candidate, (rhs_msb, rhs_lsb)) in write.positions {
+            let rhs = if rhs_msb - rhs_lsb + 1 == write.width {
+                rhs.clone()
+            } else {
+                Expr::Select {
+                    expr: Box::new(rhs.clone()),
+                    msb: const_expr_from_i128(rhs_msb),
+                    lsb: const_expr_from_i128(rhs_lsb),
+                    signed: false,
+                }
+            };
+            assignments.push(ConditionalAssignment::new(
+                combine_expr_conditions(condition.clone(), guard),
+                Assignment::new(candidate, rhs),
+            ));
+        }
+        return;
+    }
+    let rhs = if condition.is_some()
+        || matches!(
+            lhs,
+            LValue::Select {
+                is_2state: true,
+                ..
+            }
+        ) {
+        coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+    } else {
+        rhs
+    };
+    assignments.push(ConditionalAssignment::new(
+        condition,
+        Assignment::new(lhs, rhs),
+    ));
+}
+
+/// The concrete writes of a packed select whose position is a runtime value.
+struct DynamicSelectWrite {
+    /// Number of bits written when the selection is fully in range.
+    width: i128,
+    /// An in-range selection of that width, used to size the written value.
+    full: LValue,
+    /// One entry per position: the condition selecting it, the in-range
+    /// destination, and the bit range of the written value that lands there.
+    positions: Vec<(Expr, LValue, (i128, i128))>,
+}
+
+/// Expand a packed select with a runtime index. `None` when the select is
+/// constant or not a plain packed-vector select.
+fn dynamic_select_write(
+    lhs: &LValue,
+    rhs: &Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<DynamicSelectWrite> {
+    let LValue::Select {
+        name,
+        msb,
+        lsb,
+        signed,
+        array_slice_width: None,
+        ..
+    } = lhs
+    else {
+        return None;
+    };
+    let const_env = &packed_dimensions.const_env;
+    if eval_ast_const_expr(msb, const_env).is_some()
+        && eval_ast_const_expr(lsb, const_env).is_some()
+    {
+        return None;
+    }
+    let variable = packed_dimensions.get(name)?;
+    if !variable.unpacked.is_empty() {
+        return None;
+    }
+    // A read-modify-write (`x[i] ^= 1`) would make every position read the
+    // value left by the previous position, growing the expression with each
+    // candidate. Leave those writes unexpanded.
+    let whole = whole_packed_lvalue(name, packed_dimensions)?;
+    if expr_references_overlapping_lvalue(rhs, &whole, const_env) {
+        return None;
+    }
+    // Evaluate one representative position for the selection width.
+    let mut sample_env = const_env.clone();
+    for variable in packed_dimensions.keys() {
+        sample_env.entry(variable.clone()).or_insert(0);
+    }
+    let delta = eval_ast_const_expr(msb, &sample_env)?
+        .checked_sub(eval_ast_const_expr(lsb, &sample_env)?)?;
+    // The select runs towards higher indices from `lsb` when `delta >= 0`
+    // (a descending declaration) and towards lower indices otherwise.
+    let descending = delta >= 0;
+    let span = delta.abs();
+    let LValue::Select {
+        msb: whole_msb,
+        lsb: whole_lsb,
+        ..
+    } = whole
+    else {
+        return None;
+    };
+    let whole_msb = eval_ast_const_expr(&whole_msb, const_env)?;
+    let whole_lsb = eval_ast_const_expr(&whole_lsb, const_env)?;
+    let (low, high) = (whole_msb.min(whole_lsb), whole_msb.max(whole_lsb));
+    if high.abs_diff(low).saturating_add(1) > MAX_DYNAMIC_SELECT_EXPANSION {
+        return None;
+    }
+    let select = |msb: i128, lsb: i128| LValue::Select {
+        name: name.clone(),
+        msb: const_expr_from_i128(msb),
+        lsb: const_expr_from_i128(lsb),
+        signed: *signed,
+        array_slice_width: None,
+        array_slice_reversed: false,
+        is_2state: false,
+    };
+    let ordered = |first: i128, second: i128| {
+        // (msb, lsb) of a range whose numerically lower end is `first`.
+        if descending {
+            (second, first)
+        } else {
+            (first, second)
+        }
+    };
+    let equals = |bound: &ConstExpr, value: i128| Expr::Binary {
+        left: Box::new(const_expr_to_expr(bound.clone())),
+        op: BinaryOp::EqCase,
+        right: Box::new(const_expr_to_expr(const_expr_from_i128(value))),
+    };
+    let mut positions = Vec::new();
+    // Candidates that hang over either end of the vector still write their
+    // in-range bits, as the language defines for a partially out-of-range select.
+    for candidate_low in low.checked_sub(span)?..=high {
+        let candidate_high = candidate_low.checked_add(span)?;
+        let (clipped_low, clipped_high) = (candidate_low.max(low), candidate_high.min(high));
+        if clipped_low > clipped_high {
+            continue;
+        }
+        let (candidate_msb, candidate_lsb) = ordered(candidate_low, candidate_high);
+        let (clipped_msb, clipped_lsb) = ordered(clipped_low, clipped_high);
+        // Bit range of the written value (bit 0 is the select's lsb end).
+        let value_bits = if descending {
+            (clipped_high - candidate_low, clipped_low - candidate_low)
+        } else {
+            (candidate_high - clipped_low, candidate_high - clipped_high)
+        };
+        positions.push((
+            Expr::Binary {
+                left: Box::new(equals(msb, candidate_msb)),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(equals(lsb, candidate_lsb)),
+            },
+            select(clipped_msb, clipped_lsb),
+            value_bits,
+        ));
+    }
+    let (full_msb, full_lsb) = ordered(low, low + span);
+    (!positions.is_empty()).then(|| DynamicSelectWrite {
+        width: span + 1,
+        full: select(full_msb, full_lsb),
+        positions,
+    })
+}
+
 pub(super) fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
@@ -76,22 +251,7 @@ pub(super) fn conditional_assignments_from_statement(
                     "always_comb assignment expression".to_string(),
                 ));
             };
-            let rhs = if condition.is_some()
-                || matches!(
-                    lhs,
-                    LValue::Select {
-                        is_2state: true,
-                        ..
-                    }
-                ) {
-                coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
-            } else {
-                rhs
-            };
-            assignments.push(ConditionalAssignment::new(
-                condition,
-                Assignment::new(lhs, rhs),
-            ));
+            push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
         }
         sv_parser::StatementItem::NonblockingAssignment(assignment) => {
             let lhs =
@@ -107,22 +267,7 @@ pub(super) fn conditional_assignments_from_statement(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
             })?;
-            let rhs = if condition.is_some()
-                || matches!(
-                    lhs,
-                    LValue::Select {
-                        is_2state: true,
-                        ..
-                    }
-                ) {
-                coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
-            } else {
-                rhs
-            };
-            assignments.push(ConditionalAssignment::new(
-                condition,
-                Assignment::new(lhs, rhs),
-            ));
+            push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             for stmt in &block.nodes.3 {

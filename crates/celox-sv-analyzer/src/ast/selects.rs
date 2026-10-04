@@ -157,6 +157,23 @@ pub(super) fn lvalue_from_select(
     }
 
     if let Some(range) = &select.nodes.2 {
+        if let Some((msb, lsb)) = dynamic_indexed_bounds(
+            &name,
+            &range.nodes.1,
+            indices.is_empty(),
+            syntax_tree,
+            packed_dimensions,
+        ) {
+            return Some(LValue::Select {
+                name,
+                msb,
+                lsb,
+                signed: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state: false,
+            });
+        }
         let (mut msb, mut lsb) = part_select_bounds(
             &range.nodes.1,
             syntax_tree,
@@ -456,6 +473,15 @@ pub(super) fn expr_select_from_select(
         .map(|bit_select| bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions))
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
+        if let Some(select) = dynamic_indexed_select(
+            &base,
+            &range.nodes.1,
+            indices.is_empty(),
+            syntax_tree,
+            packed_dimensions,
+        ) {
+            return select;
+        }
         let name = if let Expr::Ident(name) = &base {
             Some(name.as_str())
         } else {
@@ -502,10 +528,14 @@ pub(super) fn expr_select_from_select(
                 && let Some((msb, lsb)) =
                     flatten_packed_select(name, &packed_indices, packed_dimensions)
             {
+                let lsb = add_expr(array_offset.clone(), lsb);
+                if eval_ast_const_expr(&lsb, &packed_dimensions.const_env).is_none() {
+                    return Some(shifted_select(base, lsb, 1));
+                }
                 return Some(Expr::Select {
                     expr: Box::new(base),
-                    msb: add_expr(array_offset.clone(), msb),
-                    lsb: add_expr(array_offset, lsb),
+                    msb: add_expr(array_offset, msb),
+                    lsb,
                     signed: false,
                 });
             }
@@ -565,6 +595,15 @@ pub(super) fn expr_select_from_select(
             return None;
         }
         let bit = indices[0].clone();
+        if eval_ast_const_expr(&bit, &packed_dimensions.const_env).is_none()
+            && let Expr::Ident(name) = &base
+            && let Some(dimensions) = packed_dimensions.get(name)
+            && dimensions.unpacked.is_empty()
+            && dimensions.packed.len() == 1
+        {
+            let low = packed_index_offset(&dimensions.packed[0], bit);
+            return Some(shifted_select(base, low, 1));
+        }
         return Some(Expr::Select {
             expr: Box::new(base),
             msb: bit.clone(),
@@ -574,6 +613,157 @@ pub(super) fn expr_select_from_select(
     }
 
     None
+}
+
+/// Select `width` bits starting at the runtime bit position `low`, as
+/// `(base >> low)[width-1:0]`. Positions past the top read as zero.
+fn shifted_select(base: Expr, low: ConstExpr, width: usize) -> Expr {
+    Expr::Select {
+        expr: Box::new(Expr::Binary {
+            left: Box::new(base),
+            op: BinaryOp::Shr,
+            right: Box::new(const_expr_to_expr(low)),
+        }),
+        msb: const_expr_from_i128(width as i128 - 1),
+        lsb: const_expr_from_i128(0),
+        signed: false,
+    }
+}
+
+/// The runtime start index, constant width, `+:` direction and the declared
+/// packed range of a dynamic indexed part-select of `name`.
+struct DynamicIndexed<'a> {
+    start: ConstExpr,
+    width: usize,
+    plus: bool,
+    dimension: &'a PackedDimension,
+    ascending: bool,
+}
+
+fn dynamic_indexed_shape<'a>(
+    name: &str,
+    range: &sv_parser::PartSelectRange,
+    no_leading_indices: bool,
+    syntax_tree: &SyntaxTree,
+    dimensions: &'a PackedDimensions,
+) -> Option<Option<DynamicIndexed<'a>>> {
+    let sv_parser::PartSelectRange::IndexedRange(range) = range else {
+        return None;
+    };
+    let start = indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?;
+    if eval_ast_const_expr(&start, &dimensions.const_env).is_some() {
+        return None;
+    }
+    let shape = || {
+        let width = indexed_select_base(
+            RefNode::ConstantExpression(&range.nodes.2),
+            syntax_tree,
+            dimensions,
+        )?;
+        let width = usize::try_from(eval_ast_const_expr(&width, &dimensions.const_env)?).ok()?;
+        if width == 0 || !no_leading_indices {
+            return None;
+        }
+        let variable = dimensions.get(name)?;
+        if !variable.unpacked.is_empty() || variable.packed.len() != 1 {
+            return None;
+        }
+        let dimension = &variable.packed[0];
+        let left = eval_ast_const_expr(&dimension.left, &dimensions.const_env)?;
+        let right = eval_ast_const_expr(&dimension.right, &dimensions.const_env)?;
+        Some(DynamicIndexed {
+            start,
+            width,
+            plus: syntax_tree.get_str(&range.nodes.1.nodes.0)? == "+:",
+            dimension,
+            ascending: left < right,
+        })
+    };
+    Some(shape())
+}
+
+fn const_sub(left: ConstExpr, right: ConstExpr) -> ConstExpr {
+    ConstExpr::Binary {
+        left: Box::new(left),
+        op: BinaryOp::Sub,
+        right: Box::new(right),
+    }
+}
+
+/// Lower `base[start +: W]` / `base[start -: W]` when `start` is a runtime
+/// value. Returns `None` when the select is not dynamic, and `Some(None)` when
+/// it is dynamic in a shape this lowering does not support.
+///
+/// Only a single packed dimension without unpacked dimensions is handled. The
+/// lowest selected bit position follows the declared direction: a descending
+/// `[l:r]` names the low bit with `+:` and the high bit with `-:`; an ascending
+/// range names the high-order index first.
+fn dynamic_indexed_select(
+    base: &Expr,
+    range: &sv_parser::PartSelectRange,
+    no_leading_indices: bool,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Option<Expr>> {
+    let Expr::Ident(name) = base else {
+        // A dynamic select of a non-variable base is not supported.
+        let sv_parser::PartSelectRange::IndexedRange(indexed) = range else {
+            return None;
+        };
+        let start = indexed_select_base(
+            RefNode::Expression(&indexed.nodes.0),
+            syntax_tree,
+            dimensions,
+        )?;
+        return eval_ast_const_expr(&start, &dimensions.const_env)
+            .is_none()
+            .then_some(None);
+    };
+    let shape = dynamic_indexed_shape(name, range, no_leading_indices, syntax_tree, dimensions)?;
+    Some(shape.map(|shape| {
+        let tail = const_expr_from_i128(shape.width as i128 - 1);
+        let low = if !shape.ascending {
+            let low = const_sub(shape.start, shape.dimension.right.clone());
+            if shape.plus {
+                low
+            } else {
+                const_sub(low, tail)
+            }
+        } else {
+            let low = const_sub(shape.dimension.right.clone(), shape.start);
+            if shape.plus {
+                const_sub(low, tail)
+            } else {
+                low
+            }
+        };
+        shifted_select(base.clone(), low, shape.width)
+    }))
+}
+
+/// Symbolic `(msb, lsb)` of a dynamic indexed part-select used as a write
+/// target, in declared index coordinates.
+fn dynamic_indexed_bounds(
+    name: &str,
+    range: &sv_parser::PartSelectRange,
+    no_leading_indices: bool,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let shape = dynamic_indexed_shape(name, range, no_leading_indices, syntax_tree, dimensions)??;
+    let tail = const_expr_from_i128(shape.width as i128 - 1);
+    let add = |left: ConstExpr, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left),
+        op: BinaryOp::Add,
+        right: Box::new(right),
+    };
+    // Index range of the selection, most-significant end first.
+    Some(match (shape.ascending, shape.plus) {
+        (false, true) => (add(shape.start.clone(), tail), shape.start),
+        (false, false) => (shape.start.clone(), const_sub(shape.start, tail)),
+        (true, true) => (shape.start.clone(), add(shape.start, tail)),
+        (true, false) => (const_sub(shape.start.clone(), tail), shape.start),
+    })
 }
 
 fn flatten_variable_select(

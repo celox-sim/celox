@@ -644,8 +644,7 @@ pub(super) fn reject_silently_ignored_constructs(
             }
             RefNode::IndexedRange(range) if
                 indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions)
-                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                    &indexed_dimensions).is_none()
                 || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
                 return Err(AnalyzerError::Unsupported(
                     "indexed part-select".to_string(),

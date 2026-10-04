@@ -3771,26 +3771,6 @@ fn skips_unreachable_duplicate_items_in_complete_two_state_cases() {
 }
 
 #[test]
-fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input bit [1:0] a, input bit [2:0] i, output logic y);
-            always_comb begin
-                case (a[i])
-                    1'b0: y = 1'b0;
-                    1'b1: y = 1'b1;
-                endcase
-            end
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("latch inference inside always_comb"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn regroups_comb_targets_after_dynamic_index_substitution() {
     let error = cranelift_build_error(
         r#"
@@ -5204,14 +5184,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "combinational expression",
             r#"
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
-        "#,
-        ),
-        (
-            "always_ff assignment lowering",
-            r#"
-            module Top(input logic clk, input logic i, d, output logic [1:0] q);
-                always_ff @(posedge clk) q[i] <= d;
-            endmodule
         "#,
         ),
         (
@@ -7654,19 +7626,6 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 1u8.into());
     sim.modify(|io| io.set(index, 1u8)).unwrap();
     assert_eq!(sim.get(x), 2u8.into());
-}
-
-#[test]
-fn rejects_indexed_part_selects_in_comb_write_groups() {
-    for select in ["index +: 2", "index -: 2"] {
-        let source = format!(
-            "module Top(input int index, input logic replace, output logic [7:0] value); \
-             always_comb begin value = '0; value[{select}] = 2'b11; \
-             if (replace) value = '1; end endmodule"
-        );
-        let error = cranelift_build_error(&source);
-        assert!(error.contains("indexed part-select"), "{error}");
-    }
 }
 
 sv_backends! {
