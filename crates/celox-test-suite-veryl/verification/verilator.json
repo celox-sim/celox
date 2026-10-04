@@ -5092,6 +5092,17 @@
     },
     {
       "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_arguments::test_ff_function_local_snapshot_ignores_later_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
       "expectation": "Simulation",
       "known_issue": {
@@ -8916,7 +8927,7 @@
     "emission_error": 0,
     "ignored": 91,
     "mismatch": 0,
-    "passed": 490,
+    "passed": 491,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,

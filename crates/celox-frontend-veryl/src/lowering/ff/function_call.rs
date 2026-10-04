@@ -3725,15 +3725,6 @@ impl<'a> FfParser<'a> {
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
     ) -> Expression {
-        self.substitute_function_expr_inner(expr, defs, &mut HashSet::default())
-    }
-
-    fn substitute_function_expr_inner(
-        &self,
-        expr: &Expression,
-        defs: &HashMap<VarId, Expression>,
-        expanding: &mut HashSet<VarId>,
-    ) -> Expression {
         if self
             .get_bound_function_expression_value(expr.token_range())
             .is_some()
@@ -3748,12 +3739,10 @@ impl<'a> FfParser<'a> {
                     }
                     let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
                     if is_whole && let Some(bound) = defs.get(var_id) {
-                        if expanding.insert(*var_id) {
-                            let result =
-                                self.substitute_function_expr_inner(bound, defs, expanding);
-                            expanding.remove(var_id);
-                            return result;
-                        }
+                        // State entries already hold the value captured at assignment.
+                        // Re-expanding against later definitions would reread variables
+                        // that were still unassigned then, such as mutable locals or formals.
+                        return bound.clone();
                     }
                     if !defs.contains_key(var_id)
                         && self.module.variables[var_id].affiliation != Affiliation::Function
@@ -3772,8 +3761,7 @@ impl<'a> FfParser<'a> {
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     for input_expr in call.inputs.values_mut() {
-                        *input_expr =
-                            self.substitute_function_expr_inner(input_expr, defs, expanding);
+                        *input_expr = self.substitute_function_expr(input_expr, defs);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
@@ -3788,8 +3776,7 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Onehot(input)
                         | SystemFunctionKind::Signed(input)
                         | SystemFunctionKind::Unsigned(input) => {
-                            input.0 =
-                                self.substitute_function_expr_inner(&input.0, defs, expanding);
+                            input.0 = self.substitute_function_expr(&input.0, defs);
                         }
                         _ => {}
                     }
@@ -3798,20 +3785,20 @@ impl<'a> FfParser<'a> {
                 _ => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => Expression::Binary(
-                Box::new(self.substitute_function_expr_inner(lhs, defs, expanding)),
+                Box::new(self.substitute_function_expr(lhs, defs)),
                 *op,
-                Box::new(self.substitute_function_expr_inner(rhs, defs, expanding)),
+                Box::new(self.substitute_function_expr(rhs, defs)),
                 comptime.clone(),
             ),
             Expression::Unary(op, inner, comptime) => Expression::Unary(
                 *op,
-                Box::new(self.substitute_function_expr_inner(inner, defs, expanding)),
+                Box::new(self.substitute_function_expr(inner, defs)),
                 comptime.clone(),
             ),
             Expression::Ternary(cond, then_expr, else_expr, comptime) => Expression::Ternary(
-                Box::new(self.substitute_function_expr_inner(cond, defs, expanding)),
-                Box::new(self.substitute_function_expr_inner(then_expr, defs, expanding)),
-                Box::new(self.substitute_function_expr_inner(else_expr, defs, expanding)),
+                Box::new(self.substitute_function_expr(cond, defs)),
+                Box::new(self.substitute_function_expr(then_expr, defs)),
+                Box::new(self.substitute_function_expr(else_expr, defs)),
                 comptime.clone(),
             ),
             Expression::Concatenation(parts, comptime) => Expression::Concatenation(
@@ -3819,9 +3806,8 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|(x, rep)| {
                         (
-                            self.substitute_function_expr_inner(x, defs, expanding),
-                            rep.as_ref()
-                                .map(|r| self.substitute_function_expr_inner(r, defs, expanding)),
+                            self.substitute_function_expr(x, defs),
+                            rep.as_ref().map(|r| self.substitute_function_expr(r, defs)),
                         )
                     })
                     .collect(),
@@ -3832,13 +3818,12 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Box::new(self.substitute_function_expr_inner(x, defs, expanding)),
-                            rep.as_ref().map(|r| {
-                                Box::new(self.substitute_function_expr_inner(r, defs, expanding))
-                            }),
+                            Box::new(self.substitute_function_expr(x, defs)),
+                            rep.as_ref()
+                                .map(|r| Box::new(self.substitute_function_expr(r, defs))),
                         ),
                         ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
-                            self.substitute_function_expr_inner(x, defs, expanding),
+                            self.substitute_function_expr(x, defs),
                         )),
                     })
                     .collect(),
@@ -3848,12 +3833,7 @@ impl<'a> FfParser<'a> {
                 ty.clone(),
                 fields
                     .iter()
-                    .map(|(name, x)| {
-                        (
-                            *name,
-                            self.substitute_function_expr_inner(x, defs, expanding),
-                        )
-                    })
+                    .map(|(name, x)| (*name, self.substitute_function_expr(x, defs)))
                     .collect(),
                 comptime.clone(),
             ),

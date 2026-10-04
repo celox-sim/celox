@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 695 Veryl language tests for compiler and simulator
+A reusable corpus of 696 Veryl language tests for compiler and simulator
 implementations. Each case's sources, input sequence, and assertions live
 together in a script file (`src/cases/*.vtest`), independent of any host
 language. The default dependency graph contains numeric support and Veryl standard

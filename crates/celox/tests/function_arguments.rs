@@ -45,6 +45,11 @@ fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
     @case "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments";
 }
 
+fn test_ff_function_local_snapshot_ignores_later_assignment(sim) {
+    @ignore_on(veryl);
+    @case "function_arguments::test_ff_function_local_snapshot_ignores_later_assignment";
+}
+
 fn test_comb_output_copyout_freezes_aliased_inputs_and_return(sim) {
     @ignore_on(sv);
     @case "function_arguments::test_comb_output_copyout_freezes_aliased_inputs_and_return";
