@@ -1106,7 +1106,7 @@ fn propagate_boundaries(
             for (inst_name, glue_blocks) in &sim_module.glue_blocks {
                 for (idx, glue_block) in glue_blocks.iter().enumerate() {
                     let mut child_path = path.0.clone();
-                    child_path.push((inst_name.clone(), idx));
+                    child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
                     let child_id = expanded[&InstancePath(child_path)];
 
                     // Propagate from Parent to Child (Input Ports)
@@ -1198,7 +1198,7 @@ fn expand(
         let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
         for (idx, gb) in gbs.iter().enumerate() {
             let mut path = path.clone();
-            path.push((inst_name.clone(), idx));
+            path.push((inst_name.clone(), module.instance_index(inst_name, idx)));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
             instance_modules.insert(id, gb.module_id);
@@ -1319,7 +1319,7 @@ fn unify_clock_domains(
         for (inst_name, glue_blocks) in &sim_module.glue_blocks {
             for (idx, glue_block) in glue_blocks.iter().enumerate() {
                 let mut child_path = path.0.clone();
-                child_path.push((inst_name.clone(), idx));
+                child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
                 let child_id = expanded[&InstancePath(child_path)];
 
                 // Inputs: Parent -> Child (Parent drives Child)

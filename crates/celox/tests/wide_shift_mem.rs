@@ -115,12 +115,10 @@ all_backends! {
     // Without padding, load_or_default reads uninitialised memory beyond the
     // source slot, producing garbage in the upper chunks.
     fn test_narrow_source_wide_dest_shift_left(sim) {
-        @ignore_on(sv);
         @case "wide_shift_mem::test_narrow_source_wide_dest_shift_left";
     }
 
     fn test_narrow_source_wide_dest_shift_right(sim) {
-        @ignore_on(sv);
         @case "wide_shift_mem::test_narrow_source_wide_dest_shift_right";
     }
 

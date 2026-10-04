@@ -11,7 +11,7 @@ all_backends! {
     }
 
     fn test_comb_function_body_onehot_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_comb_function_body_onehot_system_function";
     }
 
@@ -41,17 +41,14 @@ all_backends! {
     }
 
     fn test_direct_comb_signed_system_function_sign_extends_to_context(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_signed_system_function_sign_extends_to_context";
     }
 
     fn test_direct_comb_unsigned_system_function_zero_extends_to_context(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_unsigned_system_function_zero_extends_to_context";
     }
 
     fn test_direct_comb_signed_unsigned_system_functions_affect_comparison(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_signed_unsigned_system_functions_affect_comparison";
     }
 
@@ -111,22 +108,18 @@ all_backends! {
     }
 
     fn test_direct_ff_signed_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_signed_system_function";
     }
 
     fn test_direct_ff_signed_system_function_sign_extends_to_context(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_signed_system_function_sign_extends_to_context";
     }
 
     fn test_direct_ff_unsigned_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_unsigned_system_function";
     }
 
     fn test_direct_ff_unsigned_system_function_zero_extends_to_context(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_unsigned_system_function_zero_extends_to_context";
     }
 
@@ -136,7 +129,7 @@ all_backends! {
     }
 
     fn test_ff_function_body_onehot_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_ff_function_body_onehot_system_function";
     }
 }

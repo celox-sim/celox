@@ -36,6 +36,9 @@ pub struct SimModule {
     pub eval_apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
     pub glue_blocks: HashMap<String, Vec<SymbolicGlueBlock>>,
     pub indexed_instance_names: HashSet<String>,
+    /// The index of the first glue block of an instance name, when it is not
+    /// 0: the lower bound of a SystemVerilog instance array such as `u[3:2]`.
+    pub instance_index_bases: HashMap<String, usize>,
     pub comb_blocks: Vec<LogicPath<SourceVarId>>,
     pub comb_observers: Vec<CombObserver<SourceVarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
@@ -44,6 +47,13 @@ pub struct SimModule {
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,
+}
+
+impl SimModule {
+    /// The hierarchy index of glue block `position` of instance `name`.
+    pub fn instance_index(&self, name: &str, position: usize) -> usize {
+        self.instance_index_bases.get(name).copied().unwrap_or(0) + position
+    }
 }
 
 impl fmt::Debug for SimModule {
@@ -57,6 +67,7 @@ impl fmt::Debug for SimModule {
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
             .field("glue_blocks", &self.glue_blocks)
             .field("indexed_instance_names", &self.indexed_instance_names)
+            .field("instance_index_bases", &self.instance_index_bases)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_boundaries", &self.comb_boundaries)
             .field("arena", &self.arena)

@@ -266,6 +266,9 @@ importers:
       sucrase:
         specifier: ^3.35.1
         version: 3.35.1
+      typescript:
+        specifier: ^7.0.0
+        version: 7.0.2
       vite:
         specifier: ^8.0.0
         version: 8.3.1(@types/node@25.9.8)(yaml@2.9.0)

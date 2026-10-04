@@ -1178,6 +1178,7 @@ pub fn lower_frontend_artifact(
         eval_apply_ff_blocks,
         glue_blocks: HashMap::default(),
         indexed_instance_names: HashSet::default(),
+        instance_index_bases: HashMap::default(),
         comb_blocks,
         comb_observers: Vec::new(),
         runtime_errors: HashMap::default(),

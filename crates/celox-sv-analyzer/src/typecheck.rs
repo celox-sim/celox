@@ -107,6 +107,9 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 BinaryOp::Mul => left.checked_mul(right),
                 BinaryOp::Div => left.checked_div(right),
                 BinaryOp::Mod => left.checked_rem(right),
+                BinaryOp::Pow => u32::try_from(right)
+                    .ok()
+                    .and_then(|right| left.checked_pow(right)),
                 BinaryOp::Shl => shift_amount(right).and_then(|right| left.checked_shl(right)),
                 // The untyped constant environment cannot recover the declared
                 // width needed to zero-fill a negative value. Typed parameter
@@ -217,6 +220,7 @@ pub(crate) fn eval_generate_case_operand(
                         | BinaryOp::Mul
                         | BinaryOp::Div
                         | BinaryOp::Mod
+                        | BinaryOp::Pow
                         | BinaryOp::BitAnd
                         | BinaryOp::BitOr
                         | BinaryOp::BitXor
@@ -382,6 +386,7 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             | BinaryOp::Mul
             | BinaryOp::Div
             | BinaryOp::Mod
+            | BinaryOp::Pow
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
@@ -430,7 +435,12 @@ fn eval_four_state_binary_literal(
 ) -> Option<IntegralLiteral> {
     if matches!(
         op,
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow
     ) {
         let width = left.width;
         let modulus = BigUint::from(1u8) << width;
@@ -452,6 +462,7 @@ fn eval_four_state_binary_literal(
             BinaryOp::Add => (&left.value + &right.value) & &width_mask,
             BinaryOp::Sub => (&left.value + &modulus - &right.value) & &width_mask,
             BinaryOp::Mul => (&left.value * &right.value) & &width_mask,
+            BinaryOp::Pow => left.value.modpow(&right.value, &modulus),
             BinaryOp::Div | BinaryOp::Mod => {
                 let negative = |literal: &IntegralLiteral| {
                     signed && width != 0 && literal.value.bit((width - 1) as u64)
@@ -767,6 +778,18 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let left = integral_literal_from_const_expr(left)?;
             let right = integral_literal_from_const_expr(right)?;
             eval_four_state_binary_literal(&left, *op, &right, false)
+        }
+        // The result of `**` takes the type of its base; the exponent is
+        // self-determined and does not take part in sizing.
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Pow,
+            right,
+        } => {
+            let base = integral_literal_from_const_expr(left)?;
+            let exponent = integral_literal_from_const_expr(right)?;
+            let signed = base.signed;
+            eval_four_state_binary_literal(&base, BinaryOp::Pow, &exponent, signed)
         }
         ConstExpr::Binary { left, op, right }
             if matches!(

@@ -508,6 +508,24 @@ fn type_info_str(info: TypeInfo) -> &'static str {
     }
 }
 
+/// Format a name as a TypeScript/JavaScript property key.
+///
+/// Names that are not plain identifiers (e.g. `blk2.deep` from a variable in a
+/// nested generate block, which the runtime exposes as a single
+/// dot-containing property) are emitted as quoted string keys.
+fn property_key(name: &str) -> String {
+    let mut chars = name.chars();
+    let is_identifier = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    if is_identifier {
+        name.to_string()
+    } else {
+        serde_json::to_string(name).expect("string serialization cannot fail")
+    }
+}
+
 fn generate_dts(module_name: &str, ports: &[PortInfo], instances: &[InstanceInfo]) -> String {
     let mut out = String::new();
 
@@ -564,6 +582,7 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
 
     // Emit scalar ports
     for port in scalar {
+        let key = property_key(&port.name);
         let ts_type = ts_type_for_width(port.width);
         if port.array_dims.is_some() {
             let readonly = if port.is_output { "readonly " } else { "" };
@@ -574,20 +593,20 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
             };
             out.push_str(&format!(
                 "{}{}{}: {{ at(i: number): {};{} readonly length: number }};\n",
-                indent, readonly, port.name, ts_type, set_method,
+                indent, readonly, key, ts_type, set_method,
             ));
         } else if port.is_output {
-            out.push_str(&format!("{}readonly {}: {};\n", indent, port.name, ts_type));
+            out.push_str(&format!("{}readonly {}: {};\n", indent, key, ts_type));
         } else if port.is_4state {
-            out.push_str(&format!("{}get {}(): {};\n", indent, port.name, ts_type));
+            out.push_str(&format!("{}get {}(): {};\n", indent, key, ts_type));
             out.push_str(&format!(
                 "{}set {}(value: {});\n",
                 indent,
-                port.name,
+                key,
                 ts_setter_type(port)
             ));
         } else {
-            out.push_str(&format!("{}{}: {};\n", indent, port.name, ts_type));
+            out.push_str(&format!("{}{}: {};\n", indent, key, ts_type));
         }
     }
 
@@ -596,9 +615,14 @@ fn write_dts_port_members(out: &mut String, ports: &[PortInfo], indent: &str) {
     for (parent_name, members) in groups {
         let all_output = members.iter().all(|m| m.is_output);
         let readonly = if all_output { "readonly " } else { "" };
-        out.push_str(&format!("{}{}{}: {{\n", indent, readonly, parent_name));
+        out.push_str(&format!(
+            "{}{}{}: {{\n",
+            indent,
+            readonly,
+            property_key(&parent_name)
+        ));
         for member in members {
-            let member_name = &member.name[member.name.find('.').unwrap() + 1..];
+            let member_name = property_key(&member.name[member.name.find('.').unwrap() + 1..]);
             let ts_type = ts_type_for_width(member.width);
             if member.array_dims.is_some() {
                 let readonly = if member.is_output { "readonly " } else { "" };
@@ -645,10 +669,15 @@ fn write_dts_instance_members(out: &mut String, instances: &[InstanceInfo], inde
         if inst.count > 1 {
             out.push_str(&format!(
                 "{}readonly {}: ReadonlyArray<{{\n",
-                indent, inst.name
+                indent,
+                property_key(&inst.name)
             ));
         } else {
-            out.push_str(&format!("{}readonly {}: {{\n", indent, inst.name));
+            out.push_str(&format!(
+                "{}readonly {}: {{\n",
+                indent,
+                property_key(&inst.name)
+            ));
         }
         write_dts_port_members(out, &inst.ports, &child_indent);
         write_dts_instance_members(out, &inst.children, &child_indent);
@@ -718,16 +747,21 @@ fn generate_js(module_name: &str, ports: &[PortInfo], source_files: &[&str]) -> 
         };
         out.push_str(&format!(
             "    {}: {{ direction: \"{}\", type: \"{}\", width: {}{}{} }},\n",
-            port.name, port.direction, type_str, port.width, four_state_str, array_dims_str
+            property_key(&port.name),
+            port.direction,
+            type_str,
+            port.width,
+            four_state_str,
+            array_dims_str
         ));
     }
     for (parent_name, members) in iface_groups {
         out.push_str(&format!(
             "    {}: {{ direction: \"inout\", type: \"logic\", width: 0, interface: {{\n",
-            parent_name
+            property_key(&parent_name)
         ));
         for member in members {
-            let member_name = &member.name[member.name.find('.').unwrap() + 1..];
+            let member_name = property_key(&member.name[member.name.find('.').unwrap() + 1..]);
             let type_str = type_info_str(member.type_info);
             let four_state_str = if member.is_4state {
                 ", is4state: true"
@@ -1250,6 +1284,42 @@ module Top (
         // Verify single-instance modules omit count (skip_serializing_if)
         let sub = modules.iter().find(|m| m.module_name == "Sub").unwrap();
         assert!(sub.instances.is_empty());
+    }
+
+    /// Variables in nested generate blocks have multi-segment paths
+    /// (`blk.blk2.deep`). The runtime exposes the remainder after the first
+    /// segment as a single property, so the DTS and JS must quote that key
+    /// instead of emitting an invalid `get blk2.deep()` member.
+    #[test]
+    fn test_nested_generate_block_vars() {
+        let code = r#"
+module Nested (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    if 1 :blk {
+        var inner: logic<8>;
+        if 1 :blk2 {
+            var deep: logic<8>;
+            assign deep = d;
+            assign inner = deep;
+        }
+        assign q = inner;
+    }
+}
+"#;
+        let modules = generate_from_source(code);
+        let top = modules.iter().find(|m| m.module_name == "Nested").unwrap();
+
+        assert!(
+            top.dts_content.contains("get \"blk2.deep\"(): bigint;"),
+            "nested member keys must be quoted"
+        );
+        assert!(
+            top.js_content.contains("\"blk2.deep\": {"),
+            "nested member keys must be quoted in JS"
+        );
+        assert_snapshot!("nested_generate_block_vars_dts", top.dts_content);
     }
 
     /// Internal vars: a module with `var` declarations that are not ports.

@@ -345,7 +345,6 @@ fn identity_cases<B: SimBackend>(sim: &mut Simulator<B>) {
 all_backends! {
     fn resize_two_state_unoptimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = resize_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(false)
@@ -356,7 +355,6 @@ all_backends! {
 
     fn resize_two_state_optimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = resize_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(false)
@@ -389,7 +387,6 @@ all_backends! {
 
     fn context_two_state_unoptimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = context_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(false)
@@ -400,7 +397,6 @@ all_backends! {
 
     fn context_two_state_optimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = context_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(false)

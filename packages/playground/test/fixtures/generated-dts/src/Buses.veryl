@@ -1,0 +1,29 @@
+interface Bus {
+    var data : logic<8>;
+    var valid: logic   ;
+    modport consumer {
+        data : input,
+        valid: input,
+    }
+    modport producer {
+        data : output,
+        valid: output,
+    }
+}
+
+module Consumer (
+    bus: modport Bus::consumer   ,
+    arr: modport Bus::consumer [2],
+    mem: input   logic<8>      [4],
+    out: output  logic<8>         ,
+) {
+    assign out = bus.data ^ arr[1].data ^ mem[0];
+}
+
+module Producer (
+    bus: modport Bus::producer,
+    inp: input   logic<8>     ,
+) {
+    assign bus.data  = inp;
+    assign bus.valid = 1;
+}

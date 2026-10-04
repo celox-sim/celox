@@ -34,6 +34,7 @@ mod functions;
 mod generate;
 mod inlining;
 mod instances;
+pub mod packages;
 mod packed_structs;
 mod parameters;
 mod selects;
@@ -51,8 +52,8 @@ use case::{
     mark_exhaustive_fallback, two_state_case_item_reachability,
 };
 use casts::{
-    cast_is_supported, cast_zero_type, constant_cast_const_expr, constant_cast_is_supported,
-    expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
+    cast_is_supported, constant_cast_const_expr, constant_cast_is_supported, expr_type_from_type,
+    resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast, runtime_cast_expr,
     runtime_constant_cast_const_expr,
 };
 use comb_process::{comb_processes_from_module_node, fold_conditional_assignment_over};
@@ -77,8 +78,9 @@ use constants::{
     substitute_process_constants_with_parameter_literals, unary_expr_from_symbol,
 };
 use declarations::{
-    identifier_locate, module_name_from_node, module_non_port_items, module_parameter_port_list,
-    module_scope_items, package_or_generate_declaration_from_module_item,
+    identifier_locate, module_interface_from_node, module_name_from_node, module_non_port_items,
+    module_parameter_port_list, module_scope_items,
+    package_or_generate_declaration_from_module_item,
     package_or_generate_declaration_from_non_port_item, parameter_name,
     parameters_from_module_node, ports_from_module_node, signals_from_data_declaration,
     signals_from_module_node, signals_from_module_or_generate_item, type_alias_from_ref_node,
@@ -92,12 +94,13 @@ use dimensions::{
     variable_signed_marker, variable_size_function_width, variable_size_marker,
 };
 use expressions::{
-    expr_from_expression, expr_from_expression_with_types, expr_from_function_subroutine_call,
-    expr_from_primary, expression_is_grouped, guard_zero_divisions,
+    expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
+    expr_from_function_subroutine_call, expr_from_primary, expression_is_grouped,
+    guard_zero_divisions,
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{
-    case_item_condition, function_from_declaration,
+    case_item_condition, case_keyword_is_wildcard, function_from_declaration,
     function_local_packed_dimensions_from_block_item_iter,
     function_local_packed_dimensions_from_block_items,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
@@ -106,7 +109,7 @@ use functions::{
 };
 use inlining::{
     expand_assignment_calls, expand_expr_calls, expand_ff_process_calls, expand_process_calls,
-    expr_signedness_with_return_types, substitute_expr_idents,
+    expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
 };
 use instances::{
     connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,
@@ -138,9 +141,21 @@ use types::{
     validate_unpacked_dimension_sizes,
 };
 use validation::{
-    reject_silently_ignored_constructs, reject_unsupported_multidimensional_packed_bounds,
-    static_for_loop_initial_value, static_for_loop_iterations,
+    AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs,
+    reject_unsupported_multidimensional_packed_bounds, static_for_loop_initial_value,
+    static_for_loop_iterations,
 };
+
+/// The positional interface of a module: its ports in declaration order and
+/// the parameters of its `#(...)` list that an instantiation may override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleInterface {
+    pub ports: Vec<String>,
+    pub parameters: Vec<String>,
+}
+
+/// The interface of each module, by module name.
+pub type ModuleInterfaces = HashMap<String, ModuleInterface>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
@@ -161,6 +176,7 @@ impl Source {
             .iter()
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
+        let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -170,6 +186,7 @@ impl Source {
                         syntax_tree,
                         module_name,
                         &parameter_overrides,
+                        &interfaces,
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(_) => {
@@ -197,14 +214,20 @@ impl Source {
             syntax_tree,
             module_name,
             &parameter_overrides,
+            &ModuleInterfaces::default(),
         )
     }
 
+    /// `extra_interfaces` describes modules declared in other sources; the
+    /// modules of `syntax_tree` are always known.
     pub fn from_syntax_module_with_parameter_expr_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
+        extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
+        let mut interfaces = extra_interfaces.clone();
+        interfaces.extend(Self::module_interfaces_from_syntax(syntax_tree)?);
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -218,6 +241,7 @@ impl Source {
                         syntax_tree,
                         module_name,
                         parameter_overrides,
+                        &interfaces,
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(module) => {
@@ -254,6 +278,21 @@ impl Source {
         Ok(names)
     }
 
+    /// The positional interface of every ANSI module declared in `syntax_tree`.
+    pub fn module_interfaces_from_syntax(
+        syntax_tree: &SyntaxTree,
+    ) -> Result<ModuleInterfaces, AnalyzerError> {
+        let mut interfaces = ModuleInterfaces::default();
+        for node in syntax_tree {
+            if let RefNode::ModuleDeclarationAnsi(module) = node {
+                let node = RefNode::ModuleDeclarationAnsi(module);
+                let name = module_name_from_node(node.clone(), syntax_tree)?;
+                interfaces.insert(name, module_interface_from_node(node, syntax_tree)?);
+            }
+        }
+        Ok(interfaces)
+    }
+
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
@@ -277,6 +316,7 @@ impl Module {
         syntax_tree: &SyntaxTree,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
@@ -464,8 +504,13 @@ impl Module {
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
         packed_dimensions.extend(parameter_packed_dimensions(&parameters));
-        let mut instances =
-            instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        let mut instances = instances_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &packed_dimensions,
+            interfaces,
+        )?;
         let mut instance_names = HashSet::default();
         if let Some(instance) = instances
             .iter()
@@ -820,6 +865,8 @@ pub struct Instance {
     condition: Option<ConstExpr>,
     port_names: Vec<String>,
     port_connections: Vec<PortConnection>,
+    /// The declared `[left:right]` bounds of an instance array.
+    array_range: Option<(i128, i128)>,
 }
 
 impl Instance {
@@ -831,6 +878,7 @@ impl Instance {
         condition: Option<ConstExpr>,
         port_names: Vec<String>,
         port_connections: Vec<PortConnection>,
+        array_range: Option<(i128, i128)>,
     ) -> Self {
         Self {
             module_name,
@@ -840,7 +888,18 @@ impl Instance {
             condition,
             port_names,
             port_connections,
+            array_range,
         }
+    }
+
+    pub fn array_len(&self) -> Option<usize> {
+        self.array_range
+            .and_then(|(left, right)| usize::try_from(left.abs_diff(right)).ok()?.checked_add(1))
+    }
+
+    /// The declared `[left:right]` bounds of an instance array, if this is one.
+    pub fn array_range(&self) -> Option<(i128, i128)> {
+        self.array_range
     }
 
     pub fn module_name(&self) -> &str {
@@ -876,11 +935,25 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
+    /// The source text of a data type, for a `parameter type` override.
+    type_text: Option<String>,
 }
 
 impl ParameterOverride {
     fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+        Self {
+            name,
+            value,
+            type_text: None,
+        }
+    }
+
+    fn type_override(name: String, type_text: String) -> Self {
+        Self {
+            name,
+            value: None,
+            type_text: Some(type_text),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -889,6 +962,10 @@ impl ParameterOverride {
 
     pub fn value(&self) -> Option<&ConstExpr> {
         self.value.as_ref()
+    }
+
+    pub fn type_text(&self) -> Option<&str> {
+        self.type_text.as_deref()
     }
 }
 
@@ -1093,6 +1170,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Mod,
+    Pow,
     Shl,
     Shr,
     Sar,
@@ -1284,14 +1362,45 @@ struct Function {
     name: String,
     params: Vec<FunctionParam>,
     body: Expr,
+    /// For each `output` / `inout` parameter, its value when the body ends,
+    /// in terms of the input parameters.
+    outputs: Vec<(String, Expr)>,
     return_width: Option<usize>,
     return_first_packed_dimension_width: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
 }
 
+/// How a function argument is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamDirection {
+    Input,
+    Output,
+    Inout,
+}
+
+impl ParamDirection {
+    /// Whether the call writes the actual argument back.
+    fn is_written(self) -> bool {
+        !matches!(self, ParamDirection::Input)
+    }
+
+    fn from_tf_port(direction: &sv_parser::TfPortDirection) -> Option<Self> {
+        match direction {
+            sv_parser::TfPortDirection::PortDirection(direction) => match &**direction {
+                sv_parser::PortDirection::Input(_) => Some(ParamDirection::Input),
+                sv_parser::PortDirection::Output(_) => Some(ParamDirection::Output),
+                sv_parser::PortDirection::Inout(_) => Some(ParamDirection::Inout),
+                sv_parser::PortDirection::Ref(_) => None,
+            },
+            sv_parser::TfPortDirection::ConstRef(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionParam {
+    direction: ParamDirection,
     name: String,
     width: Option<usize>,
     signed: bool,
@@ -1344,6 +1453,41 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `expr inside { items }`: true when `expr` matches any item.
+    Inside {
+        expr: Box<Expr>,
+        items: Vec<InsideItem>,
+    },
+}
+
+/// One item of an `inside` set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsideItem {
+    /// A value matched with wildcard equality (`==?`).
+    Value(Expr),
+    /// An inclusive range `[low:high]`.
+    Range { low: Expr, high: Expr },
+}
+
+impl InsideItem {
+    /// The operand expressions of the item.
+    fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            InsideItem::Value(value) => vec![value],
+            InsideItem::Range { low, high } => vec![low, high],
+        }
+    }
+
+    /// Rebuild the item with `f` applied to each operand.
+    fn map(self, f: &mut impl FnMut(Expr) -> Expr) -> InsideItem {
+        match self {
+            InsideItem::Value(value) => InsideItem::Value(f(value)),
+            InsideItem::Range { low, high } => InsideItem::Range {
+                low: f(low),
+                high: f(high),
+            },
+        }
+    }
 }
 
 /// Enum member constants collected from module-level `typedef enum`

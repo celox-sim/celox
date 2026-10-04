@@ -214,6 +214,23 @@
     }
   },
   {
+    "id": "icarus_instance_array_unpacked_port",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports that uwire y has two drivers. The corresponding Verilator run passes.",
+    "upstream": [],
+    "evidence": [
+      "verification/limitations/icarus.json",
+      "LIMITATIONS.md#icarus-instance-array-unpacked-port"
+    ],
+    "cases": {
+      "icarus": [
+        "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection"
+      ]
+    }
+  },
+  {
     "id": "icarus_package_types",
     "category": "simulator_compile_limitation",
     "phase": "compile",

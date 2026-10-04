@@ -149,7 +149,7 @@ module WordArrayIndex64 (
 }
 
 fn linear_sorter_pull_late_minima_drain_once_in_sorted_order(sim) {
-    @ignore_on(wasm, sv);
+    @ignore_on(wasm);
     @build Simulator::builder(SOURCE, "LinearSorterPullMreU16")
         .param("DEPTH", DEPTH as u64)
         .reset_type(celox::ResetType::AsyncLow);

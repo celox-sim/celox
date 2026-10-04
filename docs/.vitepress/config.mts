@@ -44,6 +44,10 @@ export default defineConfig({
                 { text: "概要", link: "/ja/guide/introduction" },
                 { text: "はじめる", link: "/ja/guide/getting-started" },
                 {
+                  text: "SystemVerilog サポート",
+                  link: "/ja/guide/systemverilog",
+                },
+                {
                   text: "外部フロントエンド",
                   link: "/ja/guide/external-frontends",
                 },
@@ -147,6 +151,10 @@ export default defineConfig({
           items: [
             { text: "Introduction", link: "/guide/introduction" },
             { text: "Getting Started", link: "/guide/getting-started" },
+            {
+              text: "SystemVerilog Support",
+              link: "/guide/systemverilog",
+            },
             {
               text: "External Frontends",
               link: "/guide/external-frontends",

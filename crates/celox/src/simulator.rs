@@ -46,6 +46,9 @@ mod host {
     #[derive(Debug, Clone)]
     pub struct InstanceHierarchy {
         pub module_name: String,
+        /// The index of this instance under its name: its element index in
+        /// an instance array or generate loop, 0 otherwise.
+        pub index: usize,
         pub signals: Vec<NamedSignal>,
         pub children: Vec<(String, Vec<InstanceHierarchy>)>,
     }
@@ -1492,6 +1495,7 @@ mod host {
 
             InstanceHierarchy {
                 module_name,
+                index: current_path.last().map_or(0, |(_, index)| *index),
                 signals,
                 children,
             }
