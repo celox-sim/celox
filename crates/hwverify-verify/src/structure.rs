@@ -117,8 +117,17 @@ fn evaluate(
         }
         endpoints.push(actual);
     }
+    // Direct scalar port connections identify the same source net. Retain
+    // both traversal directions; assignment data/control edges stay directed.
+    let mut connectivity = edges.clone();
+    for edge in edges.iter().filter(|edge| edge["kind"] == "connection") {
+        let mut reverse = edge.clone();
+        reverse["from"] = edge["to"].clone();
+        reverse["to"] = edge["from"].clone();
+        connectivity.push(reverse);
+    }
     let mut adjacency: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
-    for edge in edges {
+    for edge in &connectivity {
         adjacency
             .entry(edge["from"].as_str().unwrap())
             .or_default()

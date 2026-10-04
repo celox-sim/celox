@@ -745,7 +745,11 @@ signals, not to the behavioral state-only observation expressions:
 endpoints { i.a = a; o.y = y; }
 ```
 
-Mappings are plain typed signal paths, including named child ports. Expressions,
+Mappings are plain typed signal paths, including named child ports. Direct scalar
+parent/child port connections denote the same source net and are traversable in
+both directions, including when a contract starts at a child input. Assignment
+data/control edges remain directed; shared assignment inputs do not make their
+destinations aliases. Register cuts remain non-traversable. Expressions,
 undeclared logical endpoints and direction/width mismatches are rejected. A
 hardware endpoint binding does not itself prove that a behavioral abstraction
 matches the same physical signal. Existing behavioral refinement obligations

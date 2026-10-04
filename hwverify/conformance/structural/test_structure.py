@@ -78,6 +78,37 @@ class StructuralContracts(unittest.TestCase):
         src = 'module Child (clk: input clock, a: input bit, y: output bit) { always_ff (clk) { y = a; } } module Top (clk: input clock, a: input bit, y: output bit) { inst child: Child (clk: clk, a: a, y: y); }'
         g, _, _ = graph(src); self.assertEqual(checker(g)['status'], 'verified')
 
+    def test_named_ports_share_connection_aliases_without_reversing_assignments(self):
+        src = 'module Child (a: input bit, y: output bit) { assign y = a; } module Top (a: input bit, y: output bit, z: output bit) { inst child: Child (a: a, y: z); assign y = a; }'
+        g, _, _ = graph(src)
+        child_input = NATIVE.replace('i.a = a;', 'i.a = child.a;')
+        result = checker(g, child_input)
+        self.assertEqual(result['status'], 'violated')
+        witness = result['obligations'][0]['witness']
+        self.assertEqual([(e['from'], e['to']) for e in witness], [('child.a', 'a'), ('a', 'y')])
+        self.assertEqual(witness[0]['kind'], 'connection')
+        self.assertIn('location', witness[0])
+        outputs = NATIVE.replace('observation y: bool;', 'observation y: bool; observation z: bool;').replace('from i.a;', 'from o.z;').replace('i.a = a; o.y = y;', 'o.z = child.y; o.y = z;').replace('observation y = s.q;', 'observation y = s.q; observation z = s.q;')
+        self.assertEqual(checker(g, outputs)['status'], 'violated')
+        reverse = outputs.replace('o.z = child.y; o.y = z;', 'o.z = z; o.y = child.y;')
+        self.assertEqual(checker(g, reverse)['status'], 'violated')
+        # A shared source does not make separate assignment destinations aliases.
+        separate = outputs.replace('o.z = child.y; o.y = z;', 'o.z = z; o.y = y;')
+        self.assertEqual(checker(g, separate)['status'], 'verified')
+        registered = 'module Child (a: input bit, y: output bit) { assign y = a; } module Top (clk: input clock, a: input bit, y: output bit, z: output bit) { inst child: Child (a: a, y: z); always_ff (clk) { y = a; } }'
+        cut, _, _ = graph(registered)
+        self.assertEqual(checker(cut, child_input)['status'], 'verified')
+
+    def test_ff_module_state_cuts_and_local_temporaries_fail_closed(self):
+        module_state = 'module Top (clk: input clock, a: input bit, y: output bit) { var temp: bit; always_ff (clk) { temp = a; y = temp; } }'
+        g, _, _ = graph(module_state)
+        self.assertEqual(checker(g)['status'], 'verified')
+        self.assertEqual([(e['from'], e['to']) for e in g['sequential_cuts']], [('a', 'temp'), ('temp', 'y')])
+        for local in ['var temp: bit; temp = a;', 'let temp: bit = a;']:
+            src = 'module Top (clk: input clock, a: input bit, y: output bit) { always_ff (clk) { ' + local + ' y = temp; } }'
+            g, _, _ = graph(src)
+            self.assertEqual(checker(g)['status'], 'unsupported')
+
     def test_coverage_unknown_construct_and_endpoint_fail_closed(self):
         src = 'module Top (a: input bit, y: output bit) { assign y = a; }'
         g, design, compiled = graph(src)
