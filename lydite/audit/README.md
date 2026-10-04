@@ -2,13 +2,17 @@
 
 Start with [usage](../docs/usage.md), [proof trust boundaries](../docs/trust.md)
 and the [selected RV32I contract](../docs/rv32i.md). This directory contains
-reproducible evaluators, independent interpreters, regression controls and recorded
-machine-readable results. Historical counts and source hashes describe their
-recorded runs, not the current checkout's CI status.
+the evaluators and regression controls that the required gates run, with the
+machine-readable summaries they compare against. Historical counts and source
+hashes describe their recorded runs, not the current checkout's CI status.
+
+One-off investigation campaigns, sealed archives and their raw evidence stay in
+the [original hwverify repository](https://github.com/tignear/hwverify/tree/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/audit), where
+the commands below the "Sealed archives" heading must be run.
 
 ## Fresh required gates
 
-Run from the repository root with fresh output directories outside the checkout.
+Run from `lydite/` with fresh output directories outside the checkout.
 The [workflow](../../.github/workflows/lydite.yml) is the authoritative ordering.
 The original-corpus preparation builds the pinned frontend needed by the later
 symbolic/RV gates; a failed dependency fetch is a setup failure, never a pass.
@@ -59,7 +63,7 @@ and inspect any original-machine paths first.
 
 ## Sealed archives
 
-These archives retain unique original SMT queries, reports, witnesses and source
+These archives live in the original repository. They retain unique original SMT queries, reports, witnesses and source
 snapshots. They are preserved with their existing per-member manifests and
 verification rules. The old source-distribution ZIP is unnecessary: its 2,098
 files are exactly recoverable from Git commit `4e6daa4e`. Do not add source ZIPs

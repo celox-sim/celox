@@ -521,17 +521,17 @@
   "source_sha256": "b5c634c60b31c07313f5c54b069b5428013fa162b63f96e24cbb0f56f74722ab",
   "machine_sha256": "2081eebbf49e411ee418d5bf5d7ddd0b4b3a59f715a78cd32022256f57fba69a",
   "files": {
-    "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-proof/target/debug/veryl-proof-frontend": "e1dd18668335c49c0ac625f6450b418443d42366c80570cf4badd798162d485a",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite-celox-lift": "2d281f131d143718f583e77d300e43f62df823b48370e7a067daae4f9bd4c281",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/target/debug/veryl-proof-frontend": "e1dd18668335c49c0ac625f6450b418443d42366c80570cf4badd798162d485a",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-sir-lift": "2d281f131d143718f583e77d300e43f62df823b48370e7a067daae4f9bd4c281",
     "/tmp/rv32i-latency-frozen-checker": "17399e881e7708837abee632512b77fa10abce6e0818ab709f8d93b1415f6775",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/test_rv32i_latency_onehot_candidate.py": "c464142b9151543c24400c9bbfe0df4cb3b5e61a249b046cb4bbbb46707a846a",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/interpreter.py": "995a5dbb4402c52bad5783071ffe9cfae594f8597e55ee4cf1c1cd8ee5088f9b",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/test_rv32i_pipeline.py": "8d7222df1c61f7367dfa70cda733935f34a5009694de3c2fe77ab6e34ab00e8e",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/rv32i_latency_onehot_candidate.py": "99f45b1ba01629949ce05c11a544ad819229404d14ecc65ceb506e4135cd5814",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/rv32i_pipeline.py": "c16f532646b848c088d7b7aea17ba55f0df8f5833e9dd83820dad1f3a873657a",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/cpu_memory_contract.py": "be11be275420ce4c8dd79de050319cd3603c038ca5e7ae1d5acf03a45d3c51bc",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/rv32i_spec.py": "65ffd15ad972ec20d7f794e4787b9665371b8df09a8227c625c476a01eeca9b4",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-symbolic/rv32i_pipeline_split_onehot_candidate.veryl": "b5c634c60b31c07313f5c54b069b5428013fa162b63f96e24cbb0f56f74722ab"
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/test_rv32i_latency_onehot_candidate.py": "c464142b9151543c24400c9bbfe0df4cb3b5e61a249b046cb4bbbb46707a846a",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/interpreter.py": "995a5dbb4402c52bad5783071ffe9cfae594f8597e55ee4cf1c1cd8ee5088f9b",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/test_rv32i_pipeline.py": "8d7222df1c61f7367dfa70cda733935f34a5009694de3c2fe77ab6e34ab00e8e",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/rv32i_latency_onehot_candidate.py": "99f45b1ba01629949ce05c11a544ad819229404d14ecc65ceb506e4135cd5814",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/rv32i_pipeline.py": "c16f532646b848c088d7b7aea17ba55f0df8f5833e9dd83820dad1f3a873657a",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/cpu_memory_contract.py": "be11be275420ce4c8dd79de050319cd3603c038ca5e7ae1d5acf03a45d3c51bc",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/rv32i_spec.py": "65ffd15ad972ec20d7f794e4787b9665371b8df09a8227c625c476a01eeca9b4",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-symbolic/rv32i_pipeline_split_onehot_candidate.veryl": "b5c634c60b31c07313f5c54b069b5428013fa162b63f96e24cbb0f56f74722ab"
   },
   "proofs": {
     "source-0-0": {

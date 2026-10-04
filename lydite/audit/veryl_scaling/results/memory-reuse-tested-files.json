@@ -65,7 +65,7 @@
   "crates/syntax/build.rs": "51d0a7a726d994e86acf1e3ef5e848714fc05cf32038abe4511efd1160b6d57d",
   "crates/syntax/src/examples.rs": "75fe48a555990696a82de691bf38edaa341ce2ef2275f1790cc5860797f1b1cc",
   "crates/syntax/src/expectations.rs": "d46ea474486e57bd3c90f3d3f1df56c8ae4a3965d4c750714836446dd7f33027",
-  "crates/syntax/src/lyd.par": "f2acb4c75d753b86deec97f9c90d52c4abe603802ab1f7c778a38e7eede816d0",
+  "crates/syntax/src/hwv.par": "f2acb4c75d753b86deec97f9c90d52c4abe603802ab1f7c778a38e7eede816d0",
   "crates/syntax/src/json_input.rs": "08e6c3d6eb110904038837e483a2966f65668fdb42237c6ba31dcdd45b638aea",
   "crates/syntax/src/lib.rs": "0db0e9df3b618d4e51cc72b69cdce81302f3fbd4d7aa1fc5b222018160a49df2",
   "crates/syntax/src/scoped.rs": "24f21e2e87ac1e1120eedaadfc51eb6b4329adc493b3b1ec98f9427406eb181e",
@@ -88,6 +88,6 @@
   "crates/verify/tests/scoped_specifications.rs": "9be31161a37f0cf701b4ddcf562515f9fcf2a1e81dd571371ff2d0d1faecf061",
   "examples/build_branch_pipeline.py": "f2e912173b7f418fd96583fa33239dd2461dfc78a725e88a9a38fca9891ea1a2",
   "examples/build_pipeline.py": "4888c408b9c3440daeb93045ec2136a52fe5ea95862cbe0d504bbe83ad6edd9d",
-  "target/release/lydite": "56c87594ac79fcb2b6b3943d565a8091ce0c92539b23003ca5b240eebb14fe1b",
-  "target/release/lydite-celox-lift": "40497e2e99ca7511718f912dc61dfa6876783595cabe49479c376fb3979677b1"
+  "target/release/hwverify-rs": "56c87594ac79fcb2b6b3943d565a8091ce0c92539b23003ca5b240eebb14fe1b",
+  "target/release/hwverify-sir-lift": "40497e2e99ca7511718f912dc61dfa6876783595cabe49479c376fb3979677b1"
 }

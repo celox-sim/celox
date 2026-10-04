@@ -1,7 +1,7 @@
 {
   "base_commit": "6d3de84c83a293254f5d7e0b2b952a1c1fd30994",
   "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
-  "scope": "Native .lyd authoring over the shared typed candidate API; live query-index diagnostics and exact original-context identity; no automatic heuristic changes.",
+  "scope": "Native .hwv authoring over the shared typed candidate API; live query-index diagnostics and exact original-context identity; no automatic heuristic changes.",
   "manual_migrated": {
     "status": "stuttering_refinement_verified",
     "children_verified": 436,

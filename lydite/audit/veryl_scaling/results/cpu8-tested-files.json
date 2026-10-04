@@ -28,6 +28,6 @@
   "crates/solver/src/partition.rs": "e664fd87c11ea6afee469909c4e05fc2669cf472152fa493bd28625fe147d71c",
   "crates/solver/src/quantified.rs": "fc6dabcc9c423eb6cd84825b1240337d6ec47188ad76b93bab3e3ec1e73e6829",
   "crates/solver/src/z3.rs": "9bcd0a3db90e719bc5b804914efecfb8e3e5892f16e64438e26b66c6120f2eb6",
-  "target/release/lydite": "b5632a65224bfb87c977d13fed0129e09414496dfc6beaca8c6a01ef0f669939",
-  "target/release/lydite-celox-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
+  "target/release/hwverify-rs": "b5632a65224bfb87c977d13fed0129e09414496dfc6beaca8c6a01ef0f669939",
+  "target/release/hwverify-sir-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
 }

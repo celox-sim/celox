@@ -104,7 +104,7 @@
           "python3",
           "audit/veryl_scaling/test_readonly_array_differential.py",
           "--root",
-          "/workspace/scratch/07f10565586c/lydite-git-publish",
+          "/workspace/scratch/07f10565586c/hwverify-git-publish",
           "--out",
           "/workspace/scratch/07f10565586c/rv32i-final-legacy-remaining/readonly-array-differential"
         ]
@@ -141,7 +141,7 @@
           "python3",
           "audit/veryl_scaling/test_array_store_differential.py",
           "--root",
-          "/workspace/scratch/07f10565586c/lydite-git-publish",
+          "/workspace/scratch/07f10565586c/hwverify-git-publish",
           "--out",
           "/workspace/scratch/07f10565586c/rv32i-final-legacy-remaining/array-store-differential"
         ]

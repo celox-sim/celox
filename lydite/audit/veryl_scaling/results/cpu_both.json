@@ -155,7 +155,7 @@
   },
   {
     "status": "unknown",
-    "error": "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite exit 3: ",
+    "error": "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs exit 3: ",
     "capacity": 8,
     "scope": "actual_branch_CPU_two_GPR_fixed_DXW",
     "mutant": false,
@@ -215,7 +215,7 @@
   },
   {
     "status": "unknown",
-    "error": "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite exit 3: ",
+    "error": "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs exit 3: ",
     "capacity": 8,
     "scope": "actual_branch_CPU_two_GPR_fixed_DXW",
     "mutant": true,

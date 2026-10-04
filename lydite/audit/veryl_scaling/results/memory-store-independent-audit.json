@@ -930,7 +930,7 @@
     ]
   },
   "audit_script_sha256": {
-    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/test_array_store_differential.py": "a0fcb14dbaa27fee300bff190d6fc60386d40d42b8eb6bc6532a40c6e676d531",
+    "/workspace/scratch/07f10565586c/hwverify-git-publish/audit/veryl_scaling/test_array_store_differential.py": "a0fcb14dbaa27fee300bff190d6fc60386d40d42b8eb6bc6532a40c6e676d531",
     "/workspace/scratch/07f10565586c/store-audit/simulate_cpu.py": "cb3972452fb49589cee90330dc7c4e29f0f80c8524f56ac55f28a6576c235c36",
     "/workspace/scratch/07f10565586c/store-audit/scalar_controls.py": "d310a193c6f30d08bad84ed7969080b43d107fb73b7240c5785886084b0b1f94",
     "/workspace/scratch/07f10565586c/store-audit/replay_final_witnesses.py": "84e9c565f62c38a0fa9c9fce4827fe27be386f1506d0451e77672a717a521906",

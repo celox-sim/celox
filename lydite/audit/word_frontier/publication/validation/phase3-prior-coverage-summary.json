@@ -2,14 +2,14 @@
   "status": "passed",
   "phase": "phase3_prior_automatic_coverage_revalidation",
   "candidate_sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
-  "frozen_binary": "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/lydite",
-  "prior_evidence_summary": "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/evidence-summary.json",
+  "frozen_binary": "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/hwverify-rs",
+  "prior_evidence_summary": "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/evidence-summary.json",
   "prior_evidence_summary_sha256": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1",
   "prior_candidate_sha256": "ac01cbc93c37e92d3344493ae65c8118aef0e0af3be41168ec6534c04c80a96a",
   "environment": {
-    "LYDITE_SOLVER": "finite",
-    "LYDITE_CONJUNCTIVE_LEMMAS": "1",
-    "LYDITE_AUTOMATIC_PROOFS": "independent_lemmas"
+    "HWVERIFY_SOLVER": "finite",
+    "HWVERIFY_CONJUNCTIVE_LEMMAS": "1",
+    "HWVERIFY_AUTOMATIC_PROOFS": "independent_lemmas"
   },
   "external_solver_path": "FORBIDDEN_EXTERNAL_SOLVER",
   "default_limits_unchanged": true,
@@ -19,7 +19,7 @@
     "timeout_ms": 10000
   },
   "command_template": [
-    "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/lydite",
+    "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/hwverify-rs",
     "COPIED_IDENTICAL_INPUT",
     "--out",
     "FRESH_EVIDENCE_DIRECTORY",
@@ -29,12 +29,12 @@
   "wall_clock_timeout_seconds_per_case": 180,
   "cost_accounting": "microstep_refinement recursive primitive attempts deduplicated by (name,evidence), using unchanged phase1 audit.automatic_proof.run.evidence; includes exhausted original attempts; bundle work overlaps primitive work and must not be added; engine_summary covers all report obligations separately",
   "evaluation_sources_before": {
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/evidence-summary.json": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/README.md": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/run.py": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/generate.py": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/test_generate.py": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/selected-without-hints.json": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623"
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/evidence-summary.json": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/README.md": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/run.py": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/generate.py": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/test_generate.py": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623"
   },
   "results": [
     {
@@ -1852,12 +1852,12 @@
   "aggregate_wall_seconds": 14.794476184993982,
   "harness_wall_seconds": 14.856562961002055,
   "evaluation_sources_after": {
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/evidence-summary.json": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/README.md": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/run.py": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/generate.py": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/test_generate.py": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df",
-    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/selected-without-hints.json": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623"
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/evidence-summary.json": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/README.md": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/run.py": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/generate.py": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/test_generate.py": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df",
+    "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623"
   },
   "phase1_evidence_and_sources_unchanged": true
 }

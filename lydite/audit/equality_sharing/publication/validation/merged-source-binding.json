@@ -51,21 +51,21 @@
         ],
         "exit_code": 3,
         "wall_seconds": 146.07334213700233,
-        "input_path": "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+        "input_path": "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
         "input_sha256": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
         "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
         "command": [
-          "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite",
-          "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+          "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
+          "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
           "--out",
           "/workspace/scratch/07f10565586c/automatic-proof-phase2-publication-selected/without-hints",
           "--z3",
-          "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+          "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
         ],
         "environment": {
-          "LYDITE_SOLVER": "finite",
-          "LYDITE_CONJUNCTIVE_LEMMAS": "1",
-          "LYDITE_AUTOMATIC_PROOFS": "independent_lemmas"
+          "HWVERIFY_SOLVER": "finite",
+          "HWVERIFY_CONJUNCTIVE_LEMMAS": "1",
+          "HWVERIFY_AUTOMATIC_PROOFS": "independent_lemmas"
         },
         "report_sha256": "7710f008d0fb0f2b0e0e89183093f2948d13a2bc99bb89bf65f895545801e99c"
       }
@@ -75,12 +75,12 @@
       "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
       "input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
       "command": [
-        "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite",
+        "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
         "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json",
         "--out",
         "/workspace/scratch/07f10565586c/automatic-proof-phase2-manual-retry/proof",
         "--z3",
-        "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+        "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
       ],
       "exit_code": 0,
       "wall_seconds": 114.5583350320012,

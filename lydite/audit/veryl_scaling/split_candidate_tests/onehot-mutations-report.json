@@ -1,5 +1,5 @@
 {
-  "original_sv": "/workspace/scratch/07f10565586c/lydite-git-publish/synthesis/rv32i-split-onehot-candidate/rtl/rv32i_pipeline.sv",
+  "original_sv": "/workspace/scratch/07f10565586c/hwverify-git-publish/synthesis/rv32i-split-onehot-candidate/rtl/rv32i_pipeline.sv",
   "original_sha256": "af51ab74d0bf793b51d4207070405054a190ff4612c3df5444afabf333c5fa12",
   "mutations": [
     {

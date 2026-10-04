@@ -41,7 +41,7 @@
   },
   "ci_driver": {
     "status": "approved_and_fresh_gate_passed",
-    "command": "python3 -m audit.equality_sharing.ci --checker target/release/lydite --out FRESH_DIRECTORY",
+    "command": "python3 -m audit.equality_sharing.ci --checker target/release/hwverify-rs --out FRESH_DIRECTORY",
     "summary_sha256": "1a8b7f356c72cc32cdb98c47efa1c798e9e8285ab6d84b482e2820817e558de6",
     "covered_verified": 9,
     "original_sat_mutants": 19,

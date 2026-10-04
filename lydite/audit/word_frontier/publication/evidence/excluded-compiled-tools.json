@@ -90,7 +90,7 @@
     "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
   },
   {
-    "original_path": "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/lydite",
+    "original_path": "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/hwverify-rs",
     "bytes": 4758672,
     "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
     "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."

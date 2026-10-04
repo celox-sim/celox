@@ -39,6 +39,6 @@
   "crates/solver/src/z3.rs": "9bcd0a3db90e719bc5b804914efecfb8e3e5892f16e64438e26b66c6120f2eb6",
   "examples/build_branch_pipeline.py": "f2e912173b7f418fd96583fa33239dd2461dfc78a725e88a9a38fca9891ea1a2",
   "examples/build_pipeline.py": "4888c408b9c3440daeb93045ec2136a52fe5ea95862cbe0d504bbe83ad6edd9d",
-  "target/release/lydite": "34f7b959744dc06e9cc08380ab6d47290a2b8f6b413fb1a040002aa152292d64",
-  "target/release/lydite-celox-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
+  "target/release/hwverify-rs": "34f7b959744dc06e9cc08380ab6d47290a2b8f6b413fb1a040002aa152292d64",
+  "target/release/hwverify-sir-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
 }
