@@ -1,0 +1,178 @@
+(group state_cast_semantics (category types))
+
+(case type_cast_clears_unknown_bits_in_comb_and_ff
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    narrow: input logic<8>,
+    wide: input logic<130>,
+
+    c_u8: output logic<8>,
+    c_i8: output logic<8>,
+    f_u8: output logic<8>,
+    f_i8: output logic<8>,
+    c_wide: output logic<130>,
+    f_wide: output logic<130>,
+) {
+    type U130 = bit<130>;
+
+    assign c_u8 = narrow as u8;
+    assign c_i8 = narrow as i8;
+    assign c_wide = wide as U130;
+
+    always_ff (clk) {
+        f_u8 = narrow as u8;
+        f_i8 = narrow as i8;
+        f_wide = wide as U130;
+    }
+}
+"#)
+  (top Top)
+  (let narrow_value 0xa9)
+  (let narrow_mask 0x0c)
+  (let full (- (<< 1 130) 1))
+  (let wide_mask (| (| (<< 1 5) (<< 1 70)) (<< 1 129)))
+  (let wide_value (| (| (| (<< 1 129) (<< 1 64)) (<< 1 5)) 0x35))
+  (modify
+    (set narrow (fourstate narrow_value narrow_mask))
+    (set wide (fourstate wide_value wide_mask)))
+  (assert_eq wide (fourstate wide_value wide_mask) "wide test input")
+  (let expected_wide (& wide_value (^ full wide_mask)))
+  (assert_eq c_wide (fourstate expected_wide 0) "c_wide before clock")
+  (tick clk)
+  (let expected_narrow (& narrow_value (^ 0xff narrow_mask)))
+  (expand name (c_u8 c_i8 f_u8 f_i8)
+    (assert_eq {name} (fourstate expected_narrow 0) "{name}"))
+  (expand name (c_wide f_wide)
+    (assert_eq {name} (fourstate expected_wide 0) "{name}")))
+
+(case constant_type_cast_clears_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    c_compound: output logic<8>,
+    c_variable: output logic<8>,
+    f_compound: output logic<8>,
+    f_variable: output logic<8>,
+) {
+    const X: logic<8> = 8'b10xz_01zx;
+    const U: u8 = X as u8;
+
+    assign c_compound = X as u8;
+    assign c_variable = U;
+    always_ff (clk) {
+        f_compound = X as u8;
+        f_variable = U;
+    }
+}
+"#)
+  (top Top)
+  (tick clk)
+  (expand name (c_compound c_variable f_compound f_variable)
+    (assert_eq {name} (fourstate 0x84 0) "{name}")))
+
+(case function_formal_type_clears_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    a: input logic<8>,
+    c: output logic<8>,
+    f: output logic<8>,
+) {
+    function through (x: input bit<8>) -> logic<8> {
+        return x;
+    }
+    assign c = through(a);
+    always_ff (clk) {
+        f = through(a);
+    }
+}
+"#)
+  (top Top)
+  (modify (set a (fourstate 0xa9 0x0c)))
+  (tick clk)
+  (expand name (c f)
+    (assert_eq {name} (fourstate 0xa1 0) "{name}")))
+
+(case signed_four_state_function_formal_preserves_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    a: input logic<8>,
+    c: output logic<8>,
+    f: output logic<8>,
+) {
+    function through (x: input signed logic<8>) -> logic<8> {
+        return x;
+    }
+    assign c = through(a);
+    always_ff (clk) {
+        f = through(a);
+    }
+}
+"#)
+  (top Top)
+  (modify (set a (fourstate 0xa9 0x0c)))
+  (tick clk)
+  (expand name (c f)
+    (assert_eq {name} (fourstate 0xa9 0x0c) "{name}")))
+
+(case implicit_assignment_to_bit_clears_unknowns_without_mutating_source
+  ; Veryl 0.20.3 retains the X/Z mask when assigning logic to bit.
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    narrow: input logic<8>,
+    wide: input logic<130>,
+    c_narrow_bit: output bit<8>,
+    c_narrow_after: output logic<8>,
+    c_wide_bit: output bit<130>,
+    c_wide_after: output logic<130>,
+    f_narrow_bit: output bit<8>,
+    f_narrow_after: output logic<8>,
+    f_wide_bit: output bit<130>,
+    f_wide_after: output logic<130>,
+) {
+    var narrow_source: logic<8>;
+    var wide_source: logic<130>;
+    always_comb {
+        narrow_source = narrow;
+        wide_source = wide;
+        c_narrow_bit = narrow_source;
+        c_wide_bit = wide_source;
+        c_narrow_after = narrow_source;
+        c_wide_after = wide_source;
+    }
+    always_ff (clk) {
+        f_narrow_bit = narrow;
+        f_wide_bit = wide;
+        f_narrow_after = narrow;
+        f_wide_after = wide;
+    }
+}
+"#)
+  (top Top)
+  (let narrow_value 0xa9)
+  (let narrow_mask 0x0c)
+  (let wide_mask (| (| (<< 1 5) (<< 1 70)) (<< 1 129)))
+  (let wide_value (| (| (| (<< 1 129) (<< 1 64)) (<< 1 5)) 0x35))
+  (let full_wide (- (<< 1 130) 1))
+  (let expected_narrow (& narrow_value (^ 0xff narrow_mask)))
+  (let expected_wide (& wide_value (^ full_wide wide_mask)))
+  (modify
+    (set narrow (fourstate narrow_value narrow_mask))
+    (set wide (fourstate wide_value wide_mask)))
+  (tick clk)
+  (expand name (c_narrow_bit f_narrow_bit)
+    (assert_eq {name} (fourstate expected_narrow 0) "{name}"))
+  (expand name (c_wide_bit f_wide_bit)
+    (assert_eq {name} (fourstate expected_wide 0) "{name}"))
+  (expand name (c_narrow_after f_narrow_after)
+    (assert_eq {name} (fourstate narrow_value narrow_mask) "{name}"))
+  (expand name (c_wide_after f_wide_after)
+    (assert_eq {name} (fourstate wide_value wide_mask) "{name}")))

@@ -1,0 +1,135 @@
+(group wide_data (category types))
+
+(case test_wide_int_memory_access
+  (source "test.veryl" #"
+module Top (
+i: input logic<256>,
+o: output logic<256>
+) {
+var mem: logic<256>;
+always_comb {
+mem = i;
+o = mem;
+}
+}
+"#)
+  (top Top)
+  (let input_val (| (| (<< 1 200) (<< 1 100)) 1))
+  (modify (set i input_val))
+  (assert_eq o input_val "256-bit value should be preserved through memory"))
+
+(case test_wide_concatenation
+  (source "test.veryl" #"
+module Top (
+a: input logic<64>,
+b: input logic<64>,
+c: input logic<64>,
+o: output logic<192>
+) {
+assign o = {a, b, c};
+}
+"#)
+  (top Top)
+  (let val_a 0xAAAAAAAAAAAAAAAA)
+  (let val_b 0xBBBBBBBBBBBBBBBB)
+  (let val_c 0xCCCCCCCCCCCCCCCC)
+  (modify
+    (set a val_a)
+    (set b val_b)
+    (set c val_c))
+  (let expected (| (| (<< val_a 128) (<< val_b 64)) val_c))
+  (assert_eq o expected))
+
+(case test_nested_wide_concatenation
+  (source "test.veryl" #"
+module Top (
+a: input logic<65>,
+b: input logic<63>,
+c: input logic<1>,
+d: input logic<70>,
+o_nested: output logic<199>,
+o_flat: output logic<199>
+) {
+var ab: logic<128>;
+assign ab = {a, b};
+assign o_nested = {ab, c, d};
+assign o_flat = {a, b, c, d};
+}
+"#)
+  (top Top)
+  (let val_a (| (trunc 128 (<< 1 64)) 0x0123456789ABCDEF))
+  (let val_b (& 0x23456789ABCDEF01 (- (trunc 64 (<< 1 63)) 1)))
+  (let val_c 1)
+  (let val_d (| (<< 1 69) 0x3456789ABCDEF012))
+  (modify
+    (set a val_a)
+    (set b val_b)
+    (set c val_c)
+    (set d val_d))
+  (let expected (| (| (| (<< val_a (+ (+ 63 1) 70)) (<< val_b (+ 1 70))) (<< val_c 70)) val_d))
+  (assert_eq o_nested expected)
+  (assert_eq o_flat expected)
+  (assert_eq o_nested (get o_flat)))
+
+(case test_wide_partial_write
+  (source "test.veryl" #"
+module Top (
+val: input logic<64>,
+o: output logic<256>
+) {
+var wide: logic<256>;
+always_comb {
+wide = 0;
+wide[127:64] = val;
+o = wide;
+}
+}
+"#)
+  (top Top)
+  (let input_val 0xDEADBEEFCAFEBABE)
+  (modify (set val input_val))
+  (let expected (<< input_val 64))
+  (assert_eq o expected "Partial write across 64-bit boundaries should work"))
+
+(case test_wide_cross_boundary_unaligned_write
+  (source "test.veryl" #"
+module Top (
+val: input logic<125>,
+o: output logic<256>
+) {
+var wide: logic<256>;
+always_comb {
+wide = 0;
+wide[184:60] = val;
+o = wide;
+}
+}
+"#)
+  (top Top)
+  (let input_val (- (<< 1 125) 1))
+  (modify (set val input_val))
+  (let expected (<< input_val 60))
+  (assert_eq o expected "Unaligned write crossing 3 chunks failed"))
+
+(case test_wide_rmw_preserve_neighboring_bits
+  (source "test.veryl" #"
+module Top (
+val: input logic<16>,
+o: output logic<128>
+) {
+var wide: logic<128>;
+always_comb {
+wide = 128'hAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA;
+wide[71:56] = val;
+o = wide;
+}
+}
+"#)
+  (top Top)
+  (modify (set val 0xFFFF))
+  (let base_val 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+  (let full_mask (- (<< 1 128) 1))
+  (let target_mask (<< (- (<< 1 16) 1) 56))
+  (let inv_target_mask (^ full_mask target_mask))
+  (let expected (| (& base_val inv_target_mask) (<< 0xFFFF 56)))
+  (assert_eq o expected "Neighbors were corrupted during Read-Modify-Write"))

@@ -1,0 +1,265 @@
+(group case_switch (category control_flow))
+
+(case test_case_basic_comb
+  (source "test.veryl" #"
+module Top (
+sel: input logic<2>,
+o:   output logic<8>
+) {
+always_comb {
+case sel {
+2'd0: o = 8'hAA;
+2'd1: o = 8'hBB;
+2'd2: o = 8'hCC;
+default: o = 8'hDD;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq o 0xAA)
+  (modify (set sel 1))
+  (assert_eq o 0xBB)
+  (modify (set sel 2))
+  (assert_eq o 0xCC)
+  (modify (set sel 3))
+  (assert_eq o 0xDD))
+
+(case test_switch_basic_comb
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+o: output logic<8>
+) {
+always_comb {
+switch {
+a <: 8'd10: o = 8'h01;
+a <: 8'd20: o = 8'h02;
+a <: 8'd30: o = 8'h03;
+default:    o = 8'hFF;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set a 5))
+  (assert_eq o 0x01)
+  (modify (set a 15))
+  (assert_eq o 0x02)
+  (modify (set a 25))
+  (assert_eq o 0x03)
+  (modify (set a 50))
+  (assert_eq o 0xFF))
+
+(case test_case_multiarm
+  (source "test.veryl" #"
+module Top (
+sel: input logic<3>,
+o:   output logic<8>
+) {
+always_comb {
+case sel {
+3'd0, 3'd1: o = 8'hAA;
+3'd2, 3'd3: o = 8'hBB;
+default:    o = 8'h00;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq o 0xAA)
+  (modify (set sel 1))
+  (assert_eq o 0xAA)
+  (modify (set sel 2))
+  (assert_eq o 0xBB)
+  (modify (set sel 3))
+  (assert_eq o 0xBB)
+  (modify (set sel 4))
+  (assert_eq o 0x00))
+
+(case test_case_nested_in_if
+  (source "test.veryl" #"
+module Top (
+en:  input logic,
+sel: input logic<2>,
+o:   output logic<8>
+) {
+always_comb {
+if en {
+case sel {
+2'd0: o = 8'h11;
+2'd1: o = 8'h22;
+default: o = 8'h33;
+}
+} else {
+o = 8'h00;
+}
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set en 0)
+    (set sel 1))
+  (assert_eq o 0x00)
+  (modify (set en 1))
+  (assert_eq o 0x22)
+  (modify (set sel 0))
+  (assert_eq o 0x11))
+
+(case test_case_block_body
+  (source "test.veryl" #"
+module Top (
+sel: input logic<2>,
+o1:  output logic<8>,
+o2:  output logic<8>
+) {
+always_comb {
+case sel {
+2'd0: {
+o1 = 8'hAA;
+o2 = 8'h55;
+}
+2'd1: {
+o1 = 8'h55;
+o2 = 8'hAA;
+}
+default: {
+o1 = 8'h00;
+o2 = 8'h00;
+}
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq o1 0xAA)
+  (assert_eq o2 0x55)
+  (modify (set sel 1))
+  (assert_eq o1 0x55)
+  (assert_eq o2 0xAA))
+
+(case test_case_in_always_ff
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            sel: input logic<2>,
+            o:   output logic<8>
+        ) {
+            var r_val: logic<8>;
+            always_ff {
+                case sel {
+                    2'd0: r_val = 8'h10;
+                    2'd1: r_val = 8'h20;
+                    default: r_val = 8'hFF;
+                }
+            }
+            assign o = r_val;
+        }
+    "#)
+  (top Top)
+  (modify (set sel 0))
+  (tick clk)
+  (assert_eq o 0x10)
+  (modify (set sel 1))
+  (tick clk)
+  (assert_eq o 0x20)
+  (modify (set sel 3))
+  (tick clk)
+  (assert_eq o 0xFF))
+
+(case test_case_in_comb_function_return
+  (source "test.veryl" #"
+module Top (
+    sel: input logic<2>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+    ) -> logic<8> {
+        case x {
+            2'd0: return 8'h11;
+            2'd1: return 8'h22;
+            default: return 8'h33;
+        }
+    }
+
+    always_comb {
+        q = f(sel);
+    }
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq q 0x11)
+  (modify (set sel 1))
+  (assert_eq q 0x22)
+  (modify (set sel 3))
+  (assert_eq q 0x33))
+
+(case test_case_in_comb_function_output_argument
+  (source "test.veryl" #"
+module Top (
+    sel: input logic<2>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+        y: output logic<8>,
+    ) {
+        case x {
+            2'd0: y = 8'h44;
+            2'd1: y = 8'h55;
+            default: y = 8'h66;
+        }
+    }
+
+    always_comb {
+        f(sel, q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq q 0x44)
+  (modify (set sel 1))
+  (assert_eq q 0x55)
+  (modify (set sel 2))
+  (assert_eq q 0x66))
+
+(case test_case_break_inside_comb_function_for
+  (source "test.veryl" #"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i in 0..4 {
+            case x[i] {
+                1'b1: {
+                    tmp = i + 8'd1;
+                    break;
+                }
+                default: {}
+            }
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0b0000))
+  (assert_eq q 0)
+  (modify (set d 0b1010))
+  (assert_eq q 2))

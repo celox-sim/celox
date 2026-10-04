@@ -112,7 +112,7 @@ fn test_combinational_loop_sir_error_readability() {
 }
 
 #[test]
-fn test_sv_module_unsupported_error_readability() {
+fn test_sv_module_missing_external_module_error_readability() {
     let code = r#"
         module Top (
             i_clk  : input  logic,

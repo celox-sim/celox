@@ -1,0 +1,28 @@
+(group std_onehot (category standard_library))
+
+(case test_onehot_8bit_exhaustive
+  (source "test.veryl"
+    (std "countones/onehot.veryl")
+    #"
+module Top (
+i_data  : input  logic<8>,
+o_onehot: output logic,
+o_zero  : output logic,
+) {
+inst u: onehot #(W: 8) (
+i_data,
+o_onehot,
+o_zero,
+);
+}
+"#)
+  (top Top)
+  (for val (range 0 256)
+    (let val (trunc 8 val))
+    (modify (set i_data val))
+    (let is_onehot (trunc 8 (get o_onehot)))
+    (let is_zero (trunc 8 (get o_zero)))
+    (let expected_onehot (? (== (popcount val) 1) 1 0))
+    (let expected_zero (? (== val 0) 1 0))
+    (assert (== is_onehot expected_onehot) "onehot")
+    (assert (== is_zero expected_zero) "zero")))

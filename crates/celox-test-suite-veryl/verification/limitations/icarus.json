@@ -1241,6 +1241,14 @@
       "status": "emission_error"
     },
     {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:10: error: Function celox_suite_tb.dut.copy port o is not an input port.\n<case>/source_0.sv:10:      : Function arguments must be input ports.\n<case>/source_0.sv:15: error: Function celox_suite_tb.dut.set_one port o is not an input port.\n<case>/source_0.sv:15:      : Function arguments must be input ports.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_nested_output_to_concat_and_dynamic_local",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
       "category": "Hierarchy",
       "detail": "compile hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver: Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:14: error: Function Top.write_seen port seen is not an input port.\n<case>/source_0.sv:14:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
       "expectation": "Simulation",
@@ -1482,7 +1490,7 @@
     }
   ],
   "counts": {
-    "compile_error": 123,
+    "compile_error": 124,
     "emission_error": 60,
     "ignored": 0,
     "mismatch": 0,

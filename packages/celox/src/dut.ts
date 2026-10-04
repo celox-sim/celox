@@ -258,7 +258,11 @@ export function createDut<P>(
 	// Attach child instance accessors from hierarchy
 	if (hierarchy) {
 		for (const [childName, instances] of Object.entries(hierarchy.children)) {
-			if (instances.length === 1 && (instances[0]!.index ?? 0) === 0) {
+			if (
+				instances.length === 1 &&
+				!instances[0]!.indexed &&
+				(instances[0]!.index ?? 0) === 0
+			) {
 				const childDut = createChildDut(buffer, instances[0]!, handle, state);
 				Object.defineProperty(obj, childName, {
 					value: childDut,
@@ -346,7 +350,11 @@ export function createChildDut(
 
 	// Recursively attach children
 	for (const [childName, instances] of Object.entries(hierarchy.children)) {
-		if (instances.length === 1 && (instances[0]!.index ?? 0) === 0) {
+		if (
+			instances.length === 1 &&
+			!instances[0]!.indexed &&
+			(instances[0]!.index ?? 0) === 0
+		) {
 			const childDut = createChildDut(buffer, instances[0]!, handle, state);
 			Object.defineProperty(obj, childName, {
 				value: childDut,

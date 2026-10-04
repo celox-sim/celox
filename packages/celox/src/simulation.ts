@@ -638,6 +638,9 @@ export class Simulation<P = Record<string, unknown>> {
 
 	/**
 	 * Read the raw 4-state (value + mask) pair for the named port.
+	 *
+	 * Like an output read through `dut`, this evaluates combinational logic
+	 * first when inputs changed since the last evaluation.
 	 */
 	fourState(portName: string): FourStateValue {
 		this.ensureAlive();
@@ -646,6 +649,10 @@ export class Simulation<P = Record<string, unknown>> {
 			throw new Error(
 				`Unknown port '${portName}'. Available: ${Object.keys(this._layout).join(", ")}`,
 			);
+		}
+		if (this._state.dirty && sig.direction !== "input") {
+			this._handle.evalComb();
+			this._state.dirty = false;
 		}
 		const [value, mask] = readFourState(this._buffer, sig);
 		return { __fourState: true, value, mask };

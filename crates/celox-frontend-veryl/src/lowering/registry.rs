@@ -1,4 +1,4 @@
-use crate::{LoweringPhase, ParserError, resolve_total_width};
+use crate::{ParserError, resolve_total_width};
 use celox_sir::RegisterType;
 
 use veryl_analyzer::ir::{Module, VarId};
@@ -6,9 +6,7 @@ use veryl_analyzer::ir::{Module, VarId};
 /// Get the register type of a specific port from a module definition.
 pub fn get_port_type(module: &Module, port_id: &VarId) -> Result<RegisterType, ParserError> {
     let var = module.variables.get(port_id).ok_or_else(|| {
-        ParserError::unsupported(
-            64,
-            LoweringPhase::SimulatorParser,
+        ParserError::internal(
             "port lookup",
             format!("port ID not found in child module: {}", module.name),
             None,

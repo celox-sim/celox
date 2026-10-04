@@ -79,6 +79,7 @@ pub fn run(
     version_flag: &str,
     four_state: bool,
     build: fn(&Design, &Path) -> Result<Box<dyn Backend>>,
+    build_script: ScriptBuilder,
 ) -> Result<()> {
     let args = Args::parse();
     let tests = selected_cases(&args);
@@ -120,8 +121,14 @@ pub fn run(
         for _ in 0..args.jobs {
             scope.spawn(|| {
                 while let Some(case) = tests.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let row =
-                        run_case(case, &output, four_state, build, tool, args.include_ignored);
+                    let row = run_case(
+                        case,
+                        &output,
+                        four_state,
+                        (build, build_script),
+                        tool,
+                        args.include_ignored,
+                    );
                     results.lock().unwrap().push(row);
                 }
             });
@@ -210,11 +217,76 @@ impl Backend for ObservedBackend {
     }
 }
 
+/// Builds a script case as a generated testbench.
+pub type ScriptBuilder = fn(&crate::script::ScriptCase, &Path) -> Result<Box<dyn Backend>>;
+
+type Builders = (
+    fn(&Design, &Path) -> Result<Box<dyn Backend>>,
+    ScriptBuilder,
+);
+
+/// Run a script case through its generated testbench. Returns the status,
+/// phase and detail.
+fn run_script(
+    case: &crate::TestCase,
+    script: &crate::script::ScriptCase,
+    directory: &Path,
+    four_state: bool,
+    build: ScriptBuilder,
+) -> (&'static str, &'static str, String) {
+    if script.four_state && !four_state {
+        return ("unsupported", "compile", "four-state expectations".into());
+    }
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(script, directory)));
+    let mut backend = match built {
+        Err(panic) => return ("compile_error", "compile", panic_message(panic.as_ref())),
+        Ok(Err(error)) => {
+            let detail = error.to_string();
+            return if error.is::<CompilationRejected>() {
+                if case.expectation == Expectation::CompilationError {
+                    ("rejected", "compile", detail)
+                } else {
+                    ("compile_error", "compile", detail)
+                }
+            } else if error.is::<EmissionError>() {
+                ("emission_error", "emission", detail)
+            } else if error.is::<crate::script::sv::Unsupported>() {
+                ("unsupported", "compile", detail)
+            } else {
+                ("compile_error", "compile", detail)
+            };
+        }
+        Ok(Ok(backend)) => backend,
+    };
+    if case.expectation == Expectation::CompilationError {
+        return (
+            "unexpected_accept",
+            "execute",
+            format!("invalid design was accepted: {}", case.name),
+        );
+    }
+    match backend.run_testbench() {
+        Ok(()) => ("passed", "execute", String::new()),
+        Err(error) => {
+            let log = std::fs::read_to_string(directory.join("protocol.log")).unwrap_or_default();
+            let assertions: Vec<&str> = log
+                .lines()
+                .filter_map(|line| line.trim_start().strip_prefix("@suite assert "))
+                .collect();
+            if assertions.is_empty() {
+                ("runtime_error", "execute", error.to_string())
+            } else {
+                ("mismatch", "execute", assertions.join("\n"))
+            }
+        }
+    }
+}
+
 fn run_case(
     case: &crate::TestCase,
     output: &Path,
     four_state: bool,
-    build: fn(&Design, &Path) -> Result<Box<dyn Backend>>,
+    (build, build_script): Builders,
     tool: &str,
     include_ignored: bool,
 ) -> Value {
@@ -235,6 +307,12 @@ fn run_case(
         )
         .unwrap();
         return write_result(&directory, row);
+    }
+    let script = case.script();
+    if !crate::script::sv::is_native_testbench(script) {
+        let (status, phase, detail) =
+            run_script(case, script, &directory, four_state, build_script);
+        return finish(case, &directory, status, phase, detail, known_issue);
     }
     let adapter_failed = Arc::new(AtomicBool::new(false));
     let mut phase = "setup";
@@ -304,6 +382,17 @@ fn run_case(
             (status, detail)
         }
     };
+    finish(case, &directory, status, phase, detail, known_issue)
+}
+
+fn finish(
+    case: &crate::TestCase,
+    directory: &Path,
+    status: &str,
+    phase: &str,
+    detail: String,
+    known_issue: Option<Value>,
+) -> Value {
     std::fs::write(directory.join("error.log"), &detail).unwrap();
     let mut portable_detail = detail;
     if status == "compile_error" || status == "rejected" || status == "runtime_error" {
@@ -320,7 +409,7 @@ fn run_case(
         }
     }
     // Reports do not depend on a developer's absolute checkout/cache path.
-    if let Ok(absolute) = std::fs::canonicalize(&directory) {
+    if let Ok(absolute) = std::fs::canonicalize(directory) {
         portable_detail = portable_detail.replace(absolute.to_string_lossy().as_ref(), "<case>");
     }
     portable_detail = portable_detail.chars().take(8000).collect();
@@ -331,7 +420,7 @@ fn run_case(
     if let Some(issue) = known_issue {
         row["known_issue"] = issue;
     }
-    write_result(&directory, row)
+    write_result(directory, row)
 }
 
 fn write_result(directory: &Path, row: Value) -> Value {
@@ -372,7 +461,10 @@ mod tests {
                 case,
                 &directory,
                 true,
-                |_, _| panic!("ignored case must not reach the compiler"),
+                (
+                    |_, _| panic!("ignored case must not reach the compiler"),
+                    |_, _| panic!("ignored case must not reach the compiler"),
+                ),
                 tool,
                 false,
             );
@@ -415,7 +507,10 @@ mod tests {
                     case,
                     &directory,
                     true,
-                    |_, _| Err("compiler executable unavailable".into()),
+                    (
+                        |_, _| Err("compiler executable unavailable".into()),
+                        |_, _| Err("compiler executable unavailable".into()),
+                    ),
                     tool,
                     include_ignored,
                 );
@@ -439,7 +534,10 @@ mod tests {
                 case,
                 &directory,
                 true,
-                |_, _| Err("new compiler failure".into()),
+                (
+                    |_, _| Err("new compiler failure".into()),
+                    |_, _| Err("new compiler failure".into()),
+                ),
                 tool,
                 false,
             );
@@ -462,11 +560,18 @@ mod tests {
             case,
             &directory,
             true,
-            |_, _| {
-                Err(Box::new(CompilationRejected(
-                    "nonconstant destination".into(),
-                )))
-            },
+            (
+                |_, _| {
+                    Err(Box::new(CompilationRejected(
+                        "nonconstant destination".into(),
+                    )))
+                },
+                |_, _| {
+                    Err(Box::new(CompilationRejected(
+                        "nonconstant destination".into(),
+                    )))
+                },
+            ),
             "test",
             false,
         );
@@ -475,7 +580,10 @@ mod tests {
             case,
             &directory,
             true,
-            |_, _| Err("compiler executable unavailable".into()),
+            (
+                |_, _| Err("compiler executable unavailable".into()),
+                |_, _| Err("compiler executable unavailable".into()),
+            ),
             "test",
             false,
         );
@@ -484,7 +592,10 @@ mod tests {
             case,
             &directory,
             true,
-            |_, _| Err(Box::new(EmissionError("emitter panicked".into()))),
+            (
+                |_, _| Err(Box::new(EmissionError("emitter panicked".into()))),
+                |_, _| Err(Box::new(EmissionError("emitter panicked".into()))),
+            ),
             "test",
             false,
         );

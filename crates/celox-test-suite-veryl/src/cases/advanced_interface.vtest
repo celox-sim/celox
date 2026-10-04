@@ -1,0 +1,245 @@
+(group advanced_interface (category hierarchy))
+
+(case test_interface_bidirectional
+  (source "test.veryl" #"
+interface Handshake {
+var req:  logic;
+var ack:  logic;
+var data: logic<8>;
+modport master {
+req:  output,
+ack:  input,
+data: output,
+}
+modport slave {
+req:  input,
+ack:  output,
+data: input,
+}
+}
+module Master (
+bus:  modport Handshake::master,
+send: input logic,
+din:  input logic<8>
+) {
+assign bus.req  = send;
+assign bus.data = din;
+}
+module Slave (
+bus:  modport Handshake::slave,
+dout: output logic<8>,
+got:  output logic
+) {
+assign got  = bus.req;
+assign dout = bus.data;
+assign bus.ack = bus.req;
+}
+module Top (
+send: input  logic,
+din:  input  logic<8>,
+dout: output logic<8>,
+got:  output logic
+) {
+inst hs: Handshake;
+inst m: Master (
+bus:  hs,
+send: send,
+din:  din,
+);
+inst s: Slave (
+bus:  hs,
+dout: dout,
+got:  got,
+);
+}
+"#)
+  (top Top)
+  ; No request yet
+  (modify
+    (set send 0)
+    (set din 0x42))
+  (assert_eq got 0)
+  ; Send a request with data
+  (modify
+    (set send 1)
+    (set din 0xBB))
+  (assert_eq got 1)
+  (assert_eq dout 0xBB))
+
+(case test_multiple_interface_instances
+  (source "test.veryl" #"
+interface DataBus {
+var data: logic<8>;
+modport writer {
+data: output,
+}
+modport reader {
+data: input,
+}
+}
+module Writer (
+bus: modport DataBus::writer,
+val: input logic<8>
+) {
+assign bus.data = val;
+}
+module Reader (
+bus: modport DataBus::reader,
+out: output logic<8>
+) {
+assign out = bus.data;
+}
+module Top (
+v0:  input  logic<8>,
+v1:  input  logic<8>,
+o0:  output logic<8>,
+o1:  output logic<8>
+) {
+inst bus0: DataBus;
+inst bus1: DataBus;
+inst w0: Writer (bus: bus0, val: v0);
+inst w1: Writer (bus: bus1, val: v1);
+inst r0: Reader (bus: bus0, out: o0);
+inst r1: Reader (bus: bus1, out: o1);
+}
+"#)
+  (top Top)
+  (modify
+    (set v0 0x11)
+    (set v1 0x22))
+  (assert_eq o0 0x11)
+  (assert_eq o1 0x22)
+  (modify
+    (set v0 0xFF)
+    (set v1 0x00))
+  (assert_eq o0 0xFF)
+  (assert_eq o1 0x00))
+
+(case test_interface_wide_signal
+  (source "test.veryl" #"
+interface WideBus {
+var data: logic<32>;
+modport src {
+data: output,
+}
+modport dst {
+data: input,
+}
+}
+module Source (
+bus: modport WideBus::src,
+a:   input logic<16>,
+b:   input logic<16>
+) {
+assign bus.data = {a, b};
+}
+module Sink (
+bus: modport WideBus::dst,
+out: output logic<32>
+) {
+assign out = bus.data;
+}
+module Top (
+a:   input  logic<16>,
+b:   input  logic<16>,
+out: output logic<32>
+) {
+inst wb: WideBus;
+inst src_inst: Source (bus: wb, a: a, b: b);
+inst dst_inst: Sink   (bus: wb, out: out);
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x1234)
+    (set b 0x5678))
+  ; Concatenation {a, b}: a is MSB, b is LSB → 0x12345678
+  (assert_eq out 0x12345678))
+
+(case test_transitive_generics
+  (source "test.veryl" #"
+interface DataBus::<T: type> {
+var data: T;
+modport source {
+data: output,
+}
+modport sink {
+data: input,
+}
+}
+// Inner module: receives generic interface, adds 1
+module Adder::<T: type> (
+inp: modport DataBus::<T>::sink,
+out: modport DataBus::<T>::source,
+) {
+assign out.data = inp.data + 1 as T;
+}
+// Top: instantiates Adder with concrete u16, chains two stages
+module Top (
+i_val:  input  logic<16>,
+o_val:  output logic<16>,
+) {
+inst a_bus: DataBus::<u16>;
+inst b_bus: DataBus::<u16>;
+always_comb {
+a_bus.data = i_val;
+}
+inst u_add1: Adder::<u16> (
+inp: a_bus,
+out: b_bus,
+);
+assign o_val = b_bus.data;
+}
+"#)
+  (top Top)
+  ; 0 + 1 = 1
+  (modify (set i_val 0))
+  (assert_eq (trunc 16 (get o_val)) 1)
+  ; 100 + 1 = 101
+  (modify (set i_val 100))
+  (assert_eq (trunc 16 (get o_val)) 101)
+  ; 0xFFFF + 1 = 0 (wrap)
+  (modify (set i_val 0xFFFF))
+  (assert_eq (trunc 16 (get o_val)) 0 "u16 should wrap around"))
+
+(case test_transitive_generics_two_level
+  (source "test.veryl" #"
+module Leaf::<T: type> (
+i_a: input T,
+i_b: input T,
+o_sum: output T,
+) {
+assign o_sum = i_a + i_b;
+}
+module Mid::<T: type> (
+i_x: input T,
+i_y: input T,
+o_z: output T,
+) {
+inst u_leaf: Leaf::<T> (
+i_a: i_x,
+i_b: i_y,
+o_sum: o_z,
+);
+}
+module Top (
+i_a: input  logic<8>,
+i_b: input  logic<8>,
+o_c: output logic<8>,
+) {
+inst u_mid: Mid::<u8> (
+i_x: i_a,
+i_y: i_b,
+o_z: o_c,
+);
+}
+"#)
+  (top Top)
+  (modify
+    (set i_a 10)
+    (set i_b 20))
+  (assert_eq (trunc 8 (get o_c)) 30)
+  (modify
+    (set i_a 200)
+    (set i_b 100))
+  (assert_eq (trunc 8 (get o_c)) 44 "u8 wrap: 200+100=300→44"))

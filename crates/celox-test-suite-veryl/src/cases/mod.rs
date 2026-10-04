@@ -1,193 +1,278 @@
-// The cases use ordinary Rust assertions and a small setup/build DSL so the
-// source and stimulus remain together. This macro is private to the corpus.
-macro_rules! cases {
-    (@expectation) => { crate::Expectation::Simulation };
-    (@expectation reject) => { crate::Expectation::CompilationError };
-    ($category:ident, $group:literal; $(
-        fn $name:ident($sim:ident) {
-            $(@tags [$($tag:ident),+ $(,)?];)?
-            $(@setup { $($setup:tt)* })?
-            $(@expect $expectation:ident;)?
-            @build $design:expr;
-            $($body:tt)*
-        }
-    )*) => {
-        pub(super) const CASES: &[crate::TestCase] = &[$(
-            crate::TestCase {
-                name: concat!($group, "::", stringify!($name)),
-                category: crate::Category::$category,
-                expectation: cases!(@expectation $($expectation)?),
-                tags: &[$($(crate::TestTag::$tag),+)?],
-                run: |factory| {
-                    $($($setup)*)?
-                    let design = $design;
-                    let compiled = factory(&design);
-                    if cases!(@expectation $($expectation)?) == crate::Expectation::CompilationError {
-                        match compiled {
-                            Err(error) if error.is::<crate::CompilationRejected>() => {}
-                            Err(error) => panic!("compile {}::{}: expected language rejection, got adapter failure: {error}", $group, stringify!($name)),
-                            Ok(_) => panic!("invalid design was accepted: {}::{}", $group, stringify!($name)),
-                        }
-                        return;
-                    }
-                    let backend = compiled.unwrap_or_else(|error| {
-                        panic!("compile {}::{}: {error}", $group, stringify!($name))
-                    });
-                    #[allow(unused_mut, unused_variables)]
-                    let mut $sim = crate::Simulator::new(backend);
-                    $($body)*
-                },
-            },
-        )*];
-    };
+// Every group is a script file in the language of `crate::script`.
+
+pub(super) struct Group {
+    /// The file name, for diagnostics.
+    pub file: &'static str,
+    pub text: &'static str,
 }
 
-use std::path::{Path, PathBuf};
-
-fn std_source(parts: &[&str]) -> String {
-    veryl_std::expand().expect("failed to expand veryl-std sources");
-    let rel = parts.iter().collect::<PathBuf>();
-    let paths = veryl_std::paths(Path::new("")).expect("failed to resolve veryl-std sources");
-    let src = paths
-        .iter()
-        .find(|path| path.src.ends_with(&rel))
-        .unwrap_or_else(|| panic!("veryl-std source not found: {}", rel.display()));
-    std::fs::read_to_string(&src.src)
-        .unwrap_or_else(|err| panic!("failed to read {}: {}", src.src.display(), err))
-}
-
-mod advanced_interface;
-mod array_literal;
-mod basic;
-mod case_switch;
-mod comb_observer;
-mod compare_matrix;
-mod concat_operators;
-mod concatenation;
-mod concurrent_initial;
-mod context_width;
-mod counter;
-mod data_access;
-mod duplicate_varpath;
-mod enum_type;
-mod expression_semantics;
-mod false_loop;
-mod ff_event_snapshot;
-mod ff_narrow_arrays;
-mod fifo_issue5;
-mod flip_flop;
-mod for_loop_unroll;
-mod four_state;
-mod four_state_expression_semantics;
-mod function_arguments;
-mod generic_identity;
-mod hierarchical_assignment;
-mod hierarchy;
-mod interface;
-mod issue3_repro;
-mod linear_sorter_pull;
-mod loop_idiom;
-mod multi_clock;
-mod nba_cross_block;
-mod nba_cross_block_empty;
-mod nba_dynamic_array;
-mod operators;
-mod packed_scatter_store;
-mod param_override;
-mod proto_package;
-mod recovered_unrolled_fold;
-mod reset_edge_cases;
-mod self_determination;
-mod shift_bug_test;
-mod shift_signedness;
-mod signed_divrem;
-mod state_cast_semantics;
-mod std_binary_codec;
-mod std_delay;
-mod std_edge_detector;
-mod std_fifo;
-mod std_gray_codec;
-mod std_lfsr;
-mod std_mux;
-mod std_onehot;
-mod std_ram;
-mod struct_constructor;
-mod synth_dynamic_loop;
-mod system_function;
-mod test_unimplemented_paths;
-mod veryl_context_regressions;
-mod veryl_language;
-mod veryl_regressions;
-mod wide_context_width;
-mod wide_data;
-mod wide_operators;
-mod wide_shift_mem;
-
-pub(super) const GROUPS: &[&[crate::TestCase]] = &[
-    concurrent_initial::CASES,
-    hierarchical_assignment::CASES,
-    advanced_interface::CASES,
-    array_literal::CASES,
-    basic::CASES,
-    case_switch::CASES,
-    comb_observer::CASES,
-    compare_matrix::CASES,
-    concat_operators::CASES,
-    concatenation::CASES,
-    context_width::CASES,
-    counter::CASES,
-    data_access::CASES,
-    duplicate_varpath::CASES,
-    enum_type::CASES,
-    expression_semantics::CASES,
-    false_loop::CASES,
-    ff_event_snapshot::CASES,
-    ff_narrow_arrays::CASES,
-    fifo_issue5::CASES,
-    flip_flop::CASES,
-    for_loop_unroll::CASES,
-    four_state::CASES,
-    four_state_expression_semantics::CASES,
-    function_arguments::CASES,
-    generic_identity::CASES,
-    hierarchy::CASES,
-    interface::CASES,
-    issue3_repro::CASES,
-    linear_sorter_pull::CASES,
-    loop_idiom::CASES,
-    multi_clock::CASES,
-    nba_cross_block::CASES,
-    nba_cross_block_empty::CASES,
-    nba_dynamic_array::CASES,
-    operators::CASES,
-    packed_scatter_store::CASES,
-    param_override::CASES,
-    proto_package::CASES,
-    recovered_unrolled_fold::CASES,
-    reset_edge_cases::CASES,
-    self_determination::CASES,
-    shift_bug_test::CASES,
-    shift_signedness::CASES,
-    signed_divrem::CASES,
-    state_cast_semantics::CASES,
-    std_binary_codec::CASES,
-    std_delay::CASES,
-    std_edge_detector::CASES,
-    std_fifo::CASES,
-    std_gray_codec::CASES,
-    std_lfsr::CASES,
-    std_mux::CASES,
-    std_onehot::CASES,
-    std_ram::CASES,
-    struct_constructor::CASES,
-    synth_dynamic_loop::CASES,
-    system_function::CASES,
-    test_unimplemented_paths::CASES,
-    veryl_context_regressions::CASES,
-    veryl_language::CASES,
-    veryl_regressions::CASES,
-    wide_context_width::CASES,
-    wide_data::CASES,
-    wide_operators::CASES,
-    wide_shift_mem::CASES,
+pub(super) const GROUPS: &[Group] = &[
+    Group {
+        file: "src/cases/concurrent_initial.vtest",
+        text: include_str!("concurrent_initial.vtest"),
+    },
+    Group {
+        file: "src/cases/hierarchical_assignment.vtest",
+        text: include_str!("hierarchical_assignment.vtest"),
+    },
+    Group {
+        file: "src/cases/advanced_interface.vtest",
+        text: include_str!("advanced_interface.vtest"),
+    },
+    Group {
+        file: "src/cases/array_literal.vtest",
+        text: include_str!("array_literal.vtest"),
+    },
+    Group {
+        file: "src/cases/basic.vtest",
+        text: include_str!("basic.vtest"),
+    },
+    Group {
+        file: "src/cases/case_switch.vtest",
+        text: include_str!("case_switch.vtest"),
+    },
+    Group {
+        file: "src/cases/comb_observer.vtest",
+        text: include_str!("comb_observer.vtest"),
+    },
+    Group {
+        file: "src/cases/compare_matrix.vtest",
+        text: include_str!("compare_matrix.vtest"),
+    },
+    Group {
+        file: "src/cases/concat_operators.vtest",
+        text: include_str!("concat_operators.vtest"),
+    },
+    Group {
+        file: "src/cases/concatenation.vtest",
+        text: include_str!("concatenation.vtest"),
+    },
+    Group {
+        file: "src/cases/context_width.vtest",
+        text: include_str!("context_width.vtest"),
+    },
+    Group {
+        file: "src/cases/counter.vtest",
+        text: include_str!("counter.vtest"),
+    },
+    Group {
+        file: "src/cases/data_access.vtest",
+        text: include_str!("data_access.vtest"),
+    },
+    Group {
+        file: "src/cases/duplicate_varpath.vtest",
+        text: include_str!("duplicate_varpath.vtest"),
+    },
+    Group {
+        file: "src/cases/enum_type.vtest",
+        text: include_str!("enum_type.vtest"),
+    },
+    Group {
+        file: "src/cases/expression_semantics.vtest",
+        text: include_str!("expression_semantics.vtest"),
+    },
+    Group {
+        file: "src/cases/false_loop.vtest",
+        text: include_str!("false_loop.vtest"),
+    },
+    Group {
+        file: "src/cases/ff_event_snapshot.vtest",
+        text: include_str!("ff_event_snapshot.vtest"),
+    },
+    Group {
+        file: "src/cases/ff_narrow_arrays.vtest",
+        text: include_str!("ff_narrow_arrays.vtest"),
+    },
+    Group {
+        file: "src/cases/fifo_issue5.vtest",
+        text: include_str!("fifo_issue5.vtest"),
+    },
+    Group {
+        file: "src/cases/flip_flop.vtest",
+        text: include_str!("flip_flop.vtest"),
+    },
+    Group {
+        file: "src/cases/for_loop_unroll.vtest",
+        text: include_str!("for_loop_unroll.vtest"),
+    },
+    Group {
+        file: "src/cases/four_state.vtest",
+        text: include_str!("four_state.vtest"),
+    },
+    Group {
+        file: "src/cases/four_state_expression_semantics.vtest",
+        text: include_str!("four_state_expression_semantics.vtest"),
+    },
+    Group {
+        file: "src/cases/function_arguments.vtest",
+        text: include_str!("function_arguments.vtest"),
+    },
+    Group {
+        file: "src/cases/function_bodies.vtest",
+        text: include_str!("function_bodies.vtest"),
+    },
+    Group {
+        file: "src/cases/generic_identity.vtest",
+        text: include_str!("generic_identity.vtest"),
+    },
+    Group {
+        file: "src/cases/hierarchy.vtest",
+        text: include_str!("hierarchy.vtest"),
+    },
+    Group {
+        file: "src/cases/interface.vtest",
+        text: include_str!("interface.vtest"),
+    },
+    Group {
+        file: "src/cases/issue3_repro.vtest",
+        text: include_str!("issue3_repro.vtest"),
+    },
+    Group {
+        file: "src/cases/linear_sorter_pull.vtest",
+        text: include_str!("linear_sorter_pull.vtest"),
+    },
+    Group {
+        file: "src/cases/loop_idiom.vtest",
+        text: include_str!("loop_idiom.vtest"),
+    },
+    Group {
+        file: "src/cases/multi_clock.vtest",
+        text: include_str!("multi_clock.vtest"),
+    },
+    Group {
+        file: "src/cases/nba_cross_block.vtest",
+        text: include_str!("nba_cross_block.vtest"),
+    },
+    Group {
+        file: "src/cases/nba_cross_block_empty.vtest",
+        text: include_str!("nba_cross_block_empty.vtest"),
+    },
+    Group {
+        file: "src/cases/nba_dynamic_array.vtest",
+        text: include_str!("nba_dynamic_array.vtest"),
+    },
+    Group {
+        file: "src/cases/operators.vtest",
+        text: include_str!("operators.vtest"),
+    },
+    Group {
+        file: "src/cases/packed_scatter_store.vtest",
+        text: include_str!("packed_scatter_store.vtest"),
+    },
+    Group {
+        file: "src/cases/param_override.vtest",
+        text: include_str!("param_override.vtest"),
+    },
+    Group {
+        file: "src/cases/proto_package.vtest",
+        text: include_str!("proto_package.vtest"),
+    },
+    Group {
+        file: "src/cases/recovered_unrolled_fold.vtest",
+        text: include_str!("recovered_unrolled_fold.vtest"),
+    },
+    Group {
+        file: "src/cases/reset_edge_cases.vtest",
+        text: include_str!("reset_edge_cases.vtest"),
+    },
+    Group {
+        file: "src/cases/self_determination.vtest",
+        text: include_str!("self_determination.vtest"),
+    },
+    Group {
+        file: "src/cases/shift_bug_test.vtest",
+        text: include_str!("shift_bug_test.vtest"),
+    },
+    Group {
+        file: "src/cases/shift_signedness.vtest",
+        text: include_str!("shift_signedness.vtest"),
+    },
+    Group {
+        file: "src/cases/signed_divrem.vtest",
+        text: include_str!("signed_divrem.vtest"),
+    },
+    Group {
+        file: "src/cases/state_cast_semantics.vtest",
+        text: include_str!("state_cast_semantics.vtest"),
+    },
+    Group {
+        file: "src/cases/std_binary_codec.vtest",
+        text: include_str!("std_binary_codec.vtest"),
+    },
+    Group {
+        file: "src/cases/std_delay.vtest",
+        text: include_str!("std_delay.vtest"),
+    },
+    Group {
+        file: "src/cases/std_edge_detector.vtest",
+        text: include_str!("std_edge_detector.vtest"),
+    },
+    Group {
+        file: "src/cases/std_fifo.vtest",
+        text: include_str!("std_fifo.vtest"),
+    },
+    Group {
+        file: "src/cases/std_gray_codec.vtest",
+        text: include_str!("std_gray_codec.vtest"),
+    },
+    Group {
+        file: "src/cases/std_lfsr.vtest",
+        text: include_str!("std_lfsr.vtest"),
+    },
+    Group {
+        file: "src/cases/std_mux.vtest",
+        text: include_str!("std_mux.vtest"),
+    },
+    Group {
+        file: "src/cases/std_onehot.vtest",
+        text: include_str!("std_onehot.vtest"),
+    },
+    Group {
+        file: "src/cases/std_ram.vtest",
+        text: include_str!("std_ram.vtest"),
+    },
+    Group {
+        file: "src/cases/struct_constructor.vtest",
+        text: include_str!("struct_constructor.vtest"),
+    },
+    Group {
+        file: "src/cases/synth_dynamic_loop.vtest",
+        text: include_str!("synth_dynamic_loop.vtest"),
+    },
+    Group {
+        file: "src/cases/system_function.vtest",
+        text: include_str!("system_function.vtest"),
+    },
+    Group {
+        file: "src/cases/test_unimplemented_paths.vtest",
+        text: include_str!("test_unimplemented_paths.vtest"),
+    },
+    Group {
+        file: "src/cases/veryl_context_regressions.vtest",
+        text: include_str!("veryl_context_regressions.vtest"),
+    },
+    Group {
+        file: "src/cases/veryl_language.vtest",
+        text: include_str!("veryl_language.vtest"),
+    },
+    Group {
+        file: "src/cases/veryl_regressions.vtest",
+        text: include_str!("veryl_regressions.vtest"),
+    },
+    Group {
+        file: "src/cases/wide_context_width.vtest",
+        text: include_str!("wide_context_width.vtest"),
+    },
+    Group {
+        file: "src/cases/wide_data.vtest",
+        text: include_str!("wide_data.vtest"),
+    },
+    Group {
+        file: "src/cases/wide_operators.vtest",
+        text: include_str!("wide_operators.vtest"),
+    },
+    Group {
+        file: "src/cases/wide_shift_mem.vtest",
+        text: include_str!("wide_shift_mem.vtest"),
+    },
 ];

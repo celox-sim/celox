@@ -1,0 +1,107 @@
+(group std_delay (category standard_library))
+
+(case test_delay_zero
+  (source "test.veryl"
+    (std "delay/delay.veryl")
+    #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
+) {
+inst u: delay #(DELAY: 0, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
+}
+"#)
+  (top Top)
+  ; Combinational passthrough - no clock needed
+  (modify (set i_d 0xAB))
+  (assert_eq (trunc 8 (get o_d)) 0xAB "DELAY=0 should pass through")
+  (modify (set i_d 0xCD))
+  (assert_eq (trunc 8 (get o_d)) 0xCD))
+
+(case test_delay_one
+  (source "test.veryl"
+    (std "delay/delay.veryl")
+    #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
+) {
+inst u: delay #(DELAY: 1, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_d 0))
+  (tick clk)
+  (modify (set rst 1))
+  (assert_eq (trunc 8 (get o_d)) 0 "output should be 0 after reset")
+  ; Set input to 0xAA
+  (modify (set i_d 0xAA))
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0xAA "should appear after 1 tick")
+  ; Change input to 0xBB
+  (modify (set i_d 0xBB))
+  ; Before tick, output still 0xAA
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0xBB "should appear after 1 tick"))
+
+(case test_delay_three
+  (source "test.veryl"
+    (std "delay/delay.veryl")
+    #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+i_d: input  logic<8>,
+o_d: output logic<8>,
+) {
+inst u: delay #(DELAY: 3, WIDTH: 8) (
+i_clk: clk,
+i_rst: rst,
+i_d,
+o_d,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_d 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Send 0xAA, then track when it appears at output
+  (modify (set i_d 0xAA))
+  ; Tick 1: pipeline stage 0 has 0xAA
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0 "not yet after 1 tick")
+  ; Tick 2: pipeline stage 1 has 0xAA
+  (modify (set i_d 0xBB))
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0 "not yet after 2 ticks")
+  ; Tick 3: pipeline stage 2 (output) has 0xAA
+  (modify (set i_d 0xCC))
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0xAA "0xAA should appear after 3 ticks")
+  ; Tick 4: 0xBB arrives
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0xBB "0xBB should appear after 4 ticks")
+  ; Tick 5: 0xCC arrives
+  (tick clk)
+  (assert_eq (trunc 8 (get o_d)) 0xCC "0xCC should appear after 5 ticks"))

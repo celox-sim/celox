@@ -49,6 +49,9 @@ mod host {
         /// The index of this instance under its name: its element index in
         /// an instance array or generate loop, 0 otherwise.
         pub index: usize,
+        /// Whether this instance's name takes an index (an instance array or
+        /// generate loop), even when it is the only instance under the name.
+        pub indexed: bool,
         pub signals: Vec<NamedSignal>,
         pub children: Vec<(String, Vec<InstanceHierarchy>)>,
     }
@@ -99,11 +102,23 @@ mod host {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
-        Display { message: String },
-        Write { message: String },
-        AssertContinue { message: String },
-        AssertFatal { message: String },
-        Missed { count: u64 },
+        Display {
+            message: String,
+        },
+        Write {
+            message: String,
+        },
+        AssertContinue {
+            message: String,
+        },
+        AssertFatal {
+            message: String,
+        },
+        /// The design executed `$finish`. The host decides whether to stop.
+        Finish,
+        Missed {
+            count: u64,
+        },
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -288,7 +303,9 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
-                RuntimeEventKind::Display | RuntimeEventKind::Write => 'd',
+                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish => {
+                    'd'
+                }
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return "assertion failed".to_string();
@@ -364,6 +381,7 @@ mod host {
                     RuntimeEventKind::Write => RuntimeEvent::Write { message },
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+                    RuntimeEventKind::Finish => RuntimeEvent::Finish,
                 })
             }
         }
@@ -1463,6 +1481,10 @@ mod host {
                 .instance_at_path(&InstancePath(current_path.to_vec()))
                 .expect("instance not found");
             let module_name = instance.module_name.clone();
+            let indexed = instance
+                .display_path
+                .last()
+                .is_some_and(|segment| segment.ends_with(']'));
 
             let signals = self.build_signals_for_instance(instance.id);
 
@@ -1496,6 +1518,7 @@ mod host {
             InstanceHierarchy {
                 module_name,
                 index: current_path.last().map_or(0, |(_, index)| *index),
+                indexed,
                 signals,
                 children,
             }

@@ -92,7 +92,7 @@ const val = sim.dut.result; // bigint — X bits read as 0
 
 ### Reading the Full Value/Mask Pair
 
-Use the `fourState()` method on `Simulator` or `Simulation` to read the value and X mask together:
+Use the `fourState()` method on `Simulator` or `Simulation` to read the value and X mask together. Like an output read through `dut`, it evaluates combinational logic first when inputs have changed:
 
 ```typescript
 const fs = sim.fourState("result");

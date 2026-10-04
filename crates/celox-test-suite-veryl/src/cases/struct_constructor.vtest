@@ -1,0 +1,54 @@
+(group struct_constructor (category types))
+
+(case test_struct_constructor_comb_assignment
+  (source "test.veryl" #"
+module Top (
+a: input logic<4>,
+b: input logic<4>,
+o: output logic<8>
+) {
+struct S {
+x: logic<4>,
+y: logic<4>,
+}
+always_comb {
+o = S'{x: a, y: b};
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xA)
+    (set b 0x5))
+  (assert_eq o 0xA5))
+
+(case test_struct_constructor_member_width_adjustment
+  ; Veryl 867deb1's reference simulator debug-asserts when a non-literal
+  ; struct member expression needs width adjustment.
+  (source "test.veryl" #"
+module Top (
+narrow: input logic<4>,
+wide  : input logic<8>,
+o_pad : output logic<8>,
+o_cut : output logic<4>
+) {
+struct Padded {
+x: logic<8>,
+}
+struct Cut {
+y: logic<4>,
+}
+always_comb {
+o_pad = Padded'{x: narrow};
+o_cut = Cut'{y: wide};
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set narrow 0xB)
+    (set wide 0xAB))
+  ; narrow(4bit) -> member logic<8> should be zero-extended.
+  (assert_eq o_pad 0x0B)
+  ; wide(8bit) -> member logic<4> should keep lower 4 bits.
+  (assert_eq o_cut 0xB))

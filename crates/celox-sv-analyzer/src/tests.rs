@@ -4006,3 +4006,20 @@ fn records_veryl_emitted_module_instantiations() {
         ]
     );
 }
+
+#[test]
+fn unsupported_constructs_map_to_their_tracking_issues() {
+    let issue =
+        |construct: &str| AnalyzerError::Unsupported(construct.to_string()).tracking_issue();
+    assert_eq!(issue("blocking assignment inside always_ff"), 421);
+    assert_eq!(issue("duplicate internal signal `t`"), 445);
+    assert_eq!(issue("undriven net declaration `n`"), 460);
+    assert_eq!(
+        issue("combinational expression assigned to `y`"),
+        SV_FRONTEND_TRACKING_ISSUE
+    );
+    assert_eq!(
+        AnalyzerError::Parse("bad".to_string()).tracking_issue(),
+        SV_FRONTEND_TRACKING_ISSUE
+    );
+}
