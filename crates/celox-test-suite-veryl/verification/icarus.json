@@ -6288,6 +6288,117 @@
       "tags": []
     },
     {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_concatenated_destination_in_function_body",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_dynamic_index_write_to_function_local",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-function-outputs"
+        ],
+        "id": "icarus_function_outputs",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+        "upstream": []
+      },
+      "name": "function_bodies::test_nested_output_to_concat_and_dynamic_local",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_out_of_range_dynamic_write_to_function_local_is_ignored",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_path_without_return_yields_unknown",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_runtime_bounded_loop_function_reentry",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_runtime_bounded_loop_in_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_runtime_effects_nested_in_function_statements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_bodies::test_runtime_select_of_expression_bound_formal",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Hierarchy",
       "detail": "",
       "expectation": "Simulation",
@@ -10184,9 +10295,9 @@
   "counts": {
     "compile_error": 8,
     "emission_error": 0,
-    "ignored": 195,
+    "ignored": 196,
     "mismatch": 0,
-    "passed": 484,
+    "passed": 492,
     "rejected": 8,
     "runtime_error": 0,
     "unexpected_accept": 0,
