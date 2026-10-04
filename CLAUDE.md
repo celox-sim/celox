@@ -225,16 +225,23 @@ This project uses Rust **edition 2024**.
 
 | フィールド | 種類 | 値 |
 |---|---|---|
-| Status | Single Select | `Backlog` / `In Progress` / `In Review` / `Done` |
+| Status | Single Select | `Todo` / `In Progress` / `Done` |
 | Priority | Single Select | `P0 Critical` / `P1 High` / `P2 Medium` / `P3 Low` |
 | Milestone | 標準 | フェーズ・リリース単位で管理 |
 
 ### Issue 操作例
 
+Project の操作には gh の `project` scope が必要(`gh auth refresh --hostname github.com -s project`)。
+
 ```bash
-# Issue を Project に追加
-gh project item-add 1 --owner celox-sim --url <issue-url>
+# Issue を Project に追加(出力の id が item-id)
+gh project item-add 1 --owner celox-sim --url <issue-url> --format json -q .id
 
 # フィールド更新
 gh project item-edit --project-id PVT_kwDOD8WmI84BQmif --id <item-id> --field-id <field-id> --single-select-option-id <option-id>
 ```
+
+| フィールド | field-id | option-id |
+|---|---|---|
+| Status | `PVTSSF_lADOD8WmI84BQmifzg-rITo` | `Todo` `f75ad846` / `In Progress` `47fc9ee4` / `Done` `98236657` |
+| Priority | `PVTSSF_lADOD8WmI84BQmifzg-rIVw` | `P0 Critical` `d8857f8e` / `P1 High` `d2321013` / `P2 Medium` `ff49beed` / `P3 Low` `108a7cf1` |
