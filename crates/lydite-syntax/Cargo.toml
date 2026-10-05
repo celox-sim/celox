@@ -10,7 +10,7 @@ serde_json.workspace = true
 serde.workspace = true
 lydite-ir.workspace = true
 parol_runtime = "5.0"
-scnr2 = "=0.5.2"
+scnr2 = "=0.5.3"
 [build-dependencies]
 parol = "5.0"
 

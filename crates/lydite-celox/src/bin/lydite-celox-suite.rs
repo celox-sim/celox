@@ -161,18 +161,16 @@ fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.as_slice() == ["--list"] {
-        // `script` is the parsed case (design sources and stimulus); the
-        // coverage gate pins its hash so edited cases need a new review.
+        // The coverage gate hashes each case's text from `source` onward, so
+        // edited cases need a new review.
         let listed = cases()
             .map(|c| {
-                let script = c.script();
                 let group = c.name.split("::").next().unwrap_or(c.name);
                 json!({
                     "case": c.name,
                     "expectation": format!("{:?}", c.expectation),
                     "category": format!("{:?}", c.category),
-                    "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": script.pos.line},
-                    "script": format!("{script:?}"),
+                    "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": c.script().pos.line},
                 })
             })
             .collect::<Vec<_>>();
