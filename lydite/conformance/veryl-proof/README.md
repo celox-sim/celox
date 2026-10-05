@@ -87,7 +87,7 @@ jobs/tests may separately use external solvers; they are not this path.
 ## Coverage and audit contract
 
 `coverage-manifest.json` pins every case, expectation/category, source
-location and parsed-script hash, actual design/protocol identity, read/operation counts, and exact
+location and a hash of its script text, actual design/protocol identity, read/operation counts, and exact
 compiler-rejection disposition. It contains hashes and counts, not expected
 hardware output tables. Protocol hashes may indirectly reflect read-dependent
 stimuli; they are execution-coverage drift guards requiring review, not independent

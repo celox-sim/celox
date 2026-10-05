@@ -3,6 +3,7 @@
 import argparse, collections, gzip, hashlib, json, pathlib, subprocess, sys
 from prepare import ROOT, verify_suite
 SUITE_BIN = ROOT/'../../../target/debug/lydite-celox-suite'
+SUITE_ROOT = ROOT/'../../../crates/celox-test-suite'
 # Reviewed cases that fail for a recorded reason outside the proof engine:
 # Veryl language restrictions, suite features the proof backend lacks, and
 # known Celox frontend failures that Celox's own tests also ignore.
@@ -43,8 +44,18 @@ def check_queries(name,design,record):
   control=record['negative_control'];require(control and control['status']=='passed',name+': missing poisoned observation control')
   q=queries[control['query']];require(q['solver_result']=='sat' and q['original_formula_validated'] is True and q['encoded_extra'] is not True,name+': poisoned observation lacks counterexample')
  return len(queries),control is not None
-def collect(raw,listed,exceptions,raw_exit):
- catalog=indexed(listed,'catalog'); rows=indexed(read(raw/'summary.json'),'raw results')
+def case_texts(listed,suite_root):
+ """Each case's script text: from its first line to the next case in the same file."""
+ starts=collections.defaultdict(list)
+ for meta in listed:starts[meta['source']['file']].append(meta['source']['line'])
+ texts={}
+ for file,lines in starts.items():
+  content=(suite_root/file).read_text().splitlines(keepends=True);lines=sorted(lines)
+  require(len(lines)==len(set(lines)),file+': two cases start on one line')
+  for start,end in zip(lines,lines[1:]+[len(content)+1]):texts[(file,start)]=''.join(content[start-1:end-1])
+ return texts
+def collect(raw,listed,exceptions,raw_exit,suite_root=SUITE_ROOT):
+ catalog=indexed(listed,'catalog'); rows=indexed(read(raw/'summary.json'),'raw results'); texts=case_texts(listed,suite_root)
  require(set(rows)==set(catalog),'missing/extra cases; every suite case must execute')
  check_exceptions(exceptions,catalog)
  require(raw_exit==(1 if exceptions else 0),'raw engine exit code must report exactly the recorded exceptions')
@@ -79,7 +90,8 @@ def collect(raw,listed,exceptions,raw_exit):
    designs.append({key:record[key] for key in ('design_sha256','protocol_sha256','reads','commands','operations')}|{'diagnostic':diag})
   disposition=exception['kind'] if exception else 'expected_compilation_rejection' if meta['expectation']=='CompilationError' else 'observation_verified' if all_reads else 'smoke_only'
   totals[disposition]+=1;totals['reads']+=all_reads
-  source=dict(meta['source'],script_sha256=hashlib.sha256(meta['script'].encode()).hexdigest())
+  text=texts[(meta['source']['file'],meta['source']['line'])]
+  source=dict(meta['source'],script_sha256=hashlib.sha256(text.encode()).hexdigest())
   result.append({'case':name,'expectation':meta['expectation'],'category':meta['category'],'source':source,'disposition':disposition,'designs':designs})
  passes=len(catalog)-len(exceptions)
  return {'schema':2,'cases':result},dict(totals)|{'total':len(catalog),'actual_passes':passes,'raw_failures':len(exceptions),'queries':queries_total}
@@ -91,7 +103,7 @@ def main():
  try:
   verify_suite()
   listed=json.loads(subprocess.check_output([str(SUITE_BIN),'--list'],text=True))
-  (args.out/'catalog.json').write_text(json.dumps([{k:v for k,v in c.items() if k!='script'} for c in listed],indent=2)+'\n')
+  (args.out/'catalog.json').write_text(json.dumps(listed,indent=2)+'\n')
   raw=args.raw or args.out/'raw';code=args.raw_exit
   if args.raw is None:
    with (args.out/'suite.log').open('w') as log:
