@@ -666,12 +666,26 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
         }
     }
-    let (items, predecessors) = condense_work(&mut atomic, &edges);
+    let (items, mut predecessors) = condense_work(&mut atomic, &edges);
     let item_paths = |item: usize| {
         items[item]
             .iter()
             .flat_map(|&work_item| work_paths(&work[work_item]).iter().copied())
     };
+    // Runtime events are observable in order. Chain the items emitting them
+    // so that reordering for lanes never swaps two of them.
+    let mut previous_event = None;
+    for (item, row) in predecessors.iter_mut().enumerate() {
+        if item_paths(item).any(|path| prepared.input[path].target.var().is_none()) {
+            if let Some(previous) = previous_event
+                && !row.contains(&previous)
+            {
+                row.push(previous);
+                row.sort_unstable();
+            }
+            previous_event = Some(item);
+        }
+    }
 
     // An item's cost counts every value it reaches once, including values
     // it shares with other items, because another builder recomputes them.

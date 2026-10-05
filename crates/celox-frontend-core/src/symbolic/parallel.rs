@@ -187,6 +187,20 @@ pub(crate) fn plan_parallel_ff_kernels(
         if event_parts.len() < 2 {
             continue;
         }
+        // Runtime events (such as `$display`) of different parts must keep
+        // the sequential kernel's order, which its own schedule decides.
+        // One emitting part cannot be reordered against another; with more,
+        // the event keeps its sequential kernel.
+        if event_parts
+            .iter()
+            .filter(|(_, part)| {
+                emits_runtime_events(&part.evaluate) || emits_runtime_events(&part.apply)
+            })
+            .count()
+            > 1
+        {
+            continue;
+        }
         // Instance order keeps the unit order independent of map iteration;
         // the sort is stable, so parts of one instance keep their order.
         event_parts.sort_by_key(|(instance, _)| *instance);

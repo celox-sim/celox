@@ -2872,6 +2872,10 @@ impl super::super::SimBackend for NativeBackend {
         } else if count == 0 {
             (0, Ok(()))
         } else {
+            if fused_sequential {
+                self.lane_selectors
+                    .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
+            }
             (1, self.call_func_timed(event.comb_apply_func))
         }
     }
