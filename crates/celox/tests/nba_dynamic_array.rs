@@ -14,7 +14,6 @@ all_backends! {
     }
 
     fn test_static_ff_writes_are_applied_after_all_rhs_evaluation(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_static_ff_writes_are_applied_after_all_rhs_evaluation";
     }
 
@@ -22,17 +21,14 @@ all_backends! {
     // state. A dynamic array write in one block must not become visible to a
     // read in another block until all blocks for the edge have evaluated.
     fn test_dynamic_array_write_is_deferred_across_ff_blocks(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_dynamic_array_write_is_deferred_across_ff_blocks";
     }
 
     fn test_partial_sparse_chunks_do_not_overlap_adjacent_variables(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_partial_sparse_chunks_do_not_overlap_adjacent_variables";
     }
 
     fn test_always_ff_let_bindings_are_visible_immediately(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_always_ff_let_bindings_are_visible_immediately";
     }
 
@@ -46,7 +42,6 @@ all_backends! {
     }
 
     fn test_packed_rat_checkpoint_round_trip(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_packed_rat_checkpoint_round_trip";
     }
 
@@ -56,7 +51,6 @@ all_backends! {
     }
 
     fn test_line_write_loop_updates_large_sparse_ff_array(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_line_write_loop_updates_large_sparse_ff_array";
     }
 

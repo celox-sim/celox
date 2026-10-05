@@ -49,6 +49,30 @@ pub(super) fn size_system_function_call_type(
         sv_parser::SystemTfCall::ArgExpression(call) => {
             let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
             let arguments = call.nodes.1.nodes.1.0.contents();
+            // `$size(x, n)`: the number of elements of dimension `n`, counted
+            // from the outermost unpacked dimension (IEEE 1800-2023 20.7).
+            if name == "$size"
+                && let [Some(argument), Some(dimension)] = arguments.as_slice()
+            {
+                let identifier = match const_expr_from_expr(argument, syntax_tree)? {
+                    ConstExpr::Ident(identifier) => identifier,
+                    _ => return None,
+                };
+                let dimension = const_expr_from_expr(dimension, syntax_tree)
+                    .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))?;
+                let variable = dimensions?.get(&identifier)?;
+                let widths: Vec<&ConstExpr> = variable
+                    .unpacked
+                    .iter()
+                    .map(|dimension| &dimension.width)
+                    .chain(variable.packed.iter().map(|dimension| &dimension.width))
+                    .collect();
+                let width = widths.get(usize::try_from(dimension).ok()?.checked_sub(1)?)?;
+                return Some(ExprType {
+                    width: usize::try_from(eval_ast_const_expr(width, const_env)?).ok()?,
+                    signed: false,
+                });
+            }
             if arguments.len() != 1 {
                 return None;
             }
@@ -609,7 +633,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
-                packed: packed_dimension_widths(port.r#type().packed_ranges()),
+                packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
                 is_2state: port.r#type().kind() == TypeKind::Bit,
@@ -621,7 +645,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
-                packed: packed_dimension_widths(signal.r#type().packed_ranges()),
+                packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
                 is_2state: signal.r#type().kind() == TypeKind::Bit,
@@ -632,7 +656,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     PackedDimensions::new(dimensions, const_env, type_aliases)
 }
 
-fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
+pub(super) fn signal_packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
     ranges
         .iter()
         .map(|range| {
@@ -699,7 +723,7 @@ pub(super) fn unpacked_dimension_widths(ranges: &[UnpackedRange]) -> Vec<Unpacke
 }
 
 pub(super) fn function_packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
-    packed_dimension_widths(ranges)
+    signal_packed_dimension_widths(ranges)
         .into_iter()
         .map(|mut dimension| {
             dimension.normalize_single = true;

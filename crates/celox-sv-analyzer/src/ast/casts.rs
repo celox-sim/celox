@@ -115,7 +115,18 @@ pub(super) fn runtime_cast_expr(
         &expr,
         &packed_dimensions.expression_signedness,
         &packed_dimensions.functions,
-    )?;
+    )
+    .or_else(|| {
+        // A genvar or an untyped constant is an `int`.
+        let Expr::Ident(name) = &expr else {
+            return None;
+        };
+        const_env.contains_key(name).then(|| {
+            parameter_types_from_const_env(const_env)
+                .get(name)
+                .is_none_or(|r#type| r#type.signed)
+        })
+    })?;
     let expr = if cast_target_is_two_state(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
         Expr::Unary {
             op: UnaryOp::ToTwoState,

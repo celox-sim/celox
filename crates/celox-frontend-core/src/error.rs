@@ -50,6 +50,11 @@ pub enum ParserError {
         detail: String,
         source_location: Option<SourceLocation>,
     },
+    #[error("Invalid $readmemh input: {detail}")]
+    MemoryFile {
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
     #[error("Top module `{name}` not found in IR")]
     TopNotFound { name: String },
     #[error("Top module `{name}` is generic and cannot be used as a top-level module")]

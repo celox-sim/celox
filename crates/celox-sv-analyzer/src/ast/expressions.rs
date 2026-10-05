@@ -39,6 +39,25 @@ fn expr_from_expression_with_types_raw(
                 syntax_tree,
                 packed_dimensions,
             )?;
+            // `a ~^ b` is the complement of `a ^ b` (IEEE 1800-2023 11.4.8).
+            if matches!(
+                syntax_tree.get_str(&binary.nodes.1.nodes.0.nodes.0),
+                Some("~^" | "^~")
+            ) {
+                let right = expr_from_expression_with_types_raw(
+                    &binary.nodes.3,
+                    syntax_tree,
+                    packed_dimensions,
+                )?;
+                return Some(Expr::Unary {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::BitXor,
+                        right: Box::new(right),
+                    }),
+                });
+            }
             let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
             let right = expr_from_expression_with_types_raw(
                 &binary.nodes.3,
@@ -77,6 +96,16 @@ pub(super) fn expr_from_expression_for_lvalue(
     if let sv_parser::Expression::Primary(primary) = expr
         && let sv_parser::Primary::AssignmentPatternExpression(pattern) = &**primary
     {
+        if pattern.nodes.0.is_some() {
+            return patterns::typed_pattern(pattern, syntax_tree, packed_dimensions);
+        }
+        if let LValue::Ident(name) = lhs
+            && let Some(shape) = packed_dimensions.get(name)
+            && let Some(value) =
+                patterns::expr_from_pattern(&pattern.nodes.1, shape, syntax_tree, packed_dimensions)
+        {
+            return Some(value);
+        }
         return expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions);
     }
     expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
@@ -396,6 +425,9 @@ fn expr_from_primary_with_types(
             )?;
             runtime_cast_expr(cast, expr, syntax_tree, packed_dimensions)
         }
+        sv_parser::Primary::AssignmentPatternExpression(pattern) if pattern.nodes.0.is_some() => {
+            patterns::typed_pattern(pattern, syntax_tree, packed_dimensions)
+        }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
@@ -520,16 +552,31 @@ pub(super) fn expr_from_function_subroutine_call(
                 Vec::new()
             } else {
                 let mut lowered = Vec::new();
-                for expr in contents {
+                for (position, expr) in contents.into_iter().enumerate() {
                     let Some(expr) = expr.as_ref() else {
                         return Some(Expr::Call {
                             name: "$unsupported_function_call".to_string(),
                             args: Vec::new(),
                         });
                     };
-                    let Some(expr) =
+                    // An assignment pattern takes its shape from the formal.
+                    let pattern = patterns::pattern_expression(expr)
+                        .filter(|pattern| pattern.nodes.0.is_none())
+                        .and_then(|pattern| {
+                            let shape = packed_dimensions
+                                .subroutine_param_shapes
+                                .get(&name)?
+                                .get(position)?;
+                            patterns::expr_from_pattern(
+                                &pattern.nodes.1,
+                                shape,
+                                syntax_tree,
+                                packed_dimensions,
+                            )
+                        });
+                    let Some(expr) = pattern.or_else(|| {
                         expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                    else {
+                    }) else {
                         return Some(Expr::Call {
                             name: "$unsupported_function_call".to_string(),
                             args: Vec::new(),

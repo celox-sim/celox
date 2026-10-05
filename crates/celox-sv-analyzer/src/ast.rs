@@ -19,11 +19,13 @@ use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
 use crate::{AnalyzerError, typecheck};
 
+mod array_parameters;
 mod assignment_analysis;
 mod case;
 mod casts;
 mod comb_process;
 mod comb_rewrite;
+pub(crate) mod const_functions;
 mod constant_folding;
 mod constants;
 mod declarations;
@@ -37,32 +39,22 @@ mod instances;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+mod patterns;
+mod procedural;
 mod selects;
 mod statements;
 mod types;
 mod validation;
 
-use assignment_analysis::{
-    conditional_chain_has_complementary_final_predicate,
-    definitely_assigned_comb_targets_statement_or_null, lvalue_bit_range, lvalue_is_covered_by,
-    two_state_conditions_are_complements,
-};
-use case::{
-    conditional_assignments_from_case_statement, expr_is_two_state, mark_condition_context,
-    mark_exhaustive_fallback, two_state_case_item_reachability,
-};
+use assignment_analysis::two_state_conditions_are_complements;
+use case::expr_is_two_state;
 use casts::{
     cast_is_supported, constant_cast_const_expr, constant_cast_is_supported, expr_type_from_type,
     resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast, runtime_cast_expr,
     runtime_constant_cast_const_expr,
 };
-use comb_process::{comb_processes_from_module_node, fold_conditional_assignment_over};
-use comb_rewrite::{
-    comb_previous_value_placeholder, expr_contains_comb_previous_value,
-    expr_references_overlapping_lvalue, expr_static_width, lvalues_overlap,
-    overlapping_value_before, selected_value_after_write, substitute_intermediate_comb_value_reads,
-    whole_packed_lvalue,
-};
+use comb_process::comb_processes_from_module_node;
+use comb_rewrite::{expr_static_width, whole_packed_lvalue};
 use constant_folding::{
     fold_const_integral_expr_preserving_mask, simplify_constant_mux_conditions,
 };
@@ -71,11 +63,11 @@ use constants::{
     const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
     const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_lvalue_const,
     left_associate_expr_binary, next_genvar_value, primary_literal_text,
-    substitute_assignment_constants, substitute_assignment_constants_with_parameter_literals,
-    substitute_const_expr_constants, substitute_const_expr_constants_preserving_enum_types,
-    substitute_dimension_constants, substitute_expr_constants_with_parameter_literals,
-    substitute_lvalue_constants, substitute_process_constants,
-    substitute_process_constants_with_parameter_literals, unary_expr_from_symbol,
+    substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
+    substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
+    substitute_expr_constants_with_parameter_literals, substitute_lvalue_constants,
+    substitute_process_constants, substitute_process_constants_with_parameter_literals,
+    unary_expr_from_symbol,
 };
 use declarations::{
     identifier_locate, module_interface_from_node, module_name_from_node, module_non_port_items,
@@ -100,16 +92,14 @@ use expressions::{
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{
-    case_item_condition, case_keyword_is_wildcard, function_from_declaration,
-    function_local_packed_dimensions_from_block_item_iter,
+    function_from_declaration, function_local_packed_dimensions_from_block_item_iter,
     function_local_packed_dimensions_from_block_items,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
     function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
     procedural_truth_condition, tf_item_params, tf_params,
 };
 use inlining::{
-    expand_assignment_calls, expand_expr_calls, expand_ff_process_calls, expand_process_calls,
-    expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
+    expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
 };
 use instances::{
     connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,
@@ -123,12 +113,11 @@ use parameters::{
 };
 use selects::{
     add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
-    packed_index_offset, part_select_bounds, product_expr, variable_lvalue_from_node,
+    part_select_bounds, product_expr, variable_lvalue_from_node,
 };
 use statements::{
-    assignment_op_expr, coerce_procedural_assignment_rhs, combine_expr_condition_terms,
-    conditional_assignments_from_statement, conditional_assignments_from_statement_or_null,
-    expr_from_cond_predicate, expr_from_lvalue, lvalue_expr_type,
+    assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_cond_predicate,
+    expr_from_lvalue, lvalue_expr_type,
 };
 use types::{
     direction_from_port_direction, direction_from_ref_node, is_signed_from_ref_node,
@@ -142,9 +131,14 @@ use types::{
 };
 use validation::{
     AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs,
-    reject_unsupported_multidimensional_packed_bounds, static_for_loop_initial_value,
-    static_for_loop_iterations,
+    reject_unsupported_multidimensional_packed_bounds,
 };
+
+/// A procedural statement of the analyzer AST.
+pub type Stmt = crate::procedural::StmtBase<Expr, LValue>;
+pub type LocalVariable = crate::procedural::LocalVariableBase<crate::ir::Type>;
+pub type Subroutine = crate::procedural::SubroutineBase<Expr, LValue, crate::ir::Type>;
+pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, crate::ir::Type>;
 
 /// The positional interface of a module: its ports in declaration order and
 /// the parameters of its `#(...)` list that an instantiation may override.
@@ -308,9 +302,20 @@ pub struct Module {
     assignments: Vec<Assignment>,
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
+    initial_processes: Vec<InitialProcess>,
+    locals: Vec<LocalVariable>,
+    subroutines: Vec<Subroutine>,
+    /// The functions its constant expressions may call.
+    constant_functions: const_functions::ConstantFunctions,
 }
 
 impl Module {
+    /// Make the module's constant functions available to the constant
+    /// evaluator until the guard is dropped.
+    pub(crate) fn install_constant_functions(&self) -> impl Drop {
+        const_functions::install(self.constant_functions.clone())
+    }
+
     fn from_module_node_with_parameter_overrides<'a>(
         node: impl Into<RefNode<'a>>,
         syntax_tree: &SyntaxTree,
@@ -321,6 +326,16 @@ impl Module {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
         let mut type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+        // Constant functions see the module constants known so far; they are
+        // collected again once the parameters are known.
+        let _constant_functions =
+            const_functions::install(const_functions::module_constant_functions(
+                node.clone(),
+                syntax_tree,
+                &HashMap::default(),
+                &type_aliases,
+                &HashMap::default(),
+            ));
         let empty_parameter_overrides = HashMap::default();
         let applicable_parameter_overrides = if name == override_module_name {
             parameter_overrides
@@ -396,6 +411,14 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        const_functions::replace(const_functions::module_constant_functions(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+            &parameter_value_env(&parameters, &const_env),
+        ));
+        extend_const_env_with_parameters(&mut const_env, &parameters);
 
         match reject_silently_ignored_constructs(
             node.clone(),
@@ -475,8 +498,19 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
-        let signals =
+        let mut signals =
             signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+        let array_parameters = array_parameters::array_parameters_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        signals.extend(
+            array_parameters
+                .iter()
+                .map(|parameter| parameter.signal.clone()),
+        );
         for r#type in ports
             .iter()
             .map(Port::r#type)
@@ -597,6 +631,28 @@ impl Module {
                 });
             }
         }
+        let (subroutine_params, subroutine_shapes) = procedural::subroutine_argument_names(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
+        let mut locals = Vec::new();
+        let mut local_counter = 0usize;
+        let mut body_state = procedural::BodyState {
+            locals: &mut locals,
+            counter: &mut local_counter,
+            subroutine_params: &subroutine_params,
+        };
+        let subroutines = procedural::subroutines_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &packed_dimensions,
+            &parameter_values,
+            &mut body_state,
+        )?;
         let comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -605,9 +661,9 @@ impl Module {
             &functions,
             &expression_signedness,
             &parameter_values,
+            &mut body_state,
         )?
         .into_iter()
-        .map(|process| expand_process_calls(process, &functions, &expression_signedness))
         .map(|process| {
             substitute_process_constants_with_parameter_literals(
                 process,
@@ -622,32 +678,29 @@ impl Module {
             &const_env,
             &parameter_values,
             &packed_dimensions,
-        )?
-        .into_iter()
-        .map(|process| {
-            expand_ff_process_calls(
-                process,
-                &functions,
-                &expression_signedness,
-                &const_env,
-                &parameter_values,
-            )
-        })
-        .collect::<Vec<_>>();
+            &mut body_state,
+        )?;
+        let mut initial_processes = Vec::new();
+        for parameter in &array_parameters {
+            initial_processes.push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
+        }
+        initial_processes.extend(procedural::initial_processes_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &packed_dimensions,
+            &parameter_values,
+            &mut body_state,
+        )?);
+        let procedurally_written = procedural::written_names(
+            comb_processes
+                .iter()
+                .flat_map(|process| process.body.iter())
+                .chain(ff_processes.iter().flat_map(|process| process.body.iter())),
+        );
         if let Some(signal) = signals.iter().find(|signal| {
             signal.is_net()
-                && !comb_processes.iter().any(|process| {
-                    process
-                        .assignments()
-                        .iter()
-                        .any(|assignment| assignment.lhs() == signal.name())
-                })
-                && !ff_processes.iter().any(|process| {
-                    process
-                        .assignments()
-                        .iter()
-                        .any(|assignment| assignment.assignment().lhs() == signal.name())
-                })
+                && !procedurally_written.contains(signal.name())
                 && !instances.iter().any(|instance| {
                     instance.port_connections().iter().any(|connection| {
                         connection
@@ -675,6 +728,10 @@ impl Module {
             assignments,
             comb_processes,
             ff_processes,
+            initial_processes,
+            locals,
+            subroutines,
+            constant_functions: const_functions::installed(),
         })
     }
 
@@ -709,9 +766,19 @@ impl Module {
     pub fn ff_processes(&self) -> &[FfProcess] {
         &self.ff_processes
     }
-}
 
-const MAX_STATIC_PROCEDURAL_LOOP_EXPANSION: usize = 10_000;
+    pub fn initial_processes(&self) -> &[InitialProcess] {
+        &self.initial_processes
+    }
+
+    pub fn locals(&self) -> &[LocalVariable] {
+        &self.locals
+    }
+
+    pub fn subroutines(&self) -> &[Subroutine] {
+        &self.subroutines
+    }
+}
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 
@@ -1263,6 +1330,7 @@ pub struct CombProcess {
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
+    body: Vec<Stmt>,
 }
 
 impl CombProcess {
@@ -1271,11 +1339,33 @@ impl CombProcess {
         condition: Option<ConstExpr>,
         assignments: Vec<Assignment>,
     ) -> Self {
+        let body = assignments
+            .iter()
+            .map(|assignment| Stmt::Assign {
+                lhs: assignment.lhs.clone(),
+                rhs: assignment.rhs.clone(),
+                nonblocking: false,
+            })
+            .collect();
         Self {
             kind,
             condition,
             assignments,
+            body,
         }
+    }
+
+    fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
+        Self {
+            kind,
+            condition,
+            assignments: Vec::new(),
+            body,
+        }
+    }
+
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
     }
 
     pub fn kind(&self) -> CombProcessKind {
@@ -1300,23 +1390,37 @@ pub enum CombProcessKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
     events: Vec<FfEvent>,
-    assignments: Vec<ConditionalAssignment>,
+    body: Vec<Stmt>,
 }
 
 impl FfProcess {
-    fn new(events: Vec<FfEvent>, assignments: Vec<ConditionalAssignment>) -> Self {
-        Self {
-            events,
-            assignments,
-        }
+    fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
+        Self { events, body }
     }
 
     pub fn events(&self) -> &[FfEvent] {
         &self.events
     }
 
-    pub fn assignments(&self) -> &[ConditionalAssignment] {
-        &self.assignments
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
+    }
+}
+
+/// An `initial` process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialProcess {
+    condition: Option<ConstExpr>,
+    body: Vec<Stmt>,
+}
+
+impl InitialProcess {
+    pub fn condition(&self) -> Option<&ConstExpr> {
+        self.condition.as_ref()
+    }
+
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
     }
 }
 
@@ -1358,16 +1462,6 @@ pub struct ConditionalAssignment {
 }
 
 impl ConditionalAssignment {
-    fn new(condition: Option<Expr>, assignment: Assignment) -> Self {
-        Self {
-            condition,
-            assignment,
-            exhaustive_fallback_start: None,
-            guard_boundary: None,
-            path_epochs: Vec::new(),
-        }
-    }
-
     pub fn condition(&self) -> Option<&Expr> {
         self.condition.as_ref()
     }
@@ -1572,6 +1666,9 @@ struct PackedDimensions {
     parameter_values: HashMap<String, Expr>,
     expression_signedness: Arc<HashMap<String, bool>>,
     constant_indexed_base: bool,
+    /// The declared shape of each argument of each subroutine, for
+    /// assignment patterns passed as arguments.
+    subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
 }
 
 impl PackedDimensions {
@@ -1589,6 +1686,7 @@ impl PackedDimensions {
             parameter_values: HashMap::default(),
             expression_signedness: Arc::default(),
             constant_indexed_base: false,
+            subroutine_param_shapes: Arc::default(),
         }
     }
 }
@@ -1606,8 +1704,6 @@ impl DerefMut for PackedDimensions {
         &mut self.variables
     }
 }
-
-const MAX_DYNAMIC_SELECT_EXPANSION: u128 = 4_096;
 
 /// The outermost generate scope of a scoped name such as `g.x` or `g[0].x`,
 /// or `None` for a name declared directly in the module. An escaped scope
