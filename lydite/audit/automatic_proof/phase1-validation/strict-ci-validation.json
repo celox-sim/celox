@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "positive_passed": 11,
+  "mutants_original_replayed": 18,
+  "scope": "fixed generic automatic-proof CI; no RV32I hint-removal claim",
+  "checker_sha256": "eec650b6c2ab56e0c1e8256fbe703c1def6a7748f9cdbd0098b64055494648e0",
+  "per_query_limits": {
+    "work": 100000000,
+    "clauses": 1000000,
+    "timeout_ms": 10000
+  },
+  "external_solver_invoked": false,
+  "wall_seconds": 15.242335057002492,
+  "artifacts_rehashed": 1195,
+  "gate_unit_tests": 34,
+  "generator_tests": 4,
+  "rust_automatic_tests": 5,
+  "source_sha256": {
+    "audit/automatic_proof/ci.py": "e05983791db2584a97d0feda61924bc7c0c01eed6d40fd224472d5d4945d6f69",
+    "audit/automatic_proof/test_ci.py": "2697ce1846eddbfd125b73663d07d4804e6525382b1d0cb355821227677f9df5",
+    "audit/automatic_proof/ci-matrix.json": "639dc57a5d9b1b322ca0cf955aa030546db622f89ecd346a3512c135d2b6c1c1",
+    "conformance/veryl-symbolic/run_automatic_ci.sh": "08f0b195faf1b954f9887374cf55b83eff50792b037237f9925b8340e89dc0ae",
+    ".github/workflows/veryl-fv.yml": "ba739a79a143a0421d043d27177e7790e8e5399966d3c616934d245b771ffd13"
+  },
+  "independent_review": {
+    "status": "approved",
+    "gate_and_generator_tests": 38,
+    "fresh_cases_verified": 29,
+    "artifact_hashes_verified": 1195,
+    "source_and_checker_fingerprints_verified": 83,
+    "gate_status_sha256": "e158b39339108124791f5f31939fcd7b9e3af9822f520f0db83a8088ea583a81"
+  }
+}

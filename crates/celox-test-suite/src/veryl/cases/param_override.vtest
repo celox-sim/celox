@@ -1,0 +1,244 @@
+(group param_override (category types))
+
+(case test_param_override_basic_width
+  (source "test.veryl" #"
+        module Top #(
+            param WIDTH: u32 = 8,
+        )(
+            a: input  logic<WIDTH>,
+            b: output logic<WIDTH>,
+        ) {
+            assign b = a;
+        }
+    "#)
+  (top Top)
+  (modify (set a 0xAB))
+  (assert_eq b 0xAB))
+
+(case test_param_override_logic_reflection
+  (source "test.veryl" #"
+        module Top #(
+            param OFFSET: u32 = 10,
+        )(
+            a: input  logic<32>,
+            b: output logic<32>,
+        ) {
+            assign b = a + OFFSET;
+        }
+    "#)
+  (top Top)
+  (modify (set a 5))
+  (assert_eq b 15))
+
+(case test_param_override_default_value
+  (source "test.veryl" #"
+        module Top #(
+            param INIT: u32 = 42,
+        )(
+            o: output logic<32>,
+        ) {
+            assign o = INIT;
+        }
+    "#)
+  (top Top)
+  (assert_eq o 42))
+
+(case test_param_override_multiple
+  (source "test.veryl" #"
+        module Top #(
+            param A: u32 = 1,
+            param B: u32 = 2,
+        )(
+            o: output logic<32>,
+        ) {
+            assign o = A + B;
+        }
+    "#)
+  (top Top)
+  (assert_eq o 3))
+
+(case test_param_in_child_always_ff
+  (source "test.veryl" #"
+        module Counter #(
+            param N: u32 = 1024,
+        )(
+            clk:   input  '_ clock,
+            rst:   input  '_ reset,
+            start: input  logic,
+            done:  output logic,
+        ) {
+            var counter: logic<32>;
+            var running: logic;
+
+            always_ff (clk, rst) {
+                if_reset {
+                    counter = 0;
+                    running = 0;
+                } else {
+                    if start && !(|running) {
+                        counter = 0;
+                        running = 1;
+                    } else if (|running) {
+                        if counter == N - 1 {
+                            running = 0;
+                            counter = 0;
+                        } else {
+                            counter = counter + 1;
+                        }
+                    }
+                }
+            }
+
+            assign done = !(|running);
+        }
+
+        module Top (
+            clk:   input  '_ clock,
+            rst:   input  '_ reset,
+            start: input  logic,
+            done:  output logic,
+        ) {
+            inst u_counter: Counter #(N: 4) (
+                clk:   clk,
+                rst:   rst,
+                start: start,
+                done:  done,
+            );
+        }
+    "#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 1)
+    (set clk 0)
+    (set start 0))
+  (modify (set clk 1))
+  (modify (set rst 0))
+  ; Start
+  (modify (set start 1))
+  (modify (set clk 0))
+  (modify (set clk 1))
+  (modify (set start 0))
+  ; Clock N-1 = 3 more times
+  (for _ (range 0 3)
+    (modify (set clk 0))
+    (modify (set clk 1)))
+  (let done_val (get done))
+  (assert (== done_val 1) "done should be 1 after N=4 cycles (child override)"))
+
+(case test_param_const_fold_if
+  (source "test.veryl" #"
+        module Top #(
+            param MODE: u32 = 1,
+        )(
+            clk: input clock,
+            rst: input reset,
+            a: input logic<8>,
+            b: input logic<8>,
+            o: output logic<8>,
+        ) {
+            always_ff (clk, rst) {
+                if_reset {
+                    o = 0;
+                } else {
+                    if MODE == 1 {
+                        o = a;
+                    } else {
+                        o = b;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (modify
+    (set rst 1)
+    (set a 0xAA)
+    (set b 0xBB))
+  (tick clk)
+  (assert_eq o 0xAA "MODE=1 should select a"))
+
+(case test_param_override_child_propagation
+  (source "test.veryl" #"
+        module Child #(
+            param WIDTH: u32 = 8,
+        )(
+            i_data: input  logic<WIDTH>,
+            o_data: output logic<WIDTH>,
+        ) {
+            assign o_data = i_data;
+        }
+
+        module Top #(
+            param WIDTH: u32 = 8,
+        )(
+            a: input  logic<WIDTH>,
+            b: output logic<WIDTH>,
+        ) {
+            inst u_child: Child #(WIDTH: WIDTH) (
+                i_data: a,
+                o_data: b,
+            );
+        }
+    "#)
+  (top Top)
+  (modify (set a 0xAB))
+  (assert_eq b 0xAB))
+
+(case test_param_in_always_ff
+  (source "test.veryl" #"
+        module Top #(
+            param N: u32 = 8,
+        )(
+            clk:   input  '_ clock,
+            rst:   input  '_ reset,
+            start: input  logic,
+            done:  output logic,
+        ) {
+            var counter: logic<32>;
+            var running: logic;
+
+            always_ff (clk, rst) {
+                if_reset {
+                    counter = 0;
+                    running = 0;
+                } else {
+                    if start && !(|running) {
+                        counter = 0;
+                        running = 1;
+                    } else if (|running) {
+                        if counter == N - 1 {
+                            running = 0;
+                            counter = 0;
+                        } else {
+                            counter = counter + 1;
+                        }
+                    }
+                }
+            }
+
+            assign done = !(|running);
+        }
+    "#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 1)
+    (set clk 0)
+    (set start 0))
+  (modify (set clk 1))
+  (modify (set rst 0))
+  ; Start
+  (modify (set start 1))
+  (modify (set clk 0))
+  (modify (set clk 1))
+  (modify (set start 0))
+  ; Clock N-1 = 7 more times; counter should reach 7 and stop
+  (for i (range 0 7)
+    (modify (set clk 0))
+    (modify (set clk 1)))
+  ; After 8 total rising edges (1 start + 7 more), counter should have hit N-1=7
+  ; and running should be 0 -> done should be 1
+  (assert_eq done 1 "done should be 1 after N=8 cycles"))

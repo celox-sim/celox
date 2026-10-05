@@ -1,0 +1,46 @@
+specification "Intent bug: shared output admits no synchronized advance"
+
+spec One(output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+  operation advance { expect value' == value + 1u4; }
+  example one_step {
+    expect positive;
+    initial { count = 0u4; }
+    trace { advance { observe { count = 1u4; } } }
+  }
+}
+
+spec Two(output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+  operation advance { expect value' == value + 2u4; }
+  example one_step {
+    expect positive;
+    initial { count = 0u4; }
+    trace { advance { observe { count = 2u4; } } }
+  }
+}
+
+composition Contradiction(output value: bv<4>) {
+  // Multiple relational constraints may share an output. These disagree.
+  use One(count: value);
+  use Two(count: value);
+  example common_initial_state {
+    expect positive;
+    initial { value = 0u4; }
+    trace {}
+  }
+  example no_joint_extension {
+    expect negative;
+    initial {}
+    trace { advance {} }
+  }
+  example intended_operation {
+    expect positive;
+    initial { value = 0u4; }
+    trace { advance { observe { value = 1u4; } } }
+  }
+}

@@ -1461,13 +1461,10 @@ impl<'a> ModuleParser<'a> {
         module_id: ModuleId,
     ) -> Result<(), ParserError> {
         let child = self.external_modules.get(&module_id).ok_or_else(|| {
-            ParserError::unsupported(
-                64,
-                LoweringPhase::SimulatorParser,
-                "external module instantiation",
-                format!("module \"{external_name}\" was not supplied"),
-                None,
-            )
+            ParserError::MissingExternalModule {
+                name: external_name.to_string(),
+                source_location: None,
+            }
         })?;
         let Component::SystemVerilog(system_verilog) = decl.component.as_ref() else {
             unreachable!();
@@ -1742,85 +1739,12 @@ impl<'a> ModuleParser<'a> {
         radix: u32,
         context: &mut veryl_analyzer::Context,
     ) -> Result<ModuleInitialMemoryValue, ParserError> {
-        let dst = match output {
-            [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
-            [dst] => {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh destination",
-                    "destination must be a whole unpacked array variable",
-                    Some(&dst.token),
-                ));
-            }
-            _ => {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh destination",
-                    "concatenated destinations are not supported",
-                    None,
-                ));
-            }
-        };
-
-        let var = &self.module.variables[&dst.id];
-        let depth = var.r#type.total_array().ok_or_else(|| {
-            ParserError::unresolved_width(self.module, var, var.r#type.to_string())
+        let image = readmem_image(self.module, filename_arg, output, radix, |dst| {
+            dst.index.eval_value(context)
         })?;
-        let start_addr = if dst.index.0.is_empty() {
-            0
-        } else {
-            let Some(indices) = dst.index.eval_value(context) else {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh destination index",
-                    "destination index must be compile-time constant",
-                    Some(&dst.token),
-                ));
-            };
-            let Some(index) = var.r#type.array.calc_index(&indices) else {
-                return Err(ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh destination index",
-                    format!("destination index {indices:?} is out of range"),
-                    Some(&dst.token),
-                ));
-            };
-            index
-        };
-        if depth <= 1 {
-            return Err(ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh destination",
-                "destination must be an unpacked array",
-                Some(&dst.token),
-            ));
-        }
-
-        let total_width = resolve_total_width(self.module, var)?;
-        let element_width = total_width / depth;
-        if element_width == 0 || element_width * depth != total_width {
-            return Err(ParserError::unresolved_width(
-                self.module,
-                var,
-                var.r#type.to_string(),
-            ));
-        }
-
         Ok(ModuleInitialMemoryValue {
-            address: dst.id,
-            data: read_memory_file(
-                filename_arg,
-                radix,
-                element_width,
-                start_addr,
-                depth,
-                &dst.token,
-            )?,
+            address: image.var_id,
+            data: InitialMemoryData::Writes(image.runs),
         })
     }
 
@@ -2346,6 +2270,99 @@ pub(crate) fn visit_initial_statement(
     }
 }
 
+/// The writes performed by `$readmemh(filename, destination)`.
+pub(crate) struct ReadmemImage {
+    pub var_id: VarId,
+    pub runs: Vec<InitialMemoryWriteRun>,
+}
+
+/// Validate a `$readmemh` destination and read the file into write runs.
+///
+/// `index_values` resolves the destination's constant index prefix, if any.
+pub(crate) fn readmem_image(
+    module: &veryl_analyzer::ir::Module,
+    filename_arg: &SystemFunctionInput,
+    output: &[AssignDestination],
+    radix: u32,
+    index_values: impl FnOnce(&AssignDestination) -> Option<Vec<usize>>,
+) -> Result<ReadmemImage, ParserError> {
+    let dst = match output {
+        [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
+        [dst] => {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination",
+                "destination must be a whole unpacked array variable",
+                Some(&dst.token),
+            ));
+        }
+        _ => {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination",
+                "concatenated destinations are not supported",
+                None,
+            ));
+        }
+    };
+
+    let var = &module.variables[&dst.id];
+    let depth = var
+        .r#type
+        .total_array()
+        .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))?;
+    let start_addr = if dst.index.0.is_empty() {
+        0
+    } else {
+        let Some(indices) = index_values(dst) else {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination index",
+                "destination index must be compile-time constant",
+                Some(&dst.token),
+            ));
+        };
+        let Some(index) = var.r#type.array.calc_index(&indices) else {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination index",
+                format!("destination index {indices:?} is out of range"),
+                Some(&dst.token),
+            ));
+        };
+        index
+    };
+    if depth <= 1 {
+        return Err(ParserError::illegal_context(
+            "$readmemh destination",
+            "destination must be an unpacked array",
+            Some(&dst.token),
+        ));
+    }
+
+    let total_width = resolve_total_width(module, var)?;
+    let element_width = total_width / depth;
+    if element_width == 0 || element_width * depth != total_width {
+        return Err(ParserError::unresolved_width(
+            module,
+            var,
+            var.r#type.to_string(),
+        ));
+    }
+
+    let InitialMemoryData::Writes(runs) = read_memory_file(
+        filename_arg,
+        radix,
+        element_width,
+        start_addr,
+        depth,
+        &dst.token,
+    )?
+    else {
+        unreachable!("memory files are read as write runs");
+    };
+    Ok(ReadmemImage {
+        var_id: dst.id,
+        runs,
+    })
+}
+
 pub(crate) fn read_memory_file(
     filename_arg: &SystemFunctionInput,
     radix: u32,
@@ -2355,9 +2372,7 @@ pub(crate) fn read_memory_file(
     destination_token: &veryl_parser::token_range::TokenRange,
 ) -> Result<InitialMemoryData, ParserError> {
     let Some(filename) = static_string_expr(&filename_arg.0) else {
-        return Err(ParserError::unsupported(
-            111,
-            LoweringPhase::SimulatorParser,
+        return Err(ParserError::illegal_context(
             "$readmemh filename expression",
             "filename must be a compile-time string",
             Some(&filename_arg.0.comptime().token),
@@ -2379,10 +2394,7 @@ pub(crate) fn read_memory_file(
 
     let read_start = timing.then(Instant::now);
     let content = std::fs::read_to_string(&path).map_err(|err| {
-        ParserError::unsupported(
-            111,
-            LoweringPhase::SimulatorParser,
-            "$readmemh file",
+        ParserError::memory_file(
             format!("failed to read {}: {err}", path.display()),
             Some(&filename_arg.0.comptime().token),
         )
@@ -2625,10 +2637,7 @@ fn parse_memory_write_runs(
     for word_token in memory_tokens(content) {
         if let Some(address) = word_token.strip_prefix('@') {
             addr = usize::from_str_radix(address, 16).map_err(|err| {
-                ParserError::unsupported(
-                    111,
-                    LoweringPhase::SimulatorParser,
-                    "$readmemh address",
+                ParserError::memory_file(
                     format!("invalid address directive {word_token}: {err}"),
                     None,
                 )
@@ -2637,19 +2646,13 @@ fn parse_memory_write_runs(
         }
         let (value, mask) = parse_memory_word(&word_token, radix, width)?;
         let Some(dst_addr) = start_addr.checked_add(addr) else {
-            return Err(ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh address",
+            return Err(ParserError::memory_file(
                 "address exceeds destination depth",
                 Some(location),
             ));
         };
         if dst_addr >= depth {
-            return Err(ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh address",
+            return Err(ParserError::memory_file(
                 format!("address {dst_addr} exceeds destination depth {depth}"),
                 Some(location),
             ));
@@ -2679,13 +2682,7 @@ fn parse_memory_write_runs(
 
         words += 1;
         addr = addr.checked_add(1).ok_or_else(|| {
-            ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh address",
-                "address exceeds destination depth",
-                Some(location),
-            )
+            ParserError::memory_file("address exceeds destination depth", Some(location))
         })?;
     }
     Ok(ParsedMemoryWrites { runs, words })
@@ -2782,13 +2779,7 @@ fn parse_memory_word(
 }
 
 fn invalid_memory_word(token: &str) -> ParserError {
-    ParserError::unsupported(
-        111,
-        LoweringPhase::SimulatorParser,
-        "$readmemh data",
-        format!("invalid data token {token}"),
-        None,
-    )
+    ParserError::memory_file(format!("invalid data token {token}"), None)
 }
 
 fn resolve_readmem_path_with_fallback(

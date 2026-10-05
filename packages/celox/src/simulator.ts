@@ -5,6 +5,7 @@
  * for manually controlling clock edges via `tick()`.
  */
 
+import { SimulatorCheckpoint } from "./checkpoint.js";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
 import {
 	buildNapiOpts,
@@ -522,6 +523,9 @@ export class Simulator<P = Record<string, unknown>> {
 
 	/**
 	 * Read the raw 4-state (value + mask) pair for the named port.
+	 *
+	 * Like an output read through `dut`, this evaluates combinational logic
+	 * first when inputs changed since the last evaluation.
 	 */
 	fourState(portName: string): FourStateValue {
 		this.ensureAlive();
@@ -531,6 +535,10 @@ export class Simulator<P = Record<string, unknown>> {
 				`Unknown port '${portName}'. Available: ${Object.keys(this._layout).join(", ")}`,
 			);
 		}
+		if (this._state.dirty && sig.direction !== "input") {
+			this._handle.evalComb();
+			this._state.dirty = false;
+		}
 		const [value, mask] = readFourState(this._buffer, sig);
 		return { __fourState: true, value, mask };
 	}
@@ -539,6 +547,79 @@ export class Simulator<P = Record<string, unknown>> {
 	dump(timestamp: number): void {
 		this.ensureAlive();
 		this._handle.dump(timestamp);
+	}
+
+	/**
+	 * Save the design state.
+	 *
+	 * The checkpoint can be restored any number of times, into this simulator
+	 * or into another one created from the same design.
+	 */
+	checkpoint(): SimulatorCheckpoint {
+		this.ensureAlive();
+		if (!this._handle.checkpoint) {
+			throw new Error("This simulator does not support checkpoints");
+		}
+		return new SimulatorCheckpoint(this._handle.checkpoint());
+	}
+
+	/**
+	 * Return to the state saved in `checkpoint`.
+	 *
+	 * Throws if the checkpoint comes from another design. VCD output records
+	 * the restored values as changes at the next `dump()`.
+	 */
+	restore(checkpoint: SimulatorCheckpoint): void {
+		this.ensureAlive();
+		if (!this._handle.restore) {
+			throw new Error("This simulator does not support checkpoints");
+		}
+		this._handle.restore(checkpoint._native);
+		this._state.dirty = false;
+	}
+
+	/**
+	 * Finish the current VCD file and continue the waveform in a new file at
+	 * `path`, whose timestamps start over. Use it to record a simulator rewound
+	 * by `restore()` or `loadState()`: `dump()` rejects a timestamp earlier
+	 * than the last one it wrote.
+	 */
+	switchVcd(path: string): void {
+		this.ensureAlive();
+		if (!this._handle.switchVcd) {
+			throw new Error("This simulator does not support switching VCD files");
+		}
+		this._handle.switchVcd(path);
+	}
+
+	/**
+	 * Save the value of every state object, by signal path, as state file
+	 * bytes. Unlike a checkpoint, a state file loads into simulators built
+	 * with another backend or optimization level, and can be written to disk.
+	 */
+	saveState(): Uint8Array {
+		this.ensureAlive();
+		if (!this._handle.saveState) {
+			throw new Error("This simulator does not support state files");
+		}
+		const bytes = this._handle.saveState();
+		this._state.dirty = false;
+		return bytes;
+	}
+
+	/**
+	 * Load state file bytes saved by `saveState()`, matching signals by path.
+	 *
+	 * Throws without changing anything if a register, memory or input of this
+	 * design is missing from the file or has another width.
+	 */
+	loadState(bytes: Uint8Array): void {
+		this.ensureAlive();
+		if (!this._handle.loadState) {
+			throw new Error("This simulator does not support state files");
+		}
+		this._handle.loadState(bytes);
+		this._state.dirty = false;
 	}
 
 	/** Release native resources. */

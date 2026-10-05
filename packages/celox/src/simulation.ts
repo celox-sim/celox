@@ -5,6 +5,7 @@
  * for clock-driven simulation with automatic scheduling.
  */
 
+import { SimulationCheckpoint } from "./checkpoint.js";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
 import {
 	buildNapiOpts,
@@ -638,6 +639,9 @@ export class Simulation<P = Record<string, unknown>> {
 
 	/**
 	 * Read the raw 4-state (value + mask) pair for the named port.
+	 *
+	 * Like an output read through `dut`, this evaluates combinational logic
+	 * first when inputs changed since the last evaluation.
 	 */
 	fourState(portName: string): FourStateValue {
 		this.ensureAlive();
@@ -647,6 +651,10 @@ export class Simulation<P = Record<string, unknown>> {
 				`Unknown port '${portName}'. Available: ${Object.keys(this._layout).join(", ")}`,
 			);
 		}
+		if (this._state.dirty && sig.direction !== "input") {
+			this._handle.evalComb();
+			this._state.dirty = false;
+		}
 		const [value, mask] = readFourState(this._buffer, sig);
 		return { __fourState: true, value, mask };
 	}
@@ -655,6 +663,81 @@ export class Simulation<P = Record<string, unknown>> {
 	dump(timestamp: number): void {
 		this.ensureAlive();
 		this._handle.dump(timestamp);
+	}
+
+	/**
+	 * Save the design state, simulation time, clocks and pending events.
+	 *
+	 * The checkpoint can be restored any number of times, into this simulation
+	 * or into another one created from the same design.
+	 */
+	checkpoint(): SimulationCheckpoint {
+		this.ensureAlive();
+		if (!this._handle.checkpoint) {
+			throw new Error("This simulation does not support checkpoints");
+		}
+		return new SimulationCheckpoint(this._handle.checkpoint());
+	}
+
+	/**
+	 * Return to the state saved in `checkpoint`, including its simulation time.
+	 *
+	 * Throws if the checkpoint comes from another design, or if VCD output has
+	 * already passed the checkpoint's time; call `switchVcd()` first then.
+	 */
+	restore(checkpoint: SimulationCheckpoint): void {
+		this.ensureAlive();
+		if (!this._handle.restore) {
+			throw new Error("This simulation does not support checkpoints");
+		}
+		this._handle.restore(checkpoint._native);
+		this.syncClocks();
+		this._state.dirty = false;
+	}
+
+	/**
+	 * Finish the current VCD file and continue the waveform in a new file at
+	 * `path`, whose timestamps start over. Call it before `restore()` or
+	 * `loadState()` returns to a time the current file has already passed.
+	 */
+	switchVcd(path: string): void {
+		this.ensureAlive();
+		if (!this._handle.switchVcd) {
+			throw new Error("This simulation does not support switching VCD files");
+		}
+		this._handle.switchVcd(path);
+	}
+
+	/**
+	 * Save the value of every state object, by signal path, together with the
+	 * simulation time, clocks and pending events, as state file bytes.
+	 */
+	saveState(): Uint8Array {
+		this.ensureAlive();
+		if (!this._handle.saveState) {
+			throw new Error("This simulation does not support state files");
+		}
+		const bytes = this._handle.saveState();
+		this._state.dirty = false;
+		return bytes;
+	}
+
+	/**
+	 * Load state file bytes saved by `Simulation.saveState()`, including the
+	 * simulation time, clocks and pending events.
+	 *
+	 * Throws without changing anything if the file does not match this design
+	 * or was saved from a `Simulator`, or if VCD output has already passed the
+	 * saved time; call `switchVcd()` first then.
+	 */
+	loadState(bytes: Uint8Array): void {
+		this.ensureAlive();
+		if (!this._handle.loadState) {
+			throw new Error("This simulation does not support state files");
+		}
+		this._handle.loadState(bytes);
+		this.syncClocks();
+		this._state.dirty = false;
 	}
 
 	/** Release native resources. */
@@ -671,6 +754,21 @@ export class Simulation<P = Record<string, unknown>> {
 	// -----------------------------------------------------------------------
 	// Internal
 	// -----------------------------------------------------------------------
+
+	/** Rebuild the clock registry from the clocks the handle now runs. */
+	private syncClocks(): void {
+		const periods = this._handle.clockPeriods?.();
+		if (!periods) return;
+		const names = new Map<number, string>();
+		for (const [name, id] of Object.entries(this._events)) {
+			if (!names.has(id)) names.set(id, name);
+		}
+		this._clocks.clear();
+		for (const { eventId, period } of periods) {
+			const name = names.get(eventId);
+			if (name !== undefined) this._clocks.set(name, { period, eventId });
+		}
+	}
 
 	private resolveEvent(name: string): number {
 		const id = this._events[name];

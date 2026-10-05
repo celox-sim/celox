@@ -1,0 +1,63 @@
+{
+  "base_commit": "9bbc4a23f9e869825f65c81d0c4c22a0ddc64e77",
+  "changed_files": [
+    "README.md",
+    "SHA256SUMS",
+    "SHA256SUMS.json",
+    "audit/veryl_scaling/CPU-STORE-REUSE.md",
+    "audit/veryl_scaling/README.md",
+    "audit/veryl_scaling/cpu_store_reuse.py",
+    "audit/veryl_scaling/cpu_writable_memory.py",
+    "audit/veryl_scaling/results/memory-store-changed-files.json",
+    "audit/veryl_scaling/results/memory-store-clippy.log",
+    "audit/veryl_scaling/results/memory-store-independent-audit.json",
+    "audit/veryl_scaling/results/memory-store-local-gate-status.json",
+    "audit/veryl_scaling/results/memory-store-production.json",
+    "audit/veryl_scaling/results/memory-store-symbolic.log",
+    "audit/veryl_scaling/results/memory-store-tested-files.json",
+    "audit/veryl_scaling/results/memory-store-veryl-python-tests.log",
+    "audit/veryl_scaling/results/memory-store-workspace-tests.log",
+    "audit/veryl_scaling/test_array_store_differential.py",
+    "audit/veryl_scaling/test_cpu_store_reuse.py",
+    "audit/veryl_scaling/test_cpu_writable_memory.py",
+    "conformance/veryl-symbolic/pipeline_memory_ports_store.veryl",
+    "conformance/veryl-symbolic/run_ci.sh",
+    "conformance/veryl/test_finite_trace_check.py",
+    "crates/solver/src/finite.rs",
+    "crates/solver/src/finite/control.rs",
+    "crates/solver/src/finite/readonly.rs"
+  ],
+  "content_sha256": {
+    "README.md": "9044110505744c98b41fa5947797b7fb0b396936134722858afb906592ca0de2",
+    "audit/veryl_scaling/CPU-STORE-REUSE.md": "b66af0f8258e12b068df2171d5c9ac9fd0e766ce86082f3d15613a119d4fd042",
+    "audit/veryl_scaling/README.md": "d6f7d6e8bd1a559e8938207d4ec4b41670e83a36f204285973a4da93d3a82187",
+    "audit/veryl_scaling/cpu_store_reuse.py": "e10a80c23c2334d52de6f0f57bd4df8a1015236b0be63cac0583e8edcb9e2595",
+    "audit/veryl_scaling/cpu_writable_memory.py": "5bafcd01452085f6399ed8246a011b38e357b9fa73c75a53d052316822dad308",
+    "audit/veryl_scaling/results/memory-store-clippy.log": "f129fe5b8445b144a14cd8f55c5608c3dbcba7c45d4cedfdd5748c74adf42d32",
+    "audit/veryl_scaling/results/memory-store-independent-audit.json": "568d581e17fc559839360f33c4c6946f27b4727c87d75994982fb31f38832577",
+    "audit/veryl_scaling/results/memory-store-local-gate-status.json": "44a58af068b1e21802b84603c22576d679688203815236af97015bc3943fd96f",
+    "audit/veryl_scaling/results/memory-store-production.json": "8fc53cbd2a7bbf2a2b7ae306210810370392f9d1d2478844f21ba4691cd5971d",
+    "audit/veryl_scaling/results/memory-store-symbolic.log": "d757cb9e081e45d131dc41b1ff4c58d70e4d9bfe852c4899662f49bcd3864032",
+    "audit/veryl_scaling/results/memory-store-tested-files.json": "71b008e954d06071f9abd55ed8165bc5605e0f5ee2fa8506240cd21697a5c3db",
+    "audit/veryl_scaling/results/memory-store-veryl-python-tests.log": "5a29430921891dffa2bcb1d5d77ff720b7691db1e6f3de0119a0242fa4ed4562",
+    "audit/veryl_scaling/results/memory-store-workspace-tests.log": "320b7dc17bba5159203a127a57771eefb5546d326a1d07ee67c0aed2ada1c072",
+    "audit/veryl_scaling/test_array_store_differential.py": "a0fcb14dbaa27fee300bff190d6fc60386d40d42b8eb6bc6532a40c6e676d531",
+    "audit/veryl_scaling/test_cpu_store_reuse.py": "3eab72ec090fa7f75c4c0b194137f6489baeaa3243090c32066d6c629146b6e7",
+    "audit/veryl_scaling/test_cpu_writable_memory.py": "86087b25e86f77c7124e17fa2745737a36057ac7db58200dab1de03d3af20909",
+    "conformance/veryl-symbolic/pipeline_memory_ports_store.veryl": "25b96a016fa7471c9035f694e5bbb401361cb1aaf9b3756491e6973dda3e3803",
+    "conformance/veryl-symbolic/run_ci.sh": "58a6b6e10dbffb6df53fd8e8f76adf291db867012e834ffe99616c0340375a2f",
+    "conformance/veryl/test_finite_trace_check.py": "3deb484e09529d7f458c4c83c74ca1e30287d404e7fd74468fada6dd71e64b10",
+    "crates/solver/src/finite.rs": "46a94c18fc5bdb5d77d9608e231060a59d59957b109518c175c4ab9c63c137d9",
+    "crates/solver/src/finite/control.rs": "1ab52a80cc1dde041bf793a55e3a5da9d424631a950e6d0653a6c9a9bfbfb345",
+    "crates/solver/src/finite/readonly.rs": "46df9047094ea4ff1bb6a18fecb0cb642c6411408e5865b572b58818002ef06f"
+  },
+  "recursive_hash_exclusions": [
+    "SHA256SUMS",
+    "SHA256SUMS.json",
+    "audit/veryl_scaling/results/memory-store-changed-files.json"
+  ],
+  "preserved_unrelated_untracked": [
+    "results/report.json"
+  ],
+  "no_commit_or_push_performed": true
+}

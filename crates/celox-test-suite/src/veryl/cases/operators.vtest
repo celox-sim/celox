@@ -1,0 +1,797 @@
+(group operators (category operators))
+
+(case test_ternary_operator
+  (source "test.veryl" #"
+module Top (sel: input logic, a: input logic<8>, b: input logic<8>, o: output logic<8>) {
+assign o = if sel ? a : b ;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xAA)
+    (set b 0xBB))
+  ; sel = 1 -> o = a
+  (modify (set sel 1))
+  (assert_eq o 0xAA)
+  ; sel = 0 -> o = b
+  (modify (set sel 0))
+  (assert_eq o 0xBB))
+
+(case test_nested_ternary
+  (source "test.veryl" #"
+module Top (s1: input logic, s2: input logic, a: input logic<8>, b: input logic<8>, c: input logic<8>, o: output logic<8>) {
+assign o = if s1 ? (if s2 ? a : b) : c;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xAA)
+    (set b 0xBB))
+  ; s1=1, s2=0 -> b (0xBB)
+  (modify
+    (set s1 1)
+    (set s2 0))
+  (assert_eq o 0xBB))
+
+(case test_bitwise_operations
+  (source "test.veryl" #"
+module Top (a: input logic<8>, b: input logic<8>, o_and: output logic<8>, o_or: output logic<8>, o_xor: output logic<8>) {
+always_comb {
+o_and = a & b;
+o_or  = a | b;
+o_xor = a ^ b;
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xA5)
+    (set b 0x5A))
+  (assert_eq o_and 0x00)
+  (assert_eq o_or 0xFF)
+  (assert_eq o_xor 0xFF))
+
+(case test_shift_logical_vs_arithmetic
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o_shr: output logic<8>, o_sar: output logic<8>) {
+always_comb {
+o_shr = a >> 2;
+o_sar = a >>> 2;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0x80))
+  (assert_eq o_shr 0x20)
+  ; `a` is unsigned logic<8>, so arithmetic-right shift should behave like logical shift.
+  (assert_eq o_sar 0x20))
+
+(case test_signed_arithmetic_shift_right
+  (source "test.veryl" #"
+module Top (a: input i8, o_sar: output i8) {
+always_comb {
+o_sar = a >>> 2;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0x80))
+  ; -128
+  (assert_eq o_sar 0xE0))
+  ; -32
+
+(case test_subtraction_underflow
+  (source "test.veryl" #"
+module Top (a: input logic<8>, b: input logic<8>, o: output logic<8>) {
+assign o = a - b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x05)
+    (set b 0x0A))
+  (assert_eq o 0xFB))
+
+(case test_unary_operations
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o_bitnot: output logic<8>) {
+always_comb {
+o_bitnot = ~a;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0x55))
+  (assert_eq o_bitnot 0xAA))
+
+(case test_unary_plus_operator
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o: output logic<8>) {
+always_comb {
+o = +a;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0xA5))
+  (assert_eq o 0xA5))
+
+(case test_comparisons
+  (source "test.veryl" #"
+module Top (a: input logic<8>, b: input logic<8>, o_lt: output logic<1>, o_ge: output logic<1>) {
+always_comb {
+o_lt = a <: b;
+o_ge = a >= b;
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set a 10)
+    (set b 20))
+  (assert_eq o_lt 1)
+  (assert_eq o_ge 0))
+
+(case test_signed_comparison_and_extension
+  (source "test.veryl" #"
+module Top (a: input i8, b: input i8, o_lt: output logic) {
+assign o_lt = a <: b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xFB)
+    ; -5
+    (set b 0x02))
+    ; 2
+  (assert_eq o_lt 1))
+
+(case test_logical_operators_execution
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+b: input logic<8>,
+o_and: output logic,
+o_or:  output logic
+) {
+assign o_and = (|a) && (|b);
+assign o_or  = (|a) || (|b);
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x55)
+    (set b 0x00))
+  (assert_eq o_and 0)
+  (assert_eq o_or 1))
+
+(case test_reduction_operators_execution
+  (source "test.veryl" #"
+module Top (
+a: input logic<4>,
+o_and: output logic,
+o_or:  output logic
+) {
+assign o_and = &a;
+assign o_or  = |a;
+}
+"#)
+  (top Top)
+  (modify (set a 0xE))
+  (assert_eq o_and 0)
+  (assert_eq o_or 1))
+
+(case test_pow_operator_constant_exponent
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o: output logic<8>) {
+assign o = a ** 3;
+}
+"#)
+  (top Top)
+  (modify (set a 2))
+  (assert_eq o 8)
+  (modify (set a 3))
+  (assert_eq o 27))
+
+(case test_as_operator_passthrough
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o: output logic<8>) {
+assign o = a as u8;
+}
+"#)
+  (top Top)
+  (modify (set a 0xA5))
+  (assert_eq o 0xA5))
+
+(case test_pow_operator_constant_exponent_ff
+  (source "test.veryl" #"
+module Top (clk: input clock, a: input logic<8>, o: output logic<8>) {
+var r: logic<8>;
+always_ff {
+r = a ** 2;
+}
+assign o = r;
+}
+"#)
+  (top Top)
+  (modify (set a 5))
+  (tick clk)
+  (assert_eq o 25))
+
+(case test_pow_operator_runtime_exponent_comb_and_ff
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    base: input logic<8>,
+    exponent: input logic<4>,
+    comb_o: output logic<8>,
+    ff_o: output logic<8>,
+    comb_seen: output logic<4>,
+    ff_seen: output logic<4>,
+) {
+    function observe_exponent (
+        value: input logic<4>,
+        observed: output logic<4>,
+    ) -> logic<4> {
+        observed = value;
+        return value;
+    }
+    assign comb_o = base ** observe_exponent(exponent, comb_seen);
+    always_ff (clk) {
+        ff_o = base ** observe_exponent(exponent, ff_seen);
+    }
+}
+"#)
+  (top Top)
+  (for (base_value exponent_value expected) (list (3 4 81) (7 0 1) (2 8 0))
+    (modify
+      (set base base_value)
+      (set exponent exponent_value))
+    (tick clk)
+    (assert_eq comb_o expected)
+    (assert_eq ff_o expected)
+    (assert_eq comb_seen exponent_value)
+    (assert_eq ff_seen exponent_value)))
+
+(case test_pow_operator_runtime_signed_and_unknown_operands
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    base: input signed logic<8>,
+    exponent: input signed logic<4>,
+    comb_o: output signed logic<8>,
+    ff_o: output signed logic<8>,
+) {
+    assign comb_o = base ** exponent;
+    always_ff (clk) {
+        ff_o = base ** exponent;
+    }
+}
+"#)
+  (top Top)
+  (for (base_value exponent_value expected) (list (2 0x0f 0) (1 0x0d 1) (0xff 0x0d 0xff) (0xff 0x0e 1))
+    (modify
+      (set base base_value)
+      (set exponent exponent_value))
+    (tick clk)
+    (assert_eq comb_o expected)
+    (assert_eq ff_o expected))
+  (let full_unknown 0xff)
+  (modify
+    (set base (fourstate 0 0))
+    (set exponent (fourstate 2 1)))
+  (tick clk)
+  (assert_eq comb_o (fourstate full_unknown full_unknown))
+  (assert_eq ff_o (fourstate full_unknown full_unknown)))
+
+(case test_signed_comparison_after_as_cast
+  (source "test.veryl" #"
+module Top (a: input logic<8>, b: input logic<8>, y: output logic) {
+assign y = (a as i8) <: (b as i8);
+}
+"#)
+  (top Top)
+  ; -1 < 1 should be true after signed cast.
+  (modify
+    (set a 0xFF)
+    (set b 0x01))
+  (assert_eq y 1))
+
+(case test_cast_signed_to_unsigned_affects_comparison
+  ; Veryl 0.20.2's runtime keeps the source signedness for this cast;
+  ; the analyzer and emitted SystemVerilog make the result unsigned.
+  (source "test.veryl" #"
+module Top (a: input i8, b: input i8, y: output logic) {
+assign y = (a as u8) <: (b as u8);
+}
+"#)
+  (top Top)
+  ; Signed: -1 < 1 is true, but after cast to u8: 255 < 1 is false.
+  (modify
+    (set a 0xFF)
+    (set b 0x01))
+  (assert_eq y 0))
+
+(case test_symbolic_store_preserves_declared_state_signedness
+  (source "test.veryl" #"
+module Top (
+    sel:           input  logic,
+    signed_value:  input  signed logic<8>,
+    signed_lhs:    input  signed logic<8>,
+    unsigned_cmp:  output logic,
+    unsigned_wide: output logic<16>,
+    signed_cmp:    output logic
+) {
+    var unsigned_state: logic<8>;
+    var signed_state: signed logic<8>;
+    always_comb {
+        unsigned_state = 8'd0;
+        signed_state = signed_value;
+        if sel {
+            unsigned_state = signed_value;
+        }
+        unsigned_cmp = signed_lhs >: unsigned_state;
+        unsigned_wide = unsigned_state;
+        signed_cmp = signed_lhs >: signed_state;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set sel 1)
+    (set signed_value 0xff)
+    ; -1 as signed logic<8>
+    (set signed_lhs 1))
+  ; An assignment changes the stored bits, not the declared type of the
+  ; variable read by the following expressions.
+  (assert_eq unsigned_cmp 0)
+  ; unsigned 1 > 255
+  (assert_eq unsigned_wide 0x00ff)
+  (assert_eq signed_cmp 1))
+  ; signed 1 > -1
+
+(case test_unsigned_type_cast_does_not_inherit_source_signedness
+  (source "test.veryl" #"
+module Top (
+    sel:       input  logic,
+    signed_in: input  signed logic<5>,
+    lhs:       input  signed logic<8>,
+    cmp:       output logic,
+    wide:      output logic<12>
+) {
+    var state: logic<8>;
+    always_comb {
+        state = 8'd0;
+        if sel {
+            state = signed_in as u8;
+        }
+        cmp = lhs >: state;
+        wide = state;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set sel 1)
+    ; Resizing to u8 first preserves the signed source bits (0xff), then
+    ; the result is reinterpreted as unsigned.
+    (set signed_in 0x1f)
+    (set lhs 0x20))
+  (assert_eq cmp 0)
+  ; unsigned 32 > 255 is false
+  (assert_eq wide 0x00ff))
+
+(case test_comb_div
+  (source "test.veryl" #"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+q: output logic<16>
+) {
+assign q = a / b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq q 14)
+  ; 100/7 = 14
+  (modify
+    (set a 255)
+    (set b 16))
+  (assert_eq q 15))
+  ; 255/16 = 15
+
+(case test_comb_rem
+  (source "test.veryl" #"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+r: output logic<16>
+) {
+assign r = a % b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq r 2)
+  ; 100%7 = 2
+  (modify
+    (set a 255)
+    (set b 16))
+  (assert_eq r 15))
+  ; 255%16 = 15
+
+(case test_ternary_div_zero_branch_is_lazy
+  (source "test.veryl" #"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+q: output logic<16>
+) {
+assign q = if b == 16'd0 ? 16'hFFFF : a / b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 0))
+  (assert_eq q 0xFFFF)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq q 14))
+
+(case test_ternary_rem_zero_branch_is_lazy
+  (source "test.veryl" #"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+r: output logic<16>
+) {
+assign r = if b == 16'd0 ? a : a % b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 0))
+  (assert_eq r 100)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq r 2))
+
+(case test_ff_div
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<16>,
+b:   input  logic<16>,
+q:   output logic<16>
+) {
+var r: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r = 16'd0;
+} else {
+r = a / b;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0)
+    (set b 1))
+  (tick clk)
+  (assert_eq q 0)
+  (modify
+    (set rst 1)
+    (set a 42)
+    (set b 5))
+  (tick clk)
+  (assert_eq q 8))
+  ; 42/5 = 8
+
+(case test_ff_rem
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<16>,
+b:   input  logic<16>,
+q:   output logic<16>
+) {
+var r: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r = 16'd0;
+} else {
+r = a % b;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0)
+    (set b 1))
+  (tick clk)
+  (assert_eq q 0)
+  (modify
+    (set rst 1)
+    (set a 42)
+    (set b 5))
+  (tick clk)
+  (assert_eq q 2))
+  ; 42%5 = 2
+
+(case test_comb_bitxnor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+y: output logic<8>
+) {
+assign y = a ~^ b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xF0)
+    (set b 0xFF))
+  ; XNOR: ~(0xF0 ^ 0xFF) = ~0x0F = 0xF0
+  (assert_eq y 0xF0)
+  (modify
+    (set a 0xAA)
+    (set b 0x55))
+  ; XNOR: ~(0xAA ^ 0x55) = ~0xFF = 0x00
+  (assert_eq y 0x00))
+
+(case test_ff_bitxnor
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<8>,
+b:   input  logic<8>,
+y:   output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'd0;
+} else {
+r = a ~^ b;
+}
+}
+assign y = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0)
+    (set b 0))
+  (tick clk)
+  (assert_eq y 0)
+  (modify
+    (set rst 1)
+    (set a 0xF0)
+    (set b 0xFF))
+  (tick clk)
+  (assert_eq y 0xF0))
+
+(case test_comb_reduction_nand
+  (source "test.veryl" #"
+module Top (
+a: input  logic<8>,
+y: output logic
+) {
+assign y = ~&a;
+}
+"#)
+  (top Top)
+  (modify (set a 0xFF))
+  (assert_eq y 0)
+  ; all 1s -> NAND = 0
+  (modify (set a 0xFE))
+  (assert_eq y 1)
+  ; not all 1s -> NAND = 1
+  (modify (set a 0x00))
+  (assert_eq y 1))
+  ; all 0s -> NAND = 1
+
+(case test_comb_reduction_nor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<8>,
+y: output logic
+) {
+assign y = ~|a;
+}
+"#)
+  (top Top)
+  (modify (set a 0x00))
+  (assert_eq y 1)
+  ; all 0s -> NOR = 1
+  (modify (set a 0x01))
+  (assert_eq y 0)
+  ; not all 0s -> NOR = 0
+  (modify (set a 0xFF))
+  (assert_eq y 0))
+  ; NOR = 0
+
+(case test_comb_reduction_xnor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<8>,
+y: output logic
+) {
+assign y = ~^a;
+}
+"#)
+  (top Top)
+  (modify (set a 0x00))
+  (assert_eq y 1)
+  ; 0 ones (even) -> 1
+  (modify (set a 0x01))
+  (assert_eq y 0)
+  ; 1 one (odd) -> 0
+  (modify (set a 0x03))
+  (assert_eq y 1))
+  ; 2 ones (even) -> 1
+
+(case test_ff_reduction_nand
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<8>,
+y:   output logic
+) {
+var r: logic;
+always_ff (clk, rst) {
+if_reset {
+r = 1'b0;
+} else {
+r = ~&a;
+}
+}
+assign y = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0))
+  (tick clk)
+  (assert_eq y 0)
+  (modify
+    (set rst 1)
+    (set a 0xFF))
+  (tick clk)
+  (assert_eq y 0)
+  ; all 1s -> 0
+  (modify (set a 0xFE))
+  (tick clk)
+  (assert_eq y 1))
+  ; not all 1s -> 1
+
+(case test_ff_comb_constant_folding_consistency
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+o_ff: output logic<128>,
+o_comb: output logic<128>
+) {
+always_ff (clk) {
+o_ff = 32'hffff_ffff + 1;
+}
+always_comb {
+o_comb = 32'hffff_ffff + 1;
+}
+}
+"#)
+  (top Top)
+  ; Check constant folding independently of the initialization policy.
+  ; test_ff_constant_two_state_initialization covers the zero-start contract.
+  (let expected (<< 1 32))
+  (assert_eq o_comb expected "always_comb constant folding failed")
+  ; After tick: o_ff is evaluated
+  (tick clk)
+  (assert_eq o_ff expected "always_ff constant folding failed")
+  (assert_eq o_comb expected))
+
+(case test_ff_constant_two_state_initialization
+  (tags two_state_initialization)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    q: output logic<128>,
+) {
+    always_ff (clk) {
+        q = 128'h1_0000_0000;
+    }
+}
+"#)
+  (top Top)
+  ; Fresh two-state storage starts at zero, even with constant D.
+  (assert_eq q 0)
+  (tick clk)
+  (assert_eq q (<< 1 32)))
+
+(case test_ff_reduction_nor
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<8>,
+y:   output logic
+) {
+var r: logic;
+always_ff (clk, rst) {
+if_reset {
+r = 1'b0;
+} else {
+r = ~|a;
+}
+}
+assign y = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0))
+  (tick clk)
+  (assert_eq y 0)
+  (modify
+    (set rst 1)
+    (set a 0x00))
+  (tick clk)
+  (assert_eq y 1)
+  ; all 0s -> 1
+  (modify (set a 0x01))
+  (tick clk)
+  (assert_eq y 0))
+  ; not all 0s -> 0
+
+(case test_mixed_signed_unsigned_comparison
+  (source "test.veryl" #"
+module Top (
+o_const: output logic,
+o_var:   output logic,
+o_signed_op: output logic
+) {
+// -8'sd1 (255) >: 8'd1 (1) -> true (1)
+assign o_const = -8'sd1 >: 8'd1;
+var a: i8;
+var b: u8;
+always_comb {
+a = -8'sd1;
+b = 8'd1;
+// Treated as unsigned: 255 > 1 -> true (1)
+o_var = a >: b;
+// To force signed comparison (if desired), both sides must be signed
+// but Veryl doesn't have a direct "signed comparison" operator that
+// overrides 11.8.1 other than casting both to signed.
+o_signed_op = a >: (b as i8);
+}
+}
+"#)
+  (top Top)
+  (assert_eq o_const 1 "Mixed signed/unsigned constant comparison failed")
+  (assert_eq o_var 1 "Mixed signed/unsigned variable comparison failed")
+  (assert_eq o_signed_op 0 "Mixed signed/unsigned (cast to signed) comparison failed"))

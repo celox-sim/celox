@@ -1,0 +1,41 @@
+{
+  "status": "passed",
+  "exit_code": 0,
+  "external_solver_invoked": false,
+  "base_commit": "1578e051213cce5351267189ee78d5075f83b204",
+  "command": "source /workspace/scratch/07f10565586c/recovered/tools/env.sh && ./conformance/veryl-symbolic/run_ci.sh FRESH_EVIDENCE_DIR",
+  "formal_case_counts": {
+    "cases": 28,
+    "scaling-regression": 18,
+    "cpu-capacity-regression": 28,
+    "register-scaling-regression": 42,
+    "memory-contract-regression": 41
+  },
+  "total_cases": 157,
+  "python_gate_tests": 7,
+  "register_concrete_tests": 24,
+  "memory_boundary_tests": 22,
+  "finite_runtime_sir_solver_tests": 62,
+  "workspace_tests": 251,
+  "workspace_fmt_check": "passed",
+  "workspace_clippy_all_targets_D_warnings": "passed",
+  "workspace_test_note": "Historical workspace tests used the existing Z3 binary; all symbolic/boundary runtime proofs and strict gates used finite with no Z3 fallback.",
+  "new_concrete_statistics": {
+    "composition_ticks": 720,
+    "cpu_loads": 101,
+    "cpu_resets": 43,
+    "cpu_retirements": 1716,
+    "cpu_stalls": 216,
+    "cpu_ticks": 2240,
+    "integer_isa_steps": 12288,
+    "killed_fetches": 54,
+    "load_use_bubbles": 34,
+    "lookup_cases": 384,
+    "memory_reads": 768,
+    "scope": "finite concrete regression, not universal proof",
+    "taken_branches": 54
+  },
+  "tested_source_hashes_match_final_files": true,
+  "local_CPU_contract_identical_between_standalone_and_full_CI": true,
+  "first_integration_attempt": "Test-only synthetic mutant report had an obsolete top-level status. Corrected expected fixture label; clean full integration rerun passed. No proof obligations weakened."
+}

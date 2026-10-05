@@ -1,0 +1,87 @@
+{
+  "boundary": "actual Veryl-emitted SystemVerilog simulated by Verilator; independent handwritten integer oracle; synthetic Harvard memory contract",
+  "cases": 171,
+  "expected_retirements": 4803,
+  "instruction_names": [
+    "ADD",
+    "ADDI",
+    "AND",
+    "ANDI",
+    "AUIPC",
+    "BEQ",
+    "BGE",
+    "BGEU",
+    "BLT",
+    "BLTU",
+    "BNE",
+    "EBREAK",
+    "ECALL",
+    "FENCE",
+    "JAL",
+    "JALR",
+    "LB",
+    "LBU",
+    "LH",
+    "LHU",
+    "LUI",
+    "LW",
+    "OR",
+    "ORI",
+    "SB",
+    "SH",
+    "SLL",
+    "SLLI",
+    "SLT",
+    "SLTI",
+    "SLTIU",
+    "SLTU",
+    "SRA",
+    "SRAI",
+    "SRL",
+    "SRLI",
+    "SUB",
+    "SW",
+    "XOR",
+    "XORI"
+  ],
+  "sv_sha256": "fbf7ddb898859df4c600b91ce1fd960112dc69309e9eff8f10890068f00943df",
+  "returncode": 0,
+  "tail": [
+    "PASS cases=171 retirements=4803 sameedge_store_load=37 stalls=1842 observed_enabled_latency=4..6",
+    "- /workspace/shared/rv32i-split-sv-tests/tb.sv:72: Verilog $finish",
+    "- S i m u l a t i o n   R e p o r t: Verilator 5.053 devel",
+    "- Verilator: $finish at 70ns; walltime 0.045 s; speed 1.553 us/s",
+    "- Verilator: cpu 0.045 s on 1 threads; allocated 2 MB"
+  ],
+  "observed_enabled_edge_latency_histogram": {
+    "4": 4368,
+    "5": 350,
+    "6": 85
+  },
+  "latency_examples": {
+    "4": {
+      "case": 0,
+      "name": "alu_edges",
+      "retirement_index": 0,
+      "dynamic_token_id": 0
+    },
+    "5": {
+      "case": 0,
+      "name": "alu_edges",
+      "retirement_index": 1,
+      "dynamic_token_id": 1
+    },
+    "6": {
+      "case": 58,
+      "name": "lanes_store_load",
+      "retirement_index": 3,
+      "dynamic_token_id": 2030
+    }
+  },
+  "sequential_state_variables_checked": 89,
+  "limits": [
+    "Finite concrete simulation, not universal refinement or latency proof",
+    "Synthetic Harvard memory; not physical RAM integration",
+    "Latency measured from accepted fetch edge to own retire edge; global stalls excluded; younger flushes removed by dynamic FIFO"
+  ]
+}

@@ -382,6 +382,10 @@ pub(super) fn finish_requested() -> bool {
     STATE.with_borrow(|state| state.finish)
 }
 
+pub(super) fn request_finish() {
+    STATE.with_borrow_mut(|state| state.finish = true);
+}
+
 pub(super) fn fail(message: String) {
     STATE.with_borrow_mut(|state| {
         state.error.get_or_insert(message);

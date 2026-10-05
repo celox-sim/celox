@@ -1,0 +1,332 @@
+(group function_bodies (category functions))
+
+;; A function-local variable written through a runtime index keeps its other
+;; bits, in both combinational and clocked callers.
+(case test_dynamic_index_write_to_function_local
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            i: input logic<3>,
+            v: input logic,
+            q_comb: output logic<8>,
+            q_ff: output logic<8>,
+        ) {
+            function set_bit (idx: input logic<3>, value: input logic) -> logic<8> {
+                var t: logic<8>;
+                t = 8'h0f;
+                t[idx] = value;
+                return t;
+            }
+            assign q_comb = set_bit(i, v);
+            always_ff (clk) {
+                q_ff = set_bit(i, v);
+            }
+        }
+    "#)
+  (top Top)
+  (for (index value) (list (0 0) (3 0) (4 1) (7 1) (5 0))
+    (modify (set i index) (set v value))
+    (tick clk)
+    (let expected (| (& 0x0f (^ 0xff (<< 1 index))) (<< value index)))
+    (assert_eq q_comb expected)
+    (assert_eq q_ff expected)))
+
+;; An out-of-range runtime index must not write a neighbouring element
+;; (IEEE 1800-2023 7.4.6).
+(case test_out_of_range_dynamic_write_to_function_local_is_ignored
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            i: input logic<2>,
+            v: input logic<4>,
+            q: output logic<12>,
+        ) {
+            function put (idx: input logic<2>, value: input logic<4>) -> logic<12> {
+                var m: logic<4> [3];
+                m[0] = 4'h1;
+                m[1] = 4'h2;
+                m[2] = 4'h3;
+                m[idx] = value;
+                return {m[2], m[1], m[0]};
+            }
+            always_ff (clk) {
+                q = put(i, v);
+            }
+        }
+    "#)
+  (top Top)
+  (for index (range 0 4)
+    (modify (set i index) (set v 0xa))
+    (tick clk)
+    (assert_eq q
+      (? (< index 3)
+        (| (& 0x321 (^ 0xfff (<< 0xf (* 4 index)))) (<< 0xa (* 4 index)))
+        0x321)
+      "index {index}")))
+
+;; A concatenated destination receives consecutive slices of the value, the
+;; last destination taking the least-significant bits.
+(case test_concatenated_destination_in_function_body
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            q_comb: output logic<8>,
+            q_ff: output logic<8>,
+        ) {
+            function swap_nibbles (x: input logic<8>) -> logic<8> {
+                var hi: logic<4>;
+                var lo: logic<4>;
+                {hi, lo} = x;
+                return {lo, hi};
+            }
+            assign q_comb = swap_nibbles(a);
+            always_ff (clk) {
+                q_ff = swap_nibbles(a);
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 0x12 0xa5 0xf0 0x0f)
+    (modify (set a value))
+    (tick clk)
+    (let expected (| (trunc 8 (<< value 4)) (>> value 4)))
+    (assert_eq q_comb expected)
+    (assert_eq q_ff expected)))
+
+;; Output arguments of a nested call may be bound to a concatenation or to a
+;; runtime-indexed function local.
+(case test_nested_output_to_concat_and_dynamic_local
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            i: input logic<3>,
+            q_swap: output logic<8>,
+            q_bit: output logic<8>,
+        ) {
+            function copy (x: input logic<8>, o: output logic<8>) {
+                o = x;
+            }
+            function set_one (o: output logic) {
+                o = 1'b1;
+            }
+            function swap (x: input logic<8>) -> logic<8> {
+                var hi: logic<4>;
+                var lo: logic<4>;
+                copy(x, {hi, lo});
+                return {lo, hi};
+            }
+            function one_hot (idx: input logic<3>) -> logic<8> {
+                var t: logic<8>;
+                t = 8'h00;
+                set_one(t[idx]);
+                return t;
+            }
+            always_ff (clk) {
+                q_swap = swap(a);
+                q_bit = one_hot(i);
+            }
+        }
+    "#)
+  (top Top)
+  (for (value index) (list (0x12 0) (0xa5 7) (0x3c 2))
+    (modify (set a value) (set i index))
+    (tick clk)
+    (assert_eq q_swap (| (trunc 8 (<< value 4)) (>> value 4)))
+    (assert_eq q_bit (<< 1 index))))
+
+;; Falling off the end of a function returns the uninitialized return value.
+(case test_path_without_return_yields_unknown
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            q_comb: output logic<8>,
+            q_ff: output logic<8>,
+        ) {
+            function only_zero (x: input logic<8>) -> logic<8> {
+                if x == 8'd0 {
+                    return 8'd1;
+                }
+            }
+            assign q_comb = only_zero(a);
+            always_ff (clk) {
+                q_ff = only_zero(a);
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set a 0))
+  (tick clk)
+  (assert_eq q_comb 1)
+  (assert_eq q_ff 1)
+  (modify (set a 5))
+  (tick clk)
+  (assert (== (xmask (get q_comb)) 0xff))
+  (assert (== (xmask (get q_ff)) 0xff)))
+
+;; A formal bound to an arbitrary expression can be indexed at runtime.
+(case test_runtime_select_of_expression_bound_formal
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            b: input logic<8>,
+            w: input logic<16>,
+            s: input logic<3>,
+            q_bit: output logic,
+            q_part: output logic<2>,
+            q_chained: output logic<2>,
+        ) {
+            function bit_of (x: input logic<8>, i: input logic<3>) -> logic {
+                return x[i];
+            }
+            function pair_of (x: input logic<8>, i: input logic<3>) -> logic<2> {
+                return x[i * 2+:2];
+            }
+            always_ff (clk) {
+                q_bit = bit_of(a ^ b, s);
+                q_part = pair_of(a ^ b, s);
+                q_chained = pair_of(w[11:4], s);
+            }
+        }
+    "#)
+  (top Top)
+  (for (x y wide index) (list (0x5a 0x0f 0x1234 0) (0xa5 0x3c 0xbeef 1) (0xff 0x00 0xc3a5 2) (0x81 0x18 0x0ff0 3))
+    (modify (set a x) (set b y) (set w wide) (set s index))
+    (tick clk)
+    (let value (^ x y))
+    (let field (trunc 8 (>> wide 4)))
+    (assert_eq q_bit (& (>> value index) 1))
+    (assert_eq q_part (& (>> value (* index 2)) 3))
+    (assert_eq q_chained (& (>> field (* index 2)) 3))))
+
+;; A loop bound known only at runtime, including an early return from the
+;; loop body.
+(case test_runtime_bounded_loop_in_function
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            n: input logic<4>,
+            count_comb: output logic<4>,
+            count_ff: output logic<4>,
+            first_comb: output logic<4>,
+            first_ff: output logic<4>,
+        ) {
+            function count_low (x: input logic<8>, limit: input logic<4>) -> logic<4> {
+                var c: logic<4>;
+                c = 4'd0;
+                for i in 0..limit {
+                    c += {3'b0, x[i]};
+                }
+                return c;
+            }
+            function first_set (x: input logic<8>, limit: input logic<4>) -> logic<4> {
+                for i in 0..limit {
+                    if x[i] {
+                        return i as 4;
+                    }
+                }
+                return 4'hf;
+            }
+            assign count_comb = count_low(a, n);
+            assign first_comb = first_set(a, n);
+            always_ff (clk) {
+                count_ff = count_low(a, n);
+                first_ff = first_set(a, n);
+            }
+        }
+    "#)
+  (top Top)
+  (for (value limit count first) (list (0xb6 8 5 1) (0xb6 3 2 1) (0xb6 0 0 15) (0x80 7 0 15) (0x80 8 1 7) (0xff 5 5 0))
+    (modify (set a value) (set n limit))
+    (tick clk)
+    (assert_eq count_comb count "count {value} {limit}")
+    (assert_eq count_ff count "count {value} {limit}")
+    (assert_eq first_comb first "first {value} {limit}")
+    (assert_eq first_ff first "first {value} {limit}")))
+
+;; Runtime effects in a statement-form call and in an assignment destination
+;; run in place and leave the computed values intact.
+(case test_runtime_effects_nested_in_function_statements
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            i: input logic<3>,
+            q_sum: output logic<8>,
+            q_bit: output logic<8>,
+        ) {
+            function log (x: input logic<8>) {
+                $display("value=%0d", x);
+            }
+            function traced (x: input logic<3>) -> logic<3> {
+                $display("index=%0d", x);
+                return x;
+            }
+            function bump (x: input logic<8>) -> logic<8> {
+                log(x);
+                return x + 8'd1;
+            }
+            function one_hot (idx: input logic<3>) -> logic<8> {
+                var r: logic<8>;
+                r = 8'h00;
+                r[traced(idx)] = 1'b1;
+                return r;
+            }
+            always_ff (clk) {
+                q_sum = bump(a);
+                q_bit = one_hot(i);
+            }
+        }
+    "#)
+  (top Top)
+  (for (value index) (list (0 0) (41 5) (255 7))
+    (modify (set a value) (set i index))
+    (tick clk)
+    (assert_eq q_sum (trunc 8 (+ value 1)))
+    (assert_eq q_bit (<< 1 index))))
+
+;; Calls of one runtime-looping function from several blocks, twice in one
+;; expression, and nested in its own argument each see their own arguments.
+(case test_runtime_bounded_loop_function_reentry
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            b: input logic<8>,
+            n: input logic<4>,
+            q_a: output logic<4>,
+            q_b: output logic<4>,
+            q_sum: output logic<4>,
+            q_nested: output logic<4>,
+        ) {
+            function count_low (x: input logic<8>, limit: input logic<4>) -> logic<4> {
+                var c: logic<4>;
+                c = 4'd0;
+                for i in 0..limit {
+                    c += {3'b0, x[i]};
+                }
+                return c;
+            }
+            always_ff (clk) {
+                q_a = count_low(a, n);
+            }
+            always_ff (clk) {
+                q_b = count_low(b, n);
+                q_sum = count_low(a, n) + count_low(b, n);
+                q_nested = count_low(b, count_low(a, n));
+            }
+        }
+    "#)
+  (top Top)
+  (for (x y limit count_a count_b sum nested) (list (0xff 0xf 8 8 4 12 4) (0xf 0xff 3 3 3 6 3) (0xa5 0x5a 6 3 3 6 1))
+    (modify (set a x) (set b y) (set n limit))
+    (tick clk)
+    (assert_eq q_a count_a)
+    (assert_eq q_b count_b)
+    (assert_eq q_sum sum)
+    (assert_eq q_nested nested)))

@@ -1,0 +1,8 @@
+[package]
+name = "extract-suite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+celox-test-suite-veryl = { path = "../generated-suite" }
+serde_json = "1"

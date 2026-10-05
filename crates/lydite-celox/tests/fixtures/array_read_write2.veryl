@@ -1,0 +1,11 @@
+module Top (clk: input clock, rst: input bit, we: input bit, wa: input bit<1>, wd: input bit<32>, ra0: input bit<1>, q0: output bit<32>, mem: output bit<32>[2]) {
+    always_ff (clk) {
+        if rst {
+            mem[0] = 0; mem[1] = 0;
+            q0 = 0;
+        } else {
+            if we { mem[wa] = wd; }
+            q0 = mem[ra0];
+        }
+    }
+}

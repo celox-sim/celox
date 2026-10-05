@@ -3,43 +3,69 @@ use std::path::Path;
 use celox::Simulator;
 use num_bigint::BigUint;
 
+// Each entry is either a suite case, `@case "group::name";`, or a test written
+// against the Celox API with `@setup` and `@build`. Either runs on every backend.
 macro_rules! sv_backends {
-    ($(
+    () => {};
+    (
+        fn $name:ident($sim:ident) { @case $case:literal; }
+        $($rest:tt)*
+    ) => {
+        mod $name {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            fn native() {
+                crate::suite::run_case($case, "native");
+            }
+
+            #[test]
+            fn cranelift() {
+                crate::suite::run_case($case, "cranelift");
+            }
+
+            #[test]
+            fn wasm() {
+                crate::suite::run_case($case, "wasm");
+            }
+        }
+        sv_backends! { $($rest)* }
+    };
+    (
         fn $name:ident($sim:ident) {
             @setup { $($setup:tt)* }
             @build $builder:expr;
             $($body:tt)*
         }
-    )*) => {
-        $(
-            mod $name {
-                use super::*;
+        $($rest:tt)*
+    ) => {
+        mod $name {
+            use super::*;
 
-                #[test]
-                #[allow(unused_mut, unused_variables)]
-                fn native() {
-                    $($setup)*
-                    let mut $sim = { $builder }.build_native().unwrap();
-                    $($body)*
-                }
-
-                #[test]
-                #[allow(unused_mut, unused_variables)]
-                fn cranelift() {
-                    $($setup)*
-                    let mut $sim = { $builder }.build_cranelift().unwrap();
-                    $($body)*
-                }
-
-                #[test]
-                #[allow(unused_mut, unused_variables)]
-                fn wasm() {
-                    $($setup)*
-                    let mut $sim = { $builder }.build_wasm().unwrap();
-                    $($body)*
-                }
+            #[test]
+            #[allow(unused_mut, unused_variables)]
+            fn native() {
+                $($setup)*
+                let mut $sim = { $builder }.build_native().unwrap();
+                $($body)*
             }
-        )*
+
+            #[test]
+            #[allow(unused_mut, unused_variables)]
+            fn cranelift() {
+                $($setup)*
+                let mut $sim = { $builder }.build_cranelift().unwrap();
+                $($body)*
+            }
+
+            #[test]
+            #[allow(unused_mut, unused_variables)]
+            fn wasm() {
+                $($setup)*
+                let mut $sim = { $builder }.build_wasm().unwrap();
+                $($body)*
+            }
+        }
+        sv_backends! { $($rest)* }
     };
 }
 
@@ -61,6 +87,8 @@ mod operators;
 mod packed_structs;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
+#[path = "frontends/systemverilog/suite.rs"]
+mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]
 mod synthesizable;
 #[path = "frontends/systemverilog/system_functions.rs"]

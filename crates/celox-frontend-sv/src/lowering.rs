@@ -299,8 +299,8 @@ fn child_output_driver_ranges(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
-        let element_connections = instance.array_element.and_then(|(position, count)| {
-            array_element_connections(
+        let element_connections = match instance.array_element {
+            Some((position, count)) => match array_element_connections(
                 &instance.port_connections,
                 child,
                 position,
@@ -309,9 +309,13 @@ fn child_output_driver_ranges(
                 &module.signal_names,
                 &module.constants,
                 &module.parameter_types,
-            )
-            .ok()
-        });
+            ) {
+                Ok(connections) => Some(connections),
+                // Building the instance reports the invalid connection.
+                Err(_) => continue,
+            },
+            None => None,
+        };
         let connections = element_connections
             .as_deref()
             .unwrap_or(&instance.port_connections);
@@ -777,7 +781,7 @@ pub fn schedule_sources(
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog module specialization limit exceeded (possible recursive instantiation)",
         name,
@@ -797,7 +801,7 @@ fn validate_sv_module_graph(
     }
     if !active.insert(key.clone()) {
         return Err(ParserError::unsupported(
-            64,
+            sv::SV_FRONTEND_TRACKING_ISSUE,
             LoweringPhase::SimulatorParser,
             "recursive systemverilog module instantiation",
             key.name.clone(),
@@ -1268,7 +1272,7 @@ fn array_element_connections(
 ) -> Result<Vec<LoweredSvPortConnection>, ParserError> {
     let unsupported = |detail: String| {
         ParserError::unsupported(
-            64,
+            sv::SV_FRONTEND_TRACKING_ISSUE,
             LoweringPhase::SimulatorParser,
             "systemverilog module instance array",
             detail,
@@ -1301,9 +1305,25 @@ fn array_element_connections(
             if actual_width == port_width {
                 return Ok(connection.clone());
             }
+            // Any other width is an error (IEEE 1800-2023 23.3.3.5), including
+            // a fill literal ('0 is one bit) or an unsized constant (32 bits).
+            let mismatch = || {
+                ParserError::illegal_context(
+                    "systemverilog module instance array connection",
+                    format!(
+                        "`{}` is {actual_width} bits wide; a {port_width}-bit port of {count} elements needs {port_width} or {} bits",
+                        connection.formal,
+                        port_width * count
+                    ),
+                    None,
+                )
+            };
+            if actual_width != port_width * count {
+                return Err(mismatch());
+            }
             let sv::ir::Expr::Ident(name) = actual_expr else {
                 return Err(unsupported(format!(
-                    "`{}` is connected to a wider expression",
+                    "`{}` is split between the elements only from a named vector or array",
                     connection.formal
                 )));
             };
@@ -1336,9 +1356,9 @@ fn array_element_connections(
                             [] | [(_, 0)]
                         )
                 });
-            if actual_width != port_width * count || !zero_based {
+            if !zero_based {
                 return Err(unsupported(format!(
-                    "`{}` is {actual_width} bits wide, for a {port_width}-bit port of {count} elements",
+                    "`{}` is split between the elements only from a vector declared [N-1:0]",
                     connection.formal
                 )));
             }
@@ -1377,7 +1397,7 @@ pub(crate) fn attach_instance_glue(
         };
         if &child_key == current_key {
             return Err(ParserError::unsupported(
-                64,
+                sv::SV_FRONTEND_TRACKING_ISSUE,
                 LoweringPhase::SimulatorParser,
                 "recursive systemverilog module instantiation",
                 instance.module_name.clone(),
@@ -1434,7 +1454,7 @@ pub(crate) fn attach_instance_glue(
     )
     .map_err(|error| {
         ParserError::unsupported(
-            64,
+            error.tracking_issue(),
             LoweringPhase::SimulatorParser,
             "systemverilog combinational process lowering",
             error.to_string(),
@@ -1760,7 +1780,7 @@ fn build_instance_glue(
             .count();
         if matches != 1 || !connected_formals.insert(connection.formal.clone()) {
             return Err(ParserError::unsupported(
-                64,
+                sv::SV_FRONTEND_TRACKING_ISSUE,
                 LoweringPhase::SimulatorParser,
                 "unknown or duplicate systemverilog child port connection",
                 connection.formal.clone(),
@@ -1804,7 +1824,7 @@ fn build_instance_glue(
                     )
                     .ok_or_else(|| {
                         ParserError::unsupported(
-                            64,
+                            sv::SV_FRONTEND_TRACKING_ISSUE,
                             LoweringPhase::SimulatorParser,
                             "systemverilog input port connection",
                             format!("{formal} -> {actual}"),
@@ -1875,7 +1895,7 @@ fn build_instance_glue(
                     parent_parameter_types,
                 ) else {
                     return Err(ParserError::unsupported(
-                        64,
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
                         "systemverilog output port lvalue connection",
                         format!("{formal} -> {actual}: {actual_expr:?}"),
@@ -1889,7 +1909,7 @@ fn build_instance_glue(
                 let Some(target_width) = target_width.filter(|target_width| *target_width != 0)
                 else {
                     return Err(ParserError::unsupported(
-                        64,
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
                         "systemverilog output port lvalue connection",
                         format!("{formal} -> {actual}: {actual_expr:?}"),
@@ -7395,7 +7415,7 @@ pub(crate) fn sv_top_not_found(name: String) -> ParserError {
 
 pub(crate) fn unsupported_sv_instance(name: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog module instantiation",
         format!("name: \"{}\"", name),
@@ -7405,7 +7425,7 @@ pub(crate) fn unsupported_sv_instance(name: String) -> ParserError {
 
 pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog inout port",
         path,

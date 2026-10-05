@@ -1301,6 +1301,8 @@ fn store_u64_release(base: *mut u8, byte_offset: usize, value: u64) {
 struct DrainedAssertionEvents {
     last_message: Option<String>,
     fatal_message: Option<String>,
+    /// The design executed `$finish`, which ends the run (IEEE 1800-2023 20.2).
+    finished: bool,
 }
 
 /// Forward testbench `$display` / `$write` output without contaminating the
@@ -1402,6 +1404,7 @@ fn drain_runtime_assertions<B: SimBackend>(
 ) -> DrainedAssertionEvents {
     let mut last_message = None;
     let mut fatal_message = None;
+    let mut finished = false;
     let format_ctx = RuntimeFormatContext {
         tb_time: Some(ctx.simulation_time()),
         scope: None,
@@ -1438,11 +1441,13 @@ fn drain_runtime_assertions<B: SimBackend>(
             }
             RuntimeEvent::Display { message } => forward_display(&message, true),
             RuntimeEvent::Write { message } => forward_display(&message, false),
+            RuntimeEvent::Finish => finished = true,
         }
     }
     DrainedAssertionEvents {
         last_message,
         fatal_message,
+        finished,
     }
 }
 
@@ -1899,7 +1904,7 @@ fn step_process_events<B: SimBackend>(
     if let Err(error) = result {
         return ExecResult::Fail(error.to_string());
     }
-    if sim.components.finish_requested() {
+    if drained.finished || sim.components.finish_requested() {
         return ExecResult::Finished;
     }
     ExecResult::Continue
@@ -1991,7 +1996,7 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Some(message) = drained.fatal_message {
                         return ExecResult::Fail(message);
                     }
-                    if sim.components.finish_requested() {
+                    if drained.finished || sim.components.finish_requested() {
                         return ExecResult::Finished;
                     }
                 }
@@ -2053,7 +2058,7 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Some(message) = drained.fatal_message {
                         return ExecResult::Fail(message);
                     }
-                    if sim.components.finish_requested() {
+                    if drained.finished || sim.components.finish_requested() {
                         return ExecResult::Finished;
                     }
                 }

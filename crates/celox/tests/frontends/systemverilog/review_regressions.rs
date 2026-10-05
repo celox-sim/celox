@@ -6305,7 +6305,7 @@ fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
         Ok(_) => panic!("reachable invalid hierarchy unexpectedly compiled"),
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("module \"Missing\""), "{error}");
+    assert!(error.contains("`Missing`"), "{error}");
 }
 
 #[test]
@@ -7556,22 +7556,7 @@ sv_backends! {
     }
 
     fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
-        @setup {
-            let source = r#"
-                module Top(output logic [127:0] y, output logic greater);
-                    typedef enum logic [127:0] {
-                        A = 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff + 128'h1
-                    } E;
-                    assign y = A;
-                    assign greater = A > 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("unsigned_128_bit_enum_arithmetic.sv"))], "Top"
-        );
-        assert_eq!(sim.get(sim.signal("y")), BigUint::from(1u8) << 127);
-        assert_eq!(sim.get(sim.signal("greater")), 1u8.into());
+        @case "review_regressions::preserves_unsigned_128_bit_enum_arithmetic";
     }
 
     fn preserves_four_state_reduction_case_constants(sim) {
@@ -7609,76 +7594,7 @@ sv_backends! {
     }
 
     fn preserves_use_site_dimensions_in_function_alias_types(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter W = 4)(input logic [7:0] data,
-                    output logic [7:0] constant_y, echo_y,
-                    output logic [3:0] high_y, low_y, ascending_y, inherited_y,
-                    output logic [15:0] signed_y, sizes);
-                    typedef logic [3:0] nibble_t;
-                    typedef logic signed [3:0] signed_nibble_t;
-                    function automatic nibble_t [1:0] constant_value();
-                        return 8'hab;
-                    endfunction
-                    function automatic nibble_t [W'(2):W'(1)] echo(
-                        input nibble_t [W'(2):W'(1)] x);
-                        return x;
-                    endfunction
-                    function automatic nibble_t high(input nibble_t [2:1] x);
-                        return x[2];
-                    endfunction
-                    function automatic nibble_t low;
-                        input nibble_t [2:1] x;
-                        return x[1];
-                    endfunction
-                    function automatic nibble_t ascending(input nibble_t [1:2] x);
-                        return x[1];
-                    endfunction
-                    function automatic nibble_t inherited(input nibble_t [2:1] x, z);
-                        return z[2];
-                    endfunction
-                    function automatic signed_nibble_t [1:0] signed_echo(
-                        input signed_nibble_t [1:0] x);
-                        return x;
-                    endfunction
-                    localparam BITS = $bits(constant_value())'(16'hffff);
-                    localparam SIZE = $size(constant_value())'(8'hff);
-                    always_comb begin
-                        constant_y = constant_value();
-                        echo_y = echo(data);
-                        high_y = high(data);
-                        low_y = low(data);
-                        ascending_y = ascending(data);
-                        inherited_y = inherited('0, data);
-                        signed_y = signed_echo(data);
-                        sizes = {BITS, SIZE};
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("function_alias_use_site_dimensions.sv"))], "Top"
-        ).four_state(true);
-        let data = sim.signal("data");
-        let constant_y = sim.signal("constant_y");
-        let echo_y = sim.signal("echo_y");
-        let high_y = sim.signal("high_y");
-        let low_y = sim.signal("low_y");
-        let ascending_y = sim.signal("ascending_y");
-        let inherited_y = sim.signal("inherited_y");
-        let signed_y = sim.signal("signed_y");
-        let sizes = sim.signal("sizes");
-        for value in [0xabu8, 0x80, 0x12, 0xff, 0] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(constant_y), 0xabu8.into());
-            assert_eq!(sim.get(echo_y), value.into());
-            assert_eq!(sim.get(high_y), (value >> 4).into());
-            assert_eq!(sim.get(low_y), (value & 0xf).into());
-            assert_eq!(sim.get(ascending_y), (value >> 4).into());
-            assert_eq!(sim.get(inherited_y), (value >> 4).into());
-            assert_eq!(sim.get(signed_y), (value as i8 as i16 as u16).into());
-            assert_eq!(sim.get(sizes), 0x3ffu16.into());
-        }
+        @case "review_regressions::preserves_use_site_dimensions_in_function_alias_types";
     }
 
     fn preserves_four_state_relational_case_selectors(sim) {
@@ -7821,228 +7737,27 @@ sv_backends! {
     }
 
     fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic [7:0] data,
-                    output logic [$bits(f())'(7):0] y, output logic [7:0] sizes);
-                    function automatic logic [7:0] f(); return '0; endfunction
-                    logic [$size(f())'(7):0] value;
-                    logic [1:0][3:0] a[2];
-                    localparam P = $size(a[0])'(8'hff);
-                    localparam Q = $size(a[0][0])'(8'hff);
-                    always_comb begin
-                        value = data;
-                        y = value;
-                        sizes = {P, Q, 2'b00};
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("size_cast_dimensions.sv"))], "Top"
-        );
-        let data = sim.signal("data");
-        let y = sim.signal("y");
-        let sizes = sim.signal("sizes");
-        for value in [0x80u8, 1, 0x55, 0xff, 0] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(y), value.into());
-            assert_eq!(sim.get(sizes), 0xfcu8.into());
-        }
+        @case "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections";
     }
 
     fn resolves_generate_local_alias_casts_for_all_processes(sim) {
-        @setup {
-            let source = r#"
-                module Buffer(input logic a, output logic y);
-                    assign y = a;
-                endmodule
-                module Top(input logic clk, data, output logic comb_y, ff_y);
-                    typedef logic [1:0] select_t;
-                    if (1) begin : enabled
-                        localparam S = select_t'(4);
-                        localparam select_t WIDTH = 1;
-                        logic [WIDTH-1:0] connected;
-                        Buffer u(.a(data), .y(connected));
-                        if (S) begin : disabled
-                            assign comb_y = 1'b0;
-                            always_ff @(posedge clk) ff_y <= 1'b0;
-                        end else begin : selected
-                            always_comb comb_y = connected;
-                            always_ff @(posedge clk) ff_y <= connected;
-                        end
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("generate_local_alias_casts.sv"))], "Top"
-        );
-        let data = sim.signal("data");
-        let comb_y = sim.signal("comb_y");
-        let ff_y = sim.signal("ff_y");
-        let clk = sim.event("clk");
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(comb_y), value.into());
-            sim.tick(clk).unwrap();
-            assert_eq!(sim.get(ff_y), value.into());
-        }
+        @case "review_regressions::resolves_generate_local_alias_casts_for_all_processes";
     }
 
     fn covers_single_bit_bitwise_complementary_guards(sim) {
-        @setup {
-            let source = r#"
-                module Top(input bit s, input logic outer, a, b, output logic y);
-                    always_comb if (outer) begin
-                        if (s) y = a;
-                        if (~s) y = b;
-                    end else y = a;
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("bitwise_complementary_guards.sv"))], "Top"
-        ).four_state(true);
-        let s = sim.signal("s");
-        let outer = sim.signal("outer");
-        let a = sim.signal("a");
-        let b = sim.signal("b");
-        let y = sim.signal("y");
-        for inputs in 0u8..16 {
-            sim.modify(|io| {
-                io.set(s, inputs & 1 != 0);
-                io.set(outer, inputs & 2 != 0);
-                io.set(a, inputs & 4 != 0);
-                io.set(b, inputs & 8 != 0);
-            }).unwrap();
-            let expected = if inputs & 2 == 0 || inputs & 1 != 0 {
-                inputs & 4 != 0
-            } else {
-                inputs & 8 != 0
-            };
-            assert_eq!(sim.get(y), expected.into());
-        }
+        @case "review_regressions::covers_single_bit_bitwise_complementary_guards";
     }
 
     fn normalizes_function_parameter_cast_dimensions(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter W = 5)(
-                    input logic [7:0] data,
-                    output logic [5:0] y
-                );
-                    typedef logic [3:0] index_t;
-                    typedef logic [W'(8):W'(1)] byte_t;
-                    function automatic logic ansi(input logic [W'(8):W'(1)] x);
-                        return x[7];
-                    endfunction
-                    function automatic logic nonansi;
-                        input logic [W'(8):W'(1)] x;
-                        return x[7];
-                    endfunction
-                    function automatic logic ascending(input logic [W'(1):W'(8)] x);
-                        return x[2];
-                    endfunction
-                    function automatic logic inherited(input logic [W'(8):W'(1)] x, z);
-                        return z[7];
-                    endfunction
-                    function automatic logic typecast(input logic [index_t'(8):index_t'(1)] x);
-                        return x[7];
-                    endfunction
-                    function automatic logic alias_range(input byte_t x);
-                        return x[7];
-                    endfunction
-                    always_comb begin
-                        y[0] = ansi(data);
-                        y[1] = nonansi(data);
-                        y[2] = ascending(data);
-                        y[3] = inherited('0, data);
-                        y[4] = typecast(data);
-                        y[5] = alias_range(data);
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("function_parameter_cast_dimensions.sv"))], "Top"
-        );
-        let data = sim.signal("data");
-        let y = sim.signal("y");
-        for value in [0x40u8, 0x80, 0, 0xff] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(y), if value & 0x40 != 0 { 0x3fu8 } else { 0 }.into());
-        }
+        @case "review_regressions::normalizes_function_parameter_cast_dimensions";
     }
 
     fn lowers_parameter_casts_in_conditional_generate(sim) {
-        @setup {
-            let source = r#"
-                module Buffer(input logic a, output logic y);
-                    assign y = a;
-                endmodule
-                module Top #(parameter W = 2)(
-                    input logic clk, data,
-                    output logic comb_y, ff_y
-                );
-                    typedef logic [W-1:0] select_t;
-                    if (W'(1)) begin : enabled
-                        logic connected;
-                        Buffer u(.a(data), .y(connected));
-                        if (select_t'(4)) begin : disabled
-                            assign comb_y = 1'b0;
-                            always_ff @(posedge clk) ff_y <= 1'b0;
-                        end else begin : selected
-                            always_comb comb_y = connected;
-                            always_ff @(posedge clk) ff_y <= connected;
-                        end
-                    end else begin : disabled
-                        assign comb_y = 1'b0;
-                        always_ff @(posedge clk) ff_y <= 1'b0;
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("conditional_generate_casts.sv"))], "Top"
-        );
-        let data = sim.signal("data");
-        let comb_y = sim.signal("comb_y");
-        let ff_y = sim.signal("ff_y");
-        let clk = sim.event("clk");
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(comb_y), value.into());
-            sim.tick(clk).unwrap();
-            assert_eq!(sim.get(ff_y), value.into());
-        }
+        @case "review_regressions::lowers_parameter_casts_in_conditional_generate";
     }
 
     fn lowers_parameter_casts_in_loop_generate(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter W = 3)(
-                    input logic [3:0] data,
-                    output logic [3:0] y
-                );
-                    typedef logic [W-1:0] index_t;
-                    for (genvar i = W'(8); i < index_t'(4); i += W'(1)) begin : bits
-                        if (W'(1)) begin : enabled
-                            assign y[i] = data[i];
-                        end
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("loop_generate_casts.sv"))], "Top"
-        );
-        let data = sim.signal("data");
-        let y = sim.signal("y");
-        for value in [1u8, 2, 4, 8, 0xf, 0] {
-            sim.modify(|io| io.set(data, value)).unwrap();
-            assert_eq!(sim.get(y), value.into());
-        }
+        @case "review_regressions::lowers_parameter_casts_in_loop_generate";
     }
 }
 

@@ -1,0 +1,152 @@
+(group std_edge_detector (category standard_library))
+
+(case test_edge_detector_basic
+  (source "test.veryl"
+    (std "edge_detector/edge_detector.veryl")
+    #"
+module Top (
+    clk      : input  clock,
+    rst      : input  reset,
+    i_clear  : input  logic,
+    i_data   : input  logic,
+    o_edge   : output logic,
+    o_posedge: output logic,
+    o_negedge: output logic,
+) {
+    inst u: edge_detector #(WIDTH: 1) (
+        i_clk: clk,
+        i_rst: rst,
+        i_clear,
+        i_data,
+        o_edge,
+        o_posedge,
+        o_negedge,
+    );
+}
+"#)
+  (top Top)
+  ; Reset: data register = 0 (INITIAL_VALUE='0)
+  (modify
+    (set rst 0)
+    (set i_clear 0)
+    (set i_data 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Tick to latch i_data=0 into data register
+  (tick clk)
+  ; No edge when data and i_data are both 0
+  (eval)
+  (assert_eq (trunc 8 (get o_posedge)) 0 "no edge: data=0, i_data=0")
+  (assert_eq (trunc 8 (get o_negedge)) 0)
+  ; Rising edge: change i_data to 1 (data register still 0)
+  (modify (set i_data 1))
+  (eval)
+  (assert_eq (trunc 8 (get o_posedge)) 1 "posedge: i_data=1, data=0")
+  (assert_eq (trunc 8 (get o_negedge)) 0)
+  (assert_eq (trunc 8 (get o_edge)) 1)
+  ; Tick to latch i_data=1 into data register
+  (tick clk)
+  ; No edge: data=1, i_data=1
+  (eval)
+  (assert_eq (trunc 8 (get o_posedge)) 0 "no edge: data=1, i_data=1")
+  (assert_eq (trunc 8 (get o_negedge)) 0)
+  (assert_eq (trunc 8 (get o_edge)) 0)
+  ; Falling edge: change i_data to 0 (data register is 1)
+  (modify (set i_data 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_posedge)) 0)
+  (assert_eq (trunc 8 (get o_negedge)) 1 "negedge: i_data=0, data=1")
+  (assert_eq (trunc 8 (get o_edge)) 1))
+
+(case test_edge_detector_clear
+  (source "test.veryl"
+    (std "edge_detector/edge_detector.veryl")
+    #"
+module Top (
+    clk      : input  clock,
+    rst      : input  reset,
+    i_clear  : input  logic,
+    i_data   : input  logic,
+    o_edge   : output logic,
+    o_posedge: output logic,
+    o_negedge: output logic,
+) {
+    inst u: edge_detector #(WIDTH: 1) (
+        i_clk: clk,
+        i_rst: rst,
+        i_clear,
+        i_data,
+        o_edge,
+        o_posedge,
+        o_negedge,
+    );
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_clear 0)
+    (set i_data 0))
+  (tick clk)
+  (modify (set rst 1))
+  (tick clk)
+  ; latch data=0
+  ; Create a rising edge condition (i_data=1, data=0) with clear active
+  (modify
+    (set i_data 1)
+    (set i_clear 1))
+  (eval)
+  (assert_eq (trunc 8 (get o_posedge)) 0 "clear should suppress posedge")
+  (assert_eq (trunc 8 (get o_negedge)) 0 "clear should suppress negedge"))
+
+(case test_edge_detector_multibit
+  (source "test.veryl"
+    (std "edge_detector/edge_detector.veryl")
+    #"
+module Top (
+clk      : input  clock,
+rst      : input  reset,
+i_data   : input  logic<4>,
+o_edge   : output logic<4>,
+o_posedge: output logic<4>,
+o_negedge: output logic<4>,
+) {
+inst u: edge_detector #(WIDTH: 4) (
+i_clk  : clk,
+i_rst  : rst,
+i_clear: 1'b0,
+i_data,
+o_edge,
+o_posedge,
+o_negedge,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_data 0))
+  (tick clk)
+  (modify (set rst 1))
+  (tick clk)
+  ; data register = 0b0000
+  ; Set bits 0 and 2 high (0b0101): edge detected on bits 0,2
+  (modify (set i_data 0b0101))
+  (eval)
+  ; o_edge = i_data ^ (data & ~i_clear) = 0101 ^ (0000 & 0001) = 0101 ^ 0000 = 0101
+  (assert_eq (trunc 8 (get o_edge)) 0b0101 "bits 0,2 should have edge")
+  ; Tick to latch 0b0101 into data register
+  (tick clk)
+  ; Change to 0b1010: all 4 bits change
+  (modify (set i_data 0b1010))
+  (eval)
+  ; o_edge = 1010 ^ (0101 & 1111) = 1111
+  (assert_eq (trunc 8 (get o_edge)) 0b1111 "all changed bits should report an edge")
+  ; Tick to latch 0b1010
+  (tick clk)
+  ; No change: i_data=0b1010, data=0b1010
+  (eval)
+  ; o_edge = 1010 ^ (1010 & 1111) = 0000
+  (assert_eq (trunc 8 (get o_edge)) 0 "steady state should report no edges"))

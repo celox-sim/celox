@@ -1,0 +1,56 @@
+(group hierarchical_assignment (category hierarchy))
+
+(case selections
+  (source "test.veryl" #"module Memory #(param W: u32 = 128) {
+    #[allow(unassign_variable)]
+    var mem: logic<W>[2, 2];
+}
+module Bank { inst memory: Memory; }
+#[test(Top)]
+module Top {
+    inst left: Bank;
+    inst right: Bank;
+    var idx: u32;
+    var bit_idx: u32;
+    initial {
+        left.memory.mem[0][0] = 128'h11112222333344445555666677778888;
+        left.memory.mem[1][1] = 128'hffffffffffffffffffffffffffffffff;
+        right.memory.mem[1][1] = 128'h0123456789abcdef0123456789abcdef;
+        idx = 1;
+        bit_idx = 64;
+        left.memory.mem[idx][idx][bit_idx+:8] = 8'h12;
+        left.memory.mem[idx][idx][15:8] = 8'h34;
+        left.memory.mem[idx][idx][7-:4] = 4'h5;
+        $assert(left.memory.mem[1][1] == 128'hffffffffffffff12ffffffffffff345f);
+        $assert(left.memory.mem[0][0] == 128'h11112222333344445555666677778888);
+        $assert(right.memory.mem[1][1] == 128'h0123456789abcdef0123456789abcdef);
+        for i in 0..2 {
+            left.memory.mem[0][i] = i as u32;
+        }
+        $assert(left.memory.mem[0][0] == 0);
+        $assert(left.memory.mem[0][1] == 1);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case disjoint_loop
+  (source "test.veryl" #"module Child {
+    #[allow(unassign_variable)]
+    var mem: logic<8>[2];
+}
+#[test(Top)]
+module Top {
+    inst dut: Child;
+    initial {
+        dut.mem[0] = 2;
+        for i in 0..dut.mem[0] { dut.mem[1] = i as u8; }
+        $assert(dut.mem[1] == 1);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))

@@ -2,7 +2,7 @@
 mod test_utils;
 
 use celox::{CodegenError, ParserError, SimulatorError, SimulatorErrorKind};
-use celox_test_suite_veryl::CompilationRejected;
+use celox_test_suite::CompilationRejected;
 
 #[test]
 fn negative_suite_cases_accept_only_source_diagnostics() {
@@ -24,7 +24,7 @@ fn negative_suite_cases_accept_only_source_diagnostics() {
             source_location: None,
         }),
         SimulatorError::from(ParserError::Unsupported {
-            issue: 64,
+            issue: 88,
             phase: celox::LoweringPhase::SimulatorParser,
             feature: "systemverilog analysis",
             detail: "Unsupported SystemVerilog construct: indexed part-select".into(),

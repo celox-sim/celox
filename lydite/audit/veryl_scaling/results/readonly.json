@@ -1,0 +1,1034 @@
+[
+  {
+    "axis": "readonly",
+    "size": 2,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 96,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.028533125994727015
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0018505169937270693
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.001693345002422575
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.003151084005367011
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 4,
+    "lift_bytes": 904,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.000110107,
+      "kernel_compute_seconds": 9.0987e-05,
+      "not_run": 0,
+      "query_seconds": 0.0007707739999999999,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.000115424,
+      "emission_seconds": 2.5188e-05,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 7.971999999999998e-06,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 91,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 6.2174e-05,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 2,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 96,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.025631352997152135
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.00244840399682289
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0016840999960550107
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.0031817999988561496
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 5,
+    "lift_bytes": 1007,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.00036469,
+      "kernel_compute_seconds": 0.000135786,
+      "not_run": 0,
+      "query_seconds": 0.0010638940000000001,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.000598002,
+      "emission_seconds": 2.4868e-05,
+      "finite_seconds": 0.000268716,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 7.237899999999999e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 94,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.000105549,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 1055,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 1055,
+        "conflicts": 0,
+        "decisions": 131,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 1055,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 45,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 452,
+        "work": 13454
+      }
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 4,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 160,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.024433430000499357
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.003380469999683555
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0014350049968925305
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0030558900034520775
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 8,
+    "lift_bytes": 1296,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.000146451,
+      "kernel_compute_seconds": 0.000150847,
+      "not_run": 0,
+      "query_seconds": 0.0008470770000000001,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.000187553,
+      "emission_seconds": 4.0531e-05,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 8.754000000000005e-06,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 157,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 0.000115193,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 4,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 160,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.021936648998234887
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0019015279976883903
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.00159691899898462
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.003394321000087075
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 9,
+    "lift_bytes": 1401,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.000574377,
+      "kernel_compute_seconds": 0.000206971,
+      "not_run": 0,
+      "query_seconds": 0.0013654809999999998,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.000801129,
+      "emission_seconds": 4.1844e-05,
+      "finite_seconds": 0.000445752,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 7.020999999999986e-06,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 162,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.000169585,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 1787,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 1793,
+        "conflicts": 6,
+        "decisions": 211,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 1793,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 73,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 719,
+        "work": 31105
+      }
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 8,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 288,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.023739839998597745
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.002108651999151334
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.00169338499836158
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0035390699995332398
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 16,
+    "lift_bytes": 2092,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.000238088,
+      "kernel_compute_seconds": 0.000303448,
+      "not_run": 0,
+      "query_seconds": 0.001234623,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.000361876,
+      "emission_seconds": 6.1663e-05,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 1.1638000000000013e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 289,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 0.000253793,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 8,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 288,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.02780345000064699
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.002706532999582123
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0017577719991095364
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.005149848999280948
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 17,
+    "lift_bytes": 2203,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.001219229,
+      "kernel_compute_seconds": 0.000413694,
+      "not_run": 0,
+      "query_seconds": 0.002414292,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.001579433,
+      "emission_seconds": 6.7592e-05,
+      "finite_seconds": 0.000997144,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 1.1175999999999949e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 298,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.000359012,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 3247,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 3257,
+        "conflicts": 10,
+        "decisions": 378,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 3257,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 129,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 1250,
+        "work": 62230
+      }
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 16,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 544,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.02650334299687529
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0023061850006342866
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0017769299956853501
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.005918037997616921
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 32,
+    "lift_bytes": 3716,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.00046746599999999993,
+      "kernel_compute_seconds": 0.001035272,
+      "not_run": 0,
+      "query_seconds": 0.003216723,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.001150045,
+      "emission_seconds": 0.000139491,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 1.7375999999999937e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 553,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 0.000947269,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 16,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 544,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.02842651500395732
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0029169810004532337
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.001902480005810503
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.007852577000448946
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 33,
+    "lift_bytes": 3835,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.0027994739999999997,
+      "kernel_compute_seconds": 0.000838075,
+      "not_run": 0,
+      "query_seconds": 0.004959041000000001,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.003445127,
+      "emission_seconds": 0.000131188,
+      "finite_seconds": 0.002348102,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 1.5822999999999987e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 570,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.000748289,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 6163,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 6181,
+        "conflicts": 18,
+        "decisions": 721,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 6181,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 241,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 2309,
+        "work": 129020
+      }
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 32,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 1056,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.03499038700101664
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0025569670033291914
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.002152276996639557
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.007462577996193431
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 64,
+    "lift_bytes": 6980,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.000730442,
+      "kernel_compute_seconds": 0.0012323699999999998,
+      "not_run": 0,
+      "query_seconds": 0.0036557960000000002,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.001363587,
+      "emission_seconds": 0.000195716,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 1.458200000000018e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 1081,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 0.001085888,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 32,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 1056,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.03767229299410246
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.003021608994458802
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0017791240024962462
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.01317937199928565
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 65,
+    "lift_bytes": 7115,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.004484475,
+      "kernel_compute_seconds": 0.001746514,
+      "not_run": 0,
+      "query_seconds": 0.008553103,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.005964538,
+      "emission_seconds": 0.000291229,
+      "finite_seconds": 0.003744169,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 1.654499999999997e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 1114,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.001590399,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 11991,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 11996,
+        "conflicts": 5,
+        "decisions": 1160,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 11996,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 465,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 4424,
+        "work": 208774
+      }
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 64,
+    "width": 32,
+    "mutant": false,
+    "search_hint": "query",
+    "state_bits": 2080,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.048469622000993695
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0035035850014537573
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.0028082869976060465
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.014366162002261262
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 8,
+      "joins": 0
+    },
+    "wire_count": 128,
+    "lift_bytes": 13564,
+    "status": "stuttering_refinement_verified",
+    "engine_summary": {
+      "custom_closed": 4,
+      "finite_queries": 3,
+      "finite_seconds": 0.001622396,
+      "kernel_compute_seconds": 0.0032079700000000005,
+      "not_run": 0,
+      "query_seconds": 0.008171788,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "passed",
+      "solver_result": "unsat",
+      "seconds": 0.003759522,
+      "emission_seconds": 0.000613987,
+      "finite_seconds": null,
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 1.9649000000000055e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 2137,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "seconds": 0.002917161,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": null
+    },
+    "correct_outcome": true
+  },
+  {
+    "axis": "readonly",
+    "size": 64,
+    "width": 32,
+    "mutant": true,
+    "search_hint": "query",
+    "state_bits": 2080,
+    "scope": "isolated_component_contract_not_CPU",
+    "phases": {
+      "frontend": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.05058697699860204
+      },
+      "normal_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.003552869995473884
+      },
+      "reset_lift": {
+        "status": "completed",
+        "exit_code": 0,
+        "seconds": 0.002465138997649774
+      },
+      "check": {
+        "status": "completed",
+        "exit_code": 1,
+        "seconds": 0.02475343299738597
+      }
+    },
+    "lift_statistics": {
+      "branches": 1,
+      "dynamic_accesses": 1,
+      "execution_units": 2,
+      "instructions": 10,
+      "joins": 0
+    },
+    "wire_count": 129,
+    "lift_bytes": 13733,
+    "status": "counterexample",
+    "engine_summary": {
+      "custom_closed": 3,
+      "finite_queries": 4,
+      "finite_seconds": 0.008084276,
+      "kernel_compute_seconds": 0.004272085,
+      "not_run": 0,
+      "query_seconds": 0.016394482,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep": {
+      "status": "counterexample",
+      "solver_result": "sat",
+      "seconds": 0.011373628,
+      "emission_seconds": 0.000408637,
+      "finite_seconds": 0.006374566,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 2.3075000000000005e-05,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 2202,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 3,
+        "seconds": 0.00395773,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "finite": {
+        "base_clauses": 23643,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 23648,
+        "conflicts": 5,
+        "decisions": 2186,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 23648,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 913,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 8651,
+        "work": 421044
+      }
+    },
+    "correct_outcome": true
+  }
+]

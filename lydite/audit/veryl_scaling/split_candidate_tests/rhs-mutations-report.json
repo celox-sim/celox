@@ -1,0 +1,18 @@
+{
+  "original_sv": "/workspace/scratch/07f10565586c/hwverify-git-publish/synthesis/rv32i-split-rhs-candidate/rtl/rv32i_pipeline.sv",
+  "original_sha256": "935e67d45f40482b41c3dbe88aace58623a3b0e4ad7976734de893eab812307c",
+  "mutations": [
+    {
+      "name": "bad_m_forward",
+      "source_sha256": "4cb9fadbfa4003200ad0d9ca06f200a32f162a5543ed70cf5be99fcd1aa7b2c6",
+      "detected": true,
+      "failure": "[3198] %Fatal: tb.sv:65: Assertion failed in tb: register t=5 c=12 r=2 got=00000000 expected=80000000"
+    },
+    {
+      "name": "no_hazard",
+      "source_sha256": "988fc946fe041beb12ce6acfbe933f5aaec9445e66f24e9b1fc876615840593f",
+      "detected": true,
+      "failure": "[702] %Fatal: tb.sv:65: Assertion failed in tb: register t=1 c=11 r=3 got=00000000 expected=00000001"
+    }
+  ]
+}

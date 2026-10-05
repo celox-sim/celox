@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "project": "response_dropped",
+  "goal": "response_deadline",
+  "depth": 5,
+  "identity": {
+    "manifest_sha256": "48163246abddf26f022cbea7a255d5111d8f97411e067027f01c16d0f6c5df0f",
+    "sources_sha256": "7d4565fcfbe0ef52058f3483444e84584aea83dacefac40adceafd67f9921b67",
+    "specification_sha256": "00f525a84db174fc937a233c3751c00fb6292a3b406f07dd11b27cc0c41a9848",
+    "bindings_sha256": "08ff406511e1bd9e75aef95ce8914bc7b2f238129f5e9f23ba0e63197f836e22",
+    "document_sha256": "aa8a968e335dfb271ad480e485947aee0214f28cf411a5b22f0f2b98b05352e5"
+  },
+  "inputs": [
+    {
+      "request": false,
+      "rst": true,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": true,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    }
+  ]
+}

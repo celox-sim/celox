@@ -1,15 +1,15 @@
 use std::collections::VecDeque;
 
 use crate::{
-    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError, RegionedVarAddr,
+    BuildConfig, HashMap, HashSet, ParserError, RegionedVarAddr,
     bitaccess::{celox_value_from_comptime_in_context, eval_constexpr},
     case::case_arm_condition_expr,
     resolve_total_width,
 };
 use bit_set::BitSet;
 use celox_design::{
-    BinaryOp, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, TriggerSet, UnaryOp,
-    VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
+    SPARSE_WORKING_REGION, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use celox_sir::{
     BlockId, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -336,6 +336,7 @@ mod signed_div_rem_tests {
 mod expression;
 pub(crate) use expression::expression_has_side_effect;
 mod function_call;
+mod inline_call;
 
 pub enum Domain {
     Ff, // TODO: add clock
@@ -400,6 +401,10 @@ pub struct FfParser<'a> {
     direct_static_write_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
     direct_dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
+    // Locals and formals of functions whose bodies are lowered inline. They
+    // use blocking working-region storage that is private to the call and is
+    // neither seeded from nor committed to stable state.
+    inline_function_locals: HashSet<VarId>,
     local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
@@ -446,6 +451,7 @@ impl<'a> FfParser<'a> {
             direct_static_write_ranges: HashMap::default(),
             direct_dynamic_write_vars: HashSet::default(),
             local_working_vars,
+            inline_function_locals: HashSet::default(),
             local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
             reset: None,
@@ -733,6 +739,21 @@ impl<'a> FfParser<'a> {
                 )?;
                 Ok(ControlFlow::Continue)
             }
+            SystemFunctionKind::Finish => {
+                // The host is notified through a runtime event and decides
+                // when to stop (IEEE 1800-2023 20.2).
+                let site_id = self.register_runtime_event_site(RuntimeEventKind::Finish, &[]);
+                self.emit_runtime_event(
+                    site_id,
+                    &[],
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+                Ok(ControlFlow::Continue)
+            }
             SystemFunctionKind::Assert { kind, cond, args } => {
                 self.parse_runtime_event_expression(
                     &cond.0, targets, domain, convert, sources, ir_builder,
@@ -789,14 +810,115 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(pass_bb);
                 Ok(ControlFlow::Continue)
             }
-            _ => Err(ParserError::unsupported(
-                66,
-                LoweringPhase::FfLowering,
-                "system function call",
+            SystemFunctionKind::Readmemh(filename, output) => {
+                self.parse_readmem_statement(
+                    call, filename, output, targets, domain, convert, ir_builder,
+                )?;
+                Ok(ControlFlow::Continue)
+            }
+            SystemFunctionKind::Bits(_)
+            | SystemFunctionKind::Size(..)
+            | SystemFunctionKind::Clog2(_)
+            | SystemFunctionKind::Onehot(_)
+            | SystemFunctionKind::Signed(_)
+            | SystemFunctionKind::Unsigned(_) => Err(ParserError::illegal_context(
+                "system function call as statement",
                 format!("{call}"),
                 Some(&call.comptime.token),
             )),
         }
+    }
+
+    /// `$readmemh` in a clocked block loads the file contents into the
+    /// destination each time the statement executes (IEEE 1800-2023 21.4).
+    /// The file is read at compile time; locations the file does not name
+    /// keep their values.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_readmem_statement<A>(
+        &mut self,
+        call: &SystemFunctionCall,
+        filename: &SystemFunctionInput,
+        output: &veryl_analyzer::ir::SystemFunctionOutput,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let veryl_analyzer::ir::SystemFunctionOutput::Local(destinations) = output else {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination",
+                "a hierarchical destination is only valid in a testbench",
+                Some(&call.comptime.token),
+            ));
+        };
+        let image = crate::module::readmem_image(self.module, filename, destinations, 16, |dst| {
+            dst.index
+                .0
+                .iter()
+                .map(|index| eval_constexpr(index)?.to_usize())
+                .collect()
+        })?;
+        let variable = &self.module.variables[&image.var_id];
+        let is_2state = variable.r#type.is_2state();
+        let element_count = variable.r#type.total_array().unwrap_or(1).max(1);
+        let element_width = resolve_total_width(self.module, variable)? / element_count;
+        for run in image.runs {
+            let value = BigUint::from_bytes_le(&run.value_bytes);
+            let mask = BigUint::from_bytes_le(&run.mask_bytes);
+            let (reg, value) = if is_2state {
+                (
+                    ir_builder.alloc_bit(run.bit_width, false),
+                    SIRValue::new(&value ^ (&value & &mask)),
+                )
+            } else {
+                (
+                    ir_builder.alloc_logic(run.bit_width),
+                    SIRValue::new_four_state(value, mask),
+                )
+            };
+            ir_builder.emit(SIRInstruction::Imm(reg, value));
+            let access = BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1);
+            let store_region = if self.sparse_write_vars.contains(&image.var_id) {
+                SPARSE_WORKING_REGION
+            } else {
+                domain.region()
+            };
+            let direct_write = self
+                .direct_static_write_ranges
+                .get(&image.var_id)
+                .is_some_and(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|range| range.lsb <= access.lsb && range.msb >= access.msb)
+                });
+            let store_region = if direct_write {
+                STABLE_REGION
+            } else {
+                store_region
+            };
+            ir_builder.emit(SIRInstruction::Store(
+                convert(image.var_id, store_region),
+                SIROffset::PackedElements {
+                    bit_offset: run.bit_offset,
+                    element_width,
+                },
+                run.bit_width,
+                reg,
+                Vec::new(),
+                Vec::new(),
+            ));
+            let bits = self.defined_ranges.entry(image.var_id).or_default();
+            for bit in access.lsb..=access.msb {
+                bits.insert(bit);
+            }
+            self.dynamic_defined_vars.insert(image.var_id);
+            targets.push(VarAtomBase::new(
+                convert(image.var_id, WORKING_REGION),
+                access.lsb,
+                access.msb,
+            ));
+        }
+        Ok(())
     }
 
     fn get_constant_value(&self, expr: &Expression) -> Option<u64> {

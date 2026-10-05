@@ -1,0 +1,7 @@
+---
+source: crates/celox/tests/error_readability.rs
+expression: err
+---
+missing_external_module
+
+  × External module `delay` was not supplied

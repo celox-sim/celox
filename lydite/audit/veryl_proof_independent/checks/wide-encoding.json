@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "checks": 15738,
+  "widths": [
+    1,
+    2,
+    7,
+    31,
+    32,
+    33,
+    63,
+    64,
+    65,
+    95,
+    96,
+    127,
+    128,
+    129,
+    255,
+    256,
+    1024,
+    2048
+  ],
+  "seed": 81732,
+  "encoder_sha256": "852d4cae4846fc5ff9eae6c7a8658b770a2a7a9c137c15cc54e234d7db3346fe",
+  "scope": "independent concrete evaluation of generated chunk formulas, not solver verification"
+}

@@ -1,0 +1,146 @@
+(group concat_operators (category operators))
+
+(case test_arithmetic_in_concat
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+b: input logic<8>,
+o: output logic<40>
+) {
+assign o = {a + b, a - b, a * b, a / b, a % b};
+}
+"#)
+  (top Top)
+  (modify
+    (set a 10)
+    (set b 3))
+  ; 10 + 3 = 13 (0x0D)
+  ; 10 - 3 = 7  (0x07)
+  ; 10 * 3 = 30 (0x1E)
+  ; 10 / 3 = 3  (0x03)
+  ; 10 % 3 = 1  (0x01)
+  ; Expected: {0x0D, 0x07, 0x1E, 0x03, 0x01} = 0x0D_07_1E_03_01
+  (assert_eq o 0x0D071E0301))
+
+(case test_comparison_in_concat
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+b: input logic<8>,
+o: output logic<6>
+) {
+assign o = {a == b, a != b, a <: b, a >: b, a <= b, a >= b};
+}
+"#)
+  (top Top)
+  (modify
+    (set a 10)
+    (set b 20))
+  ; 10 == 20 -> 0
+  ; 10 != 20 -> 1
+  ; 10 < 20  -> 1
+  ; 10 > 20  -> 0
+  ; 10 <= 20 -> 1
+  ; 10 >= 20 -> 0
+  ; Expected: {0, 1, 1, 0, 1, 0} = 6'b011010 = 0x1A
+  (assert_eq o 0x1A))
+
+(case test_bitwise_and_logical_in_concat
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+b: input logic<8>,
+o: output logic<32>,
+o2: output logic<3>
+) {
+assign o = {a & b, a | b, a ^ b, (~a)};
+assign o2 = {(|a) && (|b), (|a) || (|b), (!(|a))};
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xAA)
+    ; 10101010
+    (set b 0x55))
+    ; 01010101
+  ; a & b = 0x00 (8bit)
+  ; a | b = 0xFF (8bit)
+  ; a ^ b = 0xFF (8bit)
+  ; ~a = 0x55 (8bit)
+  ; a && b = 1 (1bit)
+  ; a || b = 1 (1bit)
+  ; !a = 0 (1bit)
+  ; Expected: {0x00, 0xFF, 0xFF, 0x55, 1, 1, 0}
+  ; {8'h00, 8'hFF, 8'hFF, 8'h55, 1'b1, 1'b1, 1'b0}
+  (let expected (| (| (trunc 32 (<< 0xFF (+ 8 8))) (trunc 32 (<< 0xFF 8))) 0x55))
+  (let expected2 (| (trunc 8 (<< 1 2)) (trunc 8 (<< 1 1))))
+  (assert_eq o expected)
+  (assert_eq o2 expected2))
+
+(case test_ternary_in_concat
+  (source "test.veryl" #"
+module Top (
+sel: input logic,
+a: input logic<8>,
+b: input logic<8>,
+o: output logic<16>
+) {
+assign o = {(if sel ? a : b), (if !sel ? a : b)};
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xAA)
+    (set b 0xBB))
+  ; sel = 1 -> {a, b} = {0xAA, 0xBB} = 0xAABB
+  (modify (set sel 1))
+  (assert_eq o 0xAABB)
+  ; sel = 0 -> {b, a} = {0xBB, 0xAA} = 0xBBAA
+  (modify (set sel 0))
+  (assert_eq o 0xBBAA))
+
+(case test_as_cast_in_concat
+  (source "test.veryl" #"
+module Top (
+a: input logic<16>,
+o: output logic<16>
+) {
+assign o = {a[15:8] as u8, a[7:0] as u16};
+}
+"#)
+  (top Top)
+  (modify (set a 0x1234))
+  ; 0x12 as u8 -> 0x12 (8bit)
+  ; 0x34 as u16 -> 0x0034 (16bit)
+  ; Expected: {0x12, 0x0034} = 24bit value 0x120034.
+  ; o is logic<16>, so it takes [15:0] -> 0x0034.
+  (assert_eq o 0x0034))
+
+(case test_nested_concat_and_repeat
+  (source "test.veryl" #"
+module Top (
+a: input logic<4>,
+o: output logic<16>
+) {
+assign o = {{a, a} repeat 2};
+}
+"#)
+  (top Top)
+  (modify (set a 0x5))
+  ; {a, a} = {0x5, 0x5} = 0x55 (8bit)
+  ; 0x55 repeat 2 = {0x55, 0x55} = 0x5555
+  (assert_eq o 0x5555))
+
+(case test_shift_in_concat
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            o: output logic<32>
+        ) {
+            assign o = {a << 2, a >> 2, a <<< 2, a >>> 2};
+        }
+    "#)
+  (top Top)
+  (modify (set a 0x40))
+  (let expected 0x00100010)
+  (assert_eq o expected))

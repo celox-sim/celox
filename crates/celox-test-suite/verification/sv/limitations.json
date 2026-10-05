@@ -1,0 +1,305 @@
+[
+  {
+    "id": "sv_icarus_generate_binding",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 cannot bind generate-scope parameters and signals that the block declares after their use (\"Unable to bind\"). Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::binds_generate_parameter_declarations_as_localparams",
+        "generate::resolves_each_generate_signal_declarator_independently",
+        "generate::resolves_forward_generate_localparam_dependencies",
+        "generate::resolves_generate_signal_size_parameter_dependencies"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_generate_forward_reference",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 resolves a name used before its declaration in the same generate block to the enclosing scope. Verilator (which warns VARHIDDEN) and Celox resolve it to the block's own declaration.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::predeclares_generate_signals_and_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_generate_case_context",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 compares a case-generate selector without the common width and signedness of the selector and all labels; IEEE 1800-2023 12.5 makes the comparison unsigned when any operand is unsigned. Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::uses_one_width_and_sign_context_for_generate_case"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_input_port_width",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 evaluates an input port connection at its self-determined width before padding, losing the carry; IEEE 1800-2023 10.8 and 11.8.2 widen the operands to the port first. Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "operators::propagates_child_input_width_into_connection_expressions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_syntax",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::ignores_type_aliases_in_inactive_generate_branches",
+        "indexed_select::indexed_constants_lower_selected_concatenations",
+        "indexed_select::indexed_constants_work_in_ordinary_selection_indices",
+        "indexed_select::indexed_runtime_replications_preserve_attached_selections",
+        "indexed_select::indexed_select_multidimensional_packed_reads",
+        "synthesizable::struct_assignment_patterns_follow_the_target_layout"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_packed_array_parameters",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
+        "review_regressions::preserves_use_site_dimensions_in_function_alias_types"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_internal_error",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 crashes on these designs: a segmentation fault while compiling, or a vvp assertion (vthread.cc of_DISABLE_FLOW) while running. Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::indexed_select_parameterized_generate_and_ff",
+        "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections",
+        "generate::distinguishes_escaped_generate_scope_components"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_generate_function_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 evaluates a size query in a generate block with a function from another scope and reaches a $fatal in an active branch. Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::restricts_generate_size_queries_to_visible_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unknown_generate_condition",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects a loop-generate condition with unknown bits; Verilator accepts it, and Celox treats an unknown condition as false, as for if-generate (IEEE 1800-2023 12.4, 27.5).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::treats_unknown_generate_truth_as_false"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_function_outputs",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::function_output_and_inout_arguments_are_written_back"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_instance_array_unpacked_port",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::instance_array_unpacked_connection_ascending_to_descending",
+        "synthesizable::instance_array_unpacked_connection_descending_to_ascending",
+        "synthesizable::instance_array_unpacked_connection_descending_to_descending",
+        "synthesizable::instance_array_unpacked_connection_offset_ranges"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_instance_array_fill_literal",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 accepts a one-bit '0 connected to a wider port of an instance array, which IEEE 1800-2023 23.3.3.5 makes an error. Verilator rejects it.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::instance_arrays_reject_a_fill_literal_tie_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constant_unknown_bits",
+    "category": "simulator_two_state",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 is two-state: unknown bits in constant system function arguments ($onehot(2'bx1)) are not kept unknown, so a generate condition differs from IEEE 1800-2023 20.9. Icarus agrees with the expected values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "generate::counts_only_known_ones_in_generate_system_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_generate_case_unknown_label",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 rejects an x or ? digit in a case-generate label (\"no such thing as generate casez\"). Icarus passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "generate::uses_self_determined_unbased_shift_counts_in_generate_cases"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_self_determined_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 does not wrap a self-determined index expression (2'd3 + 2'd1) to its width before selecting; IEEE 1800-2023 11.5.1 and 11.6.1 make the index 0. Icarus agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "indexed_select::indexed_unsigned_bases_cross_zero"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_function_outputs",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "synthesizable::function_output_and_inout_arguments_are_written_back"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_generate_name_collision",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 rejects a generate block named like a port with an \"Unsupported\" diagnostic instead of a duplicate-name error, so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 5.6.1, 23.9) and Icarus rejects it as a duplicate declaration.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "generate::rejects_an_escaped_generate_block_named_like_a_port"
+      ]
+    }
+  }
+]

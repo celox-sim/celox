@@ -1,0 +1,196 @@
+{
+  "schema": "word-frontier-phase3-publication-v1",
+  "base_revision": "39ec0d8dc1d55ab50997a4e8820fe674edaba471",
+  "scope": "Reviewed bounded phase3 scheduler policy, strict 18-row CI, all frozen nonbinary replay evidence, and bounded merged QA. RV Rust microstep SAT remains0/2; two concrete counterexamples are separate. No further phase.",
+  "excluded_from_this_index": [
+    "SHA256SUMS",
+    "SHA256SUMS.json",
+    "audit/word_frontier/publication/published-files.json"
+  ],
+  "files": {
+    ".github/workflows/veryl-fv.yml": {
+      "sha256": "7d29959699e17965b9f53ce486bc30bf8ec3188f474345081f6402f3f003ca02",
+      "bytes": 5169
+    },
+    "README.md": {
+      "sha256": "5e41e523b20b8ca3c2ce04e0d43ddd2418517314111f05090643ba4464f953ae",
+      "bytes": 28588
+    },
+    "WORD-FRONTIERS.md": {
+      "sha256": "cd1e5429e5d65071d511e7d2d3eeec399a3cc2de0502bf5ec605f63154612f16",
+      "bytes": 4974
+    },
+    "audit/word_frontier/README.md": {
+      "sha256": "fea174354544c8d09a6a9118e5defa8532ebf08137cc876b6f1fcccce69596b6",
+      "bytes": 6405
+    },
+    "audit/word_frontier/ci.py": {
+      "sha256": "2a1210738396deaf073863e7c8ef2dc0f27cd1c5e1a955e78d19976b49592c3a",
+      "bytes": 3168
+    },
+    "audit/word_frontier/compare.py": {
+      "sha256": "af8a2e99448f4f55070b10c50fc887048eda1923426d070718fd423516f6a360",
+      "bytes": 6445
+    },
+    "audit/word_frontier/evidence-summary.json": {
+      "sha256": "397251ff2cc1eba6c57e623f2c30fed5e767a77c37a929faabc007135fc9e4e7",
+      "bytes": 595039
+    },
+    "audit/word_frontier/generate.py": {
+      "sha256": "9298e8f9ce28ac3c346d3981f112c6f2e636d829f83fc6d135dd445bf3768d35",
+      "bytes": 3159
+    },
+    "audit/word_frontier/input-sha256.json": {
+      "sha256": "9737823511c6d2477d635599c1dd26294775d7be82f42bed0a6d79a9084367db",
+      "bytes": 2283
+    },
+    "audit/word_frontier/publication/README.md": {
+      "sha256": "6c68a226e5854f1bd476a36acb464592ba320a94f207766fe9308b33b5c408f1",
+      "bytes": 4685
+    },
+    "audit/word_frontier/publication/evidence/excluded-compiled-tools.json": {
+      "sha256": "e570be531982e3c8e45ed13903278191f70405bfec8a9e8271dc273829b4175f",
+      "bytes": 6564
+    },
+    "audit/word_frontier/publication/evidence/manifest.json": {
+      "sha256": "3e0c030e1b0f120da59b13112480fe530ca038d1f6fb7a99e3ea5493ee029980",
+      "bytes": 2362055
+    },
+    "audit/word_frontier/publication/evidence/phase3-generic-8b57146238fb75a14bc3bdca117d8f9d0701dc716b00ca1f9db9b42a40f13434.tar.xz": {
+      "sha256": "8b57146238fb75a14bc3bdca117d8f9d0701dc716b00ca1f9db9b42a40f13434",
+      "bytes": 412164
+    },
+    "audit/word_frontier/publication/evidence/phase3-generic.members.json": {
+      "sha256": "c63983722c6182744ddc349580fc94bdaab9ea290e38ee89027e14afff909cd5",
+      "bytes": 1763220
+    },
+    "audit/word_frontier/publication/evidence/phase3-merged-4613b99609210248614b2b7bd607c3789ff01b169c54007b04111eefe21ba19f.tar.xz": {
+      "sha256": "4613b99609210248614b2b7bd607c3789ff01b169c54007b04111eefe21ba19f",
+      "bytes": 269072
+    },
+    "audit/word_frontier/publication/evidence/phase3-merged.members.json": {
+      "sha256": "e66a02f225f7975f8197b2e4571fc4af972c7b1f5f0ca6046c7731b944bf8446",
+      "bytes": 272758
+    },
+    "audit/word_frontier/publication/evidence/phase3-rv-ed6e92b423caae60c09e6da506353ee0148da7aca5531b23b67a3217f260f493.tar.xz": {
+      "sha256": "ed6e92b423caae60c09e6da506353ee0148da7aca5531b23b67a3217f260f493",
+      "bytes": 6239852
+    },
+    "audit/word_frontier/publication/evidence/phase3-rv.members.json": {
+      "sha256": "fd6dd23c77cdd9c33c2f32e7dd7d20909d79b9bb9b3a281917045aec938ac94b",
+      "bytes": 2924968
+    },
+    "audit/word_frontier/publication/evidence/validation.json": {
+      "sha256": "29c5c640138fbc947beb4368976d5eea517d1eb23d624015492aa43c0a7cb826",
+      "bytes": 578
+    },
+    "audit/word_frontier/publication/validation/concrete-replay-summary.json": {
+      "sha256": "9a92e542d384c08e362ad33560688832574c1a479d0899aa326aee0d709f90e6",
+      "bytes": 1318
+    },
+    "audit/word_frontier/publication/validation/merged-artifact-crosscheck.json": {
+      "sha256": "31a1de6be498d069489b263ef3204ab21d4671d562da9cb114699c49773357e9",
+      "bytes": 2287
+    },
+    "audit/word_frontier/publication/validation/merged-automatic-tests.log": {
+      "sha256": "2446cfb8060d9e1454bfc76c47cc328edd6186e2953a16286f9b93a82199c4e5",
+      "bytes": 2153
+    },
+    "audit/word_frontier/publication/validation/merged-build.log": {
+      "sha256": "009c12aa0816b1fafe619e01ea5ef57996a91ce113c8b66ef6fdf17285c91004",
+      "bytes": 373
+    },
+    "audit/word_frontier/publication/validation/merged-ci-summary.json": {
+      "sha256": "ce86d61a9cc40df451a2b521ffc87e69a5f2c7ee9f31e859391025974d0a005d",
+      "bytes": 595
+    },
+    "audit/word_frontier/publication/validation/merged-clippy.log": {
+      "sha256": "9c83ed94e70bed7eb90ffef7c88f702f75b610eb01271256fe73a761d7379ff1",
+      "bytes": 473
+    },
+    "audit/word_frontier/publication/validation/merged-concrete-replay-summary.json": {
+      "sha256": "6dde878fc66fc8f7a80675bab2508c8d12b4d1e79c7df01065a14761d23a3b8e",
+      "bytes": 1318
+    },
+    "audit/word_frontier/publication/validation/merged-fmt.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "audit/word_frontier/publication/validation/merged-python-tests.log": {
+      "sha256": "bce79d4b37660f98b4fce934e940e45de72badd7faced9d4644c0ac2ad42fa1f",
+      "bytes": 109
+    },
+    "audit/word_frontier/publication/validation/merged-source-binding.json": {
+      "sha256": "0151a845df777673b9978190e4b93febbab5c999e000d63358154ee14e748354",
+      "bytes": 2388
+    },
+    "audit/word_frontier/publication/validation/phase2-strict-summary.json": {
+      "sha256": "3fa14f0368eccb82920331c7e6eff20ed84741bbfebfb4e4abfc3098da78c85a",
+      "bytes": 390386
+    },
+    "audit/word_frontier/publication/validation/phase3-auto-tests.log": {
+      "sha256": "f2d221180e6c9581944e9227716597a5578317a31a2a50a3542c365872f17c26",
+      "bytes": 2166
+    },
+    "audit/word_frontier/publication/validation/phase3-clippy.log": {
+      "sha256": "2d95cfeef36e83fe9858df564bbb2c1a8a2d7a09d532de0ad224427a275f2c20",
+      "bytes": 499
+    },
+    "audit/word_frontier/publication/validation/phase3-manual-compatible-report.json": {
+      "sha256": "401b9fbe7b2b071183b15edcbf8e6a8003ebbd8a73785f74d65cc36e2a0909ef",
+      "bytes": 3833428
+    },
+    "audit/word_frontier/publication/validation/phase3-prior-coverage-summary.json": {
+      "sha256": "f7d581ed9e6b56e4faf6f81c1458be685fd85b4a79fe9ef74119d945ee957874",
+      "bytes": 81707
+    },
+    "audit/word_frontier/publication/validation/phase3-word-frontier-selected-report.json": {
+      "sha256": "b26735c896ef584c78fccd119f8de937074f3b9aacb5afd12f07cac4c2e3622e",
+      "bytes": 3933054
+    },
+    "audit/word_frontier/publication/validation/phase3-workspace-release.log": {
+      "sha256": "9ce757b2705ab336e07e638984711ba970a4eea69f641ebf8e113cb8ccddf742",
+      "bytes": 33433
+    },
+    "audit/word_frontier/publication/validation/publication-inventory.json": {
+      "sha256": "9292b124940f947b8dc0658e13aff1a14e8d3d9e8561b410e2e64db6c8aea787",
+      "bytes": 2637
+    },
+    "audit/word_frontier/publication/validation/rv-mutant-summary.json": {
+      "sha256": "15d441f45386fa7bb83f7d38547d2cbbc1b2056c5b66012615c3a0bc4c672787",
+      "bytes": 12781
+    },
+    "audit/word_frontier/publication/validation/source-manifest.json": {
+      "sha256": "ce767e66015f17ea2aadfa53f79733b7452eeca67ce68405ade1bfa392ad435b",
+      "bytes": 2211
+    },
+    "audit/word_frontier/publication/validation/validation-summary.json": {
+      "sha256": "9b72e9870c4e438ed7e4acebf4cad6b11b5e476191b912918e2a25f81ff9cf11",
+      "bytes": 1977
+    },
+    "audit/word_frontier/publication/verify_evidence.py": {
+      "sha256": "96dd21ac0ff79dd4f96bd0fa8ea6eac1ea8cd833110374f9a1fdd8f00bbf829c",
+      "bytes": 640
+    },
+    "audit/word_frontier/run.py": {
+      "sha256": "670248be2e94c28fd5167dcd510e720cbea71909c53e8b6ddc11251f199259f5",
+      "bytes": 4596
+    },
+    "audit/word_frontier/rv_address_replay.py": {
+      "sha256": "351fca2f23a28141229a0e6d716f716215c1b2537ff2276ed09b1fc66711b0b4",
+      "bytes": 5997
+    },
+    "audit/word_frontier/test_ci.py": {
+      "sha256": "74a7ded80c7f4f32ae82f8bb5026aa694d68bb514b7eb40b5450d58101fc4c25",
+      "bytes": 2540
+    },
+    "audit/word_frontier/test_generate.py": {
+      "sha256": "66b306f1127b2ee2a928a10776e8d4e72fa5a4145e1e270029ea5f0a1a951258",
+      "bytes": 3933
+    },
+    "crates/solver/src/automatic.rs": {
+      "sha256": "13b676b546a2c9ee5536d8e92f8dda84d5cf76c086ce0c19a0ccc39e906f96fb",
+      "bytes": 26947
+    }
+  }
+}

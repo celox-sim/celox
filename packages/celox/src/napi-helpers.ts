@@ -16,6 +16,7 @@ import type {
 	FrontendSimulatorHandle,
 	LoopBreak,
 	NativeFrontendSimulatorHandle,
+	NativeSimulationCheckpoint,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	PortInfo,
@@ -49,6 +50,12 @@ export interface RawNapiSimulationHandle {
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
+	checkpoint?(): NativeSimulationCheckpoint;
+	restore?(checkpoint: NativeSimulationCheckpoint): void;
+	saveState?(): Uint8Array;
+	loadState?(bytes: Uint8Array): void;
+	clockPeriods?(): { eventId: number; period: number }[];
+	switchVcd?(path: string): void;
 	dispose(): void;
 }
 
@@ -671,6 +678,8 @@ export interface HierarchyNode {
 	moduleName: string;
 	/** Index of this instance under its name (instance array element index). */
 	index?: number;
+	/** Whether the name takes an index, even for a single instance. */
+	indexed?: boolean;
 	signals: Record<
 		string,
 		SignalLayout & { typeKind: string; arrayDims?: number[] }
@@ -683,6 +692,7 @@ export interface HierarchyNode {
 interface RawHierarchyNode {
 	module_name: string;
 	index?: number;
+	indexed?: boolean;
 	signals: Record<string, RawSignalLayout>;
 	children: Record<string, RawHierarchyNode[]>;
 }
@@ -755,6 +765,7 @@ function convertHierarchyNode(
 	return {
 		moduleName: raw.module_name,
 		index: raw.index,
+		indexed: raw.indexed,
 		signals,
 		forDut,
 		ports,
@@ -811,6 +822,21 @@ export function wrapDirectSimulatorHandle(
 				.tierCompiled;
 			return value ?? null;
 		},
+		...(raw.checkpoint && raw.restore
+			? {
+					checkpoint: () => raw.checkpoint!(),
+					restore: (checkpoint) => raw.restore!(checkpoint),
+				}
+			: {}),
+		...(raw.saveState && raw.loadState
+			? {
+					saveState: () => raw.saveState!(),
+					loadState: (bytes) => raw.loadState!(bytes),
+				}
+			: {}),
+		...(raw.switchVcd
+			? { switchVcd: (path: string) => raw.switchVcd!(path) }
+			: {}),
 	};
 }
 
@@ -848,6 +874,22 @@ export function wrapDirectSimulationHandle(
 		dispose(): void {
 			raw.dispose();
 		},
+		...(raw.checkpoint && raw.restore
+			? {
+					checkpoint: () => raw.checkpoint!(),
+					restore: (checkpoint) => raw.restore!(checkpoint),
+				}
+			: {}),
+		...(raw.saveState && raw.loadState
+			? {
+					saveState: () => raw.saveState!(),
+					loadState: (bytes) => raw.loadState!(bytes),
+				}
+			: {}),
+		...(raw.switchVcd
+			? { switchVcd: (path: string) => raw.switchVcd!(path) }
+			: {}),
+		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
 	};
 }
 

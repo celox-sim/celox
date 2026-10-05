@@ -1,0 +1,182 @@
+(group reset_edge_cases (category sequential))
+
+(case test_reset_async_high
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+d:   input  logic<8>,
+q:   output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'd0;
+} else {
+r = d;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  ; Assert reset (high-active)
+  (modify
+    (set rst 1)
+    (set d 0xAA))
+  (tick clk)
+  (assert_eq q 0)
+  ; held in reset
+  ; Release reset, capture data
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq q 0xAA)
+  ; Change data
+  (modify (set d 0x55))
+  (tick clk)
+  (assert_eq q 0x55)
+  ; Re-assert reset mid-operation
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0))
+
+(case test_reset_sync_high
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_sync_high,
+d:   input  logic<8>,
+q:   output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'd0;
+} else {
+r = d;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  ; Assert sync reset
+  (modify
+    (set rst 1)
+    (set d 0xBB))
+  (tick clk)
+  (assert_eq q 0)
+  ; reset takes effect synchronously
+  ; Release reset, data should be captured on next clock
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq q 0xBB))
+
+(case test_reset_sync_low
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_sync_low,
+d:   input  logic<8>,
+q:   output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'd0;
+} else {
+r = d;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  ; Assert sync reset (active-low: rst=0 means reset)
+  (modify
+    (set rst 0)
+    (set d 0xCC))
+  (tick clk)
+  (assert_eq q 0)
+  ; in reset
+  ; Release reset (rst=1)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0xCC))
+
+(case test_shared_reset
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+d1:  input  logic<8>,
+d2:  input  logic<8>,
+q1:  output logic<8>,
+q2:  output logic<8>
+) {
+var r1: logic<8>;
+var r2: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r1 = 8'h00;
+} else {
+r1 = d1;
+}
+}
+always_ff (clk, rst) {
+if_reset {
+r2 = 8'hFF;
+} else {
+r2 = d2;
+}
+}
+assign q1 = r1;
+assign q2 = r2;
+}
+"#)
+  (top Top)
+  ; Reset both FFs (AsyncLow: rst=0 means active)
+  (modify
+    (set rst 0)
+    (set d1 0xAA)
+    (set d2 0xBB))
+  (tick clk)
+  (assert_eq q1 0x00)
+  (assert_eq q2 0xFF)
+  ; different reset value
+  ; Release reset
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q1 0xAA)
+  (assert_eq q2 0xBB))
+
+(case test_nonzero_reset_value
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+d:   input  logic<8>,
+q:   output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'hDE;
+} else {
+r = d;
+}
+}
+assign q = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set d 0x00))
+  (tick clk)
+  (assert_eq q 0xDE)
+  ; reset to 0xDE
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0x00))
+  ; now captures d=0

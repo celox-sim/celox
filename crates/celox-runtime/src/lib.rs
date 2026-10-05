@@ -7,6 +7,7 @@ pub mod parallel;
 mod reflection;
 pub mod scheduler;
 mod simulation;
+mod state_file;
 mod testbench;
 mod vcd;
 
@@ -16,7 +17,13 @@ pub use reflection::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
 };
-pub use simulation::{EventInfo, SimulationExecutor, SimulationState};
+pub use simulation::{
+    EventInfo, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
+};
+pub use state_file::{
+    ScheduleRecord, ScheduledEvent, StateDifference, StateFile, StateFileError, StateObject,
+    StateRole, format_state_value,
+};
 pub use testbench::bind_testbench_program;
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
 

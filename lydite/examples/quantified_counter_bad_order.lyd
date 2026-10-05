@@ -1,0 +1,17 @@
+specification "One fixed correction cannot cancel every input"
+
+spec Corrected(input amount: bv<2>, input correction: bv<2>, output count: bv<2>) {
+  state value: bv<2>;
+  init value == 0u2;
+  invariant count == value;
+  operation add { expect value' == value + amount - correction; }
+
+  // Intentionally fails: b is chosen before a, so it cannot depend on a.
+  example fixed_correction_is_insufficient {
+    exists b: bv<2>;
+    forall a: bv<2>;
+    execution forall;
+    initial { count = 0u2; }
+    trace { add(amount: a, correction: b) => count == 0u2; }
+  }
+}

@@ -27,7 +27,7 @@ bypassing safety checks, or committing, pushing, or publishing unless requested.
 
 ## Adding tests
 
-When adding tests, consider adding them to `crates/celox-test-suite-veryl` so
+When adding tests, consider adding them to `crates/celox-test-suite` so
 other compiler and simulator implementations can reuse the Veryl source,
 stimulus, and assertions. Prefer the shared suite for implementation-independent
 language behavior and portable regressions. Keep tests of Celox-specific APIs,

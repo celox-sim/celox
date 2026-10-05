@@ -1,0 +1,509 @@
+{
+  "status": "pass",
+  "runs": [
+    {
+      "case": "countdown_good",
+      "mode": "auto",
+      "status": "program_and_refinement_verified",
+      "seconds": 0.16856168800222804,
+      "replayed": [],
+      "plan": {
+        "candidates": [
+          {
+            "decision": "selected",
+            "source": "model-only comparison",
+            "state": "x",
+            "values": [
+              0
+            ]
+          }
+        ],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 2,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 1,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "countdown_good",
+      "mode": "none",
+      "status": "program_and_refinement_verified",
+      "seconds": 0.1421893269980501,
+      "replayed": [],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "disjunction_bound_bad",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.23533944800146855,
+      "replayed": [
+        "program_invariant_preserved_auto_y_0_auto_x_9"
+      ],
+      "plan": {
+        "candidates": [
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "y",
+            "values": [
+              0
+            ]
+          },
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "x",
+            "values": [
+              0,
+              2,
+              9
+            ]
+          }
+        ],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 8,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 2,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "disjunction_bound_bad",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.16788338900005328,
+      "replayed": [
+        "program_invariant_preserved"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "implication_bound_bad",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.2619882629987842,
+      "replayed": [
+        "program_invariant_preserved_auto_y_0_auto_x_10"
+      ],
+      "plan": {
+        "candidates": [
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "y",
+            "values": [
+              0
+            ]
+          },
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "x",
+            "values": [
+              0,
+              8,
+              10
+            ]
+          }
+        ],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 8,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 2,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "implication_bound_bad",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.17031080900051165,
+      "replayed": [
+        "program_invariant_preserved"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "inverted_bound_bad",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.28135427800225443,
+      "replayed": [
+        "program_invariant_preserved_auto_y_0_auto_x_7"
+      ],
+      "plan": {
+        "candidates": [
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "y",
+            "values": [
+              0
+            ]
+          },
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "x",
+            "values": [
+              0,
+              2,
+              7,
+              12
+            ]
+          }
+        ],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 10,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 2,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "inverted_bound_bad",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.16658165700209793,
+      "replayed": [
+        "program_invariant_preserved"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "wrapped_literal_bad",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.2662371750011516,
+      "replayed": [
+        "program_invariant_preserved_auto_y_0_auto_x_7",
+        "program_invariant_preserved_auto_y_other_auto_x_2"
+      ],
+      "plan": {
+        "candidates": [
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "y",
+            "values": [
+              0
+            ]
+          },
+          {
+            "decision": "selected",
+            "source": "invariant comparison (possibly also model)",
+            "state": "x",
+            "values": [
+              0,
+              2,
+              7
+            ]
+          }
+        ],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 8,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 2,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "wrapped_literal_bad",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.1997234109985584,
+      "replayed": [
+        "program_invariant_preserved"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "multiplier_good",
+      "mode": "auto",
+      "status": "program_and_refinement_verified",
+      "seconds": 0.24263742399853072,
+      "replayed": [],
+      "plan": {
+        "candidates": [],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 1,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 0,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "multiplier_good",
+      "mode": "none",
+      "status": "program_and_refinement_verified",
+      "seconds": 0.30198913300046115,
+      "replayed": [],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "multiplier_wrong_capture",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.2548369889991591,
+      "replayed": [
+        "microstep_refinement"
+      ],
+      "plan": {
+        "candidates": [],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 1,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 0,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "multiplier_wrong_capture",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.2472037650004495,
+      "replayed": [
+        "microstep_refinement"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "multiplier_missing_decrement",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.20704730999932508,
+      "replayed": [
+        "program_invariant_preserved",
+        "program_rank_decreases"
+      ],
+      "plan": {
+        "candidates": [],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 1,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 0,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "multiplier_missing_decrement",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.19858770900100353,
+      "replayed": [
+        "program_invariant_preserved",
+        "program_rank_decreases"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    },
+    {
+      "case": "multiplier_hang_capture",
+      "mode": "auto",
+      "status": "counterexample",
+      "seconds": 0.23680421099925297,
+      "replayed": [
+        "noncommit_rank_decreases"
+      ],
+      "plan": {
+        "candidates": [],
+        "max_axes": 3,
+        "max_partitions": 128,
+        "max_values_per_axis": 32,
+        "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+        "partition_count": 1,
+        "partition_query_timeout_ms": 1000,
+        "partition_scheduling_budget_ms": 30000,
+        "selected_axes": 0,
+        "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+        "strategy": "automatic_literal_comparisons_v2"
+      }
+    },
+    {
+      "case": "multiplier_hang_capture",
+      "mode": "none",
+      "status": "counterexample",
+      "seconds": 0.241433113002131,
+      "replayed": [
+        "noncommit_rank_decreases"
+      ],
+      "plan": {
+        "partition_count": 1,
+        "strategy": "none"
+      }
+    }
+  ],
+  "enumeration": [
+    {
+      "case": "countdown_good",
+      "states": 256,
+      "bad_states": []
+    },
+    {
+      "case": "disjunction_bound_bad",
+      "states": 256,
+      "bad_states": [
+        [
+          9,
+          0
+        ]
+      ]
+    },
+    {
+      "case": "implication_bound_bad",
+      "states": 256,
+      "bad_states": [
+        [
+          10,
+          0
+        ]
+      ]
+    },
+    {
+      "case": "inverted_bound_bad",
+      "states": 256,
+      "bad_states": [
+        [
+          7,
+          0
+        ]
+      ]
+    },
+    {
+      "case": "wrapped_literal_bad",
+      "states": 256,
+      "bad_states": [
+        [
+          2,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          2,
+          7
+        ],
+        [
+          2,
+          8
+        ],
+        [
+          2,
+          9
+        ],
+        [
+          2,
+          10
+        ],
+        [
+          2,
+          11
+        ],
+        [
+          2,
+          12
+        ],
+        [
+          2,
+          13
+        ],
+        [
+          2,
+          14
+        ],
+        [
+          2,
+          15
+        ],
+        [
+          7,
+          0
+        ]
+      ]
+    }
+  ],
+  "total_replayed": 17
+}

@@ -1,0 +1,20 @@
+{
+  "version": "0.10.0",
+  "workspace_tests": 191,
+  "fmt": "pass",
+  "clippy_all_targets_warnings_denied": "pass",
+  "build": "pass",
+  "source_hashes": {
+    "Cargo.toml": "b63079ee2f66e99378a3a3c91c735442ee46715559fdf7a81645edb5771e813e",
+    "Cargo.lock": "25b148bac085a70667b94034b26c4403eacbcde144a33c73564b0ad66f1a547c",
+    "crates/solver/src/finite.rs": "8b5aa092b84f397b141aaf0c71961991601de444e2e0e6585b9de6f6f8ece3d0",
+    "crates/solver/src/lib.rs": "abc54849616f2d6f5b5f661c6f17c1c22e9bc0aa0c46c51371b7a6be3ddd766a",
+    "crates/solver/src/z3.rs": "f752c8d2c2a789cc88e1351e92e7127605be9e385d52ff9921ca454d9a35c65c",
+    "crates/solver/src/quantified.rs": "08053f88326486057065c4a982ecdf0e7fba16e9249663d8de92d0ee9980d88b",
+    "crates/verify/src/checker.rs": "44f087d61da7aaa7a9976a04d681225a31a747d2157da823cdffe138af2a7e19",
+    "crates/cli/src/main.rs": "d2ce8f8564961d2225100c2cdc45a02f1f00ee3fa04ee4a0b4f13d9f9508f8d9",
+    "crates/cli/tests/pipeline.rs": "d4181dacb9d4eda5cb6df43a1ceab5bda5fe74320f545528d675d288df9ecab1",
+    "examples/build_pipeline.py": "4888c408b9c3440daeb93045ec2136a52fe5ea95862cbe0d504bbe83ad6edd9d"
+  },
+  "binary_sha256": "0f8d39048e9c0ac53370be3156877a927d03686666b37d8020689516c438b986"
+}

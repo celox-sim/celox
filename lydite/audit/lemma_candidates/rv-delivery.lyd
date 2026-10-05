@@ -1,0 +1,23 @@
+// Native authoring of a real RV operand-delivery lemma and its guarded use.
+// x_pre/x_post and the checked projection "local" come from the existing
+// current-design proof program. Other checked steps are retained unchanged.
+lemmas "RV operand delivery" {
+  // On the original address-query premise and its normal memory-operation
+  // branch, the instruction delivered to M is the current X instruction.
+  // The existing checked rewrite consumes this freshly proved equality.
+  target m_address {
+    lemma ir {
+      context pre && normal_m_address;
+      guard true;
+      claim impl.m_ir' == impl.x_ir;
+    }
+  }
+  target x_operand1 {
+    lemma delivery {
+      context true;
+      guard x_pre;
+      claim x_post;
+    }
+    use equality: local(context: pre);
+  }
+}

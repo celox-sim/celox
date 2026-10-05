@@ -1,0 +1,49 @@
+(group always_comb (category combinational))
+
+(case simulates_systemverilog_always_comb_dependency
+  (source "always_comb.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [7:0] y,
+            output logic [7:0] z
+        );
+            always_comb begin
+                y = a ^ b;
+                z = y | 8'h80;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 0x55)
+    (set b 0x0f))
+  (assert_eq y 0x5a)
+  (assert_eq z 0xda))
+
+(case preserves_intervening_reads_when_merging_conditional_writes
+  (source "always_comb_order.sv" #"
+        module Top(
+            input logic c,
+            input logic d,
+            output logic x,
+            output logic y
+        );
+            always_comb begin
+                x = d;
+                y = x;
+                if (c) x = 1'b1;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set c 1)
+    (set d 0))
+  (assert_eq x 1)
+  (assert_eq y 0)
+  (modify
+    (set c 0)
+    (set d 1))
+  (assert_eq x 1)
+  (assert_eq y 1))

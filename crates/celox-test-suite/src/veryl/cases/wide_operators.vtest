@@ -1,0 +1,552 @@
+(group wide_operators (category operators))
+
+(case test_wide_addition_128bit
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o: output logic<128>
+) {
+assign o = a + b;
+}
+"#)
+  (top Top)
+  ; Simple addition
+  (let val_a (| (<< 1 64) 0x12345678))
+  (let val_b (| (<< 0 64) 0x00000001))
+  (let expected (+ val_a val_b))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected))
+
+(case test_wide_addition_carry_propagation
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o: output logic<128>
+) {
+assign o = a + b;
+}
+"#)
+  (top Top)
+  ; Carry from lower 64 bits into upper 64 bits
+  (let val_a 0xffffffffffffffff)
+  (let val_b 1)
+  (let expected (trunc 128 (<< 1 64)))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected))
+
+(case test_wide_subtraction_128bit
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o: output logic<128>
+) {
+assign o = a - b;
+}
+"#)
+  (top Top)
+  (let val_a (+ (trunc 128 (<< 1 64)) 100))
+  (let val_b 50)
+  (let expected (+ (trunc 128 (<< 1 64)) 50))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected))
+
+(case test_wide_subtraction_borrow
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o: output logic<128>
+) {
+assign o = a - b;
+}
+"#)
+  (top Top)
+  ; Borrow from upper chunk: (1 << 64) - 1 = 0xFFFF_FFFF_FFFF_FFFF
+  (let val_a (trunc 128 (<< 1 64)))
+  (let val_b 1)
+  (let expected 0xffffffffffffffff)
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected))
+
+(case test_wide_bitwise_operations
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o_and: output logic<128>,
+o_or:  output logic<128>,
+o_xor: output logic<128>
+) {
+assign o_and = a & b;
+assign o_or  = a | b;
+assign o_xor = a ^ b;
+}
+"#)
+  (top Top)
+  (let val_a (| 0xFF00FF00 (<< 0xAAAAAAAA 64)))
+  (let val_b (| 0x0FF00FF0 (<< 0x55555555 64)))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o_and (& val_a val_b))
+  (assert_eq o_or (| val_a val_b))
+  (assert_eq o_xor (^ val_a val_b)))
+
+(case test_wide_comparison_eq
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+o_eq: output logic,
+o_ne: output logic
+) {
+assign o_eq = a == b;
+assign o_ne = a != b;
+}
+"#)
+  (top Top)
+  (let val (| 0xDEADBEEF (<< 0xCAFEBABE 64)))
+  (modify
+    (set a val)
+    (set b val))
+  (assert_eq o_eq 1)
+  (assert_eq o_ne 0)
+  ; Differ only in upper chunk
+  (let val2 (| 0xDEADBEEF (<< 0xCAFEBABF 64)))
+  (modify (set b val2))
+  (assert_eq o_eq 0)
+  (assert_eq o_ne 1))
+
+(case test_wide_shift_left
+  (source "test.veryl" #"
+module Top (
+a:   input  logic<128>,
+amt: input  logic<8>,
+o:   output logic<128>
+) {
+assign o = a << amt;
+}
+"#)
+  (top Top)
+  (let val 1)
+  ; Shift by 0 -> stays in place
+  (modify
+    (set a val)
+    (set amt 0))
+  (assert_eq o 1)
+  ; Shift by 64 -> moves entirely to upper chunk
+  (modify (set amt 64))
+  (assert_eq o (trunc 128 (<< 1 64)))
+  ; Shift by 32 -> crosses chunk boundary
+  (modify
+    (set a 0xFFFFFFFF)
+    (set amt 32))
+  (assert_eq o (trunc 128 (<< 0xFFFFFFFF 32))))
+
+(case test_wide_ff_accumulator
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+inc: input logic<128>,
+o:   output logic<128>
+) {
+var acc: logic<128>;
+always_ff {
+acc = acc + inc;
+}
+assign o = acc;
+}
+"#)
+  (top Top)
+  (let step 0xffffffffffffffff)
+  (modify (set inc step))
+  (tick clk)
+  (assert_eq o step)
+  (tick clk)
+  (assert_eq o (* step 2))
+  (tick clk)
+  (assert_eq o (* step 3)))
+
+(case test_wide_comb_logic_and_or
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+y_and: output logic,
+y_or:  output logic,
+y_and_w: output logic<128>,
+y_or_w:  output logic<128>
+) {
+assign y_and   = (|a) && (|b);
+assign y_or    = (|a) || (|b);
+assign y_and_w = (|a) && (|b);
+assign y_or_w  = (|a) || (|b);
+}
+"#)
+  (top Top)
+  ; 0 && 0 = 0, 0 || 0 = 0
+  (modify
+    (set a 0)
+    (set b 0))
+  (assert_eq y_and 0)
+  (assert_eq y_or 0)
+  (assert_eq y_and_w 0)
+  (assert_eq y_or_w 0)
+  ; nonzero(high chunk) && 0 = 0, nonzero(high chunk) || 0 = 1
+  (modify
+    (set a (trunc 128 (<< 1 96)))
+    (set b 0))
+  (assert_eq y_and 0)
+  (assert_eq y_or 1)
+  (assert_eq y_and_w 0)
+  (assert_eq y_or_w 1)
+  ; nonzero && nonzero = 1, nonzero || nonzero = 1
+  (modify
+    (set a (trunc 128 (<< 1 96)))
+    (set b (trunc 128 (<< 1 4))))
+  (assert_eq y_and 1)
+  (assert_eq y_or 1)
+  (assert_eq y_and_w 1)
+  (assert_eq y_or_w 1))
+
+(case test_wide_logic_or_with_narrow_operand
+  (source "test.veryl" #"
+module Top (
+a: input  logic<65>,
+b: input  logic,
+o_or:  output logic,
+o_and: output logic,
+) {
+assign o_or  = (|a) || b;
+assign o_and = (|a) && b;
+}
+"#)
+  (top Top)
+  ; a=0, b=0 → both 0
+  (set b 0)
+  (set a 0)
+  (assert_eq o_or 0)
+  (assert_eq o_and 0)
+  ; a=0, b=1 → or=1, and=0
+  (set b 1)
+  (assert_eq o_or 1)
+  (assert_eq o_and 0)
+  ; a=nonzero (bit 64 set), b=0 → or=1, and=0
+  (set b 0)
+  (set a (<< 1 64))
+  (assert_eq o_or 1)
+  (assert_eq o_and 0)
+  ; a=nonzero, b=1 → both 1
+  (set b 1)
+  (assert_eq o_or 1)
+  (assert_eq o_and 1))
+
+(case test_wide_comb_mul
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+y: output logic<128>
+) {
+assign y = a * b;
+}
+"#)
+  (top Top)
+  ; 3 * 7 = 21
+  (modify
+    (set a 3)
+    (set b 7))
+  (assert_eq y 21)
+  ; Large: 0x1_0000_0000 * 0x1_0000_0000 = 0x1_0000_0000_0000_0000
+  (modify
+    (set a 0x100000000)
+    (set b 0x100000000))
+  (assert_eq y 0x10000000000000000))
+
+(case test_wide_ff_mul
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset,
+a:   input  logic<128>,
+b:   input  logic<128>,
+y:   output logic<128>
+) {
+var r: logic<128>;
+always_ff (clk, rst) {
+if_reset {
+r = 128'd0;
+} else {
+r = a * b;
+}
+}
+assign y = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set a 0)
+    (set b 0))
+  (tick clk)
+  (assert_eq y 0)
+  (modify
+    (set rst 1)
+    (set a 12345)
+    (set b 67890))
+  (tick clk)
+  (assert_eq y (* 12345 67890)))
+
+(case test_wide_comb_div
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+q: output logic<128>
+) {
+assign q = a / b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq q 14)
+  ; Large dividend spanning multiple chunks
+  (let big_a (trunc 128 (<< 1 100)))
+  (let big_b (trunc 128 (<< 1 50)))
+  (modify
+    (set a big_a)
+    (set b big_b))
+  (assert_eq q (trunc 128 (<< 1 50))))
+
+(case test_wide_comb_rem
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+r: output logic<128>
+) {
+assign r = a % b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 100)
+    (set b 7))
+  (assert_eq r 2)
+  (let big_a (+ (trunc 128 (<< 1 100)) 42))
+  (let big_b (trunc 128 (<< 1 100)))
+  (modify
+    (set a big_a)
+    (set b big_b))
+  (assert_eq r 42))
+
+(case test_wide_comb_bitxnor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+b: input  logic<128>,
+y: output logic<128>
+) {
+assign y = a ~^ b;
+}
+"#)
+  (top Top)
+  (let va 0xFFFFFFFFFFFFFFFF0000000000000000)
+  (let vb 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+  (let expected (trunc 128 (~ (^ va vb))))
+  (modify
+    (set a va)
+    (set b vb))
+  (assert_eq y expected))
+
+(case test_wide_comb_sar
+  (source "test.veryl" #"
+module Top (
+a: input  signed logic<128>,
+b: input  logic<7>,
+y: output signed logic<128>
+) {
+assign y = a >>> b;
+}
+"#)
+  (top Top)
+  ; Positive value: arithmetic shift right = logical shift right
+  (modify
+    (set a 0x100)
+    (set b 4))
+  (assert_eq y 0x10)
+  ; Negative value (MSB set): should sign-extend
+  (let neg_val (- 0xffffffffffffffffffffffffffffffff 15))
+  ; -16 in two's complement
+  (modify
+    (set a neg_val)
+    (set b 2))
+  ; -16 >>> 2 = -4, which is u128::MAX - 3
+  (assert_eq y (- 0xffffffffffffffffffffffffffffffff 3)))
+
+(case test_wide_comb_signed_lt
+  (source "test.veryl" #"
+module Top (
+a: input  signed logic<128>,
+b: input  signed logic<128>,
+y: output logic
+) {
+assign y = a <: b;
+}
+"#)
+  (top Top)
+  ; -1 < 1 should be true
+  (modify
+    (set a 0xffffffffffffffffffffffffffffffff)
+    ; -1
+    (set b 1))
+  (assert_eq y 1)
+  ; 1 < -1 should be false
+  (modify
+    (set a 1)
+    (set b 0xffffffffffffffffffffffffffffffff))
+    ; -1
+  (assert_eq y 0)
+  ; Equal values: not less than
+  (modify
+    (set a 42)
+    (set b 42))
+  (assert_eq y 0))
+
+(case test_wide_comb_signed_gt
+  (source "test.veryl" #"
+module Top (
+a: input  signed logic<128>,
+b: input  signed logic<128>,
+y: output logic
+) {
+assign y = a >: b;
+}
+"#)
+  (top Top)
+  ; 1 > -1 should be true
+  (modify
+    (set a 1)
+    (set b 0xffffffffffffffffffffffffffffffff))
+    ; -1
+  (assert_eq y 1)
+  ; -1 > 1 should be false
+  (modify
+    (set a 0xffffffffffffffffffffffffffffffff)
+    ; -1
+    (set b 1))
+  (assert_eq y 0))
+
+(case test_wide_comb_reduction_nand
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+y: output logic
+) {
+assign y = ~&a;
+}
+"#)
+  (top Top)
+  (modify (set a 0xffffffffffffffffffffffffffffffff))
+  (assert_eq y 0)
+  ; all 1s -> 0
+  (modify (set a (- 0xffffffffffffffffffffffffffffffff 1)))
+  (assert_eq y 1))
+  ; not all 1s -> 1
+
+(case test_wide_comb_reduction_nor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+y: output logic
+) {
+assign y = ~|a;
+}
+"#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq y 1)
+  ; all 0s -> 1
+  (modify (set a 1))
+  (assert_eq y 0))
+  ; not all 0s -> 0
+
+(case test_wide_comb_reduction_xnor
+  (source "test.veryl" #"
+module Top (
+a: input  logic<128>,
+y: output logic
+) {
+assign y = ~^a;
+}
+"#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq y 1)
+  ; 0 ones (even) -> 1
+  (modify (set a 1))
+  (assert_eq y 0)
+  ; 1 one (odd) -> 0
+  (modify (set a 3))
+  (assert_eq y 1))
+  ; 2 ones (even) -> 1
+
+(case test_wide_signed_compare_non_chunk_aligned
+  (source "test.veryl" #"
+module Top (
+a65: input signed logic<65>,
+b65: input signed logic<65>,
+a127: input signed logic<127>,
+b127: input signed logic<127>,
+lt65: output logic,
+le65: output logic,
+gt65: output logic,
+ge65: output logic,
+lt127: output logic,
+le127: output logic,
+gt127: output logic,
+ge127: output logic,
+) {
+assign lt65 = a65 <: b65;
+assign le65 = a65 <= b65;
+assign gt65 = a65 >: b65;
+assign ge65 = a65 >= b65;
+assign lt127 = a127 <: b127;
+assign le127 = a127 <= b127;
+assign gt127 = a127 >: b127;
+assign ge127 = a127 >= b127;
+}
+"#)
+  (top Top)
+  (let negative65 (- (<< 1 65) 1))
+  (let negative127 (- (<< 1 127) 1))
+  ; -1 compared with +1. At widths 65 and 127 the sign bits are
+  ; physical top-chunk bits 0 and 62 respectively, never bit 63.
+  (modify
+    (set a65 negative65)
+    (set b65 1)
+    (set a127 negative127)
+    (set b127 1))
+  (expand (name expected) ((lt65 1) (le65 1) (gt65 0) (ge65 0) (lt127 1) (le127 1) (gt127 0) (ge127 0))
+    (assert_eq {name} {expected}))
+  ; Reverse the signs to cover both signed ordering directions.
+  (modify
+    (set a65 1)
+    (set b65 negative65)
+    (set a127 1)
+    (set b127 negative127))
+  (expand (name expected) ((lt65 0) (le65 0) (gt65 1) (ge65 1) (lt127 0) (le127 0) (gt127 1) (ge127 1))
+    (assert_eq {name} {expected})))

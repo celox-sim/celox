@@ -525,6 +525,42 @@ impl LaidOutProgram {
     pub fn into_runtime(self) -> RuntimeProgram {
         self.runtime
     }
+
+    /// Identity of the checkpointable state layout: the path, offset, width
+    /// and state kind of every state object. Simulators with the same
+    /// fingerprint can exchange checkpoints.
+    pub fn state_fingerprint(&self) -> u64 {
+        state_fingerprint(&self.layout, &self.runtime)
+    }
+}
+
+/// Identity of the stable-region layout that checkpoints copy: the path,
+/// offset, width and state kind of every state object. Two simulators with
+/// the same fingerprint can exchange checkpoints.
+pub(crate) fn state_fingerprint(
+    layout: &crate::backend::MemoryLayout,
+    program: &RuntimeProgram,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut objects: Vec<_> = layout
+        .offsets
+        .iter()
+        .map(|(address, &offset)| {
+            (
+                offset,
+                program.get_path(address),
+                layout.widths.get(address).copied(),
+                layout.is_4states.get(address).copied(),
+            )
+        })
+        .collect();
+    objects.sort_unstable();
+    let mut hasher = std::hash::DefaultHasher::new();
+    layout.total_size.hash(&mut hasher);
+    layout.four_state.hash(&mut hasher);
+    objects.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Deref for LaidOutProgram {
@@ -590,6 +626,9 @@ impl OptimizedSir {
         }
         crate::optimizer::sir::retain_final_identity_aliases(&mut program, four_state);
         let layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
+        // Classify before alias stores disappear: an identity alias is a
+        // combinational copy even once it only shares its source's storage.
+        collect_comb_writes(&mut program);
 
         // Remove identity Stores for aliases validated by the layout
         if !program.layout_requirements.is_empty() {
@@ -628,6 +667,29 @@ impl OptimizedSir {
             layout,
         }
     }
+}
+
+/// Record the state objects written by combinational logic, including
+/// identity aliases, whose stores are about to be removed.
+fn collect_comb_writes(program: &mut OptimizedSir) {
+    let mut comb_writes: crate::HashSet<AbsoluteAddr> = program
+        .layout_requirements
+        .state_aliases()
+        .keys()
+        .copied()
+        .collect();
+    for unit in &program.sir.eval_comb {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                if let SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) =
+                    instruction
+                {
+                    comb_writes.insert(address.absolute_addr());
+                }
+            }
+        }
+    }
+    program.runtime.runtime_schema.comb_writes = comb_writes;
 }
 
 fn rebuild_rtl_writes(program: &mut OptimizedSir) {

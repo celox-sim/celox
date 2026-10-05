@@ -1601,6 +1601,30 @@ describe("createDut — child instances", () => {
 		expect(dut.u[3]?.y).toBe(0x33n);
 	});
 
+	test("a lone indexed element at index 0 is still an array", () => {
+		const buffer = makeBuffer(64);
+		new Uint8Array(buffer)[0] = 0x66;
+		const element = { ...child(0, 0), indexed: true };
+		const hierarchy: HierarchyNode = {
+			moduleName: "Top",
+			index: 0,
+			signals: {},
+			forDut: {},
+			ports: {},
+			children: { u: [element] },
+		};
+		const dut = createDut<{ u: Array<{ y: bigint }> }>(
+			buffer,
+			{},
+			{},
+			mockHandle(),
+			{ dirty: false },
+			hierarchy,
+		);
+		expect(Array.isArray(dut.u)).toBe(true);
+		expect(dut.u[0]?.y).toBe(0x66n);
+	});
+
 	test("a lone element at a non-zero index is still an array", () => {
 		const buffer = makeBuffer(64);
 		new Uint8Array(buffer)[0] = 0x44;

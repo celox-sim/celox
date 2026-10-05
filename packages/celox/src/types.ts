@@ -83,6 +83,25 @@ export interface SignalLayout {
 /**
  * Metadata shared by frontend-owned native and WASM simulator handles.
  */
+/**
+ * Saved design state created by a handle's `checkpoint()`. Only a handle of
+ * the same kind, built from the same design, can restore it.
+ * @internal
+ */
+export interface NativeCheckpoint {
+	/** Size of the saved design state in bytes. */
+	readonly stateSize: number;
+}
+
+/**
+ * Saved state of a time-based simulation handle.
+ * @internal
+ */
+export interface NativeSimulationCheckpoint extends NativeCheckpoint {
+	/** Simulation time at which the checkpoint was taken. */
+	readonly time: number;
+}
+
 interface FrontendSimulatorHandleMetadata {
 	readonly layoutJson: string;
 	readonly eventsJson: string;
@@ -101,6 +120,16 @@ export interface NativeFrontendSimulatorHandle
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
+	/** Save the design state. Absent on addons without checkpoint support. */
+	checkpoint?(): NativeCheckpoint;
+	/** Restore a checkpoint and settle combinational logic. */
+	restore?(checkpoint: NativeCheckpoint): void;
+	/** Save every state object by path as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 	initialMemoryBytes?: never;
 	combWasmBytes?: never;
 	eventWasmBytes?: never;
@@ -112,6 +141,13 @@ export interface WasmFrontendSimulatorHandle
 	initialMemoryBytes(): Uint8Array | number[];
 	combWasmBytes(): Uint8Array | number[];
 	eventWasmBytes(name: string): Uint8Array | number[];
+	/**
+	 * Offset where the checkpointable design state starts (it ends at
+	 * `stableSize`). Absent on addons without checkpoint support.
+	 */
+	readonly stateOffset?: number;
+	/** Identity of the checkpointable state layout. */
+	readonly stateFingerprint?: string;
 	tick?: never;
 	tickN?: never;
 	evalComb?: never;
@@ -143,6 +179,16 @@ export interface NativeSimulatorHandle {
 	 * repeated calls track promotion progress.
 	 */
 	tierCompiled?(): boolean | null;
+	/** Save the design state. Absent when the handle cannot checkpoint. */
+	checkpoint?(): NativeCheckpoint;
+	/** Restore a checkpoint and settle combinational logic. */
+	restore?(checkpoint: NativeCheckpoint): void;
+	/** Save every state object by path as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 }
 
 /**
@@ -159,6 +205,18 @@ export interface NativeSimulationHandle {
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;
+	/** Save the design state, time, clocks and pending events. */
+	checkpoint?(): NativeSimulationCheckpoint;
+	/** Restore a checkpoint and settle combinational logic. */
+	restore?(checkpoint: NativeSimulationCheckpoint): void;
+	/** Save the state, time, clocks and pending events as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
+	/** Registered periodic clocks, by event ID. */
+	clockPeriods?(): { eventId: number; period: number }[];
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 }
 
 /**

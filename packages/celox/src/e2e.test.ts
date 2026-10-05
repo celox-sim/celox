@@ -1691,6 +1691,50 @@ describe("E2E: fourState() method", () => {
 		sim.dispose();
 	});
 
+	test("Simulator.fourState: evaluates pending input changes", () => {
+		interface Ports {
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			b: bigint;
+			readonly y: bigint;
+		}
+
+		const sim = Simulator.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+
+		sim.dut.a = 100n;
+		sim.dut.b = 55n;
+		expect(sim.fourState("y")).toMatchObject({ value: 155n, mask: 0n });
+
+		sim.dut.a = X;
+		expect(sim.fourState("y").mask).toBe(0xffn);
+
+		sim.dispose();
+	});
+
+	test("Simulation.fourState: evaluates pending input changes", () => {
+		interface Ports {
+			get a(): bigint;
+			set a(value: FourStateSignalValue);
+			b: bigint;
+			readonly y: bigint;
+		}
+
+		const sim = Simulation.fromSource<Ports>(ADDER_4STATE_SOURCE, "Adder4S", {
+			fourState: true,
+		});
+
+		sim.dut.a = 50n;
+		sim.dut.b = 25n;
+		expect(sim.fourState("y")).toMatchObject({ value: 75n, mask: 0n });
+
+		sim.dut.a = X;
+		expect(sim.fourState("y").mask).toBe(0xffn);
+
+		sim.dispose();
+	});
+
 	test("fourState: throws for unknown port", () => {
 		interface Ports {
 			a: bigint;

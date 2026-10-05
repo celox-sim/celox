@@ -1,0 +1,94 @@
+{
+  "base_revision": "b717f6f7af6ecf54af6e1e96a3f491a0ceda422e",
+  "merged_checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
+  "frozen_worker_checker_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+  "files": {
+    "crates/solver/src/automatic.rs": "59d84d8c1651391f0fc7bc9d31ed1a48d8b6ad439a869a346614bfcb10009285",
+    "crates/solver/src/equality_sharing.rs": "dab817b96dc372d67398c656f5f27ec2a2ae3d56602e907e382b7721550e5794",
+    "crates/solver/src/lib.rs": "7921ff119710832d86f24e94a529b4ee8121b0647ab07154dceaf893c643ff4e",
+    "crates/solver/src/conjunctive.rs": "f8f155c9ffca5bc3bc67a22e110cf5fec689b55a14f0eb981391a812cb30e811",
+    "README.md": "46f5805f98c5e08a92cfdba4d3d9e4841b19fe7bb4ad2ba5923a8d3f61d0d001",
+    "AUTOMATIC-PROOFS.md": "3852cac8d691a4d8c1af32b6614b3298971f78971f9f8b143e16f7406e3154f1",
+    "EQUALITY-SHARING.md": "8cd1ad39d33e497ea09877aa386127a8a996d42a64d66c38152cdd9993874010",
+    "audit/equality_sharing/compare.py": "44edbb33ddaccad0f9e3fd685dfd5ff9f6c644603d5a9b50487804efacee2a9e",
+    "audit/equality_sharing/pre-cofactor-evidence-summary.json": "e8abc96ad155798290fd40b4db4794368b1725be5bc9bccad2db27c0b3e74c13",
+    "audit/equality_sharing/evidence-summary.json": "6bf857994f76e74ffa0500f363276b29750ba9d56b7ced9cb53f06892f880a33",
+    "audit/equality_sharing/README.md": "cee4e00ebf1298004cbcdc1345233e248b986bb1877093af434486c1fce2d39f",
+    "audit/equality_sharing/ci.py": "7ace1d6baed1ddcd35dcf0080cdead6e22c1b1f21f28b0989689295059a770a9",
+    "audit/equality_sharing/test_evidence.py": "7d0c0f75935501ca976b7d63798491da0ffc55313b4a19ac4490ed2d3023dce1",
+    "audit/equality_sharing/run.py": "02d73576213ab62ee676dae145871e3d2cf0aeaf6040ca36dfdb372365922925",
+    "audit/equality_sharing/generate.py": "797b1cb9cf8156c70e868c746873e7c6de341cf13b33cc157d0ac491248139e9",
+    "audit/equality_sharing/test_generate.py": "bfa43c9665bb4d4580adb0f018803323150261d07e547431cac92f62f28b31d0",
+    "audit/equality_sharing/test_ci.py": "e7b4086fa511a494f9643a3b7497e25ecc022bdeec4ebac486c60209c72a9a45"
+  },
+  "readme_merge": "Retains all preceding milestone and phase-1 publication context, then appends the reviewed phase-2 section. Other 16 frozen source hashes match. A link to the publication record is also included.",
+  "checks": {
+    "rust_workspace_tests": 329,
+    "fmt": "passed",
+    "strict_release_all_target_clippy": "passed",
+    "phase2_python_tests": 38,
+    "prior_phase_ci": "passed",
+    "covered_positive_verified": 9,
+    "original_formula_mutants": 19,
+    "mandatory_diagnostic_unknowns": 4
+  },
+  "kernel_changed_from_phase1": false,
+  "selected_reruns": {
+    "without_hints": [
+      {
+        "name": "without-hints",
+        "status": "unknown",
+        "children_passed": 430,
+        "children_total": 436,
+        "other_statuses": [
+          "passed",
+          "passed",
+          "passed",
+          "passed",
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "exit_code": 3,
+        "wall_seconds": 146.07334213700233,
+        "input_path": "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+        "input_sha256": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+        "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
+        "command": [
+          "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
+          "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+          "--out",
+          "/workspace/scratch/07f10565586c/automatic-proof-phase2-publication-selected/without-hints",
+          "--z3",
+          "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+        ],
+        "environment": {
+          "HWVERIFY_SOLVER": "finite",
+          "HWVERIFY_CONJUNCTIVE_LEMMAS": "1",
+          "HWVERIFY_AUTOMATIC_PROOFS": "independent_lemmas"
+        },
+        "report_sha256": "7710f008d0fb0f2b0e0e89183093f2948d13a2bc99bb89bf65f895545801e99c"
+      }
+    ],
+    "manual_compatible": {
+      "status": "passed",
+      "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
+      "input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
+      "command": [
+        "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
+        "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json",
+        "--out",
+        "/workspace/scratch/07f10565586c/automatic-proof-phase2-manual-retry/proof",
+        "--z3",
+        "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+      ],
+      "exit_code": 0,
+      "wall_seconds": 114.5583350320012,
+      "report_present": true,
+      "children_passed": 436,
+      "other_obligations_passed": 7,
+      "external_solver_invoked": false,
+      "report_sha256": "1521cab7152c6b4947558387ac177067e2d50fba406d5744f869d9e6e7b406ac"
+    }
+  }
+}

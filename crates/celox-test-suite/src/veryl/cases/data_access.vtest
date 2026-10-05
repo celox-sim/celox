@@ -1,0 +1,369 @@
+(group data_access (category arrays))
+
+(case test_dynamic_index_read
+  (source "test.veryl" #"
+module Top (i: input logic<2>, o: output logic<8>) {
+var a: logic<8> [4];
+always_comb{
+a[0] = 8'hAA;
+a[1] = 8'hBB;
+a[2] = 8'hCC;
+a[3] = 8'hDD;
+}
+assign o = a[i];
+}
+"#)
+  (top Top)
+  (modify (set i 2))
+  (assert_eq o 0xCC))
+
+(case test_dynamic_index_write
+  (source "test.veryl" #"
+module Top (i: input logic<2>, val: input logic<8>, o: output logic<8>) {
+var a: logic<8> [4];
+always_comb{
+a[0] = 1;
+a[1] = 2;
+a[2] = 3;
+a[3] = 4;
+a[i] = val;
+}
+assign o = a[2];
+}
+"#)
+  (top Top)
+  (modify
+    (set i 2)
+    (set val 0x55))
+  (assert_eq o 0x55))
+
+(case test_multidimensional_access
+  (source "test.veryl" #"
+module Top (i: input logic<8>, o: output logic<8>) {
+var a: logic<8> [4, 2];
+always_comb {
+for i_idx in 0..4 {
+for j_idx in 0..2 {
+a[i_idx][j_idx] = 8'b0;
+}
+}
+a[1][0] = i;
+}
+assign o = a[1][0];
+}
+"#)
+  (top Top)
+  (modify (set i 0xBE))
+  (assert_eq o 0xBE))
+
+(case test_minus_colon_and_step_execution
+  (source "test.veryl" #"
+module Top (a: input logic<8>, b: output logic<32>) {
+always_comb {
+b = 32'b0;
+b[31-:8] = a;
+b[1 step 8] = a;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0xAA))
+  (assert_eq b 0xAA00AA00))
+
+(case test_dynamic_slice_bullying
+  (source "test.veryl" #"
+module Top (idx: input logic<2>, data: input logic<16>, o: output logic<4>) {
+var mem: logic<16>;
+assign mem = data;
+assign o = mem[idx*4 +: 4];
+}
+"#)
+  (top Top)
+  (modify
+    (set data 0xABCD)
+    (set idx 1))
+  (assert_eq o 0xC))
+
+(case test_dynamic_minus_colon_and_step_read_write
+  (source "test.veryl" #"
+module Top (
+    minus_idx: input logic<4>,
+    step_idx: input logic<4>,
+    data: input logic<16>,
+    val: input logic<4>,
+    minus_read: output logic<4>,
+    step_read: output logic<4>,
+    step_write: output logic<16>
+) {
+var step_tmp: logic<16>;
+assign minus_read = data[minus_idx -: 4];
+assign step_read = data[step_idx step 4];
+always_comb {
+    step_tmp = data;
+    step_tmp[step_idx step 4] = val;
+}
+assign step_write = step_tmp;
+}
+"#)
+  (top Top)
+  (modify
+    (set minus_idx 7)
+    (set step_idx 2)
+    (set data 0xABCD)
+    (set val 0x5))
+  (assert_eq minus_read 0xC)
+  (assert_eq step_read 0xB)
+  (assert_eq step_write 0xA5CD))
+
+(case test_partial_write_merging
+  (source "test.veryl" #"
+module Top (a: input logic<4>, b: input logic<4>, o: output logic<8>) {
+var tmp: logic<8>;
+assign tmp[3:0] = a;
+always_comb {
+tmp[7:4] = b;
+}
+assign o = tmp;
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x5)
+    (set b 0xA))
+  (assert_eq o 0xA5))
+
+(case test_genvar_const_in_generate
+  (source "test.veryl" #"
+module Top (
+o: output logic<8> [4]
+) {
+for j in 0..4 :g_assign {
+assign o[j] = j as u8 + 10;
+}
+}
+"#)
+  (top Top)
+  ; o is a flat 32-bit value: o[0] in bits [7:0], o[1] in [15:8], etc.
+  (let val (get o))
+  (assert_eq (& val 0xFF) 10)
+  ; o[0] = 10
+  (assert_eq (& (>> val 8) 0xFF) 11)
+  ; o[1] = 11
+  (assert_eq (& (>> val 16) 0xFF) 12)
+  ; o[2] = 12
+  (assert_eq (& (>> val 24) 0xFF) 13))
+  ; o[3] = 13
+
+(case test_genvar_dynamic_index_issue21
+  (source "test.veryl" #"
+module Top (
+sel: input logic<2>,
+o: output logic<16> [4]
+) {
+var local_data: logic<16> [4];
+always_comb {
+local_data[0] = 16'hAAAA;
+local_data[1] = 16'hBBBB;
+local_data[2] = 16'hCCCC;
+local_data[3] = 16'hDDDD;
+}
+for j in 0..4 :g_idx {
+// Dynamic index: genvar j plus runtime sel, truncated to 2 bits
+var idx: logic<2>;
+assign idx = j as u32 + sel;
+assign o[j] = local_data[idx];
+}
+}
+"#)
+  (top Top)
+  (let mask16 0xFFFF)
+  ; sel=0 → src[j]=j → o[j]=local_data[j]
+  (modify (set sel 0))
+  (let val (get o))
+  (assert_eq (& val mask16) 0xAAAA)
+  ; o[0]
+  (assert_eq (& (>> val 16) mask16) 0xBBBB)
+  ; o[1]
+  (assert_eq (& (>> val 32) mask16) 0xCCCC)
+  ; o[2]
+  (assert_eq (& (>> val 48) mask16) 0xDDDD)
+  ; o[3]
+  ; sel=1 → src[j]=(j+1)%4 → rotate left by 1
+  (modify (set sel 1))
+  (let val (get o))
+  (assert_eq (& val mask16) 0xBBBB)
+  ; o[0] = local_data[1]
+  (assert_eq (& (>> val 16) mask16) 0xCCCC)
+  ; o[1] = local_data[2]
+  (assert_eq (& (>> val 32) mask16) 0xDDDD)
+  ; o[2] = local_data[3]
+  (assert_eq (& (>> val 48) mask16) 0xAAAA))
+  ; o[3] = local_data[0]
+
+(case test_dynamic_index_with_bitslice
+  (source "test.veryl" #"
+module Top (
+idx: input logic<4>,
+o_lo: output logic<32>,
+o_hi: output logic<32>
+) {
+var regs: logic<64> [16];
+always_comb {
+for i in 0..16 {
+regs[i] = 64'b0;
+}
+// regs[0] = 0x00000001_00000000
+regs[0] = 64'h00000001_00000000;
+// regs[1] = 0x0000000B_00000001
+regs[1] = 64'h0000000B_00000001;
+}
+assign o_lo = regs[idx][31:0];
+assign o_hi = regs[idx][63:32];
+}
+"#)
+  (top Top)
+  ; idx=0: regs[0] = 0x00000001_00000000
+  (modify (set idx 0))
+  (assert_eq o_lo 0x00000000)
+  ; lo 32 bits
+  (assert_eq o_hi 0x00000001)
+  ; hi 32 bits
+  ; idx=1: regs[1] = 0x0000000B_00000001
+  (modify (set idx 1))
+  (assert_eq o_lo 0x00000001)
+  ; lo 32 bits
+  (assert_eq o_hi 0x0000000B))
+  ; hi 32 bits
+
+(case test_let_index_with_bitslice_write
+  (source "test.veryl" #"
+module Top (
+o_lo: output logic<32>,
+o_hi: output logic<32>
+) {
+var data: logic<64> [4];
+always_comb {
+for i in 0..4 {
+data[i] = 64'd0;
+}
+for g in 0..2 {
+for s in 0..2 {
+let idx: u32 = g * 2 + s;
+data[idx][63:32] = (g * 2 + s) as u32;
+data[idx][31:0]  = (g * 2 + s + 100) as u32;
+}
+}
+o_hi = data[2][63:32];
+o_lo = data[2][31:0];
+}
+}
+"#)
+  (top Top)
+  (assert_eq o_hi 2)
+  (assert_eq o_lo 102))
+
+(case test_let_index_with_bitslice_write_single
+  (source "test.veryl" #"
+module Top (
+o_lo: output logic<16>,
+o_hi: output logic<16>
+) {
+var data: logic<32> [2];
+always_comb {
+data[0] = 32'd0;
+data[1] = 32'd0;
+let idx: u32 = 1;
+data[idx][31:16] = 16'hBEEF;
+data[idx][15:0]  = 16'hCAFE;
+o_hi = data[1][31:16];
+o_lo = data[1][15:0];
+}
+}
+"#)
+  (top Top)
+  (assert_eq o_hi 0xBEEF)
+  (assert_eq o_lo 0xCAFE))
+
+(case test_ff_bit_select_in_generate_loop
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+rst: input reset,
+d0: input logic<16>,
+d1: input logic<16>,
+en: input logic,
+out_a0: output logic<16>,
+out_a1: output logic<16>,
+out_b0: output logic<16>,
+out_b1: output logic<16>,
+) {
+var din: logic<16> [2];
+always_comb {
+din[0] = d0;
+din[1] = d1;
+}
+// Path A: comb abs → ff register (workaround)
+var abs_c: logic<16> [2];
+for i in 0..2 :g_abs_c {
+always_comb {
+if din[i][15] {
+abs_c[i] = ~din[i] + 1;
+} else {
+abs_c[i] = din[i];
+}
+}
+}
+always_ff (clk, rst) {
+if_reset {
+out_a0 = 0;
+out_a1 = 0;
+} else if en {
+out_a0 = abs_c[0];
+out_a1 = abs_c[1];
+}
+}
+// Path B: inline bit-select in always_ff
+var out_b: logic<16> [2];
+for i in 0..2 :g_reg_b {
+always_ff (clk, rst) {
+if_reset {
+out_b[i] = 0;
+} else if en {
+if din[i][15] {
+out_b[i] = ~din[i] + 1;
+} else {
+out_b[i] = din[i];
+}
+}
+}
+}
+always_comb {
+out_b0 = out_b[0];
+out_b1 = out_b[1];
+}
+}
+"#)
+  (top Top)
+  ; Reset (AsyncLow: active when rst=0)
+  (modify
+    (set rst 0)
+    (set en 0)
+    (set d0 0)
+    (set d1 0))
+  (tick clk)
+  ; Deactivate reset
+  (modify (set rst 1))
+  ; Set d0 = 5 (positive), d1 = 0xFFFB (-5 as i16)
+  (modify
+    (set en 1)
+    (set d0 5)
+    (set d1 0xFFFB))
+    ; -5 in two's complement
+  (tick clk)
+  ; Path A and Path B should produce identical results
+  (assert_eq out_a0 (get out_b0) "d0=5: Path A vs B mismatch")
+  (assert_eq out_a1 (get out_b1) "d1=-5: Path A vs B mismatch")
+  (assert_eq out_a0 5 "abs(5) should be 5")
+  (assert_eq out_a1 5 "abs(-5) should be 5")
+  (assert_eq out_b0 5 "abs(5) should be 5 (ff path)")
+  (assert_eq out_b1 5 "abs(-5) should be 5 (ff path)"))

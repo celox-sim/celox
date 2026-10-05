@@ -1,0 +1,47 @@
+(group test_unimplemented_paths (category regression))
+
+(case wide_dynamic_shift_works
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            idx: input logic<8>,
+            y: output logic<128>
+        ) {
+            assign y = a >> idx;
+        }
+    "#)
+  (top Top)
+  (let val (| (<< 0xDEAD 64) 0xCAFE))
+  (modify
+    (set a val)
+    (set idx 64))
+  (assert_eq y 0xDEAD))
+
+(case dynamic_mask_store
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            idx: input logic<4>,
+            val: input logic<8>,
+            out: output logic<8>,
+        ) {
+            var mem: logic<8> [16];
+            always_ff (clk) {
+                mem[idx] = val;
+            }
+            assign out = mem[idx];
+        }
+    "#)
+  (top Top)
+  ; Write val with partial X mask at index 3
+  (modify
+    (set idx 3)
+    (set val (fourstate 0xAB 0x0F)))
+  (tick clk)
+  ; Read back: should see the same mask
+  (modify (set idx 3))
+  (let v (payload (get out)))
+  (let m (xmask (get out)))
+  (assert (== v 0xAB) "dynamic mask store: value")
+  (assert (== m 0x0F) "dynamic mask store: mask"))

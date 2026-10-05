@@ -1,0 +1,88 @@
+specification "Intent bug: weakened budget permits overspending"
+
+input rst: bool;
+input go: bool;
+input amount: bv<4>;
+observation count: bv<4>;
+observation remaining: bv<4>;
+operation add {}
+
+component Counter {
+  state value: bv<4>;
+  init s.value == 0u4;
+  invariant o.count == s.value;
+  steps { add = n.value == s.value + i.amount; }
+  example add_two {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+  }
+  example wrong_arithmetic {
+    expect negative;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 3u4; } } }
+  }
+}
+
+component Budget {
+  state credits: bv<4>;
+  init s.credits == 3u4;
+  invariant o.remaining == s.credits;
+  steps { add = n.credits == s.credits - i.amount; }
+  example spend_two {
+    expect positive;
+    initial { remaining = 3u4; }
+    trace { add { inputs { amount = 2u4; } observe { remaining = 1u4; } } }
+  }
+  example cannot_overspend {
+    expect negative;
+    initial { }
+    trace { add { inputs { amount = 4u4; } observe { } } }
+  }
+}
+
+composition Arithmetic {
+  members compose(Counter);
+  example arithmetic_allows_four {
+    expect positive;
+    initial { }
+    trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
+  }
+}
+
+composition Budgeted {
+  members compose(Arithmetic, Budget);
+  example spend_all {
+    expect positive;
+    initial { count = 0u4; remaining = 3u4; }
+    trace {
+      add { inputs { amount = 2u4; } observe { count = 2u4; remaining = 1u4; } }
+      add { inputs { amount = 1u4; } observe { count = 3u4; remaining = 0u4; } }
+    }
+  }
+  example exclude_overspend {
+    expect negative;
+    initial { }
+    trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
+  }
+}
+
+implementation {
+  composition Budgeted;
+  reset_input rst;
+  state count: bv<4>;
+  state remaining: bv<4>;
+  reset { count = 0u4; remaining = 3u4; }
+  wires { accept = i.go && i.amount <= s.remaining; }
+  next {
+    count = if w.accept { s.count + i.amount } else { s.count };
+    remaining = if w.accept { s.remaining - i.amount } else { s.remaining };
+  }
+  operations { add = w.accept; }
+  binding {
+    bind Counter { value = s.count; }
+    bind Budget { credits = s.remaining; }
+    observation count = s.count;
+    observation remaining = s.remaining;
+  }
+}

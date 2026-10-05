@@ -1,0 +1,213 @@
+(group nba_cross_block_empty (category sequential))
+
+(case test_same_module_count_and_empty_ff
+  (source "test.veryl" #"
+module Top (
+clk  : input  clock    ,
+rst  : input  reset    ,
+push : input  logic    ,
+pop  : input  logic    ,
+empty: output logic    ,
+) {
+var count: logic<8>;
+var r_empty: logic;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
+}
+}
+}
+// Separate always_ff block reads count — should read OLD count (NBA)
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
+}
+}
+}
+assign empty = r_empty;
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set push 0)
+    (set pop 0))
+  (tick clk)
+  (assert_eq empty 1 "empty=1 after reset")
+  ; Deactivate reset
+  (modify (set rst 1))
+  ; Push: count goes 0→1
+  ; r_empty reads OLD count (0), so r_empty stays 1 for one more cycle
+  (modify (set push 1))
+  (tick clk)
+  ; NBA: r_empty saw count=0 (old), so empty should be 1
+  (assert_eq empty 1 "After push: r_empty should see OLD count=0 → empty=1 (1 cycle delay)")
+  ; Next tick with push deasserted: r_empty now sees count=1 → empty=0
+  (modify (set push 0))
+  (tick clk)
+  (assert_eq empty 0 "After settling: r_empty sees count=1 → empty=0")
+  ; Pop: count goes 1→0
+  ; r_empty reads OLD count (1), so r_empty stays 0 for one more cycle
+  (modify (set pop 1))
+  (tick clk)
+  ; NBA: r_empty saw count=1 (old), so empty should be 0
+  (assert_eq empty 0 "After pop: r_empty should see OLD count=1 → empty=0 (1 cycle delay)")
+  ; Next tick with pop deasserted: r_empty now sees count=0 → empty=1
+  (modify (set pop 0))
+  (tick clk)
+  (assert_eq empty 1 "After settling: r_empty sees count=0 → empty=1"))
+
+(case test_cross_module_count_and_empty_ff
+  (source "test.veryl" #"
+module EmptyDetector (
+clk       : input  clock,
+rst       : input  reset,
+count_in  : input  logic<8>,
+r_empty   : output logic,
+) {
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count_in == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
+}
+}
+}
+}
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+push : input  logic,
+pop  : input  logic,
+empty: output logic,
+) {
+var count: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
+}
+}
+}
+inst det: EmptyDetector (
+clk,
+rst,
+count_in: count,
+r_empty: empty,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set push 0)
+    (set pop 0))
+  (tick clk)
+  (assert_eq empty 1 "empty=1 after reset")
+  ; Deactivate reset
+  (modify (set rst 1))
+  ; Push: count 0→1
+  ; EmptyDetector reads OLD count_in (0) → r_empty stays 1
+  (modify (set push 1))
+  (tick clk)
+  (assert_eq empty 1 "Cross-module: r_empty should see OLD count=0 → empty=1 (1 cycle delay)")
+  ; Settle: r_empty sees count=1 → empty=0
+  (modify (set push 0))
+  (tick clk)
+  (assert_eq empty 0 "empty=0 after settling")
+  ; Pop: count 1→0
+  ; EmptyDetector reads OLD count_in (1) → r_empty stays 0
+  (modify (set pop 1))
+  (tick clk)
+  (assert_eq empty 0 "Cross-module: r_empty should see OLD count=1 → empty=0 (1 cycle delay)")
+  ; Settle: r_empty sees count=0 → empty=1
+  (modify (set pop 0))
+  (tick clk)
+  (assert_eq empty 1 "empty=1 after settling"))
+
+(case test_empty_never_stuck_at_zero
+  (source "test.veryl" #"
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+push : input  logic,
+pop  : input  logic,
+empty: output logic,
+) {
+var count: logic<8>;
+var r_empty: logic;
+always_ff (clk, rst) {
+if_reset {
+count = 0;
+} else if push && !pop {
+count = count + 1;
+} else if pop && !push {
+if count != 0 {
+count = count - 1;
+}
+}
+}
+always_ff (clk, rst) {
+if_reset {
+r_empty = 1;
+} else {
+if count == 0 {
+r_empty = 1;
+} else {
+r_empty = 0;
+}
+}
+}
+assign empty = r_empty;
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set push 0)
+    (set pop 0))
+  (tick clk)
+  ; Deactivate reset
+  (modify (set rst 1))
+  ; Push 5 items
+  (for _ (range 0 5)
+    (modify (set push 1))
+    (tick clk)
+    (modify (set push 0))
+    (tick clk))
+  (assert_eq count 5 "count should be 5")
+  (assert_eq empty 0 "not empty with 5 items")
+  ; Pop all 5 items
+  (for i (range 0 5)
+    (modify (set pop 1))
+    (tick clk)
+    (modify (set pop 0))
+    (tick clk)
+    (let expected_count (- 4 i))
+    (assert_eq count (trunc 32 expected_count) "count should be after popping items"))
+  ; After all pops + 1 settle cycle, empty must be 1
+  ; count is 0, but r_empty has 1-cycle delay (NBA)
+  ; After the last pop tick, r_empty saw OLD count=1 → r_empty=0
+  ; Need one more tick for r_empty to see count=0
+  (tick clk)
+  (assert_eq empty 1 "BUG: empty should be 1 after all items popped — stuck at 0 forever?"))

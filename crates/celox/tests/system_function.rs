@@ -165,41 +165,42 @@ module Top (clk: input clock, d: input logic) {
 }
 
 #[test]
-fn test_unsupported_ff_statement_system_functions_are_reported() {
-    let cases = [
-        (
-            "readmemh",
-            r#"
+fn test_ff_statement_system_tasks_are_lowered() {
+    // `$readmemh` reads its file at compile time, so a missing file is an
+    // input error rather than an unsupported construct.
+    let readmemh = r#"
 module Top (clk: input clock) {
     var mem: logic<8>[4];
     always_ff (clk) {
-        $readmemh("mem.hex", mem);
+        $readmemh("celox-missing-memory-file.hex", mem);
     }
 }
-"#,
+"#;
+    let err = Simulator::builder(readmemh, "Top")
+        .build()
+        .expect_err("a missing memory file must be reported");
+    assert!(
+        matches!(
+            err.kind(),
+            celox::SimulatorErrorKind::SIRParser(celox::ParserError::MemoryFile { .. })
         ),
-        (
-            "finish",
-            r#"
+        "expected a memory file error, got: {err:?}"
+    );
+
+    let finish = r#"
 module Top (clk: input clock) {
     always_ff (clk) {
         $finish();
     }
 }
-"#,
-        ),
-    ];
-
-    for (name, code) in cases {
-        let err = Simulator::builder(code, "Top")
-            .build()
-            .expect_err("statement system function should be unsupported in FF lowering");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("system function call"),
-            "expected system function unsupported error for {name}, got: {err:?}"
-        );
-    }
+"#;
+    let mut sim = Simulator::builder(finish, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Finish]
+    );
 }
 
 /// Runtime events of several instances on one edge keep the sequential order
