@@ -1,0 +1,31 @@
+{
+  "status": "passed",
+  "input_checks": 1024,
+  "rows": [
+    {
+      "case": "test_direct_comb_onehot_system_function",
+      "inputs_passed": 256,
+      "queries": 551,
+      "epochs": 19
+    },
+    {
+      "case": "test_direct_comb_clog2_system_function",
+      "inputs_passed": 256,
+      "queries": 1523,
+      "epochs": 22
+    },
+    {
+      "case": "test_direct_ff_onehot_system_function",
+      "inputs_passed": 256,
+      "queries": 551,
+      "epochs": 19
+    },
+    {
+      "case": "test_direct_ff_clog2_system_function",
+      "inputs_passed": 256,
+      "queries": 641,
+      "epochs": 64
+    }
+  ],
+  "scope": "all 8-bit input values; trusted finite solver feasibility and read uniqueness; arithmetic oracle independent of circuit outputs"
+}

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "project": "memory-project.json",
+  "config": {
+    "address_width": 8,
+    "data_width": 32,
+    "capacity": 1,
+    "role": "subordinate"
+  },
+  "signals": {
+    "awvalid": "bus_awvalid",
+    "awready": "bus_awready",
+    "wvalid": "bus_wvalid",
+    "wready": "bus_wready",
+    "bvalid": "bus_bvalid",
+    "bready": "bus_bready",
+    "arvalid": "bus_arvalid",
+    "arready": "bus_arready",
+    "rvalid": "bus_rvalid",
+    "rready": "bus_rready",
+    "awaddr": "bus_awaddr",
+    "araddr": "bus_araddr",
+    "awprot": "bus_awprot",
+    "arprot": "bus_arprot",
+    "wdata": "bus_wdata",
+    "rdata": "bus_rdata",
+    "wstrb": "bus_wstrb",
+    "bresp": "bus_bresp",
+    "rresp": "bus_rresp"
+  }
+}

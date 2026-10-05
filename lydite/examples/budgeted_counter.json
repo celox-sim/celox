@@ -1,0 +1,403 @@
+{
+  "components": {
+    "Budget": {
+      "examples": {
+        "cannot_overspend": {
+          "expect": "negative",
+          "initial": {},
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  4
+                ]
+              },
+              "observe": {},
+              "operation": "add"
+            }
+          ]
+        },
+        "spend_two": {
+          "expect": "positive",
+          "initial": {
+            "remaining": [
+              "bv",
+              4,
+              3
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "remaining": [
+                  "bv",
+                  4,
+                  1
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.credits",
+        [
+          "bv",
+          4,
+          3
+        ]
+      ],
+      "invariant": [
+        "eq",
+        "o.remaining",
+        "s.credits"
+      ],
+      "state": {
+        "credits": {
+          "bv": 4
+        }
+      },
+      "steps": {
+        "add": [
+          "and",
+          [
+            "ule",
+            "i.amount",
+            "s.credits"
+          ],
+          [
+            "eq",
+            "n.credits",
+            [
+              "sub",
+              "s.credits",
+              "i.amount"
+            ]
+          ]
+        ]
+      }
+    },
+    "Counter": {
+      "examples": {
+        "add_two": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        },
+        "wrong_arithmetic": {
+          "expect": "negative",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  3
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "invariant": [
+        "eq",
+        "o.count",
+        "s.value"
+      ],
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      },
+      "steps": {
+        "add": [
+          "eq",
+          "n.value",
+          [
+            "add",
+            "s.value",
+            "i.amount"
+          ]
+        ]
+      }
+    }
+  },
+  "compositions": {
+    "Arithmetic": {
+      "examples": {
+        "arithmetic_allows_four": {
+          "expect": "positive",
+          "initial": {},
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  4
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  4
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "members": [
+        "Counter"
+      ]
+    },
+    "Budgeted": {
+      "examples": {
+        "exclude_overspend": {
+          "expect": "negative",
+          "initial": {},
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  4
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  4
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        },
+        "spend_all": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ],
+            "remaining": [
+              "bv",
+              4,
+              3
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  2
+                ],
+                "remaining": [
+                  "bv",
+                  4,
+                  1
+                ]
+              },
+              "operation": "add"
+            },
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  1
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  3
+                ],
+                "remaining": [
+                  "bv",
+                  4,
+                  0
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "members": [
+        "Arithmetic",
+        "Budget"
+      ]
+    }
+  },
+  "implementation": {
+    "binding": {
+      "observations": {
+        "count": "s.count",
+        "remaining": "s.remaining"
+      },
+      "states": {
+        "Budget": {
+          "credits": "s.remaining"
+        },
+        "Counter": {
+          "value": "s.count"
+        }
+      }
+    },
+    "composition": "Budgeted",
+    "next": {
+      "count": [
+        "ite",
+        "w.accept",
+        [
+          "add",
+          "s.count",
+          "i.amount"
+        ],
+        "s.count"
+      ],
+      "remaining": [
+        "ite",
+        "w.accept",
+        [
+          "sub",
+          "s.remaining",
+          "i.amount"
+        ],
+        "s.remaining"
+      ]
+    },
+    "operations": {
+      "add": "w.accept"
+    },
+    "reset": {
+      "count": [
+        "bv",
+        4,
+        0
+      ],
+      "remaining": [
+        "bv",
+        4,
+        3
+      ]
+    },
+    "reset_input": "rst",
+    "state": {
+      "count": {
+        "bv": 4
+      },
+      "remaining": {
+        "bv": 4
+      }
+    },
+    "wires": {
+      "accept": [
+        "and",
+        "i.go",
+        [
+          "ule",
+          "i.amount",
+          "s.remaining"
+        ]
+      ]
+    }
+  },
+  "inputs": {
+    "amount": {
+      "bv": 4
+    },
+    "go": "bool",
+    "rst": "bool"
+  },
+  "kind": "specification",
+  "name": "Counter arithmetic composed with a spending budget",
+  "observations": {
+    "count": {
+      "bv": 4
+    },
+    "remaining": {
+      "bv": 4
+    }
+  },
+  "operations": {
+    "add": {}
+  },
+  "version": 3
+}

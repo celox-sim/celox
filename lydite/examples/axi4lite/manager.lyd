@@ -1,0 +1,49 @@
+specification "AXI4-Lite manager binding"
+input rst: bool;
+input arready: bool;
+input awready: bool;
+input bresp: bv<2>;
+input bvalid: bool;
+input rdata: bv<32>;
+input rresp: bv<2>;
+input rvalid: bool;
+input start_read: bool;
+input start_write: bool;
+input wready: bool;
+operation tick {}
+component Clock { init true; invariant true; steps { tick = true; } }
+composition Manager { members compose(Clock); }
+implementation {
+  composition Manager;
+  reset_input rst;
+  state awvalid: bool;
+  state wvalid: bool;
+  state arvalid: bool;
+  state write_busy: bool;
+  state read_busy: bool;
+  reset { awvalid = false; wvalid = false; arvalid = false; write_busy = false; read_busy = false; }
+  next { awvalid = s.awvalid; wvalid = s.wvalid; arvalid = s.arvalid; write_busy = s.write_busy; read_busy = s.read_busy; }
+  wires {
+    bus_awvalid = false;
+    bus_awready = i.awready;
+    bus_wvalid = false;
+    bus_wready = i.wready;
+    bus_bvalid = i.bvalid;
+    bus_bready = false;
+    bus_arvalid = false;
+    bus_arready = i.arready;
+    bus_rvalid = i.rvalid;
+    bus_rready = false;
+    bus_awaddr = 0u8;
+    bus_araddr = 0u8;
+    bus_awprot = 0u3;
+    bus_arprot = 0u3;
+    bus_wdata = 0u32;
+    bus_rdata = i.rdata;
+    bus_wstrb = 0u4;
+    bus_bresp = i.bresp;
+    bus_rresp = i.rresp;
+  }
+  operations { tick = true; }
+  binding { bind Clock {} }
+}

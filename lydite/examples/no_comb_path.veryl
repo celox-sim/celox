@@ -1,0 +1,3 @@
+module Top (clk: input clock, a: input bit, y: output bit) {
+    always_ff (clk) { y = a; }
+}
