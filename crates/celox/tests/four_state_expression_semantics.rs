@@ -11,51 +11,46 @@ all_backends! {
     }
 
     fn indeterminate_ternary_executes_effectful_arms_in_order(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "four_state_expression_semantics::indeterminate_ternary_executes_effectful_arms_in_order";
     }
 
     fn logical_unknown_truth_table_matches_comb_and_ff(sim) {
-        @ignore_on(sv);
         @case "four_state_expression_semantics::logical_unknown_truth_table_matches_comb_and_ff";
     }
 
     fn ternary_unknown_condition_merges_branch_bits(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "four_state_expression_semantics::ternary_unknown_condition_merges_branch_bits";
     }
 
     fn wide_logical_unknown_truth_table_uses_dominant_values(sim) {
-        @ignore_on(sv);
         @case "four_state_expression_semantics::wide_logical_unknown_truth_table_uses_dominant_values";
     }
 
     fn logical_not_known_one_dominates_unknown_bits(sim) {
-        @ignore_on(sv);
         @case "four_state_expression_semantics::logical_not_known_one_dominates_unknown_bits";
     }
 
     fn effectful_ternary_takes_known_true_branch_despite_unknown_bits(sim) {
-        @ignore_on(veryl, sv);
+        @omit_sv;
+        @ignore_on(veryl);
         @case "four_state_expression_semantics::effectful_ternary_takes_known_true_branch_despite_unknown_bits";
     }
 
     fn ff_procedural_control_uses_known_nonzero_truth(sim) {
         @omit_veryl;
-        @ignore_on(sv);
+        @omit_sv;
         @case "four_state_expression_semantics::ff_procedural_control_uses_known_nonzero_truth";
     }
 
     fn ff_unknown_reset_is_not_active(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "four_state_expression_semantics::ff_unknown_reset_is_not_active";
     }
 
     fn ff_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -101,7 +96,6 @@ module Top (
 
     fn comb_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     cond: input logic<130>,
@@ -146,12 +140,11 @@ module Top (
     }
 
     fn wide_ternary_condition_known_one_dominates_unknown_bits(sim) {
-        @ignore_on(sv);
         @case "four_state_expression_semantics::wide_ternary_condition_known_one_dominates_unknown_bits";
     }
 
     fn wide_ternary_unknown_condition_merges_every_arm_chunk(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "four_state_expression_semantics::wide_ternary_unknown_condition_merges_every_arm_chunk";
     }
 

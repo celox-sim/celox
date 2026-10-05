@@ -8,12 +8,10 @@ mod test_utils;
 all_backends! {
 
 fn test_expression_bounds_in_synth_for_loops(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_expression_bounds_in_synth_for_loops";
 }
 
 fn test_constant_break_in_synth_comb_loop(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_constant_break_in_synth_comb_loop";
 }
 
@@ -24,27 +22,24 @@ fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
 }
 
 fn test_runtime_bounds_in_synth_for_loops(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_in_synth_for_loops";
 }
 
 fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bitwise_steps_in_synth_for_loops";
 }
 
 fn test_signed_xor_step_uses_loop_counter_width(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "synth_dynamic_loop::test_signed_xor_step_uses_loop_counter_width";
 }
 
 fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "synth_dynamic_loop::test_i32_bitwise_steps_discard_bits_above_the_counter_width";
 }
 
 fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -69,7 +64,6 @@ fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
 }
 
 fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -94,7 +88,6 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
 }
 
 fn test_i32_mul_step_overflow_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input signed logic<32>,
@@ -119,7 +112,6 @@ fn test_i32_mul_step_overflow_reports_true_loop(sim) {
 }
 
 fn test_i32_shl_step_overflow_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input signed logic<32>,
@@ -144,7 +136,6 @@ fn test_i32_shl_step_overflow_reports_true_loop(sim) {
 }
 
 fn test_runtime_bounds_terminal_inclusive_mul_loop_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             count: input logic<32>,
@@ -166,12 +157,11 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_reports_true_loop(sim) {
 }
 
 fn test_runtime_reverse_step_matches_emitted_sv_order(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_reverse_step_matches_emitted_sv_order";
 }
 
 fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             start: input signed logic<64>,
@@ -196,27 +186,22 @@ fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
 }
 
 fn test_runtime_break_in_synth_comb_loop(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_break_in_synth_comb_loop";
 }
 
 fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_break_after_assign_in_synth_comb_loop";
 }
 
 fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_if_without_break_in_synth_comb_loop";
 }
 
 fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_stalled_step_with_break_exits_cleanly";
 }
 
 fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -248,57 +233,46 @@ fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim
 }
 
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds";
 }
 
 fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_truncate_loop_var_to_declared_width";
 }
 
 fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_constant_bounds_preserve_wide_limit_above_loop_width";
 }
 
 fn test_runtime_bounds_track_initial_seed_dependency(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency";
 }
 
 fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates";
 }
 
 fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state";
 }
 
 fn test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads";
 }
 
 fn test_runtime_bounds_reverse_singleton_exits_cleanly(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_reverse_singleton_exits_cleanly";
 }
 
 fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency_across_module_boundary";
 }
 
 fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_break_condition_dependency_across_module_boundary";
 }
 
 fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -329,17 +303,14 @@ fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
 }
 
 fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_forward_overshoot_exits_without_wraparound";
 }
 
 fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_large_additive_step_exits_without_wraparound";
 }
 
 fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
-    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_inclusive_max_bound_runs_full_range";
 }
 

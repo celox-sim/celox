@@ -65,41 +65,35 @@ fn build_sorter(n: u64) -> std::time::Duration {
     process_cpu_time() - start
 }
 
-/// Compilation-scaling regression across small, medium, and large designs.
+/// Compilation-scaling regression across small and medium designs.
 ///
 /// Keep all measurements in one test so the Rust test harness cannot run
 /// heavyweight sorter builds concurrently. Each size is built exactly once.
+/// Sizes stop at N=32: the exponential mux lowering this guards against
+/// already took 24 minutes at N=16, while N=64/128 added minutes of CPU time
+/// to every test run without catching anything the smaller ratios miss.
 #[test]
 fn sorter_tree_compilation_scales() {
     let t4 = build_sorter(4);
     let t8 = build_sorter(8);
     let t16 = build_sorter(16);
     let t32 = build_sorter(32);
-    let t64 = build_sorter(64);
-    let t128 = build_sorter(128);
 
     let ratio_4_8 = t8.as_secs_f64() / t4.as_secs_f64();
-    let ratio_16_64 = t64.as_secs_f64() / t16.as_secs_f64();
-    let ratio_32_128 = t128.as_secs_f64() / t32.as_secs_f64();
+    let ratio_8_32 = t32.as_secs_f64() / t8.as_secs_f64();
     println!(
         "SorterTreeDistEntry compile CPU times: N=4 {t4:?}, N=8 {t8:?}, N=16 {t16:?}, \
-         N=32 {t32:?}, N=64 {t64:?}, N=128 {t128:?}; ratios: \
-         N=8/N=4 {ratio_4_8:.2}x, N=64/N=16 {ratio_16_64:.2}x, \
-         N=128/N=32 {ratio_32_128:.2}x"
+         N=32 {t32:?}; ratios: N=8/N=4 {ratio_4_8:.2}x, N=32/N=8 {ratio_8_32:.2}x"
     );
 
-    // Linear scaling gives roughly 2x here; exponential growth exceeds this
-    // broad bound by orders of magnitude.
+    // Linear scaling gives roughly 2x and 4x here; exponential growth exceeds
+    // these broad bounds by orders of magnitude.
     assert!(
         ratio_4_8 < 4.0,
         "N=8/N=4 ratio is {ratio_4_8:.2}x, expected < 4.0x (linear scaling)"
     );
     assert!(
-        ratio_16_64 < 10.0,
-        "N=64/N=16 ratio is {ratio_16_64:.2}x, expected < 10.0x"
-    );
-    assert!(
-        ratio_32_128 < 12.0,
-        "N=128/N=32 ratio is {ratio_32_128:.2}x, expected < 12.0x"
+        ratio_8_32 < 10.0,
+        "N=32/N=8 ratio is {ratio_8_32:.2}x, expected < 10.0x"
     );
 }

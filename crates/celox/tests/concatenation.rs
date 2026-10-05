@@ -7,7 +7,6 @@ mod test_utils;
 all_backends! {
 
     fn test_lhs_concatenation_execution(sim) {
-        @ignore_on(sv);
         @case "concatenation::test_lhs_concatenation_execution";
     }
 

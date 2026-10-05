@@ -16,7 +16,6 @@ all_backends! {
 
     // RAM with USE_RESET=true: clear via i_clr
     fn test_ram_reset_and_clear(sim) {
-        @ignore_on(sv);
         @case "std_ram::test_ram_reset_and_clear";
     }
 }

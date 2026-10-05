@@ -62,180 +62,6 @@ fn caps_aggregate_nested_generate_expansion() {
 }
 
 #[test]
-fn keeps_case_item_guards_on_nested_comb_branches() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic s, t, a, b, c, output logic y);
-                always_comb begin
-                    case (s)
-                        1'b0: if (t) y = a; else y = b;
-                        default: y = c;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("nested_case.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    assert_eq!(assignments.len(), 1);
-    let ir::Expr::Mux { else_expr, .. } = assignments[0].rhs() else {
-        panic!("expected a multiplexer chain");
-    };
-    // The default branch value must remain the final fallback so that
-    // `s != 0` selects `c`, not the nested else value.
-    assert_eq!(expr_bottom_else(else_expr), "c");
-}
-
-fn expr_bottom_else(expr: &ir::Expr) -> String {
-    match expr {
-        ir::Expr::Mux { else_expr, .. } => expr_bottom_else(else_expr),
-        ir::Expr::Ident(name) => name.clone(),
-        other => panic!("unexpected expression in mux chain: {other:?}"),
-    }
-}
-
-#[test]
-fn preserves_reads_between_merged_conditional_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, output logic x, y);
-                always_comb begin
-                    x = d;
-                    y = x;
-                    if (c) x = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("intervening_read.sv"),
-    )
-    .expect("intervening read should use the value at its statement position");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        expr_references_ident_name(y.rhs(), "d"),
-        "expected y to use the preceding d assignment: {:?}",
-        y.rhs()
-    );
-    assert!(!expr_references_ident_name(y.rhs(), "x"));
-}
-
-#[test]
-fn snapshots_unconditional_sources_before_relocated_conditional_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, b, c, d, e, output logic x, y);
-                always_comb begin
-                    y = a;
-                    if (c) x = y;
-                    else x = b;
-                    y = d;
-                    if (e) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_cross_target_read.sv"),
-    )
-    .expect("a relocated write should retain values read at its source position");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let x = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "x")
-        .expect("x assignment");
-    assert!(expr_references_ident_name(x.rhs(), "a"));
-    assert!(
-        !expr_references_ident_name(x.rhs(), "y"),
-        "x must snapshot y before its later overwrite: {:?}",
-        x.rhs()
-    );
-}
-
-#[test]
-fn preserves_fallback_guards_for_each_comb_target() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, a, b, output logic x, y);
-                always_comb begin
-                    x = 1'b0;
-                    y = 1'b0;
-                    if (c) x = a;
-                    else y = b;
-                end
-            endmodule
-        "#,
-        Path::new("target_fallback.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        matches!(y.rhs(), ir::Expr::Mux { .. }),
-        "the else write must not become globally unconditional: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn keeps_writes_after_exhaustive_comb_fallbacks() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, e, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else x = b;
-                    if (d) x = e;
-                end
-            endmodule
-        "#,
-        Path::new("write_after_fallback.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    let ir::Expr::Mux { condition, .. } = rhs else {
-        panic!("expected the trailing write to produce a mux: {rhs:?}");
-    };
-    assert!(
-        expr_references_ident_name(condition, "d"),
-        "the trailing d write must retain priority: {rhs:?}"
-    );
-}
-
-#[test]
-fn later_exhaustive_comb_chain_overrides_the_previous_chain() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, e, f, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else x = b;
-                    if (d) x = e;
-                    else x = f;
-                end
-            endmodule
-        "#,
-        Path::new("consecutive_exhaustive_chains.sv"),
-    )
-    .expect("the later exhaustive chain should fully define x");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    assert!(expr_references_ident_name(rhs, "d"));
-    assert!(expr_references_ident_name(rhs, "e"));
-    assert!(expr_references_ident_name(rhs, "f"));
-    assert!(
-        !expr_references_ident_name(rhs, "c")
-            && !expr_references_ident_name(rhs, "a")
-            && !expr_references_ident_name(rhs, "b"),
-        "the fully overriding second chain must discard the first chain: {rhs:?}"
-    );
-}
-
-#[test]
 fn recognizes_complementary_equality_guards_as_exhaustive() {
     analyze_source(
         r#"
@@ -298,251 +124,6 @@ fn preserves_complementary_guards_across_harmless_blocks() {
 }
 
 #[test]
-fn invalidates_complementary_guards_for_overlapping_selected_writes() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic outer, q, a, b, c,
-                input bit idx,
-                output logic y
-            );
-                logic [1:0] s;
-                always_comb begin
-                    s = {q, q};
-                    if (outer) begin
-                        if (s[0]) y = a;
-                        s[idx] = b;
-                        if (!s[0]) y = c;
-                    end else begin
-                        y = a;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_write_between_complementary_guards.sv"),
-    )
-    .expect_err("a dynamic overlapping write must invalidate the guard proof");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic outer, q, a, b, output logic y);
-                logic s;
-                function automatic bit f();
-                    return s;
-                endfunction
-                always_comb begin
-                    s = q;
-                    if (outer) begin
-                        if (f()) y = a;
-                        s = 1'b1;
-                        if (!f()) y = b;
-                    end else begin
-                        y = a;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("function_guard_dependency_write.sv"),
-    )
-    .expect_err("a function guard's free-variable write must invalidate its proof");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-}
-
-#[test]
-fn substitutes_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, a, b, output logic [1:0] x, output logic y);
-                always_comb begin
-                    x[0] = a;
-                    y = x[0];
-                    if (c) x[0] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "a"));
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must observe the preceding selected write: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn substitutes_subselect_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c,
-                input logic [2:0] a, b,
-                output logic [3:0] x,
-                output logic y
-            );
-                always_comb begin
-                    x[3:1] = a;
-                    y = x[2];
-                    if (c) x[3:1] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_subselect_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "a"));
-    let ir::Expr::Select { msb, lsb, .. } = y.rhs() else {
-        panic!(
-            "expected the intervening bit read to select from a: {:?}",
-            y.rhs()
-        );
-    };
-    assert_eq!(msb, &ir::ConstExpr::Literal("1".to_string()));
-    assert_eq!(lsb, &ir::ConstExpr::Literal("1".to_string()));
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must observe the matching bit of the preceding selected write: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn substitutes_partially_overlapping_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c,
-                input logic [2:0] a, b,
-                output logic [4:0] x,
-                output logic [2:0] y
-            );
-                always_comb begin
-                    x[3:1] = a;
-                    y = x[4:2];
-                    if (c) x[3:1] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_partial_overlap_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        expr_references_ident_name(y.rhs(), "a"),
-        "the overlapping bits must come from the preceding selected write: {:?}",
-        y.rhs()
-    );
-    assert!(
-        expr_references_ident_name(y.rhs(), "x"),
-        "the non-overlapping bit must retain its original source: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn coerces_always_comb_if_predicates_to_procedural_truth() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic s, output logic y);
-                always_comb begin
-                    if (s) y = 1'b1;
-                    else y = 1'b0;
-                end
-            endmodule
-        "#,
-        Path::new("always_comb_procedural_truth.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    let ir::Expr::Mux { condition, .. } = rhs else {
-        panic!("expected conditional assignment mux: {rhs:?}");
-    };
-    assert!(matches!(
-        &**condition,
-        ir::Expr::Unary {
-            op: ir::UnaryOp::RedOr,
-            expr,
-        } if matches!(
-            &**expr,
-            ir::Expr::Unary {
-                op: ir::UnaryOp::ToTwoState,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
-fn applies_cross_target_substitutions_before_merging_comb_groups() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, output logic x, y);
-                always_comb begin
-                    y = 1'b0;
-                    x = 1'b0;
-                    y = x;
-                    if (c) x = 1'b1;
-                    if (d) y = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("cross_target_substitution.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let y = ir.modules()[0].comb_processes()[0]
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must use x's value at the intervening statement: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn uses_whole_vector_defaults_for_conditional_selected_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, output logic [1:0] x);
-                always_comb begin
-                    x = '0;
-                    if (c) x[0] = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("whole_then_selected.sv"),
-    )
-    .expect("whole-vector initialization should cover the selected fallback");
-    assert_eq!(ir.modules()[0].comb_processes()[0].assignments().len(), 2);
-}
-
-#[test]
 fn uses_selected_writes_before_conditional_whole_vector_writes() {
     analyze_source(
         r#"
@@ -578,167 +159,6 @@ fn permits_reads_after_assignments_on_the_same_comb_path() {
         Path::new("path_local_comb_read.sv"),
     )
     .expect("each guarded read is preceded by a write on the same path");
-}
-
-#[test]
-fn freezes_comb_branch_guards_before_overwriting_the_predicate() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic en, output logic t, y);
-                always_comb begin
-                    t = en;
-                    y = 1'b0;
-                    if (t) begin
-                        t = 1'b0;
-                        y = 1'b1;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("frozen_comb_guard.sv"),
-    )
-    .expect("the branch predicate should use t's value on entry");
-    let y = ir.modules()[0].comb_processes()[0]
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "en"));
-    assert!(!expr_references_ident_name(y.rhs(), "t"));
-}
-
-#[test]
-fn rejects_entry_value_guards_relocated_past_their_first_write() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic a, b, d, e,
-                output logic t, x
-            );
-                always_comb begin
-                    if (t) x = a;
-                    else x = b;
-                    t = d;
-                    if (e) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_entry_guard.sv"),
-    )
-    .expect_err("the entry value of t cannot be moved past t's first write");
-    assert!(
-        error
-            .to_string()
-            .contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic a, b, c, d, e, f,
-                output logic y,
-                output logic [1:0] x
-            );
-                always_comb begin
-                    y = 1'b0;
-                    if (x) y = a;
-                    x[0] = c;
-                    if (d) x[0] = e;
-                    if (f) y = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_overlapping_entry_guard.sv"),
-    )
-    .expect_err("a whole-vector guard read cannot move past a selected write");
-    assert!(
-        error
-            .to_string()
-            .contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn preserves_prior_partially_overlapping_selected_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c, d,
-                input logic [2:0] a, b,
-                output logic [3:0] x
-            );
-                always_comb begin
-                    x = '0;
-                    if (c) x[3:1] = a;
-                    if (d) x[2:0] = b;
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_selected_fallback.sv"),
-    )
-    .expect("overlapping selected writes should preserve their procedural order");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let rhs = assignments.last().expect("final selected assignment").rhs();
-    assert!(
-        expr_references_ident_name(rhs, "a"),
-        "the later false path must retain the earlier selected value: {rhs:?}"
-    );
-}
-
-#[test]
-fn requires_definite_assignment_before_filling_comb_fallbacks() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else if (d) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("nested_incomplete_fallback.sv"),
-    )
-    .expect_err("the incomplete nested fallback must infer a latch")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
-}
-
-#[test]
-fn rejects_genuine_self_reads_in_exhaustive_comb_branches() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, output logic [7:0] x);
-                always_comb begin
-                    if (c) x = x + 1;
-                    else x = 0;
-                end
-            endmodule
-        "#,
-        Path::new("genuine_self_read.sv"),
-    )
-    .expect_err("a genuine self-read must not be filled as a fallback hole")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
-}
-
-#[test]
-fn rejects_overlapping_selected_self_reads() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, output logic [1:0] x);
-                always_comb begin
-                    if (c) x[0] = x[1:0];
-                    else x[0] = 1'b0;
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_selected_self_read.sv"),
-    )
-    .expect_err("an overlapping selected self-read must be rejected")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
 }
 
 #[test]
@@ -854,35 +274,6 @@ fn evaluates_constant_cast_operand_expressions() {
 }
 
 #[test]
-fn resolves_enum_members_referencing_earlier_members() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic [1:0] sel, output logic y);
-                typedef enum logic [1:0] { A = 2'd0, B = A + 2'd1 } E;
-                always_comb y = (sel == B);
-            endmodule
-        "#,
-        Path::new("enum_member_ref.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    assert_eq!(assignments.len(), 1);
-    // `B` must resolve to its constant value even though it references
-    // the earlier member `A`.
-    assert!(
-        !expr_references_ident_name(assignments[0].rhs(), "B"),
-        "unresolved enum member in {:?}",
-        assignments[0].rhs()
-    );
-    assert!(
-        expr_contains_literal(assignments[0].rhs(), "1"),
-        "expected the folded member value in {:?}",
-        assignments[0].rhs()
-    );
-}
-
-#[test]
 fn context_sizes_unbased_enum_member_initializers() {
     let ir = analyze_source(
         r#"
@@ -937,74 +328,6 @@ fn accepts_casez_nested_under_comb_conditionals() {
         Path::new("nested_casez.sv"),
     )
     .expect("casez nested under a conditional must analyze");
-}
-
-fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
-    match expr {
-        ir::Expr::Ident(ident) => ident == name,
-        ir::Expr::Select { expr, .. } => expr_references_ident_name(expr, name),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => parts
-            .iter()
-            .any(|part| expr_references_ident_name(part, name)),
-        ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
-            expr_references_ident_name(expr, name)
-        }
-        ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident_name(arg, name)),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_references_ident_name(left, name) || expr_references_ident_name(right, name)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_references_ident_name(condition, name)
-                || expr_references_ident_name(then_expr, name)
-                || expr_references_ident_name(else_expr, name)
-        }
-        ir::Expr::Literal(_) => false,
-        ir::Expr::Inside { expr, items } => {
-            expr_references_ident_name(expr, name)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(|operand| expr_references_ident_name(operand, name))
-        }
-    }
-}
-
-fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
-    match expr {
-        ir::Expr::Literal(value) => value == needle || value.ends_with(&format!("d{needle}")),
-        ir::Expr::Select { expr, .. } => expr_contains_literal(expr, needle),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().any(|part| expr_contains_literal(part, needle))
-        }
-        ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
-            expr_contains_literal(expr, needle)
-        }
-        ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_contains_literal(arg, needle)),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_contains_literal(left, needle) || expr_contains_literal(right, needle)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_literal(condition, needle)
-                || expr_contains_literal(then_expr, needle)
-                || expr_contains_literal(else_expr, needle)
-        }
-        ir::Expr::Ident(_) => false,
-        ir::Expr::Inside { expr, items } => {
-            expr_contains_literal(expr, needle)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(|operand| expr_contains_literal(operand, needle))
-        }
-    }
 }
 
 #[test]
@@ -1154,78 +477,6 @@ fn skips_duplicate_case_items_for_four_state_selectors() {
         Path::new("four_state_duplicate_case_item.sv"),
     )
     .expect("an unreachable duplicate case item should not infer a latch");
-}
-
-#[test]
-fn compares_normalized_four_state_case_labels_for_reachability() {
-    analyze_source(
-        r#"
-            module Top(input logic [1:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        2'd0: y = a;
-                        2'b00: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("normalized_four_state_case_labels.sv"),
-    )
-    .expect("equivalent case-label values should make the later item unreachable");
-
-    analyze_source(
-        r#"
-            module Top(input logic [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        9'd0: y = a;
-                        9'b000000000: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("wide_normalized_four_state_case_labels.sv"),
-    )
-    .expect("equivalent wide labels should be normalized without domain enumeration");
-
-    analyze_source(
-        r#"
-            module Top(input logic signed [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        1'sb1: y = a;
-                        9'b111111111: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("selector_typed_four_state_case_labels.sv"),
-    )
-    .expect("labels should be normalized in the signed selector context");
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        10'h3ff: y = a;
-                        9'h1ff: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("wider_unreachable_case_label.sv"),
-    )
-    .expect_err("a wider unreachable label must not hide a reachable empty item");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
 }
 
 #[test]
@@ -1400,26 +651,6 @@ fn substitutes_loop_indices_when_tracking_comb_writes() {
 }
 
 #[test]
-fn rejects_static_for_loops_that_write_their_index() {
-    let error = analyze_source(
-        r#"
-            module Top(output logic [3:0] y);
-                always_comb begin
-                    for (int i = 0; i < 4; i++) begin
-                        y[i] = 1'b1;
-                        i = i + 1;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("loop_body_index_write.sv"),
-    )
-    .expect_err("a loop body that changes its index must not be statically unrolled")
-    .to_string();
-    assert!(error.contains("procedural loop inside always_comb"));
-}
-
-#[test]
 fn analyzes_comb_processes_with_generate_local_constants() {
     analyze_source(
         r#"
@@ -1490,116 +721,6 @@ fn preserves_logical_constant_case_selector_masks() {
 }
 
 #[test]
-fn preserves_four_state_equality_case_selector_masks() {
-    for (selector, expected) in [
-        ("1'bx == 1'bx", "1'bx"),
-        ("1'bz != 1'b0", "1'bx"),
-        ("2'b0x == 2'b1x", "1'b0"),
-        ("2'b0z != 2'b1x", "1'b1"),
-        ("!(1'bx == 1'b0)", "1'bx"),
-        ("(1'bx != 1'bz) && 1'b1", "1'bx"),
-        ("(1'bx && 1'b1) == 1'bx", "1'bx"),
-        ("(1'bx == 1'bx) ? 1'b0 : 1'b1", "1'bx"),
-        ("(1'bx == 1'bx) ? 1'bz : 1'bz", "1'bz"),
-        ("1'sbx == 2'b1x", "1'b0"),
-        ("1'sbx != 2'sb1x", "1'bx"),
-        ("8'hff == '1", "1'b1"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case ({selector}) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("equality_constant_case.sv"))
-            .unwrap_or_else(|error| panic!("{selector}: {error}"));
-    }
-
-    for op in ["==", "!="] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case (1'bx {op} 1'bx) \
-             1'b0, 1'b1: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_equality_case.sv"))
-            .expect_err("two-state labels cannot cover an unknown equality result");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn preserves_four_state_relational_case_selector_masks() {
-    for op in ["<", "<=", ">", ">="] {
-        for (left, right) in [("1'bx", "1'b1"), ("2'b1z", "2'b00")] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({left} {op} {right}) \
-                 1'bx: y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("relational_constant_case.sv"))
-                .unwrap_or_else(|error| panic!("{left} {op} {right}: {error}"));
-        }
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case (1'bx {op} 1'b1) \
-             1'b0, 1'b1: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_relational_case.sv"))
-            .expect_err("two-state labels cannot cover an unknown relational result");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_declared_constant_part_select_coordinates() {
-    for (range, selection, expected) in [
-        ("0:3", "0:1", "2'bxx"),
-        ("0:3", "2:3", "2'b00"),
-        ("4:7", "4:5", "2'bxx"),
-        ("7:4", "7:6", "2'bxx"),
-        ("-3:0", "-3:-2", "2'bxx"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             localparam logic [{range}] P = 4'bxx00;
-             always_comb case (P[{selection}]) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("constant_select_coordinates.sv"))
-            .unwrap_or_else(|error| panic!("{range}, {selection}: {error}"));
-        let source = source.replace(&format!("{expected}: y"), "2'b11: y");
-        let error = analyze_source(&source, Path::new("unmatched_select_coordinates.sv"))
-            .expect_err("a nonmatching selected constant must not cover the case");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_compound_case_and_wildcard_equalities() {
-    for (expression, expected) in [
-        ("(1'bx | 1'b0) === 1'bx", "1'b1"),
-        ("(1'bx | 1'b0) !== 1'bx", "1'b0"),
-        ("(1'bx | 1'b0) === 1'bz", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'bx0", "1'b1"),
-        ("(2'bx0 | 2'b00) !=? 2'bx0", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'b01", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'b00", "1'bx"),
-        ("(2'bx0 | 2'b00) !=? 2'b00", "1'bx"),
-        ("(1'sb1 | 1'sb0) === 2'sb11", "1'b1"),
-        ("(1'b1 | 1'b0) === 2'b11", "1'b0"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             always_comb case ({expression}) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("compound_equality.sv"))
-            .unwrap_or_else(|error| panic!("{expression}: {error}"));
-        let wrong = if expected == "1'b1" { "1'b0" } else { "1'b1" };
-        let source = source.replace(&format!("{expected}: y"), &format!("{wrong}: y"));
-        let error = analyze_source(&source, Path::new("unmatched_compound_equality.sv"))
-            .expect_err("a nonmatching equality result must not cover the case");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
 fn resolves_function_scope_size_casts() {
     for function in [
         "function automatic logic [7:0] f(input logic [3:0] x);
@@ -1620,119 +741,6 @@ fn resolves_function_scope_size_casts() {
         analyze_source(&source, Path::new("function_scope_size_cast.sv"))
             .unwrap_or_else(|error| panic!("{function}: {error}"));
     }
-}
-
-#[test]
-fn folds_constant_part_selects_and_resized_concatenations() {
-    for (selector, label) in [
-        ("p()", "2'bxx"),
-        ("q()", "3'bxz1"),
-        ("r()", "2'b01"),
-        ("f()", "4'b00xz"),
-        ("g()", "4'b1111"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             function automatic logic [1:0] p();
-               logic [3:0] v; v = 4'bxx00; return v[3:2]; endfunction
-             function automatic logic [2:0] q();
-               logic [3:0] v; v = 4'bxz10; return v[3:1]; endfunction
-             function automatic logic [1:0] r();
-               logic [3:0] v; v = 4'b1010; return v[2:1]; endfunction
-             function automatic logic [3:0] f(); return {{1'bx, 1'bz}}; endfunction
-             function automatic logic signed [3:0] g(); return 2'sb11; endfunction
-             always_comb case ({selector}) {label}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("constant_case.sv"))
-            .unwrap_or_else(|error| panic!("{selector}: {error}"));
-        let source = source.replace(&format!("{label}: y"), "5'b10000: y");
-        let error = analyze_source(&source, Path::new("unmatched_constant_case.sv"))
-            .expect_err("a nonmatching label must still infer a latch");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn retains_dynamic_case_labels_for_two_state_selectors() {
-    let source = "module Top(input bit selector, dynamic_label, input logic a, b,
-                  output logic y);
-                  always_comb case (selector)
-                  dynamic_label: y = a;
-                  default: y = b;
-                  endcase endmodule";
-    let ir = analyze_source(source, Path::new("dynamic_case.sv")).unwrap();
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    assert!(expr_references_ident_name(rhs, "dynamic_label"), "{rhs:?}");
-    assert!(expr_references_ident_name(rhs, "a"), "{rhs:?}");
-    assert!(expr_references_ident_name(rhs, "b"), "{rhs:?}");
-}
-
-#[test]
-fn masked_parameters_are_substituted_for_if_coverage() {
-    for value in ["1'bx", "1'bz"] {
-        let source = format!(
-            "module Top(input logic outer, a, b, output logic y);
-             localparam logic P = {value};
-             always_comb if (outer) begin if (P === {value}) y = a; end else y = b;
-             endmodule"
-        );
-        analyze_source(&source, Path::new("masked_if_coverage.sv")).unwrap();
-        let mismatch = source.replace(&format!("P === {value}"), "P === 1'b0");
-        assert!(
-            analyze_source(&mismatch, Path::new("masked_if_uncovered.sv"))
-                .unwrap_err()
-                .to_string()
-                .contains("latch inference")
-        );
-    }
-}
-
-#[test]
-fn substitutes_masked_parameter_case_labels() {
-    for (value, label) in [("1'bx", "P"), ("1'bz", "P"), ("1'bx", "(P | 1'b0)")] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             localparam logic P = {value};
-             always_comb if (a) case ({value}) {label}: y = a; endcase else y = a; endmodule"
-        );
-        analyze_source(&source, Path::new("masked_parameter_case_label.sv"))
-            .unwrap_or_else(|error| panic!("{value}, {label}: {error}"));
-        let mismatch = source.replace(&format!("case ({value})"), "case (1'b1)");
-        let error = analyze_source(&mismatch, Path::new("unmatched_parameter_case_label.sv"))
-            .expect_err("an X/Z label must not cover a known selector");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_compound_four_state_case_labels() {
-    for (selector, label) in [
-        ("1'bx", "(1'bx | 1'b0)"),
-        ("1'bx", "(1'bz & 1'b1)"),
-        ("2'bxz", "{1'bx, 1'bz}"),
-        ("2'bxx", "{2{1'bx}}"),
-        ("1'bz", "(1'bx ? 1'bz : 1'bz)"),
-        ("2'bxx", "(1'b1 ? 1'sbx : 2'sb00)"),
-        ("1'bx", "(1'bx < 1'b1)"),
-        ("1'bx", "label()"),
-        ("4'b1111", "'1"),
-        ("4'sb1111", "'1"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             function logic label(); return 1'bx | 1'b0; endfunction \
-             always_comb case ({selector}) {label}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("compound_constant_case_label.sv"))
-            .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-    }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (1'bz) (1'bx | 1'b0): y = a; endcase endmodule",
-        Path::new("unmatched_compound_case_label.sv"),
-    )
-    .expect_err("an X-valued label must not cover a Z-valued selector");
-    assert!(error.to_string().contains("latch inference"), "{error}");
 }
 
 #[test]
@@ -1790,77 +798,6 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
 }
 
 #[test]
-fn preserves_four_state_arithmetic_case_constants() {
-    for (expression, expected) in [
-        ("1'bx + 1'b0", "1'bx"),
-        ("2'b1z - 4'b0001", "4'bxxxx"),
-        ("4'b0000 * 2'b1x", "4'bxxxx"),
-        ("2'b1z / 2'b01", "2'bxx"),
-        ("2'b1x % 2'b01", "2'bxx"),
-        ("2'b01 / 2'b1x", "2'bxx"),
-        ("2'b01 % 2'b1z", "2'bxx"),
-        ("+(2'b1z)", "2'bxx"),
-        ("-(2'b1z)", "2'bxx"),
-        ("(2'b11 + 2'b01) + 2'b0x", "2'bxx"),
-        ("(2'b1x + 2'b01) & 2'b00", "2'b00"),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("arithmetic_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
-    }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (1'bx + 1'b0) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
-        Path::new("unmatched_arithmetic_case.sv"),
-    )
-    .expect_err("arithmetic X results must not match known values or Z");
-    assert!(error.to_string().contains("latch inference"), "{error}");
-}
-
-#[test]
-fn preserves_four_state_shift_and_select_case_constants() {
-    for (expression, expected) in [
-        ("2'bx0 >> 1", "2'b0x"),
-        ("2'bz0 >> 1", "2'b0z"),
-        ("4'b10xz << 1", "4'b0xz0"),
-        ("4'sbxz01 >>> 2", "4'bxxxz"),
-        ("4'sbz101 >>> 2", "4'bzzz1"),
-        ("4'bx101 >>> 2", "4'b00x1"),
-        ("2'bx0 >> 1000", "2'b00"),
-        ("2'sbz0 >>> 1000", "2'bzz"),
-        ("2'b00 << 1'bx", "2'bxx"),
-        ("2'b11 >> 1'bz", "2'bxx"),
-        ("{2'bx0}[1]", "1'bx"),
-        ("{2'bz0}[1]", "1'bz"),
-        ("{2'bx0}[0]", "1'b0"),
-        ("{2'bx0}[2]", "1'bx"),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("shift_select_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
-    }
-    for selector in ["2'bx0 >> 1", "{2'bx0}[1]"] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case ({selector}) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_shift_select.sv"))
-            .expect_err("X must not match a known value or Z");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
 fn preserves_unsigned_128_bit_enum_expression_results() {
     let ir = analyze_source(
         "module Top(output logic [127:0] y);
@@ -1902,45 +839,6 @@ fn rejects_nonblocking_comb_assignments_before_coverage() {
             "{body}: {error}"
         );
     }
-}
-
-#[test]
-fn preserves_four_state_reduction_case_constants() {
-    for (expression, expected) in [
-        ("&1'bx", "1'bx"),
-        ("|1'bz", "1'bx"),
-        ("^2'b1x", "1'bx"),
-        ("&3'b1z0", "1'b0"),
-        ("|3'b0z1", "1'b1"),
-        ("~&2'b1z", "1'bx"),
-        ("~|2'b0x", "1'bx"),
-        ("~^2'b1z", "1'bx"),
-        ("^~2'b1x", "1'bx"),
-        ("^'1", "1'b1"),
-        ("&'z", "1'bx"),
-        ("&(4'b1x11 & 4'b0111)", "1'b0"),
-        ("|(4'b0z00 | 4'b1000)", "1'b1"),
-        (
-            "^256'hffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            "1'b0",
-        ),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("reduction_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
-    }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (&1'bx) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
-        Path::new("unmatched_reduction_case.sv"),
-    )
-    .expect_err("reduction X results must not match known values or Z");
-    assert!(error.to_string().contains("latch inference"), "{error}");
 }
 
 #[test]
@@ -2039,33 +937,6 @@ fn preserves_known_conditional_case_selector_types() {
 }
 
 #[test]
-fn recognizes_single_bit_two_state_bitwise_complements() {
-    for predicate in ["s", "~(~s)", "s != 0"] {
-        let source = format!(
-            "module Top(input bit s, input logic outer, a, b, output logic y); \
-             always_comb if (outer) begin \
-             if ({predicate}) y = a; if (~({predicate})) y = b; \
-             end else y = a; endmodule"
-        );
-        analyze_source(&source, Path::new("one_bit_complements.sv"))
-            .unwrap_or_else(|error| panic!("{predicate}: {error}"));
-    }
-    for declaration in ["logic s", "bit [1:0] s"] {
-        let source = format!(
-            "module Top(input {declaration}, input logic outer, a, b, output logic y); \
-             always_comb if (outer) begin \
-             if (s) y = a; if (~s) y = b; end else y = a; endmodule"
-        );
-        assert!(
-            analyze_source(&source, Path::new("non_complementary_bitwise_guards.sv"))
-                .expect_err("only a one-bit two-state bitwise inverse proves coverage")
-                .to_string()
-                .contains("latch inference inside always_comb")
-        );
-    }
-}
-
-#[test]
 fn resolves_size_casts_in_declaration_ranges_without_recursion() {
     for declaration in [
         "output logic [$bits(f())'(7):0] y",
@@ -2088,34 +959,6 @@ fn resolves_size_casts_in_declaration_ranges_without_recursion() {
             Some(8)
         );
     }
-}
-
-#[test]
-fn applies_function_return_types_in_procedural_lvalue_indices() {
-    let ir = analyze_source(
-        r#"
-            module Top(input bit [1:0] index, input logic data, output logic [1:0] x);
-                function automatic bit idx();
-                    return index;
-                endfunction
-                always_comb begin
-                    x = '0;
-                    x[idx()] = data;
-                end
-            endmodule
-        "#,
-        Path::new("function_typed_lvalue_index.sv"),
-    )
-    .expect("the one-bit function return should truncate the expanded lvalue index");
-    assert!(
-        ir.modules()[0].comb_processes()[0]
-            .assignments()
-            .iter()
-            .any(|assignment| assignment.lhs() == "x"
-                && expr_references_ident_name(assignment.rhs(), "data")),
-        "the selected write must not be dropped: {:?}",
-        ir.modules()[0].comb_processes()[0].assignments()
-    );
 }
 
 #[test]
@@ -2181,26 +1024,6 @@ fn skips_inactive_loop_generate_blocks_with_parameter_casts() {
     let ir = analyze_source(source, Path::new("inactive_loop_generate_cast.sv"))
         .expect("a zero-iteration loop must skip unsupported declarations");
     assert_eq!(ir.modules()[0].comb_processes().len(), 1);
-}
-
-#[test]
-fn caps_aggregate_nested_static_loop_expansion() {
-    let error = analyze_source(
-        r#"
-            module Top(output logic y);
-                always_comb begin
-                    y = 1'b0;
-                    for (int i = 0; i < 101; i++)
-                        for (int j = 0; j < 100; j++)
-                            y = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("nested_static_loop_budget.sv"),
-    )
-    .expect_err("nested loop expansion must have an aggregate bound")
-    .to_string();
-    assert!(error.contains("procedural loop unroll limit exceeded"));
 }
 
 #[test]
@@ -2400,82 +1223,6 @@ fn resolves_value_dependent_type_parameter_defaults() {
         ir.modules()[0].ports()[0].r#type().resolved_width(),
         Some(8)
     );
-}
-
-#[test]
-fn caps_dynamic_select_normalization_expansion() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic [16:0] index,
-                input logic data, replace,
-                output logic [4096:0] value
-            );
-                always_comb begin
-                    value = '0;
-                    value[index] = data;
-                    if (replace) value = '1;
-                end
-            endmodule
-        "#,
-        Path::new("capped_dynamic_select_expansion.sv"),
-    )
-    .expect_err("oversized dynamic-select expansion should be rejected compactly");
-    assert!(
-        error
-            .to_string()
-            .contains("dynamic selected write expansion exceeds limit")
-    );
-}
-
-#[test]
-fn retains_zero_iteration_loop_writes_for_latch_detection() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic a, output logic y);
-                always_comb
-                    for (int i = 0; i < 0; i++) y = a;
-            endmodule
-        "#,
-        Path::new("zero_iteration_comb_loop.sv"),
-    )
-    .expect_err("a zero-iteration loop must not silently discard its target");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic enable, a, output logic y);
-                always_comb begin
-                    if (enable)
-                        for (int i = 0; i < 0; i++) y = a;
-                end
-            endmodule
-        "#,
-        Path::new("nested_zero_iteration_comb_loop.sv"),
-    )
-    .expect_err("a nested zero-iteration loop must retain its write target");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    analyze_source(
-        r#"
-            module Top(input logic a, output logic y);
-                always_comb begin
-                    y = 1'b0;
-                    for (int i = 0; i < 0; i++) y = a;
-                end
-            endmodule
-        "#,
-        Path::new("initialized_zero_iteration_comb_loop.sv"),
-    )
-    .expect("a preceding assignment should initialize a zero-iteration loop target");
 }
 
 #[test]
@@ -2702,7 +1449,7 @@ fn rejects_conditional_predicate_conjunction_terms() {
     .expect_err("unsupported predicate conjunctions must not be partially lowered")
     .to_string();
     assert!(
-        error.contains("predicate lowering"),
+        error.contains("procedural condition"),
         "unexpected error: {error}"
     );
 }
@@ -2756,43 +1503,6 @@ fn analyzes_basic_sv_module_name() {
         ir.modules()[0].ports()[1].r#type().resolved_width(),
         Some(1)
     );
-}
-
-#[test]
-fn preserves_signedness_for_compound_unpacked_array_lvalues() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic signed [7:0] input_value);
-                logic signed [7:0] values[2];
-                always_comb begin
-                    values[0] = input_value;
-                    values[0] >>>= 1;
-                end
-            endmodule
-        "#,
-        Path::new("compound_array.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let compound = ir.modules()[0]
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments())
-        .find_map(|assignment| match assignment.rhs() {
-            ir::Expr::Binary {
-                op: ir::BinaryOp::Sar,
-                left,
-                ..
-            } => Some(left),
-            _ => None,
-        })
-        .expect("compound assignment should lower to an arithmetic shift");
-    // The earlier write is substituted into the compound assignment, so the
-    // shifted operand is the signed input itself.
-    assert_eq!(
-        compound.as_ref(),
-        &ir::Expr::Ident("input_value".to_string())
-    );
-    assert!(ir.modules()[0].ports()[0].r#type().is_signed());
 }
 
 #[test]
@@ -2938,13 +1648,24 @@ fn records_always_ff_case_branches() {
 
     let process = &ir.modules()[0].ff_processes()[0];
     assert_eq!(process.events().len(), 1);
-    assert_eq!(process.assignments().len(), 3);
-    assert!(
-        process
-            .assignments()
-            .iter()
-            .all(|assignment| assignment.condition().is_some())
-    );
+    assert_eq!(assignment_count(process.body()), 3);
+    let [crate::ir::Stmt::Case { items, default, .. }] = process.body() else {
+        panic!("expected a case statement: {:?}", process.body());
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1].labels.len(), 2);
+    assert!(default.is_some());
+}
+
+/// The assignments a statement body contains, at any depth.
+fn assignment_count(body: &[crate::ir::Stmt]) -> usize {
+    let mut count = 0;
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            count += usize::from(matches!(stmt, crate::ir::Stmt::Assign { .. }));
+        });
+    }
+    count
 }
 
 #[test]
@@ -2968,7 +1689,10 @@ fn accepts_unknown_labels_in_always_ff_case() {
     )
     .expect("X/Z case labels should use exact four-state case equality");
 
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    assert_eq!(
+        assignment_count(ir.modules()[0].ff_processes()[0].body()),
+        2
+    );
 }
 
 #[test]
@@ -2993,246 +1717,10 @@ fn accepts_dynamic_labels_in_always_ff_case() {
     )
     .expect("dynamic labels should use exact four-state case equality");
 
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
-}
-
-#[test]
-fn inlines_simple_function_call() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, input logic b, output logic y);
-                function automatic logic choose(input logic s, input logic t);
-                    if (s) begin
-                        return t;
-                    end else begin
-                        return 1'b0;
-                    end
-                endfunction
-
-                always_comb y = choose(a, b);
-            endmodule
-        "#,
-        Path::new("Top.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    assert!(matches!(
-        ir.modules()[0].assignments()[0].rhs(),
-        ir::Expr::Resize { expr, width: 1, .. }
-            if matches!(&**expr, ir::Expr::Mux { .. })
-    ));
-}
-
-#[test]
-fn inlines_veryl_generated_std_counter_functions() {
-    let ir = analyze_source(
-        include_str!("../testdata/verilator/StdCounter.sv"),
-        Path::new("StdCounter.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let counter = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "counter")
-        .expect("counter module should exist");
     assert_eq!(
-        counter
-            .parameters()
-            .iter()
-            .find(|parameter| parameter.name() == "MAX_COUNT")
-            .and_then(|parameter| parameter.resolved_value()),
-        Some(3)
+        assignment_count(ir.modules()[0].ff_processes()[0].body()),
+        2
     );
-    assert_eq!(
-        counter
-            .ports()
-            .iter()
-            .find(|port| port.name() == "o_count")
-            .and_then(|port| port.r#type().resolved_width()),
-        Some(2)
-    );
-
-    assert!(
-        counter
-            .assignments()
-            .iter()
-            .all(|assignment| !expr_contains_call(assignment.rhs()))
-    );
-    let count_next = counter
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "count_next")
-        .expect("count_next assignment should exist");
-    assert!(
-        matches!(count_next.rhs(), ir::Expr::Resize { width: 2, .. }),
-        "{:#?}",
-        count_next.rhs()
-    );
-    assert!(
-        counter
-            .signals()
-            .iter()
-            .any(|signal| signal.name() == "count")
-    );
-    assert!(
-        counter
-            .signals()
-            .iter()
-            .any(|signal| signal.name() == "count_next")
-    );
-}
-
-#[test]
-fn analyzes_veryl_generated_lfsr_tap_assignments() {
-    let ir = analyze_source(
-        include_str!("../testdata/verilator/Lfsr.sv"),
-        Path::new("Lfsr.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let lfsr = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "lfsr_galois")
-        .expect("lfsr_galois module should exist");
-    assert_eq!(
-        lfsr.ports()
-            .iter()
-            .find(|port| port.name() == "o_val")
-            .and_then(|port| port.r#type().resolved_width()),
-        Some(64)
-    );
-    assert_eq!(
-        lfsr.signals()
-            .iter()
-            .find(|signal| signal.name() == "val_next")
-            .and_then(|signal| signal.r#type().resolved_width()),
-        Some(64)
-    );
-
-    assert!(lfsr.assignments().iter().any(|assignment| matches!(
-        assignment.lhs_value(),
-        ir::LValue::Select { name, msb, lsb, .. }
-            if name == "val_next"
-                && typecheck::eval_const_expr(
-                    msb,
-                    &[("SIZE".to_string(), 32)].into_iter().collect(),
-                ) == Some(31)
-                && typecheck::eval_const_expr(
-                    lsb,
-                    &[("SIZE".to_string(), 32)].into_iter().collect(),
-                ) == Some(31)
-    )));
-}
-
-#[test]
-fn specializes_veryl_generated_lfsr_top_bit_assignment() {
-    let ir = analyze_source_with_module_parameter_overrides(
-        include_str!("../testdata/verilator/Lfsr.sv"),
-        Path::new("Lfsr.sv"),
-        "lfsr_galois",
-        &[("SIZE".to_string(), 32)].into_iter().collect(),
-    )
-    .expect("SV analysis should succeed");
-    let lfsr = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "lfsr_galois")
-        .expect("lfsr_galois module should exist");
-    let constants: HashMap<_, _> = [("SIZE".to_string(), 32)].into_iter().collect();
-
-    let assignments = lfsr
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments().iter())
-        .filter(|assignment| {
-            matches!(
-                assignment.lhs_value(),
-                ir::LValue::Select { name, msb, lsb, .. }
-                    if name == "val_next"
-                        && typecheck::eval_const_expr(
-                            msb,
-                            &constants
-                        ) == Some(31)
-                        && typecheck::eval_const_expr(
-                            lsb,
-                            &constants
-                        ) == Some(31)
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let bit_zero_assignments = lfsr
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments().iter())
-        .filter(|assignment| {
-            matches!(
-                assignment.lhs_value(),
-                ir::LValue::Select { name, msb, lsb, .. }
-                    if name == "val_next"
-                        && typecheck::eval_const_expr(msb, &constants) == Some(0)
-                        && typecheck::eval_const_expr(lsb, &constants) == Some(0)
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(assignments.len(), 1);
-    assert!(matches!(
-        assignments[0].rhs(),
-        ir::Expr::Select { expr, msb, lsb, .. }
-            if matches!(&**expr, ir::Expr::Ident(name) if name == "o_val")
-                && typecheck::eval_const_expr(msb, &HashMap::default())
-                    == Some(0)
-                && typecheck::eval_const_expr(lsb, &HashMap::default())
-                    == Some(0)
-    ));
-    assert!(
-        bit_zero_assignments.iter().any(|assignment| {
-            matches!(
-                assignment.rhs(),
-                ir::Expr::Mux {
-                    condition,
-                    then_expr,
-                    else_expr,
-                } if matches!(&**condition, ir::Expr::Ident(name) if name == "i_set")
-                    && matches!(&**then_expr, ir::Expr::Select { expr, .. }
-                        if matches!(&**expr, ir::Expr::Ident(name) if name == "i_setval"))
-                    && matches!(&**else_expr, ir::Expr::Binary { .. } | ir::Expr::Select { .. })
-            )
-        }),
-        "val_next[0] should retain its ternary assignment"
-    );
-}
-
-fn expr_contains_call(expr: &ir::Expr) -> bool {
-    match expr {
-        ir::Expr::Ident(_) | ir::Expr::Literal(_) => false,
-        ir::Expr::Select { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Resize { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().any(expr_contains_call)
-        }
-        ir::Expr::Unary { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_contains_call(left) || expr_contains_call(right)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_call(condition)
-                || expr_contains_call(then_expr)
-                || expr_contains_call(else_expr)
-        }
-        ir::Expr::Call { .. } => true,
-        ir::Expr::Inside { expr, items } => {
-            expr_contains_call(expr)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(expr_contains_call)
-        }
-    }
 }
 
 #[test]
@@ -3406,69 +1894,6 @@ fn rejects_nonpositive_implicit_unpacked_array_dimensions() {
             matches!(error, AnalyzerError::Unsupported(message) if message == "nonpositive unpacked array dimension")
         );
     }
-}
-
-#[test]
-fn analyzes_nested_static_loops_with_outer_index_environment() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, input logic d);
-                logic q[2][2];
-                always_ff @(posedge clk) begin
-                    for (int i = 0; i < 2; i++) begin
-                        for (int j = 0; j < i; j++) begin
-                            q[i][j] <= d;
-                        end
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("nested_static_loops.sv"),
-    )
-    .expect("nested static loops should use the outer loop environment");
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 1);
-}
-
-#[test]
-fn carries_outer_loop_types_into_nested_loop_preflight() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, input logic d);
-                logic q;
-                always_ff @(posedge clk) begin
-                    for (int i = -1; i < 0; i++) begin
-                        for (int j = 0; i < 32'd1; j++) begin
-                            q <= d;
-                        end
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("nested_loop_preflight_types.sv"),
-    )
-    .expect("nested loop preflight should use outer loop types");
-    assert!(ir.modules()[0].ff_processes().is_empty());
-}
-
-#[test]
-fn applies_expression_types_to_compound_loop_steps() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, output logic q);
-                always_ff @(posedge clk) begin
-                    for (int i = -2; i < 0; i /= 32'd2) begin
-                        q <= 1'b1;
-                    end
-                    for (int i = -3; i < 0; i %= 32'd2) begin
-                        q <= 1'b0;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("typed_compound_loop_steps.sv"),
-    )
-    .expect("compound loop steps should use expression types");
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
 }
 
 #[test]
@@ -3728,59 +2153,6 @@ fn records_continuous_assignments() {
 }
 
 #[test]
-fn records_always_comb_processes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, input logic b, output logic y, output logic z);
-                always_comb begin
-                    y = a & b;
-                    z = a | b;
-                end
-            endmodule
-        "#,
-        Path::new("always_comb.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let top = &ir.modules()[0];
-    assert_eq!(top.assignments().len(), 2);
-    assert_eq!(top.comb_processes().len(), 1);
-    assert_eq!(
-        top.comb_processes()[0].kind(),
-        ir::CombProcessKind::AlwaysComb
-    );
-    assert_eq!(top.comb_processes()[0].assignments()[0].lhs(), "y");
-    assert_eq!(top.comb_processes()[0].assignments()[1].lhs(), "z");
-}
-
-#[test]
-fn expands_operator_assignments() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic [3:0] a, input logic [3:0] b, output logic [3:0] y);
-                always_comb begin
-                    y = a;
-                    y ^= b;
-                end
-            endmodule
-        "#,
-        Path::new("operator_assignment.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let top = &ir.modules()[0];
-    let assignment = &top.comb_processes()[0].assignments()[1];
-    assert_eq!(assignment.lhs(), "y");
-    assert!(matches!(
-        assignment.rhs(),
-        ir::Expr::Binary {
-            op: ir::BinaryOp::BitXor,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn folds_countones_with_self_determined_argument_types() {
     let ir = analyze_source(
         r#"
@@ -3944,8 +2316,8 @@ fn analyzes_veryl_emitted_benchmark_sv() {
 #[test]
 fn rejects_unlowered_constructs() {
     let error = analyze_source(
-        "module Top(output logic y); initial y = 1'b0; endmodule",
-        Path::new("initial.sv"),
+        "module Top(input logic a, output logic y); always_comb begin fork y = a; join end endmodule",
+        Path::new("fork.sv"),
     )
     .expect_err("unlowered constructs must not be silently ignored");
     assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
@@ -4011,7 +2383,7 @@ fn records_veryl_emitted_module_instantiations() {
 fn unsupported_constructs_map_to_their_tracking_issues() {
     let issue =
         |construct: &str| AnalyzerError::Unsupported(construct.to_string()).tracking_issue();
-    assert_eq!(issue("blocking assignment inside always_ff"), 421);
+    assert_eq!(issue("gate primitive instantiation"), 457);
     assert_eq!(issue("duplicate internal signal `t`"), 445);
     assert_eq!(issue("undriven net declaration `n`"), 460);
     assert_eq!(

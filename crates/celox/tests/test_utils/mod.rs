@@ -9,6 +9,17 @@ pub mod veryl_std;
 /// Generates native, cranelift, wasm, interpreter, and Veryl reference tests,
 /// plus an SV frontend test when the `systemverilog` feature is enabled.
 ///
+/// Directives at the start of a test body, in any order:
+///
+/// - `@ignore_on(backend, ...);` marks the listed backends' tests `#[ignore]`:
+///   the backend cannot yet run the design.
+/// - `@omit_veryl;` generates no Veryl reference test.
+/// - `@omit_sv;` generates no SV frontend test: the design uses a construct
+///   only Celox's Veryl frontend accepts (such as function outputs or side
+///   effects in `always_ff`), which Veryl rejects because the emitted
+///   SystemVerilog would not have its semantics, so there is no SystemVerilog
+///   to simulate.
+///
 /// The `interp` arm calls `build_interpreter()`, which executes every
 /// execution unit on the Tier-0 SIR interpreter against the same memory
 /// image ABI as the compiled backends.
@@ -81,6 +92,7 @@ macro_rules! all_backends {
     (@sv_fn
         $(#[$meta:meta])* fn $name:ident ($sim:ident)
         ignore_list { $ignore_list:tt }
+        emit
         setup { $($setup:tt)* }
         build { $builder:expr }
         body { $($body:tt)* }
@@ -94,18 +106,25 @@ macro_rules! all_backends {
                 $($setup)*
                 let __builder = { $builder };
                 let __emitted = test_utils::veryl_sv::emit_veryl_sources(__builder.sources());
-                let __sv_sources = __emitted.as_sv_sources();
-                let mut $sim = celox::Simulator::from_sv_sources(
-                    __sv_sources,
-                    __builder.top(),
-                )
-                .four_state(__builder.four_state_enabled())
-                .build()
-                .unwrap();
+                // The same configuration (loop authorizations, parameter
+                // overrides, state mode) applies to the emitted design.
+                let mut $sim = __builder
+                    .into_sv_sources(__emitted.as_sv_sources())
+                    .build()
+                    .unwrap();
                 $($body)*
             }
         });
     };
+
+    (@sv_fn
+        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+        ignore_list { $ignore_list:tt }
+        skip
+        setup { $($setup:tt)* }
+        build { $builder:expr }
+        body { $($body:tt)* }
+    ) => {};
 
     // ── internal: emit the Veryl reference test ─────────────────────
     (@veryl_fn
@@ -146,6 +165,7 @@ macro_rules! all_backends {
         $(#[$meta:meta])* fn $name:ident ($sim:ident)
         ignore_list { $ignore_list:tt }
         veryl_mode { $veryl_mode:ident }
+        sv_mode { $sv_mode:ident }
         setup { $($setup:tt)* }
         build { $builder:expr }
         body { $($body:tt)* }
@@ -252,6 +272,7 @@ macro_rules! all_backends {
             all_backends!(@sv_fn
                 $(#[$meta])* fn $name ($sim)
                 ignore_list { $ignore_list }
+                $sv_mode
                 setup { $($setup)* }
                 build { $builder }
                 body { $($body)* }
@@ -268,159 +289,61 @@ macro_rules! all_backends {
         }
     };
 
-    // ── internal: dispatch per body shape ───────────────────────────
-
-    // @omit_veryl + @ignore_on + @setup + @build
+    // ── internal: read the directives in any order ──────────────────
     (@dispatch
         $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @ignore_on $ignore_list:tt; @setup { $($setup:tt)* } @build $builder:expr; $($body:tt)* }
+        { $($body:tt)* }
     ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { $ignore_list }
-            veryl_mode { skip }
-            setup { $($setup)* }
-            build { $builder }
-            body { $($body)* }
-        );
+        all_backends!(@parse [$(#[$meta])*] $name $sim emit emit () { $($body)* });
     };
-
-    // @omit_veryl + @ignore_on + @build (no setup)
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @ignore_on $ignore_list:tt; @build $builder:expr; $($body:tt)* }
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
+        { @omit_veryl; $($rest:tt)* }
     ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { $ignore_list }
-            veryl_mode { skip }
-            setup { }
-            build { $builder }
-            body { $($body)* }
-        );
+        all_backends!(@parse [$(#[$meta])*] $name $sim skip $sv $ignore { $($rest)* });
     };
-
-    // @omit_veryl + @setup + @build
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @setup { $($setup:tt)* } @build $builder:expr; $($body:tt)* }
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
+        { @omit_sv; $($rest:tt)* }
     ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { () }
-            veryl_mode { skip }
-            setup { $($setup)* }
-            build { $builder }
-            body { $($body)* }
-        );
+        all_backends!(@parse [$(#[$meta])*] $name $sim $veryl skip $ignore { $($rest)* });
     };
-
-    // @omit_veryl + @build (no setup)
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @build $builder:expr; $($body:tt)* }
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $old:tt
+        { @ignore_on $ignore_list:tt; $($rest:tt)* }
     ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { () }
-            veryl_mode { skip }
-            setup { }
-            build { $builder }
-            body { $($body)* }
-        );
+        all_backends!(@parse [$(#[$meta])*] $name $sim $veryl $sv $ignore_list { $($rest)* });
     };
-
-    // @ignore_on + @setup + @build
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @ignore_on $ignore_list:tt; @setup { $($setup:tt)* } @build $builder:expr; $($body:tt)* }
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
+        { @case $case:literal; }
     ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { $ignore_list }
-            veryl_mode { emit }
-            setup { $($setup)* }
-            build { $builder }
-            body { $($body)* }
-        );
+        all_backends!(@case_impl $(#[$meta])* fn $name $ignore $veryl $sv $case);
     };
-
-    // @ignore_on + @build (no setup)
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @ignore_on $ignore_list:tt; @build $builder:expr; $($body:tt)* }
-    ) => {
-        all_backends!(@impl
-            $(#[$meta])* fn $name ($sim)
-            ignore_list { $ignore_list }
-            veryl_mode { emit }
-            setup { }
-            build { $builder }
-            body { $($body)* }
-        );
-    };
-
-    // @setup + @build (no ignore)
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
         { @setup { $($setup:tt)* } @build $builder:expr; $($body:tt)* }
     ) => {
         all_backends!(@impl
             $(#[$meta])* fn $name ($sim)
-            ignore_list { () }
-            veryl_mode { emit }
+            ignore_list { $ignore }
+            veryl_mode { $veryl }
+            sv_mode { $sv }
             setup { $($setup)* }
             build { $builder }
             body { $($body)* }
         );
     };
-
-    // @build only (no ignore, no setup)
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
         { @build $builder:expr; $($body:tt)* }
     ) => {
         all_backends!(@impl
             $(#[$meta])* fn $name ($sim)
-            ignore_list { () }
-            veryl_mode { emit }
+            ignore_list { $ignore }
+            veryl_mode { $veryl }
+            sv_mode { $sv }
             setup { }
             build { $builder }
             body { $($body)* }
         );
     };
-
-    // Portable cases keep Celox's test identities and exclusions at call sites.
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @case $case:literal; }
-    ) => {
-        all_backends!(@case_impl $(#[$meta])* fn $name
-            () emit $case);
-    };
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @ignore_on $ignore_list:tt; @case $case:literal; }
-    ) => {
-        all_backends!(@case_impl $(#[$meta])* fn $name
-            $ignore_list emit $case);
-    };
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @case $case:literal; }
-    ) => {
-        all_backends!(@case_impl $(#[$meta])* fn $name
-            () skip $case);
-    };
-    (@dispatch
-        $(#[$meta:meta])* fn $name:ident ($sim:ident)
-        { @omit_veryl; @ignore_on $ignore_list:tt; @case $case:literal; }
-    ) => {
-        all_backends!(@case_impl $(#[$meta])* fn $name
-            $ignore_list skip $case);
-    };
     (@case_impl $(#[$meta:meta])* fn $name:ident
-        $ignore_list:tt $veryl:ident $case:literal
+        $ignore_list:tt $veryl:ident $sv:ident $case:literal
     ) => {
         mod $name {
             use super::*;
@@ -472,14 +395,7 @@ macro_rules! all_backends {
                     test_utils::suite::run_case($case, "interp");
                 }
             });
-            all_backends!(@with_ignore sv; $ignore_list; {
-                #[cfg(feature = "systemverilog")]
-                #[test]
-                $(#[$meta])*
-                fn sv() {
-                    test_utils::suite::run_case($case, "sv");
-                }
-            });
+            all_backends!(@case_sv $sv $ignore_list $(#[$meta])* $case);
             all_backends!(@case_veryl $veryl $ignore_list $(#[$meta])* $case);
         }
     };
@@ -493,6 +409,17 @@ macro_rules! all_backends {
         });
     };
     (@case_veryl skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
+    (@case_sv emit $ignore_list:tt $(#[$meta:meta])* $case:literal) => {
+        all_backends!(@with_ignore sv; $ignore_list; {
+            #[cfg(feature = "systemverilog")]
+            #[test]
+            $(#[$meta])*
+            fn sv() {
+                test_utils::suite::run_case($case, "sv");
+            }
+        });
+    };
+    (@case_sv skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
 
     // ── entry point ─────────────────────────────────────────────────
     ($(

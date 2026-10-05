@@ -190,14 +190,12 @@ fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
 
 fn test_dynamic_minus_colon_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
-    // The SV analyzer cannot analyze indexed part-selects yet.
     @ignore_on(veryl);
     @case "hierarchy::test_dynamic_minus_colon_output_port_rmw";
 }
 
 fn test_dynamic_step_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
-    // The SV analyzer cannot analyze indexed part-selects yet.
     @ignore_on(veryl);
     @case "hierarchy::test_dynamic_step_output_port_rmw";
 }

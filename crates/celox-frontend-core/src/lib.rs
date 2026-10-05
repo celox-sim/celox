@@ -1,6 +1,7 @@
 //! Source-language-independent symbolic lowering and scheduling.
 
 mod error;
+pub mod memory_file;
 mod sdk;
 pub mod shared;
 pub mod symbolic;

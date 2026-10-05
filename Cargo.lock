@@ -642,6 +642,7 @@ dependencies = [
  "celox-sv-analyzer",
  "fxhash",
  "num-bigint",
+ "num-traits",
  "thiserror 2.0.21",
 ]
 

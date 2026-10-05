@@ -72,6 +72,7 @@
             pkgs.openssl
             pkgs.fuse-overlayfs
             pkgs.cargo-insta
+            pkgs.cargo-nextest
             pkgs.git
             pkgs.curl
             pkgs.jq

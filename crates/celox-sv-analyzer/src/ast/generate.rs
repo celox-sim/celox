@@ -221,7 +221,12 @@ impl Item<'_> {
     }
 
     pub fn assignment(&self, assignment: &mut Assignment) {
-        match &mut assignment.lhs {
+        self.lvalue(&mut assignment.lhs);
+        self.expr(&mut assignment.rhs);
+    }
+
+    pub fn lvalue(&self, lvalue: &mut LValue) {
+        match lvalue {
             LValue::Ident(name) => *name = self.name(name),
             LValue::Select {
                 name,
@@ -238,7 +243,6 @@ impl Item<'_> {
                 }
             }
         }
-        self.expr(&mut assignment.rhs);
     }
 }
 

@@ -24,16 +24,30 @@ pub(super) fn functions_from_module_node(
                 sv_parser::TaskBodyDeclaration::WithPort(body) => &body.nodes.5,
                 sv_parser::TaskBodyDeclaration::WithoutPort(body) => &body.nodes.4,
             };
-            for statement in statements {
-                validate_function_statement_or_null(statement, syntax_tree, &task_dimensions)?;
-            }
-            if let Some(mut task) = task_from_declaration(
-                declaration,
-                syntax_tree,
-                const_env,
-                &type_aliases,
-                &task_dimensions,
-            ) {
+            let expression_form = statements.iter().all(|statement| {
+                validate_function_statement_or_null(statement, syntax_tree, &task_dimensions)
+                    .is_ok()
+            });
+            let task = expression_form
+                .then(|| {
+                    task_from_declaration(
+                        declaration,
+                        syntax_tree,
+                        const_env,
+                        &type_aliases,
+                        &task_dimensions,
+                    )
+                })
+                .flatten()
+                .or_else(|| {
+                    task_signature_from_declaration(
+                        declaration,
+                        syntax_tree,
+                        const_env,
+                        &type_aliases,
+                    )
+                });
+            if let Some(mut task) = task {
                 item.qualify_function(&mut task);
                 task.name = item.name(&task.name);
                 let name = task.name.clone();
@@ -52,23 +66,39 @@ pub(super) fn functions_from_module_node(
         let const_env = &item.env;
         let function_dimensions = item.dimensions(packed_dimensions);
         let packed_dimensions = &function_dimensions;
-        validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
-        validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
-        validate_function_local_names(declaration, syntax_tree, const_env, &type_aliases)?;
-        validate_function_declaration_statements(
-            declaration,
-            syntax_tree,
-            const_env,
-            &type_aliases,
-            packed_dimensions,
-        )?;
-        if let Some(mut function) = function_from_declaration(
-            declaration,
-            syntax_tree,
-            const_env,
-            &type_aliases,
-            packed_dimensions,
-        ) {
+        // The expression form of a body is only used where calls are still
+        // inlined (port connections). Statement bodies are lowered from the
+        // subroutine IR, so a body without an expression form keeps its
+        // signature: return type and arguments.
+        let expression_form = (|| -> Result<Option<Function>, AnalyzerError> {
+            validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
+            validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
+            validate_function_local_names(declaration, syntax_tree, const_env, &type_aliases)?;
+            validate_function_declaration_statements(
+                declaration,
+                syntax_tree,
+                const_env,
+                &type_aliases,
+                packed_dimensions,
+            )?;
+            Ok(function_from_declaration(
+                declaration,
+                syntax_tree,
+                const_env,
+                &type_aliases,
+                packed_dimensions,
+            ))
+        })();
+        let function = match expression_form {
+            Ok(Some(function)) => Some(function),
+            _ => function_signature_from_declaration(
+                declaration,
+                syntax_tree,
+                const_env,
+                &type_aliases,
+            ),
+        };
+        if let Some(mut function) = function {
             for parameter in &function.params {
                 literals.remove(&parameter.name);
             }
@@ -1807,4 +1837,92 @@ pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bo
         },
         right: Box::new(item_expr),
     }
+}
+
+/// The body placeholder of a subroutine that has no expression form.
+fn statement_body_placeholder() -> Expr {
+    Expr::Call {
+        name: "$unsupported_function_call".to_string(),
+        args: Vec::new(),
+    }
+}
+
+/// The signature of a function whose body has no expression form.
+fn function_signature_from_declaration(
+    declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<Function> {
+    let (return_node, name, params) = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => (
+            &body.nodes.0,
+            identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?,
+            body.nodes
+                .3
+                .nodes
+                .1
+                .as_ref()
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                .unwrap_or_default(),
+        ),
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => (
+            &body.nodes.0,
+            identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?,
+            tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases),
+        ),
+    };
+    let return_type = function_return_type(return_node, syntax_tree, const_env, type_aliases);
+    let return_first_packed_dimension_width = function_return_first_packed_dimension_width(
+        return_node,
+        syntax_tree,
+        const_env,
+        type_aliases,
+        return_type,
+    );
+    Some(Function {
+        name,
+        params,
+        body: statement_body_placeholder(),
+        outputs: Vec::new(),
+        return_width: return_type.map(|r#type| r#type.width),
+        return_first_packed_dimension_width,
+        return_signed: return_type.is_some_and(|r#type| r#type.signed),
+        return_is_2state: function_return_is_2state(return_node, syntax_tree, type_aliases),
+    })
+}
+
+/// The signature of a task whose body has no expression form.
+fn task_signature_from_declaration(
+    declaration: &sv_parser::TaskDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<Function> {
+    let (name, params) = match &declaration.nodes.2 {
+        sv_parser::TaskBodyDeclaration::WithPort(body) => (
+            identifier_text(RefNode::TaskIdentifier(&body.nodes.1), syntax_tree)?,
+            body.nodes
+                .2
+                .nodes
+                .1
+                .as_ref()
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                .unwrap_or_default(),
+        ),
+        sv_parser::TaskBodyDeclaration::WithoutPort(body) => (
+            identifier_text(RefNode::TaskIdentifier(&body.nodes.1), syntax_tree)?,
+            tf_item_params(&body.nodes.3, syntax_tree, const_env, type_aliases),
+        ),
+    };
+    Some(Function {
+        name,
+        params,
+        body: statement_body_placeholder(),
+        outputs: Vec::new(),
+        return_width: None,
+        return_first_packed_dimension_width: None,
+        return_signed: false,
+        return_is_2state: false,
+    })
 }
