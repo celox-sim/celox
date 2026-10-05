@@ -1717,19 +1717,40 @@ fn constant_case_pattern_matches(target: &Expression, pattern: &CasePattern) -> 
     if !target.comptime().is_const {
         return false;
     }
+    // A compound target was folded in its own width and signedness. A label
+    // that widens it or makes the comparison unsigned recomputes it, so the
+    // folded value does not decide that comparison.
+    let expression_width = |expression: &Expression| {
+        crate::context_width::get_expr_width(expression)
+            .or_else(|| expression.comptime().r#type.total_width())
+    };
+    let target_width = expression_width(target);
+    let target_signed = crate::context_width::expression_signed(target);
+    let folded_in_context = |label: &Expression| {
+        matches!(target, Expression::Term(_))
+            || (expression_width(label)
+                .zip(target_width)
+                .is_some_and(|(label, target)| label <= target)
+                && (!target_signed || crate::context_width::expression_signed(label)))
+    };
     let Ok(target) = target.comptime().get_value() else {
         return false;
     };
     match pattern {
         CasePattern::Eq(expression) => {
             expression.comptime().is_const
+                && folded_in_context(expression)
                 && expression
                     .comptime()
                     .get_value()
                     .is_ok_and(|pattern| compare(Op::EqWildcard, target, pattern))
         }
         CasePattern::Range { lo, hi, inclusive } => {
-            if !lo.comptime().is_const || !hi.comptime().is_const {
+            if !lo.comptime().is_const
+                || !hi.comptime().is_const
+                || !folded_in_context(lo)
+                || !folded_in_context(hi)
+            {
                 return false;
             }
             let (Ok(lo), Ok(hi)) = (lo.comptime().get_value(), hi.comptime().get_value()) else {
