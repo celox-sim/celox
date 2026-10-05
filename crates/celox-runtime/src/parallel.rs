@@ -139,6 +139,9 @@ struct Job {
 /// Progress value of a lane that has finished every task of its epoch.
 const LANE_DONE: u64 = u32::MAX as u64;
 
+/// Largest epoch before the counters restart.
+const MAX_EPOCH: u64 = u32::MAX as u64;
+
 struct Shared {
     lanes: usize,
     job_epoch: Padded<AtomicU64>,
@@ -306,9 +309,18 @@ impl LanePool {
         if schedule.lanes as usize > self.shared.lanes {
             return schedule.run_sequential(runner);
         }
+        let shared = &*self.shared;
+        // Progress words hold `epoch << 32 | count`, so the epoch must fit 32
+        // bits. Every lane is idle between runs; clearing the words before
+        // wrapping keeps no stale value above the new epoch's targets.
+        if self.epoch >= MAX_EPOCH {
+            for progress in shared.progress.iter() {
+                progress.0.store(0, Ordering::Relaxed);
+            }
+            self.epoch = 0;
+        }
         self.epoch += 1;
         let epoch = self.epoch;
-        let shared = &*self.shared;
         // SAFETY: lifetime erasure only; the referents outlive this call,
         // which waits for every worker below before returning.
         let runner: &'static dyn LaneTaskRunner = unsafe {
@@ -533,6 +545,19 @@ mod tests {
         let runner = recorder(predecessors, None);
         pool.run(&schedule, &runner).unwrap();
         assert_eq!(runner.calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn epochs_restart_without_releasing_waits_early() {
+        let (schedule, predecessors) = chain_schedule();
+        let mut pool = LanePool::new(3).unwrap();
+        pool.epoch = MAX_EPOCH - 2;
+        for _ in 0..4 {
+            let runner = recorder(predecessors.clone(), None);
+            pool.run(&schedule, &runner).unwrap();
+            assert_eq!(runner.calls.load(Ordering::Relaxed), 4);
+        }
+        assert!(pool.epoch < 4);
     }
 
     #[test]

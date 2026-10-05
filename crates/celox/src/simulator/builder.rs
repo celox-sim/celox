@@ -1519,8 +1519,10 @@ mod host {
         /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
         pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
-            self.options.optimize_options =
-                crate::optimizer::OptimizeOptions::new(level).with_parallel_lanes(lanes);
+            let partition = self.options.optimize_options.parallel_partition();
+            self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
+                .with_parallel_lanes(lanes)
+                .with_parallel_partition(partition);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -1554,12 +1556,14 @@ mod host {
         /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
         pub fn optimize(mut self, enable: bool) -> Self {
             let lanes = self.options.optimize_options.parallel_lanes();
+            let partition = self.options.optimize_options.parallel_partition();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
                 crate::optimizer::OptimizeOptions::none()
             }
-            .with_parallel_lanes(lanes);
+            .with_parallel_lanes(lanes)
+            .with_parallel_partition(partition);
             self
         }
 
@@ -1567,13 +1571,21 @@ mod host {
         pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
             self.options.cranelift_options.tail_call_split =
                 options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
-            // A thread count requested separately survives an options reset.
+            // A thread count or partition mode requested separately survives
+            // an options reset.
             let lanes = if options.parallel_lanes() > 1 {
                 options.parallel_lanes()
             } else {
                 self.options.optimize_options.parallel_lanes()
             };
-            self.options.optimize_options = options.with_parallel_lanes(lanes);
+            let partition = if options.parallel_partition() == crate::ParallelPartition::Always {
+                crate::ParallelPartition::Always
+            } else {
+                self.options.optimize_options.parallel_partition()
+            };
+            self.options.optimize_options = options
+                .with_parallel_lanes(lanes)
+                .with_parallel_partition(partition);
             self
         }
 
@@ -2251,6 +2263,12 @@ mod host {
         ///
         /// Used by tests to make promotion timing deterministic; `compile`
         /// runs on the background worker thread.
+        /// The optimizer options this builder will compile with.
+        #[cfg(test)]
+        pub(crate) fn optimize_options_for_test(&self) -> &crate::optimizer::OptimizeOptions {
+            &self.options.optimize_options
+        }
+
         #[cfg(test)]
         pub(crate) fn build_tiered_with_compiler<F>(
             self,
@@ -2914,5 +2932,33 @@ mod component_library_tests {
             component_library_target_name(dir.path()).as_deref(),
             Some("actual_component")
         );
+    }
+}
+
+#[cfg(test)]
+mod parallel_option_tests {
+    use crate::{OptLevel, OptimizeOptions, ParallelPartition};
+
+    #[test]
+    fn optimization_setters_keep_thread_and_partition_requests() {
+        let builders = [
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .opt_level(OptLevel::O2),
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .optimize(false),
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .optimize_options(OptimizeOptions::default()),
+        ];
+        for builder in builders {
+            let options = builder.optimize_options_for_test();
+            assert_eq!(options.parallel_lanes(), 4);
+            assert_eq!(options.parallel_partition(), ParallelPartition::Always);
+        }
     }
 }

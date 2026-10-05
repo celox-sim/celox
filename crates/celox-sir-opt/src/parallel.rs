@@ -522,7 +522,9 @@ pub fn unit_dependencies(
 /// Sparse staging class of a unit: 1 when it stores sparse next-state data,
 /// 2 when it commits sparse data. Native code generation commits every
 /// active sparse object when one function contains both, so such units never
-/// share a task.
+/// share a task. Only such a function marks and scans the shared sparse
+/// "active" bitmap, so keeping the classes apart also keeps that bitmap out
+/// of every lane task's footprint.
 fn sparse_class(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> u8 {
     let mut class = 0;
     for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
