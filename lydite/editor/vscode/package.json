@@ -72,7 +72,7 @@
     }
   },
   "dependencies": {
-    "vscode-languageclient": "9.0.1"
+    "vscode-languageclient": "10.1.2"
   },
   "devDependencies": {
     "@vscode/test-electron": "2.5.2"
