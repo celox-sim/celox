@@ -125,6 +125,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      # The conformance gates are pinned to Python 3.12.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Extract, lower and verify the pinned Veryl corpus
         run: ./conformance/veryl/run_ci.sh "$RUNNER_TEMP/veryl-conformance"
       - name: Upload complete conformance evidence
@@ -146,6 +150,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      # The conformance gates are pinned to Python 3.12.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Run every reusable suite case with proof-backed reads
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants
