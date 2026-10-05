@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791200647841,
+  "lastUpdate": 1791200948124,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -331651,6 +331651,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_71v_linux_boot_execution",
             "unit": "ms",
             "value": 248216.045343
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "8688af701e97d488f796ab906d27186ab01e1b5e",
+          "message": "fix(veryl)!: upgrade to Veryl 0.22.0 (#985)",
+          "timestamp": "2026-10-03T00:01:50Z",
+          "url": "https://github.com/celox-sim/celox/commit/8688af701e97d488f796ab906d27186ab01e1b5e"
+        },
+        "date": 1791200948124,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71v_linux_boot_startup",
+            "unit": "ms",
+            "value": 20012.579628
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71v_linux_boot_execution",
+            "unit": "ms",
+            "value": 271083.787334
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71v_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 291116.26504
           }
         ]
       }
