@@ -75,7 +75,7 @@
     "vscode-languageclient": "9.0.1"
   },
   "devDependencies": {
-    "@vscode/test-electron": "2.5.2"
+    "@vscode/test-electron": "3.1.0"
   },
   "scripts": {
     "test": "node test/run-extension-host.js",
