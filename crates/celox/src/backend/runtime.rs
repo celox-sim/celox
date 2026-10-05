@@ -81,6 +81,8 @@ pub(crate) struct JitLaneKernels {
     comb: Option<JitLaneKernel>,
     /// Kernels indexed by event id.
     events: Vec<Option<JitLaneKernel>>,
+    /// Settle-plus-event kernels indexed by event id.
+    fused: Vec<Option<JitLaneKernel>>,
 }
 
 /// Runs Cranelift task functions against one simulation state image.
@@ -566,6 +568,7 @@ impl JitBackend {
                     lanes,
                     comb: None,
                     events: (0..id_to_event.len()).map(|_| None).collect(),
+                    fused: (0..id_to_event.len()).map(|_| None).collect(),
                 };
                 for planned_kernel in &planned {
                     let functions = (0..planned_kernel.tasks.len())
@@ -595,11 +598,16 @@ impl JitBackend {
                         })?,
                         functions,
                     };
-                    match planned_kernel.event {
-                        None => kernels.comb = Some(kernel),
-                        Some(event) => {
+                    match planned_kernel.kind {
+                        super::lanes::LaneKernelKind::Comb => kernels.comb = Some(kernel),
+                        super::lanes::LaneKernelKind::Event(event) => {
                             if let Some(id) = event_map.get(&event).map(|event| event.id) {
                                 kernels.events[id] = Some(kernel);
+                            }
+                        }
+                        super::lanes::LaneKernelKind::Fused(event) => {
+                            if let Some(id) = event_map.get(&event).map(|event| event.id) {
+                                kernels.fused[id] = Some(kernel);
                             }
                         }
                     }
@@ -1089,6 +1097,27 @@ impl JitBackend {
     /// Settle combinational logic and evaluate one event, letting partitioned
     /// phases compete with the fused sequential function.
     pub fn eval_comb_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        let fused = self.shared.lane_kernels.as_ref().is_some_and(|kernels| {
+            kernels
+                .fused
+                .get(event.id)
+                .is_some_and(|kernel| kernel.is_some())
+        });
+        if fused {
+            let shared = Arc::clone(&self.shared);
+            let kernels = shared.lane_kernels.as_ref().expect("checked lane kernels");
+            let kernel = kernels.fused[event.id]
+                .as_ref()
+                .expect("checked fused lane kernel");
+            return super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::lanes::LaneKernelSlot::Fused(event.id),
+                super::lanes::kernel_selection(&shared.options),
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.run_sim_func(event.comb_apply_func),
+            );
+        }
         if self.has_lane_comb_kernel() || self.has_lane_event_kernel(&event) {
             let selection = super::lanes::kernel_selection(&self.shared.options);
             return super::lanes::run_selected(

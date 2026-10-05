@@ -46,7 +46,14 @@ pub struct InstanceHierarchy<Addr> {
     pub instance_of: fn(&Addr) -> usize,
     /// The parent of every instance, or `usize::MAX` for a root.
     pub parents: Vec<usize>,
+    /// Work that runs in the lane of each instance's logic besides the
+    /// scheduled paths (such as its FF updates), indexed like `parents`.
+    pub extra_costs: Vec<u64>,
 }
+
+/// Largest subtree kept whole, in percent of one lane's share, for each
+/// instance-subtree candidate.
+const CLUSTER_SHARE_PERCENTS: [u64; 3] = [100, 150, 200];
 
 /// Estimated cost of one task boundary: the call, the progress publication,
 /// and reloading state the previous task held in registers.
@@ -66,7 +73,9 @@ fn cluster_group_lanes(
     groups: &[usize],
     group_lanes: &[Option<u32>],
     parents: &[usize],
+    extra_costs: &[u64],
     lanes: u32,
+    share_percent: u64,
 ) -> Option<Vec<Option<u32>>> {
     let instance_count = parents.len();
     let root_of = |instance: usize| {
@@ -76,7 +85,9 @@ fn cluster_group_lanes(
             usize::MAX
         }
     };
-    let mut own_cost = vec![0u64; instance_count];
+    let mut own_cost = (0..instance_count)
+        .map(|instance| extra_costs.get(instance).copied().unwrap_or(0))
+        .collect::<Vec<_>>();
     for (item, &instance) in item_instances.iter().enumerate() {
         if let Some(cost) = own_cost.get_mut(instance) {
             *cost = cost.saturating_add(costs[item]);
@@ -109,8 +120,15 @@ fn cluster_group_lanes(
             subtree[parent] = subtree[parent].saturating_add(subtree[instance]);
         }
     }
-    let total = costs.iter().copied().fold(0u64, u64::saturating_add);
-    let share = total.div_ceil(u64::from(lanes.max(1)));
+    let total = costs
+        .iter()
+        .chain(extra_costs)
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    let share = total
+        .div_ceil(u64::from(lanes.max(1)))
+        .saturating_mul(share_percent)
+        / 100;
 
     let mut cluster = vec![usize::MAX; instance_count];
     let mut stack = roots
@@ -134,6 +152,11 @@ fn cluster_group_lanes(
         let key = root_of(instance);
         let key = if key == usize::MAX { key } else { cluster[key] };
         *cluster_costs.entry(key).or_default() += costs[item];
+    }
+    for (instance, &extra) in extra_costs.iter().enumerate().take(instance_count) {
+        if extra > 0 {
+            *cluster_costs.entry(cluster[instance]).or_default() += extra;
+        }
     }
     if cluster_costs.values().filter(|cost| **cost > 0).count() < 2 {
         return None;
@@ -798,16 +821,25 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     .map_or(usize::MAX, |target| (hierarchy.instance_of)(&target.id))
             })
             .collect::<Vec<_>>();
-        if let Some(clustered) = cluster_group_lanes(
-            &item_instances,
-            &costs,
-            &groups,
-            &group_lanes,
-            &hierarchy.parents,
-            options.lanes,
-        ) && let Ok(plan) = schedule(&clustered)
-        {
-            candidates.push(plan);
+        // A subtree slightly larger than one lane's share would otherwise be
+        // split into fine pieces; larger limits keep it whole.
+        let mut tried = Vec::new();
+        for share_percent in CLUSTER_SHARE_PERCENTS {
+            if let Some(clustered) = cluster_group_lanes(
+                &item_instances,
+                &costs,
+                &groups,
+                &group_lanes,
+                &hierarchy.parents,
+                &hierarchy.extra_costs,
+                options.lanes,
+                share_percent,
+            ) && !tried.contains(&clustered)
+                && let Ok(plan) = schedule(&clustered)
+            {
+                tried.push(clustered);
+                candidates.push(plan);
+            }
         }
     }
     let task_overhead = options.synchronization_cost / TASK_OVERHEAD_DIVISOR;

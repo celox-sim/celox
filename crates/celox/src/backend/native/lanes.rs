@@ -18,6 +18,7 @@ use super::backend::{
 };
 use super::jit_mem;
 use crate::backend::compile_cancel::CompileCancel;
+use crate::backend::lanes::LaneKernelKind;
 use crate::ir::{AbsoluteAddr, LaidOutProgram};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
@@ -31,6 +32,8 @@ pub(super) struct NativeLaneImage {
     pub(super) comb: Option<NativeLaneKernelImage>,
     /// Kernels of canonical events, sorted by address.
     pub(super) events: Vec<(AbsoluteAddr, NativeLaneKernelImage)>,
+    /// Settle-plus-event kernels of canonical events, sorted by address.
+    pub(super) fused: Vec<(AbsoluteAddr, NativeLaneKernelImage)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,9 +45,12 @@ pub(super) struct NativeLaneKernelImage {
 
 impl NativeLaneImage {
     pub(super) fn kernels(&self) -> impl Iterator<Item = &NativeLaneKernelImage> {
-        self.comb
-            .iter()
-            .chain(self.events.iter().map(|(_, kernel)| kernel))
+        self.comb.iter().chain(
+            self.events
+                .iter()
+                .chain(&self.fused)
+                .map(|(_, kernel)| kernel),
+        )
     }
 
     pub(super) fn validate(
@@ -72,6 +78,7 @@ impl NativeLaneImage {
         if self
             .events
             .iter()
+            .chain(&self.fused)
             .any(|(event, _)| !events.contains_key(event))
         {
             return Err("a lane kernel names an unknown event".into());
@@ -91,13 +98,19 @@ pub(super) struct CompiledLaneKernels {
     lanes: u32,
     comb: Option<CompiledLaneKernel>,
     events: Vec<(AbsoluteAddr, CompiledLaneKernel)>,
+    fused: Vec<(AbsoluteAddr, CompiledLaneKernel)>,
 }
 
 impl CompiledLaneKernels {
     pub(super) fn functions(&self) -> impl Iterator<Item = &CompiledNativeFunction> {
         self.comb
             .iter()
-            .chain(self.events.iter().map(|(_, kernel)| kernel))
+            .chain(
+                self.events
+                    .iter()
+                    .chain(&self.fused)
+                    .map(|(_, kernel)| kernel),
+            )
             .flat_map(|kernel| &kernel.functions)
     }
 
@@ -143,10 +156,19 @@ impl CompiledLaneKernels {
                 ))
             })
             .collect::<Result<Vec<_>, SimulatorError>>()?;
+        let fused = self
+            .fused
+            .into_iter()
+            .enumerate()
+            .map(|(index, (event, kernel))| {
+                Ok((event, pack_kernel(&format!("lane_fused[{index}]"), kernel)?))
+            })
+            .collect::<Result<Vec<_>, SimulatorError>>()?;
         Ok(NativeLaneImage {
             lanes: self.lanes,
             comb,
             events,
+            fused,
         })
     }
 }
@@ -230,6 +252,7 @@ pub(super) fn compile_lane_kernels(
 
     let mut comb = None;
     let mut events = Vec::new();
+    let mut fused = Vec::new();
     for (mut planned, functions) in planned.into_iter().zip(functions) {
         let (functions, footprints): (Vec<_>, Vec<_>) = functions
             .into_iter()
@@ -251,15 +274,17 @@ pub(super) fn compile_lane_kernels(
             tasks: planned.task_specs(),
             functions,
         };
-        match planned.event {
-            None => comb = Some(kernel),
-            Some(event) => events.push((event, kernel)),
+        match planned.kind {
+            LaneKernelKind::Comb => comb = Some(kernel),
+            LaneKernelKind::Event(event) => events.push((event, kernel)),
+            LaneKernelKind::Fused(event) => fused.push((event, kernel)),
         }
     }
     Ok(Some(CompiledLaneKernels {
         lanes,
         comb,
         events,
+        fused,
     }))
 }
 
@@ -319,6 +344,8 @@ pub(super) struct NativeLaneKernels {
     pub(super) comb: Option<NativeLaneKernel>,
     /// Kernels indexed by event id.
     pub(super) events: Vec<Option<NativeLaneKernel>>,
+    /// Settle-plus-event kernels indexed by event id.
+    pub(super) fused: Vec<Option<NativeLaneKernel>>,
 }
 
 impl NativeLaneKernels {
@@ -340,17 +367,23 @@ impl NativeLaneKernels {
                     .collect::<Result<Vec<_>, _>>()?,
             })
         };
-        let mut events = (0..event_count).map(|_| None).collect::<Vec<_>>();
-        for (event, image) in &image.events {
-            let id = event_ids(event)
-                .filter(|id| *id < event_count)
-                .ok_or_else(|| codegen_message("native lane kernel names an unknown event"))?;
-            events[id] = Some(kernel(image)?);
-        }
+        let by_event = |kernels: &[(AbsoluteAddr, NativeLaneKernelImage)]| {
+            let mut table = (0..event_count).map(|_| None).collect::<Vec<_>>();
+            for (event, image) in kernels {
+                let id = event_ids(event)
+                    .filter(|id| *id < event_count)
+                    .ok_or_else(|| codegen_message("native lane kernel names an unknown event"))?;
+                table[id] = Some(kernel(image)?);
+            }
+            Ok::<_, SimulatorError>(table)
+        };
+        let events = by_event(&image.events)?;
+        let fused = by_event(&image.fused)?;
         Ok(Self {
             lanes: image.lanes,
             comb: image.comb.as_ref().map(kernel).transpose()?,
             events,
+            fused,
         })
     }
 }

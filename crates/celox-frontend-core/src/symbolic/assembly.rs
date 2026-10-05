@@ -652,9 +652,15 @@ pub fn schedule_symbolic_rtl(
                 synchronization_cost: parallel.synchronization_cost,
                 lane0_targets: lane0_objects.clone().unwrap_or_default(),
                 minimum_speedup_percent: parallel.minimum_speedup_percent,
-                hierarchy: Some(scheduler::InstanceHierarchy {
-                    instance_of: |address: &AbsoluteAddr| address.instance_id.0,
-                    parents: instance_parents(&expanded),
+                hierarchy: Some({
+                    let parents = instance_parents(&expanded);
+                    let extra_costs =
+                        super::parallel::instance_ff_costs(&parallel_ff_units, parents.len());
+                    scheduler::InstanceHierarchy {
+                        instance_of: |address: &AbsoluteAddr| address.instance_id.0,
+                        parents,
+                        extra_costs,
+                    }
                 }),
             };
             let partitioned = scheduler::sort_lanes(

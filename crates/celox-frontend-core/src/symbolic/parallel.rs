@@ -64,6 +64,30 @@ fn unit_cost(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> u64 {
         .max(1)
 }
 
+/// Estimated FF work of every instance in its most expensive event, indexed
+/// by instance id. A partitioned combinational settle runs fused with the FF
+/// update, and FF work follows the lane of the instance's logic, so balancing
+/// lanes needs both.
+pub(crate) fn instance_ff_costs(
+    parts: &HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
+    instance_count: usize,
+) -> Vec<u64> {
+    let mut costs = vec![0u64; instance_count];
+    for event_parts in parts.values() {
+        let mut event_costs = HashMap::<usize, u64>::default();
+        for (instance, part) in event_parts {
+            *event_costs.entry(instance.0).or_default() +=
+                unit_cost(&part.evaluate).saturating_add(unit_cost(&part.apply));
+        }
+        for (instance, cost) in event_costs {
+            if let Some(slot) = costs.get_mut(instance) {
+                *slot = (*slot).max(cost);
+            }
+        }
+    }
+    costs
+}
+
 /// Logical byte ranges written by a unit, per object and independent of the
 /// storage region (a staged write and its publication cover the same bytes).
 /// Dynamic writes cover the whole object.

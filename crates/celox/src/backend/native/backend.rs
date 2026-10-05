@@ -2708,6 +2708,15 @@ impl NativeBackend {
             .is_some_and(|kernels| kernels.comb.is_some())
     }
 
+    fn lane_fused_kernel(&self, event: NativeEventRef) -> bool {
+        self.compiled.lane_kernels.as_ref().is_some_and(|kernels| {
+            kernels
+                .fused
+                .get(event.id)
+                .is_some_and(|kernel| kernel.is_some())
+        })
+    }
+
     fn lane_event_kernel(&self, event: NativeEventRef) -> bool {
         self.compiled.lane_kernels.as_ref().is_some_and(|kernels| {
             kernels
@@ -2838,6 +2847,25 @@ impl super::super::SimBackend for NativeBackend {
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         // Partitioned phases compete with the fused sequential function,
         // which shares state between its combinational and FF parts.
+        if self.lane_fused_kernel(event) {
+            let compiled = Arc::clone(&self.compiled);
+            let kernels = compiled
+                .lane_kernels
+                .as_ref()
+                .expect("checked lane kernels");
+            let kernel = kernels.fused[event.id]
+                .as_ref()
+                .expect("checked fused lane kernel");
+            let selection = compiled.options.kernel_selection;
+            return super::super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::super::lanes::LaneKernelSlot::Fused(event.id),
+                selection,
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.call_func_timed(event.comb_apply_func),
+            );
+        }
         if self.lane_comb_kernel() || self.lane_event_kernel(event) {
             let selection = self.compiled.options.kernel_selection;
             return super::super::lanes::run_selected(

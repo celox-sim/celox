@@ -9,10 +9,22 @@ use celox_sir_opt::parallel::LaneTask;
 
 use crate::ir::{AbsoluteAddr, ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr};
 
+/// The simulation phase a partitioned kernel implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneKernelKind {
+    /// The combinational settle.
+    Comb,
+    /// The FF update of one canonical event.
+    Event(AbsoluteAddr),
+    /// The combinational settle followed by one event's FF update, as one
+    /// kernel: a lane starts its FF work as soon as the settle work it
+    /// depends on is done instead of after every lane's settle.
+    Fused(AbsoluteAddr),
+}
+
 /// One partitioned kernel with its concurrency plan.
 pub(crate) struct PlannedLaneKernel<'a> {
-    /// `None` for the combinational settle, otherwise the canonical event.
-    pub(crate) event: Option<AbsoluteAddr>,
+    pub(crate) kind: LaneKernelKind,
     units: Vec<&'a LaneUnit<RegionedAbsoluteAddr>>,
     pub(crate) tasks: Vec<LaneTask>,
 }
@@ -58,21 +70,32 @@ pub(crate) fn plan_lane_kernels(
     if lanes < 2 {
         return Ok((1, Vec::new()));
     }
-    let mut candidates: Vec<(Option<AbsoluteAddr>, Vec<&LaneUnit<RegionedAbsoluteAddr>>)> =
-        Vec::new();
+    let mut candidates: Vec<(LaneKernelKind, Vec<&LaneUnit<RegionedAbsoluteAddr>>)> = Vec::new();
     if !parallel.eval_comb.is_empty() {
-        candidates.push((None, parallel.eval_comb.iter().collect()));
+        candidates.push((LaneKernelKind::Comb, parallel.eval_comb.iter().collect()));
     }
     let mut events = parallel.eval_apply_ffs.keys().copied().collect::<Vec<_>>();
     events.sort_unstable();
-    for event in events {
+    for &event in &events {
         candidates.push((
-            Some(event),
+            LaneKernelKind::Event(event),
             parallel.eval_apply_ffs[&event].units().collect(),
         ));
     }
+    if !parallel.eval_comb.is_empty() {
+        for &event in &events {
+            candidates.push((
+                LaneKernelKind::Fused(event),
+                parallel
+                    .eval_comb
+                    .iter()
+                    .chain(parallel.eval_apply_ffs[&event].units())
+                    .collect(),
+            ));
+        }
+    }
     let mut planned = Vec::new();
-    for (event, units) in candidates {
+    for (kind, units) in candidates {
         let tasks = celox_sir_opt::parallel::plan_parallel_kernel(
             &units,
             laid_out.layout(),
@@ -89,18 +112,13 @@ pub(crate) fn plan_lane_kernels(
             .map(|task| task.lane)
             .collect::<std::collections::BTreeSet<_>>();
         tracing::debug!(
-            "[parallel] kernel={} units={} tasks={} waits={} lanes={used_lanes:?}",
-            event.map_or_else(|| "eval_comb".to_string(), |event| event.to_string()),
+            "[parallel] kernel={kind:?} units={} tasks={} waits={} lanes={used_lanes:?}",
             units.len(),
             tasks.len(),
             tasks.iter().map(|task| task.waits.len()).sum::<usize>(),
         );
         if used_lanes.len() > 1 {
-            planned.push(PlannedLaneKernel {
-                event,
-                units,
-                tasks,
-            });
+            planned.push(PlannedLaneKernel { kind, units, tasks });
         }
     }
     Ok((lanes, planned))
