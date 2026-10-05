@@ -1,0 +1,12 @@
+# cargo-nextest runs every test in its own process and schedules tests from
+# all binaries on one pool, so a single long binary no longer serializes the
+# rest of the workspace the way `cargo test` does.
+
+[profile.default]
+slow-timeout = { period = "60s" }
+
+[profile.ci]
+fail-fast = false
+# Flag hangs instead of letting a runner sit until the job timeout.
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "immediate-final"
