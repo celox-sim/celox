@@ -66,6 +66,38 @@ pub struct SharedJitCode {
     /// Pre-computed 4-state init regions: (offset, allocated_size) for stable
     /// and working regions.
     four_state_inits: Vec<(usize, usize)>,
+    /// Lane-partitioned kernels, one function per task.
+    lane_kernels: Option<JitLaneKernels>,
+}
+
+/// One lane-partitioned kernel with its task functions.
+pub(crate) struct JitLaneKernel {
+    schedule: celox_runtime::parallel::LaneSchedule,
+    functions: Vec<SimFunc>,
+}
+
+pub(crate) struct JitLaneKernels {
+    lanes: u32,
+    comb: Option<JitLaneKernel>,
+    /// Kernels indexed by event id.
+    events: Vec<Option<JitLaneKernel>>,
+}
+
+/// Runs Cranelift task functions against one simulation state image.
+struct JitTaskRunner<'a> {
+    memory: *mut u8,
+    functions: &'a [SimFunc],
+}
+
+// SAFETY: concurrently running tasks are ordered or touch disjoint state, and
+// Cranelift code spills only to the executing thread's machine stack.
+unsafe impl Sync for JitTaskRunner<'_> {}
+
+impl celox_runtime::parallel::LaneTaskRunner for JitTaskRunner<'_> {
+    fn run_task(&self, task: usize) -> i64 {
+        // SAFETY: `memory` is the backend's live state image.
+        unsafe { (self.functions[task])(self.memory) as i64 }
+    }
 }
 
 // SAFETY: After JITModule finalization, compiled code is immutable.
@@ -88,6 +120,9 @@ pub struct JitBackend {
     comb_capture_enabled: Vec<u8>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
     comb_func: SimFunc,
+    /// Worker threads for lane-partitioned kernels, started on first use.
+    lane_pool: Option<celox_runtime::parallel::LanePool>,
+    lane_selectors: Box<super::lanes::LaneSelectors>,
 }
 
 /// Cranelift-only lowering plan for an oversized `eval_comb` function.
@@ -519,11 +554,65 @@ impl JitBackend {
 
         let id_to_event: Vec<EventRef> = id_to_addr.iter().map(|addr| event_map[addr]).collect();
 
+        let lane_kernels = {
+            let (lanes, planned) = super::lanes::plan_lane_kernels(
+                laid_out,
+                celox_sir_opt::parallel::CodegenFootprint::Cranelift,
+            )?;
+            if planned.is_empty() {
+                None
+            } else {
+                let mut kernels = JitLaneKernels {
+                    lanes,
+                    comb: None,
+                    events: (0..id_to_event.len()).map(|_| None).collect(),
+                };
+                for planned_kernel in &planned {
+                    let functions = (0..planned_kernel.tasks.len())
+                        .map(|task| {
+                            let units = planned_kernel
+                                .task_units(task)
+                                .into_iter()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let ptr = engine
+                                .compile_units(&units, None, None, None)
+                                .map_err(SimulatorError::from)?;
+                            Ok::<SimFunc, SimulatorError>(unsafe {
+                                std::mem::transmute::<*const u8, SimFunc>(ptr)
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let kernel = JitLaneKernel {
+                        schedule: celox_runtime::parallel::LaneSchedule::new(
+                            lanes,
+                            planned_kernel.task_specs(),
+                        )
+                        .map_err(|error| {
+                            SimulatorError::from(crate::CodegenError::message(format!(
+                                "invalid lane schedule: {error}"
+                            )))
+                        })?,
+                        functions,
+                    };
+                    match planned_kernel.event {
+                        None => kernels.comb = Some(kernel),
+                        Some(event) => {
+                            if let Some(id) = event_map.get(&event).map(|event| event.id) {
+                                kernels.events[id] = Some(kernel);
+                            }
+                        }
+                    }
+                }
+                Some(kernels)
+            }
+        };
+
         let comb_func: SimFunc = unsafe { std::mem::transmute(comb_code_ptr) };
 
-        debug_assert_eq!(
-            engine.layout().working_base_offset,
-            (engine.layout().total_size + 7) & !7
+        debug_assert!(
+            engine.layout().working_base_offset >= engine.layout().total_size
+                && engine.layout().working_base_offset.is_multiple_of(8)
         );
         debug_assert_eq!(
             engine.layout().merged_total_size,
@@ -578,6 +667,7 @@ impl JitBackend {
             layout,
             options,
             four_state_inits,
+            lane_kernels,
         })
     }
 
@@ -610,6 +700,8 @@ impl JitBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             comb_func,
+            lane_pool: None,
+            lane_selectors: Default::default(),
         };
         backend.install_event_buffers();
         backend
@@ -644,6 +736,8 @@ impl JitBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             comb_func,
+            lane_pool: None,
+            lane_selectors: Default::default(),
         }
     }
 
@@ -691,8 +785,67 @@ impl JitBackend {
             _ => unreachable!(),
         }
     }
+    /// Run one lane-partitioned kernel on the lane workers, falling back to
+    /// its sequential task order when worker threads are unavailable.
+    fn run_lane_kernel(
+        &mut self,
+        lanes: u32,
+        kernel: &JitLaneKernel,
+    ) -> Result<(), SimulatorErrorCode> {
+        if self.lane_pool.is_none() {
+            match celox_runtime::parallel::LanePool::new(lanes) {
+                Ok(pool) => self.lane_pool = Some(pool),
+                Err(error) => {
+                    tracing::warn!("lane workers unavailable, running sequentially: {error}");
+                }
+            }
+        }
+        let runner = JitTaskRunner {
+            memory: self.memory.as_mut_ptr() as *mut u8,
+            functions: &kernel.functions,
+        };
+        let result = match &mut self.lane_pool {
+            Some(pool) => pool.run(&kernel.schedule, &runner),
+            None => kernel.schedule.run_sequential(&runner),
+        };
+        result.map_err(|failure| match failure.code {
+            code if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+            _ => SimulatorErrorCode::InternalError,
+        })
+    }
+
+    fn has_lane_comb_kernel(&self) -> bool {
+        self.shared
+            .lane_kernels
+            .as_ref()
+            .is_some_and(|kernels| kernels.comb.is_some())
+    }
+
+    fn has_lane_event_kernel(&self, event: &EventRef) -> bool {
+        self.shared.lane_kernels.as_ref().is_some_and(|kernels| {
+            kernels
+                .events
+                .get(event.id)
+                .is_some_and(|kernel| kernel.is_some())
+        })
+    }
+
     /// Execute combinational logic
     pub fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        if self.has_lane_comb_kernel() {
+            let shared = Arc::clone(&self.shared);
+            let kernels = shared.lane_kernels.as_ref().expect("checked lane kernels");
+            let kernel = kernels.comb.as_ref().expect("checked comb lane kernel");
+            let comb_func = self.comb_func;
+            return super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::lanes::LaneKernelSlot::Comb,
+                super::lanes::kernel_selection(&shared.options),
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.run_sim_func(comb_func),
+            );
+        }
         self.run_sim_func(self.comb_func)
     }
 
@@ -915,7 +1068,42 @@ impl JitBackend {
     }
 
     pub fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        if self.has_lane_event_kernel(&event) {
+            let shared = Arc::clone(&self.shared);
+            let kernels = shared.lane_kernels.as_ref().expect("checked lane kernels");
+            let kernel = kernels.events[event.id]
+                .as_ref()
+                .expect("checked event lane kernel");
+            return super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::lanes::LaneKernelSlot::Event(event.id),
+                super::lanes::kernel_selection(&shared.options),
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.run_sim_func(event.func),
+            );
+        }
         self.run_sim_func(event.func)
+    }
+
+    /// Settle combinational logic and evaluate one event, letting partitioned
+    /// phases compete with the fused sequential function.
+    pub fn eval_comb_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        if self.has_lane_comb_kernel() || self.has_lane_event_kernel(&event) {
+            let selection = super::lanes::kernel_selection(&self.shared.options);
+            return super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::lanes::LaneKernelSlot::Fused(event.id),
+                selection,
+                |backend| {
+                    backend.eval_comb()?;
+                    backend.eval_apply_ff_at(event)
+                },
+                |backend| backend.run_sim_func(event.comb_apply_func),
+            );
+        }
+        self.run_sim_func(event.comb_apply_func)
     }
 
     pub fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
@@ -1054,7 +1242,7 @@ impl super::SimBackend for JitBackend {
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
-        self.run_sim_func(event.comb_apply_func)
+        JitBackend::eval_comb_apply_ff_at(self, event)
     }
 
     fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {

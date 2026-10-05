@@ -15,6 +15,7 @@ pub use shared::{
 pub use trace::{FrontendTrace, FrontendTraceOptions, TraceSimModule};
 
 pub use symbolic::flattening;
+pub use symbolic::parallel::ParallelScheduleOptions;
 
 pub(crate) type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub(crate) type HashSet<T> = fxhash::FxHashSet<T>;

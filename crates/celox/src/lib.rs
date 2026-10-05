@@ -53,11 +53,15 @@ pub use ir::{
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
+pub use optimizer::ParallelPartition;
 pub use optimizer::SirDiagnostics;
 pub use optimizer::SirPass;
 pub use simulator::render_diagnostic;
 pub use simulator::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 pub use veryl_metadata::{ClockType, ResetType};
+
+/// Largest worker-thread count accepted by `SimulatorBuilder::threads`.
+pub const MAX_SIMULATION_THREADS: u32 = 64;
 
 #[cfg(feature = "host-runtime")]
 mod host_api {

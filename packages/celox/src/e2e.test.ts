@@ -2732,6 +2732,67 @@ describe("E2E: 1-bit unpacked array port (logic [N])", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Parallel simulation
+// ---------------------------------------------------------------------------
+
+const PARALLEL_SOURCE = `
+module Lane (
+    clk: input clock,
+    rst: input reset,
+    seed: input logic<32>,
+    out: output logic<32>,
+) {
+    var s0: logic<32>;
+    var s1: logic<32>;
+    let m0: logic<32> = (s0 * 32'h9e3779b9) ^ (s1 >> 3);
+    always_ff (clk, rst) {
+        if_reset {
+            s0 = 0;
+            s1 = 1;
+        } else {
+            s0 = m0 ^ seed;
+            s1 = m0 + s1;
+        }
+    }
+    assign out = s0 ^ s1;
+}
+
+module Top (
+    clk: input clock,
+    rst: input reset,
+    seed: input logic<32>,
+    out: output logic<32>[64],
+) {
+    for i in 0..64: g {
+        inst l: Lane (clk, rst, seed: seed + i, out: out[i]);
+    }
+}
+`;
+
+describe("E2E: threads option", () => {
+	test("several threads simulate exactly like one", () => {
+		const run = (threads: number) => {
+			const sim = Simulator.fromSource(PARALLEL_SOURCE, "Top", { threads });
+			const dut = sim.dut as any;
+			dut.seed = 0x1234n;
+			dut.rst = 0n;
+			sim.tick();
+			dut.rst = 1n;
+			for (let cycle = 0; cycle < 200; cycle++) {
+				sim.tick();
+			}
+			const values: bigint[] = [];
+			for (let index = 0; index < 64; index++) {
+				values.push(BigInt(dut.out.at(index)));
+			}
+			sim.dispose();
+			return values;
+		};
+		expect(run(4)).toEqual(run(1));
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Dead Store Elimination (DSE) tests
 // ---------------------------------------------------------------------------
 

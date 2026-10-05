@@ -162,6 +162,8 @@ impl super::super::EventHandle for NativeEventRef {
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
     comb_unit_funcs: Vec<NativeSimFunc>,
+    /// Lane-partitioned kernels and their task functions.
+    lane_kernels: Option<super::lanes::NativeLaneKernels>,
     /// Keep the combined executable image alive so every entry pointer remains
     /// valid. The image contains all native functions and their trailing
     /// constant/literal data.
@@ -245,6 +247,18 @@ impl SharedNativeCode {
         let event_map = materialize_map(&program_image.event_map)?;
         let eval_only_event_map = materialize_map(&program_image.eval_only_event_map)?;
         let apply_event_map = materialize_map(&program_image.apply_event_map)?;
+        let lane_kernels = program_image
+            .lanes
+            .as_ref()
+            .map(|lanes| {
+                super::lanes::NativeLaneKernels::materialize(
+                    lanes,
+                    &jit_image,
+                    |event| program_image.event_map.get(event).map(|event| event.id),
+                    program_image.id_to_event.len(),
+                )
+            })
+            .transpose()?;
         let id_to_event = program_image
             .id_to_event
             .iter()
@@ -255,6 +269,7 @@ impl SharedNativeCode {
         Ok(Self {
             comb_func,
             comb_unit_funcs,
+            lane_kernels,
             _jit_image: jit_image,
             event_map,
             eval_only_event_map,
@@ -317,7 +332,7 @@ struct NativeEventImageRef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct NativeCodeSymbol {
+pub(super) struct NativeCodeSymbol {
     offset: usize,
     size: usize,
     name: String,
@@ -329,6 +344,8 @@ struct NativeRuntimeOptions {
     native_tick_loop: bool,
     native_force_support: bool,
     perf_map: bool,
+    /// How lane-partitioned kernels are chosen over sequential ones.
+    kernel_selection: celox_runtime::parallel::KernelSelection,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,6 +380,8 @@ pub struct NativeProgramImage {
     native_memory_size: usize,
     options: NativeRuntimeOptions,
     four_state_inits: Vec<(usize, usize)>,
+    /// Lane-partitioned kernels, one function per task.
+    lanes: Option<super::lanes::NativeLaneImage>,
 }
 
 impl NativeProgramImage {
@@ -476,6 +495,9 @@ impl NativeProgramImage {
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
         }
+        if let Some(lanes) = &self.lanes {
+            lanes.validate(&entry_offsets, &self.event_map)?;
+        }
         for symbol in &self.symbols {
             let end = symbol
                 .offset
@@ -547,16 +569,16 @@ fn codegen_err(error: CodegenError) -> SimulatorError {
     error.into()
 }
 
-fn codegen_message(message: impl Into<String>) -> SimulatorError {
+pub(super) fn codegen_message(message: impl Into<String>) -> SimulatorError {
     codegen_err(CodegenError::message(message))
 }
 
-struct CompiledNativeFunction {
+pub(super) struct CompiledNativeFunction {
     code: Vec<u8>,
     symbols: Vec<jit_mem::JitSymbol>,
     trace: Option<emit::NativeFunctionTrace>,
-    required_state_size: usize,
-    required_native_features: u8,
+    pub(super) required_state_size: usize,
+    pub(super) required_native_features: u8,
 }
 
 #[cfg_attr(
@@ -732,7 +754,7 @@ fn compile_units(
     )
 }
 
-fn compile_unit_refs(
+pub(super) fn compile_unit_refs(
     units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
@@ -742,6 +764,36 @@ fn compile_unit_refs(
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
+) -> Result<CompiledNativeFunction, SimulatorError> {
+    compile_unit_refs_inspected(
+        units,
+        layout,
+        four_state,
+        label,
+        first_ff_unit,
+        x86_options,
+        capture_trace,
+        diagnostics,
+        cancel,
+        &mut |_| {},
+    )
+}
+
+/// [`compile_unit_refs`] that shows the merged SIR, after every SIR rewrite
+/// of the native pipeline, to `inspect_prepared` before instruction
+/// selection. It is not called for an empty unit list.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_unit_refs_inspected(
+    units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &MemoryLayout,
+    four_state: bool,
+    label: &str,
+    first_ff_unit: Option<usize>,
+    x86_options: &crate::backend::X86BackendOptions,
+    capture_trace: bool,
+    diagnostics: &crate::optimizer::SirDiagnostics,
+    cancel: Option<&CompileCancel>,
+    inspect_prepared: &mut dyn FnMut(&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>),
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     if cancelled(cancel) {
         return Err(cancelled_error());
@@ -830,6 +882,7 @@ fn compile_unit_refs(
         cancel,
         x86_options.baseline,
     )?;
+    inspect_prepared(&sir_eu);
     if cancelled(cancel) {
         return Err(cancelled_error());
     }
@@ -858,12 +911,13 @@ fn compile_unit_refs(
         feature = "arm64-codegen",
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
     ))]
-    let emit_result = emit::emit_prepared_eu(
+    let emit_result = emit::emit_prepared_eu_with_arena(
         &sir_eu,
         layout,
         four_state,
         label,
         x86_options.native_tick_loop,
+        x86_options.arena_base,
         trace.as_mut(),
         || cancelled(cancel),
     )
@@ -940,7 +994,7 @@ fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<j
 
 const NATIVE_CODE_ENTRY_ALIGNMENT: usize = 16;
 
-fn append_native_code(
+pub(super) fn append_native_code(
     image: &mut Vec<u8>,
     entries: &mut Vec<NativeCodeEntry>,
     image_symbols: &mut Vec<NativeCodeSymbol>,
@@ -992,7 +1046,7 @@ fn append_native_code(
     Ok(offset)
 }
 
-fn native_function_at(
+pub(super) fn native_function_at(
     image: &jit_mem::JitCode,
     offset: usize,
 ) -> Result<NativeSimFunc, SimulatorError> {
@@ -1899,6 +1953,7 @@ fn compile_program(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
     let semantic_memory_size = layout
@@ -1916,6 +1971,12 @@ fn compile_program(
                 .iter()
                 .map(|compiled| compiled.required_state_size),
         )
+        .chain(
+            lane_kernels
+                .iter()
+                .flat_map(|kernels| kernels.functions())
+                .map(|compiled| compiled.required_state_size),
+        )
         .fold(semantic_memory_size, usize::max);
     let required_native_features = std::iter::once(comb_jit.required_native_features)
         .chain(
@@ -1926,6 +1987,12 @@ fn compile_program(
         .chain(
             comb_unit_jits
                 .iter()
+                .map(|compiled| compiled.required_native_features),
+        )
+        .chain(
+            lane_kernels
+                .iter()
+                .flat_map(|kernels| kernels.functions())
                 .map(|compiled| compiled.required_native_features),
         )
         .fold(0, |features, required| features | required);
@@ -1967,6 +2034,9 @@ fn compile_program(
         )?;
         task_offsets.insert(task_id, offset);
     }
+    let lane_image = lane_kernels
+        .map(|kernels| kernels.pack(&mut packed_image, &mut code_entries, &mut image_symbols))
+        .transpose()?;
     // Bind semantic event identities to image-relative function offsets. The
     // precompiled runtime turns these into process-local pointers after it has
     // copied the image into executable memory.
@@ -2116,8 +2186,10 @@ fn compile_program(
                 native_tick_loop: options.x86_options.native_tick_loop,
                 native_force_support: options.native_force_support,
                 perf_map: options.x86_options.diagnostics.perf_map,
+                kernel_selection: crate::backend::lanes::kernel_selection(options),
             },
             four_state_inits,
+            lanes: lane_image,
         },
         codegen_trace,
     ))
@@ -2133,6 +2205,10 @@ pub struct NativeBackend {
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     execution_timing: Option<NativeExecutionTiming>,
+    /// Worker threads for lane-partitioned kernels, started on first use.
+    lane_pool: Option<celox_runtime::parallel::LanePool>,
+    /// Per-kernel choice between partitioned and sequential code.
+    lane_selectors: Box<super::super::lanes::LaneSelectors>,
 }
 
 fn write_bits_to_memory_from(
@@ -2339,6 +2415,8 @@ impl NativeBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             execution_timing: None,
+            lane_pool: None,
+            lane_selectors: Default::default(),
         };
         backend.install_event_buffers();
         let compiled = Arc::clone(&backend.compiled);
@@ -2364,6 +2442,8 @@ impl NativeBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             execution_timing: None,
+            lane_pool: None,
+            lane_selectors: Default::default(),
         }
     }
 
@@ -2575,6 +2655,58 @@ impl NativeBackend {
         }
     }
 
+    /// Run one lane-partitioned kernel on the lane workers.
+    ///
+    /// The calling thread executes lane 0. If worker threads cannot be
+    /// started, the kernel runs sequentially in its listed task order.
+    fn run_lane_kernel(
+        &mut self,
+        lanes: u32,
+        kernel: &super::lanes::NativeLaneKernel,
+    ) -> Result<(), SimulatorErrorCode> {
+        if self.lane_pool.is_none() {
+            match celox_runtime::parallel::LanePool::new(lanes) {
+                Ok(pool) => self.lane_pool = Some(pool),
+                Err(error) => {
+                    tracing::warn!("lane workers unavailable, running sequentially: {error}");
+                }
+            }
+        }
+        let start = self.execution_timing.is_some().then(Instant::now);
+        let runner = super::lanes::NativeTaskRunner {
+            memory: self.memory.as_mut_slice().as_mut_ptr() as *mut u8,
+            functions: &kernel.functions,
+        };
+        let result = match &mut self.lane_pool {
+            Some(pool) => pool.run(&kernel.schedule, &runner),
+            None => kernel.schedule.run_sequential(&runner),
+        };
+        if let (Some(start), Some(timing)) = (start, self.execution_timing.as_mut()) {
+            timing.elapsed = timing.elapsed.saturating_add(start.elapsed());
+            timing.calls = timing.calls.saturating_add(1);
+        }
+        result.map_err(|failure| match failure.code {
+            code if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+            _ => SimulatorErrorCode::InternalError,
+        })
+    }
+
+    fn lane_comb_kernel(&self) -> bool {
+        self.compiled
+            .lane_kernels
+            .as_ref()
+            .is_some_and(|kernels| kernels.comb.is_some())
+    }
+
+    fn lane_event_kernel(&self, event: NativeEventRef) -> bool {
+        self.compiled.lane_kernels.as_ref().is_some_and(|kernels| {
+            kernels
+                .events
+                .get(event.id)
+                .is_some_and(|kernel| kernel.is_some())
+        })
+    }
+
     fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
@@ -2649,15 +2781,67 @@ impl super::super::SimBackend for NativeBackend {
     type Event = NativeEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        if self.lane_comb_kernel() {
+            let compiled = Arc::clone(&self.compiled);
+            let kernels = compiled
+                .lane_kernels
+                .as_ref()
+                .expect("checked lane kernels");
+            let kernel = kernels.comb.as_ref().expect("checked comb lane kernel");
+            let selection = compiled.options.kernel_selection;
+            return super::super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::super::lanes::LaneKernelSlot::Comb,
+                selection,
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.call_func_timed(compiled.comb_func),
+            );
+        }
         let func = self.compiled.comb_func;
         self.call_func_timed(func)
     }
 
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        if self.lane_event_kernel(event) {
+            let compiled = Arc::clone(&self.compiled);
+            let kernels = compiled
+                .lane_kernels
+                .as_ref()
+                .expect("checked lane kernels");
+            let kernel = kernels.events[event.id]
+                .as_ref()
+                .expect("checked event lane kernel");
+            let selection = compiled.options.kernel_selection;
+            return super::super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::super::lanes::LaneKernelSlot::Event(event.id),
+                selection,
+                |backend| backend.run_lane_kernel(kernels.lanes, kernel),
+                |backend| backend.call_func_timed(event.func),
+            );
+        }
         self.call_func_timed(event.func)
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        // Partitioned phases compete with the fused sequential function,
+        // which shares state between its combinational and FF parts.
+        if self.lane_comb_kernel() || self.lane_event_kernel(event) {
+            let selection = self.compiled.options.kernel_selection;
+            return super::super::lanes::run_selected(
+                self,
+                |backend| &mut *backend.lane_selectors,
+                super::super::lanes::LaneKernelSlot::Fused(event.id),
+                selection,
+                |backend| {
+                    backend.eval_comb()?;
+                    backend.eval_apply_ff_at(event)
+                },
+                |backend| backend.call_func_timed(event.comb_apply_func),
+            );
+        }
         self.call_func_timed(event.comb_apply_func)
     }
 
@@ -2666,8 +2850,25 @@ impl super::super::SimBackend for NativeBackend {
         event: NativeEventRef,
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
+        let fused_sequential = self
+            .lane_selectors
+            .decided(super::super::lanes::LaneKernelSlot::Fused(event.id))
+            == Some(celox_runtime::parallel::KernelChoice::Sequential);
+        if (self.lane_comb_kernel() || self.lane_event_kernel(event)) && !fused_sequential {
+            if count == 0 {
+                return (0, Ok(()));
+            }
+            return (1, self.eval_comb_apply_ff_at(event));
+        }
         if self.compiled.options.native_tick_loop {
-            self.call_func_many_timed(event.comb_apply_func, count)
+            let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
+            if fused_sequential {
+                self.lane_selectors.advance(
+                    super::super::lanes::LaneKernelSlot::Fused(event.id),
+                    executed,
+                );
+            }
+            (executed, result)
         } else if count == 0 {
             (0, Ok(()))
         } else {

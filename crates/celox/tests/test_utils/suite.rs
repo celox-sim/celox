@@ -112,8 +112,23 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         "native" => Box::new(CeloxBackend(
             builder.build_native().map_err(classify_build_error)?,
         )),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        "native-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_native()
+                .map_err(classify_build_error)?,
+        )),
         "cranelift" => Box::new(CeloxBackend(
             builder.build_cranelift().map_err(classify_build_error)?,
+        )),
+        "cranelift-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_cranelift()
+                .map_err(classify_build_error)?,
         )),
         "wasm" => Box::new(CeloxBackend(
             builder.build_wasm().map_err(classify_build_error)?,

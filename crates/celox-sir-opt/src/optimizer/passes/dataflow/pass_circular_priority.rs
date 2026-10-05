@@ -302,6 +302,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
                 cfg.block_ids[natural_loop.header],
                 &loop_blocks,
                 &definitions,
+                &use_blocks,
                 &mut constant_cache,
                 &self.bit_array_elements,
                 &self.array_shapes,
@@ -1057,6 +1058,7 @@ fn recognize_sparse_bitmap_loop(
     header: BlockId,
     loop_blocks: &HashSet<BlockId>,
     definitions: &HashMap<RegisterId, Definition>,
+    use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
     constant_cache: &mut HashMap<RegisterId, Option<bool>>,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
     array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
@@ -1065,6 +1067,22 @@ fn recognize_sparse_bitmap_loop(
         return None;
     }
     let header_block = &eu.blocks[&header];
+    // The rewrite lets the preheader branch straight to the exit, so the loop
+    // no longer dominates it: values defined in the loop may leave it only as
+    // exit arguments.
+    if header_block
+        .params
+        .iter()
+        .copied()
+        .chain(header_block.instructions.iter().filter_map(def_reg))
+        .any(|value| {
+            use_blocks
+                .get(&value)
+                .is_some_and(|users| users.iter().any(|user| !loop_blocks.contains(user)))
+        })
+    {
+        return None;
+    }
     let header_index = cfg.block_index(header)?;
     let outside = cfg.predecessors[header_index]
         .iter()
@@ -4715,6 +4733,15 @@ mod tests {
     }
 
     fn sparse_bitmap_loop_fixture() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        sparse_bitmap_loop_fixture_with(false)
+    }
+
+    /// With `escaping_constant`, the loop defines its own constant one and
+    /// the exit block uses it directly, which is valid only while the loop
+    /// dominates the exit.
+    fn sparse_bitmap_loop_fixture_with(
+        escaping_constant: bool,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
         const SPARSE_LANES: usize = 16;
         let mut builder = Builder::new();
         let enable0 = builder.bit(1);
@@ -4753,6 +4780,11 @@ mod tests {
         let result1 = builder.bit(1);
         let result2 = builder.bit(1);
         let mut instructions = Vec::new();
+        let one_result = if escaping_constant {
+            builder.imm(&mut instructions, 1, 1)
+        } else {
+            one_result
+        };
         let mut loaded = Vec::new();
         for raw in 0..4 {
             let lane = builder.bit(1);
@@ -4836,23 +4868,31 @@ mod tests {
         let output0 = builder.bit(1);
         let output1 = builder.bit(1);
         let output2 = builder.bit(1);
+        let mut exit_instructions = Vec::new();
+        let mut outputs = vec![output0, output1, output2];
+        if escaping_constant {
+            outputs[0] = builder.binary(
+                &mut exit_instructions,
+                1,
+                output0,
+                BinaryOp::And,
+                one_result,
+            );
+        }
+        exit_instructions.extend(outputs.into_iter().enumerate().map(|(index, output)| {
+            SIRInstruction::Store(
+                address(4 + index as u32),
+                SIROffset::Static(0),
+                1,
+                output,
+                Vec::new(),
+                Vec::new(),
+            )
+        }));
         let exit = BasicBlock {
             id: BlockId(2),
             params: vec![output0, output1, output2],
-            instructions: [output0, output1, output2]
-                .into_iter()
-                .enumerate()
-                .map(|(index, output)| {
-                    SIRInstruction::Store(
-                        address(4 + index as u32),
-                        SIROffset::Static(0),
-                        1,
-                        output,
-                        Vec::new(),
-                        Vec::new(),
-                    )
-                })
-                .collect(),
+            instructions: exit_instructions,
             terminator: SIRTerminator::Return,
         };
         ExecutionUnit {
@@ -4925,6 +4965,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sparse_scan_keeps_loops_whose_values_escape_to_the_exit() {
+        const SPARSE_LANES: usize = 16;
+        let mut unit = sparse_bitmap_loop_fixture_with(true);
+        unit.verify_result().unwrap();
+        let original = unit.clone();
+        let pass = CircularPriorityPass {
+            bit_array_elements: (0..4)
+                .map(|raw| (address(raw).absolute_addr(), SPARSE_LANES))
+                .collect(),
+            array_shapes: HashMap::default(),
+        };
+        pass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+        assert_eq!(unit, original);
     }
 
     #[test]

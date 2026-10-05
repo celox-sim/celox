@@ -568,7 +568,7 @@ pub fn prepare_external_hierarchy(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state)?;
+        let lowered = specialize_module(base, &key, four_state, false)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -595,7 +595,7 @@ pub fn prepare_external_hierarchy(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            Ok((module_id, specialize_module(base, key, four_state)?))
+            Ok((module_id, specialize_module(base, key, four_state, false)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
@@ -656,6 +656,7 @@ pub fn schedule_sources(
         usize,
     )],
     four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
@@ -689,7 +690,7 @@ pub fn schedule_sources(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state)?;
+        let lowered = specialize_module(base, &key, four_state, false)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -716,7 +717,8 @@ pub fn schedule_sources(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let lowered = specialize_module(base, key, four_state).map_err(FrontendError::from)?;
+            let lowered = specialize_module(base, key, four_state, parallel.enabled())
+                .map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
@@ -766,6 +768,7 @@ pub fn schedule_sources(
         ignored_loops,
         true_loops,
         four_state,
+        parallel,
         trace_options,
         trace,
     )
@@ -826,6 +829,7 @@ fn specialize_module(
     module: &AnalyzedSvModule,
     key: &LoweredSvModuleKey,
     four_state: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     // A `parameter type` is bound by rewriting its default in the module source.
@@ -860,22 +864,31 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(specialized, four_state, module.implicit_nets_allowed)
+    lower_module(
+        specialized,
+        four_state,
+        module.implicit_nets_allowed,
+        ff_parts,
+    )
 }
 
 fn lower_module(
     module: &sv::ir::Module,
     four_state: bool,
     implicit_nets_allowed: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed)
+    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed, ff_parts)
 }
 
+/// `ff_parts` additionally keeps every `always_ff` process as an
+/// independently evaluated part, for lane-partitioned builds.
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
     implicit_nets_allowed: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let name = module.name().to_string();
     let mut next_id = SourceVarId::default();
@@ -985,15 +998,21 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
-    let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
-        lower_ff_processes(
-            module,
-            &variables,
-            &name_to_id,
-            &constants,
-            &parameter_types,
-            four_state,
-        )?;
+    let (
+        eval_only_ff_blocks,
+        apply_ff_blocks,
+        eval_apply_ff_blocks,
+        reset_clock_map,
+        parallel_ff_parts,
+    ) = lower_ff_processes(
+        module,
+        &variables,
+        &name_to_id,
+        &constants,
+        &parameter_types,
+        four_state,
+        ff_parts,
+    )?;
     mark_ff_event_domains(module, &mut variables, &name_to_id);
 
     let shared_variables = variables
@@ -1072,6 +1091,7 @@ fn lower_module_with_overrides(
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            parallel_ff_parts,
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
             instance_index_bases: HashMap::default(),
@@ -5249,6 +5269,10 @@ type SvFfBlocks = (
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<SourceVarId, SourceVarId>,
+    HashMap<
+        TriggerSet<SourceVarId>,
+        Vec<celox_frontend_core::symbolic::artifact::FfPart<RegionedVarAddr>>,
+    >,
 );
 
 fn lower_ff_processes(
@@ -5258,7 +5282,9 @@ fn lower_ff_processes(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
+    ff_parts: bool,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
+    let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
@@ -5366,16 +5392,28 @@ fn lower_ff_processes(
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
         })?;
+        if ff_parts {
+            parallel_ff_parts
+                .entry(trigger_set.clone())
+                .or_default()
+                .push(celox_frontend_core::symbolic::artifact::FfPart {
+                    evaluate: eval_only.clone(),
+                    apply: apply.clone(),
+                });
+        }
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
         insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
         insert_or_merge_ff_unit(&mut eval_apply_ff_blocks, trigger_set, eval_apply);
     }
+    // One process is the whole trigger group.
+    parallel_ff_parts.retain(|_, parts| parts.len() > 1);
 
     Ok((
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
         reset_clock_map,
+        parallel_ff_parts,
     ))
 }
 

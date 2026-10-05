@@ -529,6 +529,7 @@ pub fn parse(
             ignored_loops,
             true_loops,
             four_state,
+            &crate::optimizer::parallel_schedule_options(optimize_options),
             &frontend_trace_options,
             trace.is_some().then_some(&mut frontend_trace),
         )
@@ -596,6 +597,7 @@ pub fn parse_sv(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )
@@ -749,6 +751,7 @@ pub fn parse_with_external_hierarchy(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )?;
@@ -883,6 +886,7 @@ mod fused_hint_tests {
                 .collect(),
                 eval_only_ffs: Default::default(),
                 apply_ffs: Default::default(),
+                parallel: None,
             },
             design: Default::default(),
             frontend_lookup: Default::default(),

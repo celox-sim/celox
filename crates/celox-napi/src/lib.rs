@@ -110,6 +110,8 @@ pub struct NapiOptions {
     pub parameters: Option<Vec<NapiParamOverride>>,
     /// Dead store elimination policy: "off", "preserve_top_ports", or "preserve_all_ports".
     pub dead_store_policy: Option<String>,
+    /// Simulation threads, including the calling thread. Default: 1.
+    pub threads: Option<u32>,
 }
 
 /// Parsed builder options from NapiOptions (common fields available on all targets).
@@ -404,9 +406,19 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
 /// Helper to extract the full builder config from NapiOptions (native only).
 #[cfg(not(target_arch = "wasm32"))]
 fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
-    let common = parse_options_common(options)?;
+    let mut common = parse_options_common(options)?;
     match options.as_ref() {
         Some(o) => {
+            if let Some(threads) = o.threads {
+                if threads == 0 {
+                    return Err(Error::from_reason(
+                        "Invalid threads 0. Expected at least 1.".to_string(),
+                    ));
+                }
+                common
+                    .optimize_options
+                    .set_parallel_lanes(threads.min(celox::MAX_SIMULATION_THREADS));
+            }
             let dead_store_policy = o
                 .dead_store_policy
                 .as_deref()
@@ -620,6 +632,7 @@ fn apply_options<'a, T>(
 ) -> celox::SimulatorBuilder<'a, T> {
     builder = builder.four_state(opts.four_state);
     builder = builder.optimize_options(opts.optimize_options.clone());
+    builder = builder.threads(opts.optimize_options.parallel_lanes() as usize);
     builder = builder.cranelift_options(opts.cranelift_options);
     // VCD changes the layout and generated stores, so enable it before building.
     if let Some(path) = opts.vcd.as_deref() {
@@ -715,6 +728,8 @@ struct SirOptimizationCacheKey {
     opt_level: celox::OptLevel,
     enabled_passes: Box<[bool]>,
     max_native_memory_width: usize,
+    parallel_lanes: u32,
+    always_partition: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -727,6 +742,8 @@ impl From<&celox::OptimizeOptions> for SirOptimizationCacheKey {
                 .map(|&pass| options.is_enabled(pass))
                 .collect(),
             max_native_memory_width: options.max_native_memory_width(),
+            parallel_lanes: options.parallel_lanes(),
+            always_partition: options.parallel_partition() == celox::ParallelPartition::Always,
         }
     }
 }
@@ -3339,6 +3356,7 @@ mod tests {
                 extra_source: None,
                 parameters: None,
                 dead_store_policy: None,
+                threads: None,
             });
             let mut handle = if mode == "tiered" {
                 NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), options)

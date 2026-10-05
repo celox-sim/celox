@@ -405,6 +405,7 @@ fn analyze(
     if let Some(rt) = reset_type {
         build_config.reset_type = rt;
     }
+    build_config.parallel_lanes = optimize_options.parallel_lanes();
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
             &top,
@@ -602,6 +603,7 @@ fn compile_frontend_to_sir_with_layout_mode(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace_out.is_some().then_some(&mut frontend_trace),
     )
@@ -1516,7 +1518,9 @@ mod host {
         /// Set the overall optimization level. Sets defaults for SIR passes,
         /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
         pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
-            self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
+            let lanes = self.options.optimize_options.parallel_lanes();
+            self.options.optimize_options =
+                crate::optimizer::OptimizeOptions::new(level).with_parallel_lanes(lanes);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -1549,11 +1553,13 @@ mod host {
         /// Enable or disable all SIRT optimization passes at once.
         /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
         pub fn optimize(mut self, enable: bool) -> Self {
+            let lanes = self.options.optimize_options.parallel_lanes();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
                 crate::optimizer::OptimizeOptions::none()
-            };
+            }
+            .with_parallel_lanes(lanes);
             self
         }
 
@@ -1561,7 +1567,51 @@ mod host {
         pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
             self.options.cranelift_options.tail_call_split =
                 options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
-            self.options.optimize_options = options;
+            // A thread count requested separately survives an options reset.
+            let lanes = if options.parallel_lanes() > 1 {
+                options.parallel_lanes()
+            } else {
+                self.options.optimize_options.parallel_lanes()
+            };
+            self.options.optimize_options = options.with_parallel_lanes(lanes);
+            self
+        }
+
+        /// Evaluate the design on up to `threads` worker threads, the calling
+        /// thread included.
+        ///
+        /// Compilation partitions the combinational settle and the sequential
+        /// update of each clock event into one lane per thread, using the
+        /// scheduler's dependency graph. Every state object written by a lane
+        /// lives in that lane's own memory segment. A phase whose estimated
+        /// speedup is too small keeps its sequential kernel, and so does every
+        /// phase on backends without parallel execution. `1` (the default)
+        /// compiles only the sequential kernels. Native force support keeps
+        /// sequential execution.
+        pub fn threads(mut self, threads: usize) -> Self {
+            let lanes = if self.options.native_force_support {
+                1
+            } else {
+                u32::try_from(threads)
+                    .unwrap_or(u32::MAX)
+                    .clamp(1, crate::MAX_SIMULATION_THREADS)
+            };
+            self.options.optimize_options.set_parallel_lanes(lanes);
+            self
+        }
+
+        /// Choose how [`Self::threads`] decides which phases to partition.
+        ///
+        /// The default partitions a phase only when its estimated speedup
+        /// outweighs lane synchronization. [`crate::ParallelPartition::Always`]
+        /// partitions every phase with independent work; it exists for
+        /// testing and measurement.
+        pub fn parallel_partition(mut self, partition: crate::ParallelPartition) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_parallel_partition(partition);
             self
         }
 
