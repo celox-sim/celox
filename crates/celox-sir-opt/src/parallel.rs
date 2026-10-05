@@ -57,8 +57,8 @@ pub enum ParallelPlanError {
 ///
 /// Both generators write a static field with read-modify-write accesses
 /// that start at the field's first byte and may end past its last byte. A
-/// dynamically addressed write stays within its object plus
-/// [`DYNAMIC_WRITE_OVERHANG`] bytes.
+/// dynamically addressed write stays within its object plus a few bytes,
+/// and is planned as a write of its whole home with a 16-byte overhang.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodegenFootprint {
     /// x86-64 and AArch64 native code. A static field of `n` bytes is
