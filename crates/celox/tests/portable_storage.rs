@@ -10,8 +10,6 @@ all_backends! {
     }
 
     fn ff_captures_padded_elements_and_unknown_masks(sim) {
-        // The SV frontend currently rejects four-state always_ff event signals.
-        @ignore_on(sv);
         @case "ff_narrow_arrays::ff_captures_padded_elements_and_unknown_masks";
     }
 

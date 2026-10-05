@@ -36,6 +36,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("packed_structs.vtest"),
     },
     Group {
+        file: "src/sv/cases/procedural.vtest",
+        text: include_str!("procedural.vtest"),
+    },
+    Group {
         file: "src/sv/cases/review_regressions.vtest",
         text: include_str!("review_regressions.vtest"),
     },

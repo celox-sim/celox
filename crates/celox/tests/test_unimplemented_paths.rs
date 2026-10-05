@@ -16,7 +16,6 @@ fn wide_dynamic_shift_works(sim) {
 // Dynamic offset Store with 4-state mask: array write with variable index
 // on a logic (4-state) type must correctly store the mask.
 fn dynamic_mask_store(sim) {
-    @ignore_on(sv);
     @case "test_unimplemented_paths::dynamic_mask_store";
 }
 
