@@ -54,6 +54,17 @@ all_backends! {
         @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
     }
+    fn dynamic_param_array_read_uses_its_elements(sim) {
+        // SV frontend rejects the emitted unpacked array parameter as unsupported_simulator_parser.
+        @ignore_on(sv);
+        @case "veryl_context_regressions::dynamic_param_array_read_uses_its_elements";
+    }
+    fn constant_case_target_uses_comparison_context(sim) {
+        @case "veryl_context_regressions::constant_case_target_uses_comparison_context";
+    }
+    fn unfolded_constant_struct_member_reads_its_value(sim) {
+        @case "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value";
+    }
 }
 
 all_backends! {
@@ -107,174 +118,6 @@ all_backends! {
             ("dynamic_count", 0u32),
             ("inclusive_count", 0u32),
         ] {
-            let signal = sim.signal(name);
-            assert_eq!(sim.get(signal), expected.into(), "{name}");
-        }
-    }
-}
-
-all_backends! {
-    fn dynamic_param_array_read_uses_its_elements(sim) {
-        @ignore_on(sv);
-        @setup { let code = r#"
-            module Child #(
-                param Q: i8 [2] = '{1, 2},
-            ) (
-                clk: input  clock,
-                i  : input  logic<1>,
-                c  : output logic<16>,
-                f  : output logic<16>,
-            ) {
-                assign c = Q[i];
-                always_ff (clk) {
-                    f = Q[i];
-                }
-            }
-            module Top (
-                clk: input  clock,
-                i  : input  logic<1>,
-                c0 : output logic<16>,
-                f0 : output logic<16>,
-                c1 : output logic<16>,
-                f1 : output logic<16>,
-            ) {
-                inst u0: Child (clk, i, c: c0, f: f0);
-                inst u1: Child #(Q: '{-3, -5}) (clk, i, c: c1, f: f1);
-            }
-        "#; }
-        @build celox::Simulator::builder(code, "Top");
-        let clk = sim.event("clk");
-        let i = sim.signal("i");
-        for (index, expected) in [(0u8, [1u16, 1, 0xfffd, 0xfffd]), (1, [2, 2, 0xfffb, 0xfffb])] {
-            sim.modify(|io| io.set(i, index)).unwrap();
-            sim.tick(clk).unwrap();
-            for (name, expected) in ["c0", "f0", "c1", "f1"].into_iter().zip(expected) {
-                let signal = sim.signal(name);
-                assert_eq!(sim.get(signal), expected.into(), "{name} at i={index}");
-            }
-        }
-    }
-}
-
-all_backends! {
-    fn constant_case_target_uses_comparison_context(sim) {
-        @ignore_on(sv);
-        @setup { let code = r#"
-            module Top (
-                clk: input  clock,
-                y0 : output logic<8>,
-                y1 : output logic<8>,
-                y2 : output logic<8>,
-                y3 : output logic<8>,
-                y4 : output logic<8>,
-                y5 : output logic<8>,
-                f0 : output logic<8>,
-                f3 : output logic<8>,
-                f1 : output logic<8>,
-                f2 : output logic<8>,
-            ) {
-                const J: u8 = 8'hFF;
-                function g (
-                    n: input logic<8>,
-                ) -> logic<8> {
-                    var r: logic<8>;
-                    case J + n {
-                        16'h0100: r = 2;
-                        default : r = 0;
-                    }
-                    return r;
-                }
-                always_comb {
-                    y5 = g(8'h01);
-                    case J + 8'h01 {
-                        16'h0100: y0 = 2;
-                        default : y0 = 0;
-                    }
-                    case (J + 8'h01) >> 1 {
-                        16'h0080: y1 = 2;
-                        default : y1 = 0;
-                    }
-                    case J + 8'h01 {
-                        16'h0000: y2 = 1;
-                        default : y2 = 3;
-                    }
-                    case J + 8'h01 {
-                        16'h00FF..=16'h0100: y3 = 2;
-                        default            : y3 = 0;
-                    }
-                    case J + 8'h01 {
-                        8'h00  : y4 = 2;
-                        default: y4 = 0;
-                    }
-                }
-                always_ff (clk) {
-                    f3 = g(8'h01);
-                    case J + 8'h01 {
-                        16'h0100: f0 = 2;
-                        default : f0 = 0;
-                    }
-                    case (J + 8'h01) >> 1 {
-                        16'h0080: f1 = 2;
-                        default : f1 = 0;
-                    }
-                    case J + 8'h01 {
-                        16'h0000: f2 = 1;
-                        default : f2 = 3;
-                    }
-                }
-            }
-        "#; }
-        @build celox::Simulator::builder(code, "Top");
-        let clk = sim.event("clk");
-        sim.tick(clk).unwrap();
-        for (name, expected) in [
-            ("y0", 2u8),
-            ("y1", 2),
-            ("y2", 3),
-            ("y3", 2),
-            ("y4", 2),
-            ("y5", 2),
-            ("f0", 2),
-            ("f3", 2),
-            ("f1", 2),
-            ("f2", 3),
-        ] {
-            let signal = sim.signal(name);
-            assert_eq!(sim.get(signal), expected.into(), "{name}");
-        }
-    }
-}
-
-all_backends! {
-    fn unfolded_constant_struct_member_reads_its_value(sim) {
-        @ignore_on(sv);
-        @setup { let code = r#"
-            package pkg {
-                struct S {
-                    m: signed logic<4>,
-                    k: logic<4>,
-                }
-            }
-            module Top (
-                a : input  logic<8>,
-                y0: output logic<16>,
-                y1: output logic<16>,
-                y2: output logic<16>,
-                y3: output logic<16>,
-            ) {
-                const LS: pkg::S = pkg::S'{ m: -3, k: 5 };
-                always_comb {
-                    y0 = LS.m + a;
-                    y1 = LS.m[3:0] + a;
-                    y2 = LS.k[3:0] + a;
-                    y3 = LS.m[1:0] + a;
-                }
-            }
-        "#; }
-        @build celox::Simulator::builder(code, "Top");
-        let a = sim.signal("a");
-        sim.modify(|io| io.set(a, 0u8)).unwrap();
-        for (name, expected) in [("y0", 0xdu16), ("y1", 0xd), ("y2", 5), ("y3", 1)] {
             let signal = sim.signal(name);
             assert_eq!(sim.get(signal), expected.into(), "{name}");
         }

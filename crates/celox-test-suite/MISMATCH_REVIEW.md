@@ -460,5 +460,12 @@ not information lost in Veryl AIR:
   target, in combinational, `always_ff`, and function bodies. Case expressions
   were already folded per comparison by the analyzer.
 
-Both cases are enabled on all four Celox backends; their SV frontend variants
-remain excluded.
+Both cases are enabled on all four Celox backends and the SV frontend. Three
+added cases isolate the repaired paths:
+`dynamic_param_array_read_uses_its_elements` (default and overridden parameter
+arrays in comb and ff), `constant_case_target_uses_comparison_context`
+(widening, narrowing, shifted, and range labels in comb, ff, and a function), and
+`unfolded_constant_struct_member_reads_its_value`. All three pass Verilator.
+Icarus cannot compile them: it rejects unpacked array parameters, the emitted
+`case ... inside`, and the package-typed local parameter respectively. The SV
+frontend runs the last two; it rejects the unpacked array parameter.
