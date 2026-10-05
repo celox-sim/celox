@@ -284,6 +284,7 @@ impl crate::Frontend for VerylFrontend {
             outputs: module.outputs.clone(),
             edges: edges.clone(),
             max_width: emitted.max_width(),
+            parameters: design.parameters.clone(),
             arrays: module
                 .arrays
                 .iter()

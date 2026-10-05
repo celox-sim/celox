@@ -578,3 +578,74 @@
   (assert_eq plus 8)
   (assert_eq minus 7)
   (assert_eq concat_slice 0x35))
+
+(case runtime_indexed_reads_follow_the_declared_direction
+  (source "runtime_indexed_reads.sv" #"
+                module Top(input logic [31:0] down, input logic [0:31] up, input logic [4:0] i,
+                           output logic bit_down, bit_up,
+                           output logic [7:0] down_plus, down_minus, up_plus, up_minus);
+                    assign bit_down = down[i];
+                    assign bit_up = up[i];
+                    assign down_plus = down[i +: 8];
+                    assign down_minus = down[i -: 8];
+                    assign up_plus = up[i +: 8];
+                    assign up_minus = up[i -: 8];
+                endmodule
+            "#)
+  (top Top)
+  (let value 0xaabb_ccdd)
+  (modify
+    (set down value)
+    (set up value))
+  ; An ascending range numbers its bits from the most significant end.
+  (for index (range 7 25)
+    (modify (set i index))
+    (assert_eq bit_down (bit value index) "down[i]")
+    (assert_eq bit_up (bit value (- 31 index)) "up[i]")
+    (assert_eq down_plus (slice value (+ index 7) index) "down[i +: 8]")
+    (assert_eq down_minus (slice value index (- index 7)) "down[i -: 8]")
+    (assert_eq up_plus (slice value (- 31 index) (- 24 index)) "up[i +: 8]")
+    (assert_eq up_minus (slice value (- 38 index) (- 31 index)) "up[i -: 8]"))
+  (for index (list 0 31)
+    (modify (set i index))
+    (assert_eq bit_down (bit value index) "down[i]")))
+
+(case runtime_indexed_writes_keep_unselected_bits_and_clip_overhang
+  (source "runtime_indexed_writes.sv" #"
+                module Top(input logic [2:0] i, input logic replace, input logic [7:0] base,
+                           output logic [7:0] bit_write, plus_write, minus_write, filled);
+                    always_comb begin
+                        bit_write = base;
+                        bit_write[i] = 1'b0;
+                        plus_write = base;
+                        plus_write[i +: 2] = 2'b10;
+                        minus_write = base;
+                        minus_write[i -: 2] = 2'b10;
+                        filled = '0;
+                        filled[i +: 2] = 2'b11;
+                        if (replace) filled = '1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  ; Bits written outside 7..0 are dropped.
+  (let initial 0xa5)
+  (modify
+    (set base initial)
+    (set replace 0))
+  (for index (range 0 8)
+    (modify (set i index))
+    (assert_eq bit_write (& initial (~ (<< 1 index))) "bit_write")
+    ; [i +: 2] = 2'b10: bit i is 0 and bit i+1 is 1.
+    (assert_eq plus_write (trunc 8 (| (& initial (~ (<< 1 index))) (<< 2 index))) "plus_write")
+    ; [i -: 2] = 2'b10: bit i is 1 and bit i-1 is 0.
+    (assert_eq minus_write
+      (| (? (== index 0) initial (& initial (~ (<< 1 (- index 1))))) (<< 1 index))
+      "minus_write")
+    ; A conditional write after a runtime-positioned one is merged by the
+    ; analyzer's value tracking, which only follows selections that lie
+    ; fully inside the vector.
+    (if (<= index 6)
+      (assert_eq filled (<< 3 index) "filled")))
+  (modify (set replace 1))
+  (assert_eq filled 0xff))

@@ -118,40 +118,7 @@ sv_backends! {
     }
 
     fn runtime_indexed_reads_follow_the_declared_direction(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic [31:0] down, input logic [0:31] up, input logic [4:0] i,
-                           output logic bit_down, bit_up,
-                           output logic [7:0] down_plus, down_minus, up_plus, up_minus);
-                    assign bit_down = down[i];
-                    assign bit_up = up[i];
-                    assign down_plus = down[i +: 8];
-                    assign down_minus = down[i -: 8];
-                    assign up_plus = up[i +: 8];
-                    assign up_minus = up[i -: 8];
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("runtime_indexed_reads.sv"))], "Top");
-        let (down, up, i) = (sim.signal("down"), sim.signal("up"), sim.signal("i"));
-        let value = 0xaabb_ccddu32;
-        sim.modify(|io| { io.set(down, value); io.set(up, value); }).unwrap();
-        let bit = |position: u32| u8::from(value >> position & 1 != 0);
-        let byte = |low: u32| ((value >> low) & 0xff) as u8;
-        // An ascending range numbers its bits from the most-significant end.
-        for index in 7..=24u32 {
-            sim.modify(|io| io.set(i, index as u8)).unwrap();
-            assert_eq!(sim.get(sim.signal("bit_down")), bit(index).into(), "down[{index}]");
-            assert_eq!(sim.get(sim.signal("bit_up")), bit(31 - index).into(), "up[{index}]");
-            assert_eq!(sim.get(sim.signal("down_plus")), byte(index).into(), "down[{index} +: 8]");
-            assert_eq!(sim.get(sim.signal("down_minus")), byte(index - 7).into(), "down[{index} -: 8]");
-            assert_eq!(sim.get(sim.signal("up_plus")), byte(24 - index).into(), "up[{index} +: 8]");
-            assert_eq!(sim.get(sim.signal("up_minus")), byte(31 - index).into(), "up[{index} -: 8]");
-        }
-        for (index, expected) in [(0u32, bit(0)), (31, bit(31))] {
-            sim.modify(|io| io.set(i, index as u8)).unwrap();
-            assert_eq!(sim.get(sim.signal("bit_down")), expected.into(), "down[{index}]");
-        }
+        @case "indexed_select::runtime_indexed_reads_follow_the_declared_direction";
     }
 
     fn runtime_indexed_base_may_select_a_parameter_bit(sim) {
@@ -159,53 +126,7 @@ sv_backends! {
     }
 
     fn runtime_indexed_writes_keep_unselected_bits_and_clip_overhang(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic [2:0] i, input logic replace, input logic [7:0] base,
-                           output logic [7:0] bit_write, plus_write, minus_write, filled);
-                    always_comb begin
-                        bit_write = base;
-                        bit_write[i] = 1'b0;
-                        plus_write = base;
-                        plus_write[i +: 2] = 2'b10;
-                        minus_write = base;
-                        minus_write[i -: 2] = 2'b10;
-                        filled = '0;
-                        filled[i +: 2] = 2'b11;
-                        if (replace) filled = '1;
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("runtime_indexed_writes.sv"))], "Top");
-        let (i, replace, base) = (sim.signal("i"), sim.signal("replace"), sim.signal("base"));
-        // Write `value` into the bits `low..low + width`; bits outside 0..8 are dropped.
-        let write = |start: u8, low: i32, width: i32, value: u8| {
-            (0..width).fold(start, |bits, offset| {
-                let position = low + offset;
-                if !(0..8).contains(&position) {
-                    return bits;
-                }
-                let mask = 1u8 << position;
-                if value >> offset & 1 != 0 { bits | mask } else { bits & !mask }
-            })
-        };
-        let initial = 0xa5u8;
-        sim.modify(|io| { io.set(base, initial); io.set(replace, 0u8); }).unwrap();
-        for index in 0..8i32 {
-            sim.modify(|io| io.set(i, index as u8)).unwrap();
-            assert_eq!(sim.get(sim.signal("bit_write")), write(initial, index, 1, 0).into(), "bit_write i={index}");
-            assert_eq!(sim.get(sim.signal("plus_write")), write(initial, index, 2, 0b10).into(), "plus_write i={index}");
-            assert_eq!(sim.get(sim.signal("minus_write")), write(initial, index - 1, 2, 0b10).into(), "minus_write i={index}");
-            // A conditional write after a runtime-positioned one is merged by the
-            // analyzer's value tracking, which only follows selections that lie
-            // fully inside the vector.
-            if index <= 6 {
-                assert_eq!(sim.get(sim.signal("filled")), write(0, index, 2, 0b11).into(), "filled i={index}");
-            }
-        }
-        sim.modify(|io| io.set(replace, 1u8)).unwrap();
-        assert_eq!(sim.get(sim.signal("filled")), 0xffu8.into());
+        @case "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang";
     }
 
     fn runtime_indexed_ff_write_updates_only_the_selected_slice(sim) {

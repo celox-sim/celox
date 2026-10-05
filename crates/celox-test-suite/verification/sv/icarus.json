@@ -908,6 +908,28 @@
       "tags": []
     },
     {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indexed_reads_follow_the_declared_direction",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
@@ -1339,6 +1361,29 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 returns 2 for $size of an element of a multidimensional packed struct member (value.m[0] of logic [1:0][3:0]); IEEE 1800-2023 20.7 makes it the element's size, 4. Verilator agrees with the expected value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_packed_element_size",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns 2 for $size of an element of a multidimensional packed struct member (value.m[0] of logic [1:0][3:0]); IEEE 1800-2023 20.7 makes it the element's size, 4. Verilator agrees with the expected value.",
+        "upstream": []
+      },
+      "name": "packed_structs::packed_struct_bounds_and_type_queries",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "packed_structs::packed_struct_field_assignments_and_registers",
@@ -1352,7 +1397,63 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_layout_and_nested_fields",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_mixed_state_struct_members",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values.",
+        "upstream": []
+      },
+      "name": "packed_structs::packed_struct_mixed_state_members",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_parameterized_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "packed_structs::packed_struct_typedef_bounds_survive_generate_shadowing",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_whole_value_signedness",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1439,9 +1540,31 @@
     },
     {
       "category": "Regression",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/parameters.sv:3: error: Cannot override parameter `P` in `celox_suite_parameters.dut`. Parameter cannot be overridden in the scope it has been declared in.\n2 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "review_regressions::body_parameters_are_local_with_a_parameter_port_list",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
       "name": "review_regressions::covers_single_bit_bitwise_complementary_guards",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::folds_compound_four_state_case_labels",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1477,6 +1600,96 @@
       "name": "review_regressions::normalizes_function_parameter_cast_dimensions",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_constant_case_selector_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unary_plus_unknown",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values.",
+        "upstream": []
+      },
+      "name": "review_regressions::preserves_four_state_arithmetic_case_constants",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_equality_case_selectors",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_reduction_case_constants",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_relational_case_selectors",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_syntax",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1542,6 +1755,17 @@
       "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "review_regressions::resolves_generate_local_alias_casts_for_all_processes",
       "phase": "execute",
       "status": "passed",
@@ -1554,6 +1778,39 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "synthesizable::always_star_and_edge_sensitive_always_match_the_systemverilog_keywords",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::assigning_the_function_name_returns_its_last_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::block_locals_and_dependent_assignments_accumulate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::break_and_continue_end_unrolled_loop_iterations",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1610,6 +1867,29 @@
         "upstream": []
       },
       "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_inside",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "synthesizable::inside_matches_values_ranges_and_wildcards",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,
@@ -1768,6 +2048,17 @@
       "category": "Combinational",
       "detail": "",
       "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_with_non_zero_based_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "synthesizable::net_declaration_assignment_drives_the_net",
       "phase": "execute",
       "status": "passed",
@@ -1780,6 +2071,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "synthesizable::packages_provide_types_parameters_functions_and_enums",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::positional_ports_and_parameters_bind_in_declaration_order",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1836,6 +2138,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "synthesizable::typedef_unpacked_arrays_are_not_instance_arrays",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1934,10 +2247,10 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 27,
+    "ignored": 32,
     "mismatch": 0,
-    "passed": 117,
-    "rejected": 2,
+    "passed": 134,
+    "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
     "unsupported": 0

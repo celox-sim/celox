@@ -460,10 +460,16 @@ pub(super) fn type_with_fallback_ranges_with_env(
     let direct_ranges =
         packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases);
     if type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases).is_some() {
-        // Use-site dimensions enclose the aliased packed type.
+        // Use-site dimensions enclose the aliased packed type. The packed
+        // array they form is unsigned, whatever its elements (IEEE 1800-2023
+        // 7.4.1); a type name takes no signing of its own.
+        if !direct_ranges.is_empty() {
+            r#type.is_signed = false;
+        }
         let mut ranges = direct_ranges;
         ranges.extend(r#type.packed_ranges);
         r#type.packed_ranges = ranges;
+        return r#type;
     } else if r#type.packed_ranges.is_empty() {
         r#type.packed_ranges = direct_ranges;
     }

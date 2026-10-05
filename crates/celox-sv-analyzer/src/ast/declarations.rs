@@ -210,7 +210,11 @@ pub(super) fn parameters_from_module_node(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
-    if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
+    let parameter_port_list = module_parameter_port_list(node.clone());
+    // IEEE 1800-2023 6.20.1: with a parameter port list, even an empty one,
+    // a `parameter` declared in the module body is a localparam.
+    let body_parameters_are_local = parameter_port_list.is_some();
+    if let Some(parameter_port_list) = parameter_port_list {
         let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list else {
             unreachable!();
         };
@@ -243,7 +247,7 @@ pub(super) fn parameters_from_module_node(
                         RefNode::ParameterDeclaration(&parameter.0),
                         syntax_tree,
                         &mut parameters,
-                        false,
+                        body_parameters_are_local,
                         base_const_env,
                         type_aliases,
                         parameter_overrides,
