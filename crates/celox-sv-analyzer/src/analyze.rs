@@ -11,6 +11,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
     for module in source.modules() {
+        let _constant_functions = module.install_constant_functions();
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
@@ -124,6 +125,19 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             assignments,
             comb_processes,
             ff_processes,
+            module
+                .initial_processes()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+            module.locals().to_vec(),
+            module
+                .subroutines()
+                .iter()
+                .cloned()
+                .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
+                .collect(),
         ));
     }
 

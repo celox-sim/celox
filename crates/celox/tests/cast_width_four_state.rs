@@ -341,7 +341,6 @@ fn identity_cases<B: SimBackend>(sim: &mut Simulator<B>) {
     }
 }
 
-// The SV frontend rejects size casts and four-state always_ff event signals.
 all_backends! {
     fn resize_two_state_unoptimized(sim) {
         @omit_veryl;
@@ -365,7 +364,6 @@ all_backends! {
 
     fn resize_four_state_unoptimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = resize_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)
@@ -376,7 +374,6 @@ all_backends! {
 
     fn resize_four_state_optimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = resize_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)
@@ -407,7 +404,6 @@ all_backends! {
 
     fn context_four_state_unoptimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = context_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)
@@ -418,7 +414,6 @@ all_backends! {
 
     fn context_four_state_optimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = context_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)
@@ -429,7 +424,6 @@ all_backends! {
 
     fn identity_four_state_unoptimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = identity_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)
@@ -440,7 +434,6 @@ all_backends! {
 
     fn identity_four_state_optimized(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = identity_design(); }
         @build Simulator::builder(&code, "Top")
             .four_state(true)

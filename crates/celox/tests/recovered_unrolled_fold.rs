@@ -18,12 +18,10 @@ fn recovered_mmio_read_write_dependencies_are_independent(sim) {
 }
 
 fn recovered_unrolled_store_forward_selects_older_entry(sim) {
-    @ignore_on(sv);
     @case "recovered_unrolled_fold::recovered_unrolled_store_forward_selects_older_entry";
 }
 
 fn recovered_unrolled_multi_state_priority(sim) {
-    @ignore_on(sv);
     @case "recovered_unrolled_fold::recovered_unrolled_multi_state_priority";
 }
 

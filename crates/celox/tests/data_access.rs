@@ -22,7 +22,6 @@ all_backends! {
     }
 
     fn test_dynamic_index_write(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_index_write";
     }
 
@@ -47,12 +46,12 @@ all_backends! {
     }
 
     fn test_genvar_const_in_generate(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "data_access::test_genvar_const_in_generate";
     }
 
     fn test_genvar_dynamic_index_issue21(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "data_access::test_genvar_dynamic_index_issue21";
     }
 
@@ -61,12 +60,10 @@ all_backends! {
     }
 
     fn test_let_index_with_bitslice_write(sim) {
-        @ignore_on(sv);
         @case "data_access::test_let_index_with_bitslice_write";
     }
 
     fn test_let_index_with_bitslice_write_single(sim) {
-        @ignore_on(sv);
         @case "data_access::test_let_index_with_bitslice_write_single";
     }
 
