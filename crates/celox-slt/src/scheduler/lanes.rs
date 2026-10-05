@@ -1157,12 +1157,12 @@ mod tests {
             .unwrap()
     }
 
-    /// `depth` multiplications applied to `node`; `salt` keeps chains apart.
-    fn chain(arena: &mut SLTNodeArena<u32>, mut node: NodeId, depth: u32, salt: u32) -> NodeId {
+    /// `depth` multiplications applied to `node`; `variant` keeps chains apart.
+    fn chain(arena: &mut SLTNodeArena<u32>, mut node: NodeId, depth: u32, variant: u32) -> NodeId {
         for step in 0..depth {
             let constant = arena
                 .alloc(SLTNode::Constant(
-                    BigUint::from(salt * 1000 + step + 3),
+                    BigUint::from(variant * 1000 + step + 3),
                     BigUint::from(0u8),
                     32,
                     false,
