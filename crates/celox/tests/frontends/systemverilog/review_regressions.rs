@@ -1375,7 +1375,7 @@ fn returns_unknown_for_invalid_runtime_array_read_indices() {
         io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
     })
     .unwrap();
-    let all_x = (BigUint::default(), BigUint::from(0xffu16));
+    let all_x = (BigUint::from(0xffu16), BigUint::from(0xffu16));
     assert_eq!(sim.get_four_state(combinational), all_x);
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get_four_state(registered), all_x);
@@ -1452,7 +1452,7 @@ fn returns_unknown_for_invalid_inner_runtime_array_indices() {
     .unwrap();
     assert_eq!(
         sim.get_four_state(selected),
-        (BigUint::default(), BigUint::from(0xffu16))
+        (BigUint::from(0xffu16), BigUint::from(0xffu16))
     );
 }
 

@@ -660,7 +660,7 @@ module Top (
         (assert (== (bit (get rp_q) 0) 1) "in-range bit of a part select read")))))
 
 ; An unknown or out-of-range index neither writes nor reads an element; the
-; read value is unknown (IEEE 1800-2023 7.4.6).
+; read value is X (IEEE 1800-2023 7.4.6).
 (case test_out_of_range_dynamic_ff_access_four_state
   (four_state)
   (source "test.veryl" #"
@@ -707,14 +707,73 @@ module Top (
     (modify (set idx index))
     (tick clk)
     (assert_eq mem_q 0 "out-of-range or unknown index changed an element")
-    (assert_eq (xmask (get rd_q)) 0xff "out-of-range or unknown index read")
+    (assert_eq rd_q (fourstate 0xff 0xff) "out-of-range or unknown index read")
     (modify (set load 1) (set wen 0))
     (tick clk)
     (modify (set load 0) (set wen 1)))
   (modify (set idx 0))
-  ; Out-of-range bits read as unknown, in-range bits keep their value.
-  (for (b expected unknown) (list (0 2 0) (4 2 0) (5 1 2) (6 0 3) (7 0 3))
+  ; Out-of-range bits read as X, in-range bits keep their value.
+  (for (b expected) (list (0 2) (4 2) (5 (fourstate 3 2)) (6 (fourstate 3 3)) (7 (fourstate 3 3)))
     (modify (set base b))
     (tick clk)
-    (assert_eq (xmask (get part_q)) unknown "part select read unknown bits")
-    (assert_eq (& (payload (get part_q)) (~ unknown) 3) expected "part select read")))
+    (assert_eq part_q expected "part select read")))
+
+; A combinational read through an invalid index returns X without reading
+; another variable, and a write through it is a no-op; a partly out-of-range
+; part select reads and writes only its in-range bits (IEEE 1800-2023 7.4.6,
+; 11.5.1).
+(case test_out_of_range_dynamic_comb_access
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    idx   : input  logic<2>,
+    base  : input  logic<3>,
+    v     : input  logic<8>,
+    rd_q  : output logic<8>,
+    mem_q : output logic<24>,
+    part_q: output logic<2>,
+    pw_q  : output logic<6>,
+) {
+    var src : logic<8> [3];
+    var next: logic<8>;
+    var dst : logic<8> [3];
+    var bits: logic<6>;
+    var pw  : logic<6>;
+
+    always_comb {
+        for i in 0..3 {
+            src[i] = 8'h11;
+        }
+        next = 8'hee;
+        bits = 6'b10_1010;
+    }
+
+    always_comb {
+        for i in 0..3 {
+            dst[i] = 8'h00;
+        }
+        dst[idx] = v;
+        pw = 6'h00;
+        pw[base+:2] = 2'b11;
+    }
+
+    assign rd_q   = src[idx];
+    assign mem_q  = {dst[2], dst[1], dst[0]};
+    assign part_q = bits[base+:2];
+    assign pw_q   = pw;
+}
+"#)
+  (top Top)
+  (modify (set v 0xab) (set base 0))
+  (for index (list 3 (fourstate 1 1) (fourstate 2 2))
+    (modify (set idx index))
+    (assert_eq rd_q (fourstate 0xff 0xff) "invalid index read")
+    (assert_eq mem_q 0 "invalid index write"))
+  (modify (set idx 1))
+  (assert_eq rd_q 0x11 "in-range read")
+  (assert_eq mem_q 0xab00 "in-range write")
+  (for (b expected) (list (0 2) (4 2) (5 (fourstate 3 2)) (6 (fourstate 3 3)) (7 (fourstate 3 3)))
+    (modify (set base b))
+    (assert_eq part_q expected "part select read")
+    (assert_eq pw_q (& (<< 3 b) 0x3f) "part select write")))
+
