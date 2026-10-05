@@ -6,6 +6,6 @@ license.workspace = true
 [lib]
 proc-macro = true
 [dependencies]
-syn = { version = "=2.0.119", features = ["full", "visit-mut", "extra-traits"] }
+syn = { version = "=3.0.6", features = ["full", "visit-mut", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
