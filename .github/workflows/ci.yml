@@ -173,12 +173,25 @@ jobs:
       - name: Install Z3 for lydite solver tests
         run: python -m pip install z3-solver==5.1.0
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.144
+
       # Enable the frontend and suite features together so common integration
       # tests run once, rather than once per Cargo feature combination.
+      # nextest schedules tests from all binaries on one pool; `cargo test`
+      # runs the binaries one after another.
       - name: Run workspace tests with CI features
         run: >-
           Z3_BIN="$(command -v z3)"
-          cargo test --locked --workspace
+          cargo nextest run --locked --workspace --profile ci
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+
+      # nextest does not run documentation tests.
+      - name: Run workspace documentation tests with CI features
+        run: >-
+          cargo test --locked --workspace --doc
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
 
       - name: Verify default-feature library and documentation tests

@@ -107,11 +107,19 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
+    let condition = process
+        .condition
+        .map(|condition| substitute_const_expr_constants(condition, const_env));
+    if process.assignments.is_empty() {
+        let mut body = process.body;
+        for stmt in &mut body {
+            procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+        }
+        return CombProcess::procedural(process.kind, condition, body);
+    }
     CombProcess::new(
         process.kind,
-        process
-            .condition
-            .map(|condition| substitute_const_expr_constants(condition, const_env)),
+        condition,
         process
             .assignments
             .into_iter()
@@ -123,17 +131,6 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
                 )
             })
             .collect(),
-    )
-}
-
-pub(super) fn substitute_assignment_constants(
-    assignment: Assignment,
-    const_env: &HashMap<String, i128>,
-) -> Assignment {
-    substitute_assignment_constants_with_parameter_literals(
-        assignment,
-        const_env,
-        &HashMap::default(),
     )
 }
 
@@ -525,11 +522,25 @@ fn const_expr_from_primary(
             ) {
                 return None;
             }
-            identifier_text(
+            let ident = identifier_text(
                 RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
                 syntax_tree,
             )
-            .map(ConstExpr::Ident)
+            .map(ConstExpr::Ident)?;
+            // A single bit-select is kept; other selections need the typed
+            // expression path and must not be dropped here.
+            let select = &hierarchical.nodes.2;
+            if select.nodes.0.is_some() || select.nodes.2.is_some() {
+                return None;
+            }
+            match select.nodes.1.nodes.0.as_slice() {
+                [] => Some(ident),
+                [bit] => Some(ConstExpr::Select {
+                    expr: Box::new(ident),
+                    bit: Box::new(const_expr_from_expr(&bit.nodes.1, syntax_tree)?),
+                }),
+                _ => None,
+            }
         }
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             const_expr_from_function_subroutine_call(call, syntax_tree)

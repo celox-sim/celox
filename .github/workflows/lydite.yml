@@ -54,7 +54,7 @@ defaults:
 
 jobs:
   documentation:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,7 +63,7 @@ jobs:
         run: python3 scripts/check_docs.py
 
   editor:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -95,7 +95,7 @@ jobs:
   # celox-replay and veryl-proof use the in-tree Celox; the narrow veryl gate
   # checks lydite's own Veryl lowering against a pinned upstream corpus.
   celox-replay:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -116,7 +116,7 @@ jobs:
           retention-days: 14
 
   veryl-fv:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -125,6 +125,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      # The conformance gates are pinned to Python 3.12.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Extract, lower and verify the pinned Veryl corpus
         run: ./conformance/veryl/run_ci.sh "$RUNNER_TEMP/veryl-conformance"
       - name: Upload complete conformance evidence
@@ -137,7 +141,7 @@ jobs:
           retention-days: 14
 
   veryl-proof-corpus:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -146,6 +150,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      # The conformance gates are pinned to Python 3.12.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Run every reusable suite case with proof-backed reads
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants

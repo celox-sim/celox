@@ -38,6 +38,13 @@ test("Rust changes exercise native builds and JavaScript bindings", () => {
   );
 });
 
+test("test runner configuration changes exercise Rust", () => {
+  assert.deepEqual(
+    classifyFiles([".config/nextest.toml"]),
+    { ...all, docs: false, scripts: false },
+  );
+});
+
 test("JavaScript changes skip Rust tests and the ARM64 native build", () => {
   assert.deepEqual(classifyFiles(["packages/celox/src/index.ts"]), {
     ...none,

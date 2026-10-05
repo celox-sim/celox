@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
-    RegionedVarAddrBase, RuntimeErrorInfo, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION,
+    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use celox_frontend_core::symbolic::artifact::{
     ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
@@ -22,8 +22,8 @@ use celox_frontend_core::{
     SourceLocation, SourceVarId, VariableKind, symbolic::width::coerce_node_width,
 };
 use celox_sir::{
-    BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue, merge_sir_eus,
+    BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
+    merge_sir_eus,
 };
 use celox_slt::{
     CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, NodeId, SLTIndex, SLTIndexKind,
@@ -32,6 +32,10 @@ use celox_slt::{
 use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
+
+mod comb;
+mod ff;
+mod procedural;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
@@ -57,6 +61,8 @@ struct SvVariable {
     kind: VariableKind,
     type_kind: PortTypeKind,
     source: Option<SourceLocation>,
+    /// A procedural local or a lowering temporary: not addressable by name.
+    hidden: bool,
 }
 
 impl SvVariable {
@@ -78,7 +84,7 @@ impl SvVariable {
                 .map(|(left, right)| left.abs_diff(*right) as usize + 1)
                 .collect(),
             source: self.source.clone(),
-            module_affiliated: true,
+            module_affiliated: !self.hidden,
         }
     }
 }
@@ -473,44 +479,37 @@ fn local_driver_ranges(
 ) -> Vec<(usize, Option<(i128, i128)>)> {
     let mut drivers = Vec::new();
     let mut driver_id = 0;
+    let body_drivers = |drivers: &mut Vec<_>, body: &[sv::ir::Stmt], driver_id: usize| {
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                let lvalues: Vec<&sv::ir::LValue> = match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => vec![lhs],
+                    sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for lvalue in lvalues {
+                    if lvalue.name() == signal_name {
+                        drivers.push((
+                            driver_id,
+                            net_lvalue_range(lvalue, constants, parameter_types),
+                        ));
+                    }
+                }
+            });
+        }
+    };
     for process in module.comb_processes() {
         let active = process.condition().is_none_or(|condition| {
             sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
                 .is_none_or(|value| value != 0)
         });
         if active {
-            for assignment in process.assignments() {
-                if assignment.lhs() == signal_name {
-                    drivers.push((
-                        driver_id,
-                        net_lvalue_range(assignment.lhs_value(), constants, parameter_types),
-                    ));
-                }
-                if process.kind() == sv::ir::CombProcessKind::ContinuousAssign {
-                    driver_id += 1;
-                }
-            }
-            if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
-                driver_id += 1;
-            }
-        } else {
-            driver_id += 1;
+            body_drivers(&mut drivers, process.body(), driver_id);
         }
+        driver_id += 1;
     }
     for process in module.ff_processes() {
-        drivers.extend(
-            process
-                .assignments()
-                .iter()
-                .map(|assignment| assignment.assignment())
-                .filter(|assignment| assignment.lhs() == signal_name)
-                .map(|assignment| {
-                    (
-                        driver_id,
-                        net_lvalue_range(assignment.lhs_value(), constants, parameter_types),
-                    )
-                }),
-        );
+        body_drivers(&mut drivers, process.body(), driver_id);
         driver_id += 1;
     }
     drivers
@@ -925,6 +924,7 @@ fn lower_module_with_overrides(
             kind,
             type_kind: type_info.type_kind,
             source: None,
+            hidden: false,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -968,6 +968,7 @@ fn lower_module_with_overrides(
             kind: VariableKind::Variable,
             type_kind: type_info.type_kind,
             source: None,
+            hidden: false,
         };
         name_to_id.insert(signal.name().to_string(), id);
         if signal.is_net() || type_info.is_4state {
@@ -989,16 +990,43 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
-    let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
-        lower_ff_processes(
+    procedural::register_locals(
+        module,
+        &mut variables,
+        &mut name_to_id,
+        &mut next_id,
+        &constants,
+        &parameter_types,
+    )?;
+    let (
+        (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map),
+        runtime_event_sites,
+        runtime_errors,
+    ) = {
+        let mut pm = procedural::ProcModule::new(
             module,
-            &variables,
-            &name_to_id,
+            &mut variables,
+            &mut name_to_id,
             &constants,
             &parameter_types,
             four_state,
-        )?;
+        );
+        let blocks = lower_ff_processes(module, &mut pm)?;
+        (
+            blocks,
+            std::mem::take(&mut pm.runtime_event_sites),
+            std::mem::take(&mut pm.runtime_errors),
+        )
+    };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
+    initial_memory_values.extend(lower_initial_processes(
+        module,
+        &mut variables,
+        &mut name_to_id,
+        &constants,
+        &parameter_types,
+        four_state,
+    )?);
 
     let shared_variables = variables
         .iter()
@@ -1081,8 +1109,8 @@ fn lower_module_with_overrides(
             instance_index_bases: HashMap::default(),
             comb_blocks: Vec::new(),
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
-            runtime_errors: HashMap::<i64, RuntimeErrorInfo<SourceVarId>>::default(),
-            runtime_event_sites: Vec::new(),
+            runtime_errors,
+            runtime_event_sites,
             initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
@@ -1424,25 +1452,42 @@ pub(crate) fn attach_instance_glue(
         )?;
         resolved_instances.push((instance, child_id, child, connections));
     }
-    let (comb_blocks, arena) = lower_comb_processes(
+    let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
         &lowered.source,
-        &parent_variables,
-        &signal_names,
+        &mut parent_variables,
+        &mut signal_names,
         &lowered.constants,
         &lowered.parameter_types,
         four_state,
     )
-    .map_err(|error| {
-        ParserError::unsupported(
+    .map_err(|error| match error {
+        sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
+            detail,
+            source_location: None,
+        },
+        error => ParserError::unsupported(
             error.tracking_issue(),
             LoweringPhase::SimulatorParser,
             "systemverilog combinational process lowering",
             error.to_string(),
             None,
-        )
+        ),
     })?;
     module.comb_blocks = comb_blocks;
     module.arena = arena;
+    // Combinational event sites follow the flip-flop ones.
+    let site_base = module.runtime_event_sites.len() as u32;
+    for mut observer in comb_observers {
+        observer.site_id += site_base;
+        observer.activation_group += site_base;
+        module.comb_observers.push(observer);
+    }
+    module.runtime_event_sites.extend(comb_sites);
+    for id in created {
+        module
+            .variables
+            .insert(id, parent_variables[&id].to_symbolic_variable());
+    }
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -1513,10 +1558,26 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 else {
                     unreachable!()
                 };
+                let else_expr = expr_for_state_mode(else_expr, four_state);
+                // The unknown result has the width and signedness of the
+                // division: an X operand makes the whole sum X (IEEE 1800-2023
+                // 11.4.3), and `'x` alone would make the result unsigned.
+                let unknown = match &else_expr {
+                    sv::ir::Expr::Binary { left, right, .. } => sv::ir::Expr::Binary {
+                        left: Box::new(sv::ir::Expr::Binary {
+                            left: left.clone(),
+                            op: sv::ir::BinaryOp::Add,
+                            right: right.clone(),
+                        }),
+                        op: sv::ir::BinaryOp::Add,
+                        right: Box::new(sv::ir::Expr::Literal("1'sbx".to_string())),
+                    },
+                    _ => sv::ir::Expr::Literal("'x".to_string()),
+                };
                 sv::ir::Expr::Mux {
                     condition: Box::new(expr_for_state_mode(condition, four_state)),
-                    then_expr: Box::new(sv::ir::Expr::Literal("'x".to_string())),
-                    else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+                    then_expr: Box::new(unknown),
+                    else_expr: Box::new(else_expr),
                 }
             } else {
                 expr_for_state_mode(else_expr, four_state)
@@ -1601,16 +1662,82 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
     }
 }
 
-fn lower_comb_processes(
+/// The initial state `initial` blocks define (IEEE 1800-2023 9.2.1): their
+/// bodies run once, before any other process, so each must compute constant
+/// values. The hidden variables used while executing them are discarded.
+fn lower_initial_processes(
     module: &sv::ir::Module,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
+    variables: &mut HashMap<SourceVarId, SvVariable>,
+    name_to_id: &mut HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
-) -> Result<(Vec<LogicPath<SourceVarId>>, SLTNodeArena<SourceVarId>), sv::AnalyzerError> {
+) -> Result<Vec<InitialStateValue<SourceVarId>>, sv::AnalyzerError> {
+    if module.initial_processes().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut values = Vec::new();
+    let mut pm = procedural::ProcModule::new(
+        module,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        four_state,
+    );
+    for process in module.initial_processes() {
+        if let Some(condition) = process.condition() {
+            let condition =
+                sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
+                    .ok_or_else(|| {
+                        procedural::unsupported("unknown conditional-generate condition")
+                    })?;
+            if condition == 0 {
+                continue;
+            }
+        }
+        let mut arena = SLTNodeArena::new();
+        let mut comb = comb::Comb::new(&mut pm, &mut arena);
+        values.extend(comb.lower_initial(process.body())?);
+    }
+    let created = std::mem::take(&mut pm.created);
+    for id in created {
+        if let Some(variable) = variables.remove(&id) {
+            name_to_id.remove(&variable.path.join("."));
+        }
+    }
+    Ok(values)
+}
+
+fn lower_comb_processes(
+    module: &sv::ir::Module,
+    variables: &mut HashMap<SourceVarId, SvVariable>,
+    name_to_id: &mut HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
+) -> Result<
+    (
+        Vec<LogicPath<SourceVarId>>,
+        SLTNodeArena<SourceVarId>,
+        Vec<SourceVarId>,
+        Vec<CombObserver<SourceVarId>>,
+        Vec<RuntimeEventSite>,
+    ),
+    sv::AnalyzerError,
+> {
     let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
+    let mut observers = Vec::new();
+    let mut sites = Vec::new();
+    let mut pm = procedural::ProcModule::new(
+        module,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        four_state,
+    );
     for process in module.comb_processes() {
         if let Some(condition) = process.condition() {
             let condition =
@@ -1624,17 +1751,20 @@ fn lower_comb_processes(
                 continue;
             }
         }
-        comb_blocks.extend(lower_comb_process(
-            process,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            &mut arena,
-            four_state,
-        )?);
+        let mut comb = comb::Comb::new(&mut pm, &mut arena);
+        comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
+        comb_blocks.extend(comb.lower_process(process.body())?);
+        // The sites of one process activate together.
+        let base = sites.len() as u32;
+        for mut observer in std::mem::take(&mut comb.observers) {
+            observer.site_id += base;
+            observer.activation_group = base;
+            observers.push(observer);
+        }
+        sites.append(&mut comb.sites);
     }
-    Ok((comb_blocks, arena))
+    let created = std::mem::take(&mut pm.created);
+    Ok((comb_blocks, arena, created, observers, sites))
 }
 
 fn ensure_parent_output_signals(
@@ -1723,6 +1853,7 @@ fn ensure_parent_output_signals(
             kind: VariableKind::Variable,
             type_kind: PortTypeKind::Logic,
             source: None,
+            hidden: false,
         };
         parent
             .variables
@@ -2868,279 +2999,6 @@ fn signal_type_from_sv(
     })
 }
 
-struct PreviousArrayValue {
-    expr: NodeId,
-    sources: HashSet<VarAtomBase<SourceVarId>>,
-    previous_sources: HashSet<VarAtomBase<SourceVarId>>,
-    address_sources: HashSet<VarAtomBase<SourceVarId>>,
-}
-
-fn lower_previous_array_value(
-    id: SourceVarId,
-    width: usize,
-    paths: &[LogicPath<SourceVarId>],
-) -> Result<Option<PreviousArrayValue>, sv::AnalyzerError> {
-    let mut matching = paths
-        .iter()
-        .filter(|path| path.target.var().is_some_and(|target| target.id == id));
-    let Some(path) = matching.next() else {
-        return Ok(None);
-    };
-    let Some(target) = path.target.var() else {
-        unreachable!("matching path must have a variable target");
-    };
-    if target.access
-        != BitAccess::new(
-            0,
-            width.checked_sub(1).ok_or_else(|| {
-                sv::AnalyzerError::Unsupported("zero-width unpacked array".to_string())
-            })?,
-        )
-    {
-        return Err(sv::AnalyzerError::Unsupported(
-            "dynamic unpacked-array assignment after an earlier partial assignment to the same array is unsupported"
-                .to_string(),
-        ));
-    }
-    Ok(Some(PreviousArrayValue {
-        expr: path.expr,
-        sources: path.sources.clone(),
-        previous_sources: path.previous_sources.clone(),
-        address_sources: path.address_sources.clone(),
-    }))
-}
-
-fn lower_comb_process(
-    process: &sv::ir::CombProcess,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-    four_state: bool,
-) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
-    let assignments = process.assignments();
-    if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
-        for (index, assignment) in assignments.iter().enumerate() {
-            if assignments[index + 1..].iter().any(|later| {
-                later.lhs_value() != assignment.lhs_value()
-                    && expr_references_ident(assignment.rhs(), later.lhs())
-            }) {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "read-before-write dependency inside always_comb".to_string(),
-                ));
-            }
-            for later_index in index + 1..assignments.len() {
-                if assignments[later_index].lhs() != assignment.lhs() {
-                    continue;
-                }
-                if assignments[index + 1..=later_index]
-                    .iter()
-                    .any(|later| expr_references_ident(later.rhs(), assignment.lhs()))
-                {
-                    return Err(sv::AnalyzerError::Unsupported(
-                        "dependent repeated assignment inside always_comb".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    let mut paths = Vec::new();
-    for (index, assignment) in assignments.iter().enumerate() {
-        if process.kind() == sv::ir::CombProcessKind::AlwaysComb
-            && assignments[index + 1..]
-                .iter()
-                .any(|later| later.lhs_value() == assignment.lhs_value())
-        {
-            continue;
-        }
-        let allow_dynamic_array_write = process.kind() == sv::ir::CombProcessKind::AlwaysComb;
-        let previous_array = if allow_dynamic_array_write {
-            if let Some(id) = dynamic_array_element_lvalue(
-                assignment.lhs_value(),
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-            )
-            .map(|(id, _, _, _)| id)
-            .or_else(|| {
-                dynamic_packed_write(
-                    assignment.lhs_value(),
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                )
-                .map(|write| write.id)
-            }) {
-                let width = variables
-                    .get(&id)
-                    .map(|variable| variable.width)
-                    .ok_or_else(|| {
-                        sv::AnalyzerError::Unsupported(
-                            "dynamic unpacked-array assignment target".to_string(),
-                        )
-                    })?;
-                lower_previous_array_value(id, width, &paths)?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let path = lower_assignment(
-            assignment,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            arena,
-            four_state,
-            allow_dynamic_array_write,
-            previous_array.as_ref(),
-        )?;
-        merge_overlapping_comb_path(&mut paths, path, arena)?;
-    }
-    Ok(paths)
-}
-
-fn merge_overlapping_comb_path(
-    paths: &mut Vec<LogicPath<SourceVarId>>,
-    mut later: LogicPath<SourceVarId>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-) -> Result<(), sv::AnalyzerError> {
-    let mut index = 0;
-    while index < paths.len() {
-        let Some(previous_target) = paths[index].target.var() else {
-            index += 1;
-            continue;
-        };
-        let Some(later_target) = later.target.var() else {
-            break;
-        };
-        if previous_target.id != later_target.id
-            || !previous_target.access.overlaps(&later_target.access)
-        {
-            index += 1;
-            continue;
-        }
-        let previous = paths.remove(index);
-        later = overlay_comb_paths(previous, later, arena)?;
-    }
-    paths.push(later);
-    Ok(())
-}
-
-fn overlay_comb_paths(
-    previous: LogicPath<SourceVarId>,
-    later: LogicPath<SourceVarId>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
-    let previous_target = previous.target.var().expect("variable path target");
-    let later_target = later.target.var().expect("variable path target");
-    debug_assert_eq!(previous_target.id, later_target.id);
-    debug_assert!(previous_target.access.overlaps(&later_target.access));
-
-    let access = BitAccess::new(
-        previous_target.access.lsb.min(later_target.access.lsb),
-        previous_target.access.msb.max(later_target.access.msb),
-    );
-    let end = access.msb.checked_add(1).ok_or_else(|| {
-        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
-    })?;
-    let previous_end = previous_target.access.msb.checked_add(1).ok_or_else(|| {
-        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
-    })?;
-    let later_end = later_target.access.msb.checked_add(1).ok_or_else(|| {
-        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
-    })?;
-    let mut boundaries = vec![
-        access.lsb,
-        end,
-        previous_target.access.lsb,
-        previous_end,
-        later_target.access.lsb,
-        later_end,
-    ];
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    let mut nodes = Vec::new();
-    let mut uses_previous = false;
-    let mut uses_later = false;
-    for bounds in boundaries.windows(2).rev() {
-        let segment = BitAccess::new(bounds[0], bounds[1] - 1);
-        let (path, target) =
-            if later_target.access.lsb <= segment.lsb && segment.msb <= later_target.access.msb {
-                uses_later = true;
-                (&later, later_target)
-            } else {
-                uses_previous = true;
-                (&previous, previous_target)
-            };
-        let relative = BitAccess::new(
-            segment.lsb - target.access.lsb,
-            segment.msb - target.access.lsb,
-        );
-        let node = if relative == BitAccess::new(0, target.access.msb - target.access.lsb) {
-            path.expr
-        } else {
-            arena
-                .alloc(SLTNode::Slice {
-                    expr: path.expr,
-                    access: relative,
-                })
-                .map_err(|error| {
-                    sv::AnalyzerError::Unsupported(format!(
-                        "overlapping always_comb assignment: {error}"
-                    ))
-                })?
-        };
-        nodes.push((node, segment.msb - segment.lsb + 1));
-    }
-    let expr = if nodes.len() == 1 {
-        nodes[0].0
-    } else {
-        arena.alloc(SLTNode::Concat(nodes)).map_err(|error| {
-            sv::AnalyzerError::Unsupported(format!("overlapping always_comb assignment: {error}"))
-        })?
-    };
-    let mut sources = HashSet::default();
-    if uses_previous {
-        sources.extend(previous.sources);
-    }
-    if uses_later {
-        sources.extend(later.sources);
-    }
-    let mut previous_sources = HashSet::default();
-    if uses_previous {
-        previous_sources.extend(previous.previous_sources);
-    }
-    if uses_later {
-        previous_sources.extend(later.previous_sources);
-    }
-    let mut address_sources = HashSet::default();
-    if uses_previous {
-        address_sources.extend(previous.address_sources);
-    }
-    if uses_later {
-        address_sources.extend(later.address_sources);
-    }
-    Ok(LogicPath {
-        target: LogicPathTarget::Var(VarAtomBase::new(previous_target.id, access.lsb, access.msb)),
-        expr,
-        sources,
-        address_sources,
-        previous_sources,
-        local_inputs: Vec::new(),
-        order_before: HashSet::default(),
-        comb_capture_enable_sites: Vec::new(),
-        comb_capture_enable_always: false,
-        pre_lower_nodes: Vec::new(),
-    })
-}
-
 fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
     match expr {
         sv::ir::Expr::Ident(ident) => ident == name,
@@ -3174,148 +3032,8 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
     }
 }
 
-fn lower_dynamic_array_write_expr(
-    lvalue: &sv::ir::LValue,
-    rhs: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-    previous_array: Option<&PreviousArrayValue>,
-) -> Option<(
-    LogicPathTarget<SourceVarId>,
-    celox_slt::NodeId,
-    HashSet<VarAtomBase<SourceVarId>>,
-    HashSet<VarAtomBase<SourceVarId>>,
-)> {
-    let (id, element_width, offset, access) =
-        dynamic_array_element_lvalue(lvalue, variables, name_to_id, constants, parameter_types)?;
-    let variable = variables.get(&id)?;
-    let element_count = variable.width.checked_div(element_width)?;
-    if element_count == 0 {
-        return None;
-    }
-    let array_width = variable.width;
-    let target_width = access.msb - access.lsb + 1;
-    let (rhs_node, mut sources) = if let sv::ir::Expr::Literal(literal) = rhs
-        && let Some(fill) = unbased_fill_literal(literal)
-    {
-        (
-            lower_unbased_fill_literal_slt(arena, fill, target_width)?,
-            HashSet::default(),
-        )
-    } else {
-        lower_expr_with_context(
-            rhs,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            arena,
-            Some(target_width),
-            Some(sv_expr_is_signed_with_parameters(
-                rhs,
-                variables,
-                name_to_id,
-                parameter_types,
-            )),
-        )?
-    };
-    let rhs_node = coerce_node_width(
-        arena,
-        rhs_node,
-        Some(target_width),
-        sv_expr_is_signed_with_parameters(rhs, variables, name_to_id, parameter_types),
-    )
-    .ok()?;
-    let (element_index, index_sources) = lower_dynamic_array_element_index_slt(
-        &offset,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        arena,
-        element_width,
-    )?;
-    sources.extend(index_sources);
-    let (old, previous_sources) = if let Some(previous_array) = previous_array {
-        sources.extend(previous_array.sources.iter().copied());
-        sources.extend(previous_array.address_sources.iter().copied());
-        (previous_array.expr, previous_array.previous_sources.clone())
-    } else {
-        let previous_sources = [VarAtomBase::new(id, 0, array_width.checked_sub(1)?)]
-            .into_iter()
-            .collect();
-        let old = arena
-            .alloc(SLTNode::Input {
-                variable: id,
-                signed: variable.signed,
-                index: Vec::new(),
-                access: BitAccess::new(0, array_width - 1),
-            })
-            .ok()?;
-        (old, previous_sources)
-    };
-    let mut parts = Vec::with_capacity(element_count);
-    for element in (0..element_count).rev() {
-        let lsb = element.checked_mul(element_width)?;
-        let old_element = arena
-            .alloc(SLTNode::Slice {
-                expr: old,
-                access: BitAccess::new(lsb, lsb + element_width - 1),
-            })
-            .ok()?;
-        let element_literal = arena
-            .alloc(SLTNode::Constant(
-                BigUint::from(element),
-                BigUint::default(),
-                64,
-                false,
-            ))
-            .ok()?;
-        let condition = arena
-            .alloc(SLTNode::Binary(
-                element_index,
-                BinaryOp::EqCase,
-                element_literal,
-            ))
-            .ok()?;
-        let updated_element = replace_slt_slice(
-            arena,
-            old_element,
-            rhs_node,
-            access.lsb,
-            target_width,
-            element_width,
-        )?;
-        let updated = arena
-            .alloc(SLTNode::Mux {
-                cond: condition,
-                then_expr: updated_element,
-                else_expr: old_element,
-            })
-            .ok()?;
-        parts.push((updated, element_width));
-    }
-    let expr = if parts.len() == 1 {
-        parts[0].0
-    } else {
-        arena.alloc(SLTNode::Concat(parts)).ok()?
-    };
-    Some((
-        LogicPathTarget::Var(VarAtomBase::new(id, 0, array_width - 1)),
-        expr,
-        sources,
-        previous_sources,
-    ))
-}
-
 /// A write to a packed vector whose selected position is a runtime value.
 struct DynamicPackedWrite {
-    id: SourceVarId,
-    /// Width of the whole vector.
-    vector_width: usize,
     /// Number of bits written.
     select_width: usize,
     /// Where the selected bits sit; see [`RuntimePosition`].
@@ -3353,179 +3071,11 @@ fn dynamic_packed_write(
     )?;
     (variable.array_dims.is_empty() && position.width <= variable.width).then_some(
         DynamicPackedWrite {
-            id,
-            vector_width: variable.width,
             select_width: position.width,
             up: position.up,
             down: position.down,
         },
     )
-}
-
-/// Lower `v[start +: W] = rhs` with a runtime `start` as a read-modify-write of
-/// the whole vector: `(old & ~(mask << low)) | (rhs << low)`. Bits that would
-/// land outside the vector are dropped by the shift.
-fn lower_dynamic_packed_write_expr(
-    lvalue: &sv::ir::LValue,
-    rhs: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-    previous: Option<&PreviousArrayValue>,
-) -> Option<(
-    LogicPathTarget<SourceVarId>,
-    celox_slt::NodeId,
-    HashSet<VarAtomBase<SourceVarId>>,
-    HashSet<VarAtomBase<SourceVarId>>,
-)> {
-    let write = dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types)?;
-    let variable = variables.get(&write.id)?;
-    let rhs_signed = sv_expr_is_signed_with_parameters(rhs, variables, name_to_id, parameter_types);
-    let (rhs_node, mut sources) = if let sv::ir::Expr::Literal(literal) = rhs
-        && let Some(fill) = unbased_fill_literal(literal)
-    {
-        (
-            lower_unbased_fill_literal_slt(arena, fill, write.select_width)?,
-            HashSet::default(),
-        )
-    } else {
-        lower_expr_with_context(
-            rhs,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            arena,
-            Some(write.select_width),
-            Some(rhs_signed),
-        )?
-    };
-    let rhs_node = coerce_node_width(arena, rhs_node, Some(write.select_width), rhs_signed).ok()?;
-    let rhs_node = coerce_node_width(arena, rhs_node, Some(write.vector_width), false).ok()?;
-    let (up, up_sources) = lower_expr_with_context(
-        &write.up,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        arena,
-        None,
-        Some(false),
-    )?;
-    let (down, down_sources) = lower_expr_with_context(
-        &write.down,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        arena,
-        None,
-        Some(false),
-    )?;
-    sources.extend(up_sources);
-    sources.extend(down_sources);
-    let (old, previous_sources) = if let Some(previous) = previous {
-        sources.extend(previous.sources.iter().copied());
-        sources.extend(previous.address_sources.iter().copied());
-        (previous.expr, previous.previous_sources.clone())
-    } else {
-        let previous_sources = [VarAtomBase::new(
-            write.id,
-            0,
-            write.vector_width.checked_sub(1)?,
-        )]
-        .into_iter()
-        .collect();
-        let old = arena
-            .alloc(SLTNode::Input {
-                variable: write.id,
-                signed: variable.signed,
-                index: Vec::new(),
-                access: BitAccess::new(0, write.vector_width - 1),
-            })
-            .ok()?;
-        (old, previous_sources)
-    };
-    let select_mask = (BigUint::from(1u8) << write.select_width) - BigUint::from(1u8);
-    let mask = arena
-        .alloc(SLTNode::Constant(
-            select_mask,
-            BigUint::default(),
-            write.vector_width,
-            false,
-        ))
-        .ok()?;
-    let mut place = |value| -> Option<celox_slt::NodeId> {
-        let raised = arena
-            .alloc(SLTNode::Binary(value, BinaryOp::Shl, up))
-            .ok()?;
-        arena
-            .alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
-            .ok()
-    };
-    let shifted_mask = place(mask)?;
-    let shifted_rhs = place(rhs_node)?;
-    let keep_mask = arena
-        .alloc(SLTNode::Unary(UnaryOp::BitNot, shifted_mask))
-        .ok()?;
-    let kept = arena
-        .alloc(SLTNode::Binary(old, BinaryOp::And, keep_mask))
-        .ok()?;
-    let updated = arena
-        .alloc(SLTNode::Binary(kept, BinaryOp::Or, shifted_rhs))
-        .ok()?;
-    Some((
-        LogicPathTarget::Var(VarAtomBase::new(
-            write.id,
-            0,
-            write.vector_width.checked_sub(1)?,
-        )),
-        updated,
-        sources,
-        previous_sources,
-    ))
-}
-
-fn replace_slt_slice<A: std::hash::Hash + Eq + Clone>(
-    arena: &mut SLTNodeArena<A>,
-    current: NodeId,
-    replacement: NodeId,
-    lsb: usize,
-    replacement_width: usize,
-    total_width: usize,
-) -> Option<NodeId> {
-    if lsb == 0 && replacement_width == total_width {
-        return Some(replacement);
-    }
-    let end = lsb.checked_add(replacement_width)?;
-    if end > total_width {
-        return None;
-    }
-
-    let mut parts = Vec::with_capacity(3);
-    if end < total_width {
-        let upper_width = total_width - end;
-        let upper = arena
-            .alloc(SLTNode::Slice {
-                expr: current,
-                access: BitAccess::new(end, total_width - 1),
-            })
-            .ok()?;
-        parts.push((upper, upper_width));
-    }
-    parts.push((replacement, replacement_width));
-    if lsb != 0 {
-        let lower = arena
-            .alloc(SLTNode::Slice {
-                expr: current,
-                access: BitAccess::new(0, lsb - 1),
-            })
-            .ok()?;
-        parts.push((lower, lsb));
-    }
-    arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
 fn permute_reversed_lvalue_rhs_slt(
@@ -3572,225 +3122,6 @@ fn permute_reversed_lvalue_rhs_slt(
     arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
-fn lower_assignment(
-    assignment: &sv::ir::Assignment,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<SourceVarId>,
-    four_state: bool,
-    allow_dynamic_array_write: bool,
-    previous_array: Option<&PreviousArrayValue>,
-) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
-    let rhs = expr_for_state_mode(assignment.rhs(), four_state);
-    let dynamic_write = if allow_dynamic_array_write {
-        lower_dynamic_array_write_expr(
-            assignment.lhs_value(),
-            &rhs,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            arena,
-            previous_array,
-        )
-        .or_else(|| {
-            lower_dynamic_packed_write_expr(
-                assignment.lhs_value(),
-                &rhs,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arena,
-                previous_array,
-            )
-        })
-    } else {
-        None
-    };
-    if let Some((target, expr, sources, previous_sources)) = dynamic_write {
-        let target_width = target
-            .var()
-            .map(|target| target.access.msb - target.access.lsb + 1)
-            .ok_or_else(|| {
-                sv::AnalyzerError::Unsupported(format!(
-                    "combinational assignment target `{}`",
-                    assignment.lhs()
-                ))
-            })?;
-        let mut expr = coerce_node_width(
-            arena,
-            expr,
-            Some(target_width),
-            sv_expr_is_signed_with_parameters(&rhs, variables, name_to_id, parameter_types),
-        )
-        .map_err(|error| {
-            sv::AnalyzerError::Unsupported(format!(
-                "combinational assignment width coercion for `{}`: {error}",
-                assignment.lhs()
-            ))
-        })?;
-        let target_is_two_state = target
-            .var()
-            .and_then(|target| variables.get(&target.id))
-            .is_some_and(|variable| !variable.is_4state);
-        if target_is_two_state || (!four_state && expr_is_unknown_literal(&rhs)) {
-            expr = arena
-                .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))
-                .map_err(|error| {
-                    sv::AnalyzerError::Unsupported(format!(
-                        "two-state conversion for `{}`: {error}",
-                        assignment.lhs()
-                    ))
-                })?;
-        }
-        return Ok(LogicPath {
-            target,
-            expr,
-            sources,
-            address_sources: HashSet::default(),
-            previous_sources,
-            local_inputs: Vec::new(),
-            order_before: HashSet::default(),
-            comb_capture_enable_sites: Vec::new(),
-            comb_capture_enable_always: false,
-            pre_lower_nodes: Vec::new(),
-        });
-    }
-    let target = lower_lvalue_target(
-        assignment.lhs_value(),
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-    )
-    .ok_or_else(|| {
-        sv::AnalyzerError::Unsupported(format!(
-            "combinational assignment target `{}`",
-            assignment.lhs()
-        ))
-    })?;
-    let target_width = target
-        .var()
-        .map(|target| target.access.msb - target.access.lsb + 1)
-        .ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "combinational assignment target `{}`",
-                assignment.lhs()
-            ))
-        })?;
-    let (expr, sources) = if let sv::ir::Expr::Literal(literal) = &rhs
-        && let Some(fill) = unbased_fill_literal(literal)
-    {
-        (
-            lower_unbased_fill_literal_slt(arena, fill, target_width).ok_or_else(|| {
-                sv::AnalyzerError::Unsupported(format!("combinational expression `{literal}`"))
-            })?,
-            HashSet::default(),
-        )
-    } else {
-        lower_expr_with_context(
-            &rhs,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            arena,
-            Some(target_width),
-            Some(sv_expr_is_signed_with_parameters(
-                &rhs,
-                variables,
-                name_to_id,
-                parameter_types,
-            )),
-        )
-        .ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "combinational expression assigned to `{}`",
-                assignment.lhs()
-            ))
-        })?
-    };
-    let mut expr = coerce_node_width(
-        arena,
-        expr,
-        Some(target_width),
-        sv_expr_is_signed_with_parameters(&rhs, variables, name_to_id, parameter_types),
-    )
-    .map_err(|error| {
-        sv::AnalyzerError::Unsupported(format!(
-            "combinational assignment width coercion for `{}`: {error}",
-            assignment.lhs()
-        ))
-    })?;
-    expr = permute_reversed_lvalue_rhs_slt(
-        assignment.lhs_value(),
-        expr,
-        target_width,
-        constants,
-        parameter_types,
-        arena,
-    )
-    .ok_or_else(|| {
-        sv::AnalyzerError::Unsupported(format!(
-            "combinational assignment lvalue order for `{}`",
-            assignment.lhs()
-        ))
-    })?;
-    let target_is_two_state = target
-        .var()
-        .and_then(|target| variables.get(&target.id))
-        .is_some_and(|variable| !variable.is_4state);
-    if target_is_two_state || (!four_state && expr_is_unknown_literal(&rhs)) {
-        expr = arena
-            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))
-            .map_err(|error| {
-                sv::AnalyzerError::Unsupported(format!(
-                    "two-state conversion for `{}`: {error}",
-                    assignment.lhs()
-                ))
-            })?;
-    }
-    Ok(LogicPath {
-        target,
-        expr,
-        sources,
-        address_sources: HashSet::default(),
-        previous_sources: HashSet::default(),
-        local_inputs: Vec::new(),
-        order_before: HashSet::default(),
-        comb_capture_enable_sites: Vec::new(),
-        comb_capture_enable_always: false,
-        pre_lower_nodes: Vec::new(),
-    })
-}
-
-fn lower_lvalue_target(
-    lvalue: &sv::ir::LValue,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<LogicPathTarget<SourceVarId>> {
-    let target_id = *name_to_id.get(lvalue.name())?;
-    let target_width = variables.get(&target_id)?.width;
-    let (lsb, msb) = match lvalue {
-        sv::ir::LValue::Ident(_) => (0, target_width.checked_sub(1)?),
-        sv::ir::LValue::Select { msb, lsb, .. } => {
-            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
-            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
-            let variable = variables.get(&target_id)?;
-            let msb = packed_index_offset(variable, msb)?;
-            let lsb = packed_index_offset(variable, lsb)?;
-            (lsb.min(msb), lsb.max(msb))
-        }
-    };
-    (lsb <= msb && msb < target_width)
-        .then(|| LogicPathTarget::Var(VarAtomBase::new(target_id, lsb, msb)))
-}
-
 // IEEE 1800-2023 20.9: count only known ones; predicates return a two-state bit.
 fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
@@ -3803,7 +3134,44 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
     let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, 1)?;
-    let result = if name == "$isunknown" {
+    let result = if name == "$clog2" {
+        // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
+        // (IEEE 1800-2023 20.8.1).
+        let operand_width = celox_slt::get_width(known, arena);
+        let constant = |arena: &mut SLTNodeArena<A>, value: usize, width: usize| {
+            arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(value),
+                    BigUint::default(),
+                    width,
+                    false,
+                ))
+                .ok()
+        };
+        let one = constant(arena, 1, operand_width)?;
+        let decremented = arena
+            .alloc(SLTNode::Binary(known, BinaryOp::Sub, one))
+            .ok()?;
+        let zeros = arena
+            .alloc(SLTNode::Unary(UnaryOp::CountLeadingZeros, decremented))
+            .ok()?;
+        let zeros = coerce_node_width(arena, zeros, Some(32), false).ok()?;
+        let total = constant(arena, operand_width, 32)?;
+        let bits = arena
+            .alloc(SLTNode::Binary(total, BinaryOp::Sub, zeros))
+            .ok()?;
+        let small = arena
+            .alloc(SLTNode::Binary(known, BinaryOp::LeU, one))
+            .ok()?;
+        let zero = constant(arena, 0, 32)?;
+        arena
+            .alloc(SLTNode::Mux {
+                cond: small,
+                then_expr: zero,
+                else_expr: bits,
+            })
+            .ok()?
+    } else if name == "$isunknown" {
         // Case inequality detects either X or Z, including unknown bits whose
         // value plane is zero and would disappear during two-state conversion.
         arena
@@ -4078,11 +3446,11 @@ fn lower_expr_with_context(
             Some((arena.alloc(SLTNode::Concat(repeated)).ok()?, sources))
         }
         sv::ir::Expr::Literal(literal) => {
-            if let Some(width) = context_width
-                && let Some(fill) = unbased_fill_literal(literal)
-            {
+            if let Some(fill) = unbased_fill_literal(literal) {
+                // In a self-determined context an unbased unsized literal is
+                // one bit wide (IEEE 1800-2023 5.7.1).
                 return Some((
-                    lower_unbased_fill_literal_slt(arena, fill, width)?,
+                    lower_unbased_fill_literal_slt(arena, fill, context_width.unwrap_or(1))?,
                     HashSet::default(),
                 ));
             }
@@ -4121,6 +3489,34 @@ fn lower_expr_with_context(
                 operand_context,
                 context_signed,
             )?;
+            // A self-determined operand (such as a concatenation) is extended
+            // to the context width before the operator applies.
+            let inner = coerce_node_width(
+                arena,
+                inner,
+                operand_context,
+                context_signed.unwrap_or(false),
+            )
+            .ok()?;
+            if *op == sv::ir::UnaryOp::Plus {
+                // Unary plus is arithmetic: an unknown operand bit makes the
+                // whole result unknown (IEEE 1800-2023 11.4.3).
+                let width = celox_slt::get_width(inner, arena);
+                let zero = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::default(),
+                        BigUint::default(),
+                        width,
+                        procedural::node_is_signed(arena, inner),
+                    ))
+                    .ok()?;
+                return Some((
+                    arena
+                        .alloc(SLTNode::Binary(inner, BinaryOp::Add, zero))
+                        .ok()?,
+                    sources,
+                ));
+            }
             Some((
                 arena
                     .alloc(SLTNode::Unary(unary_op_from_sv(*op)?, inner))
@@ -4156,15 +3552,6 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let left_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
-            let operands_signed = left_signed
-                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
-            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                left_signed
-            } else {
-                operands_signed
-            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -4184,12 +3571,67 @@ fn lower_expr_with_context(
             );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            // An unsigned context makes the operands of a context-determined
+            // operator unsigned, and `>>>` a logical shift (IEEE 1800-2023
+            // 11.8.2).
+            let unsigned_context = context_determined && context_signed == Some(false);
+            let left_signed = !unsigned_context
+                && sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                left_signed
+            } else {
+                operands_signed
+            };
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
                     sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                         .unwrap_or(context_width),
                 )
             });
+            if matches!(op, sv::ir::BinaryOp::Pow) {
+                // The base is context-determined and gives the result its
+                // type; the exponent is self-determined (IEEE 1800-2023 11.6.1).
+                let (base, mut sources) = lower_expr_with_context(
+                    left,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    operation_context,
+                    Some(left_signed),
+                )?;
+                let exponent_signed = sv_expr_is_signed_with_parameters(
+                    right,
+                    variables,
+                    name_to_id,
+                    parameter_types,
+                );
+                let (exponent, exponent_sources) = lower_expr_with_context(
+                    right,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    None,
+                    Some(exponent_signed),
+                )?;
+                sources.extend(exponent_sources);
+                let width = celox_slt::get_width(base, arena);
+                let node = celox_frontend_core::symbolic::pow::lower_runtime_pow(
+                    arena,
+                    base,
+                    exponent,
+                    width,
+                    exponent_signed,
+                    left_signed,
+                )
+                .ok()?;
+                return Some((node, sources));
+            }
             let comparison_context = comparison
                 .then(|| {
                     sv_comparison_operand_width(
@@ -4742,7 +4184,8 @@ fn runtime_select_position(
 
 /// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
 /// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
-/// `lsb` index. Positions past the top of the vector read as zero.
+/// `lsb` index. Positions outside the vector read as X in a four-state
+/// vector and as zero in a two-state one.
 fn runtime_select_as_shift(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -5127,188 +4570,6 @@ fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
         .ok()
 }
 
-fn lower_dynamic_array_element_index(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    offset: &sv::ir::ConstExpr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    element_width: usize,
-) -> Option<celox_sir::RegisterId> {
-    let offset_expr = expr_from_const_expr(offset)?;
-    let offset = lower_expr_to_sir_with_context(
-        builder,
-        &offset_expr,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        None,
-        None,
-    )?;
-    let offset = resize_sir_register(builder, offset, 64, false)?;
-    if element_width == 1 {
-        return Some(offset);
-    }
-    let divisor = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(
-        divisor,
-        SIRValue::new(element_width as u64),
-    ));
-    let index = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Binary(
-        index,
-        offset,
-        BinaryOp::DivU,
-        divisor,
-    ));
-    Some(index)
-}
-
-fn lower_dynamic_array_selection_sir(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    address: RegionedVarAddr,
-    index: celox_sir::RegisterId,
-    access: BitAccess,
-    element_width: usize,
-    variable: &SvVariable,
-) -> Option<celox_sir::RegisterId> {
-    let packed_element_width = unpacked_element_width(variable)?;
-    let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
-    if element_width == packed_element_width {
-        let result = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Load(
-            result,
-            address,
-            SIROffset::Element {
-                index,
-                element_width,
-                bit_offset: access.lsb,
-                dynamic_bit_offset: None,
-            },
-            width,
-        ));
-        return Some(result);
-    }
-    if access.lsb != 0 || access.msb.checked_add(1)? != element_width {
-        return None;
-    }
-    let inner_count = element_width.checked_div(packed_element_width)?;
-    let inner_count_value = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(
-        inner_count_value,
-        SIRValue::new(u64::try_from(inner_count).ok()?),
-    ));
-    let scaled_index = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Binary(
-        scaled_index,
-        index,
-        BinaryOp::Mul,
-        inner_count_value,
-    ));
-    let mut values = Vec::with_capacity(inner_count);
-    for inner_index in (0..inner_count).rev() {
-        let element_index = if inner_index == 0 {
-            scaled_index
-        } else {
-            let inner_index_value = builder.alloc_bit(64, false);
-            builder.emit(SIRInstruction::Imm(
-                inner_index_value,
-                SIRValue::new(u64::try_from(inner_index).ok()?),
-            ));
-            let element_index = builder.alloc_bit(64, false);
-            builder.emit(SIRInstruction::Binary(
-                element_index,
-                scaled_index,
-                BinaryOp::Add,
-                inner_index_value,
-            ));
-            element_index
-        };
-        let value = builder.alloc_logic(packed_element_width);
-        builder.emit(SIRInstruction::Load(
-            value,
-            address,
-            SIROffset::Element {
-                index: element_index,
-                element_width: packed_element_width,
-                bit_offset: 0,
-                dynamic_bit_offset: None,
-            },
-            packed_element_width,
-        ));
-        values.push(value);
-    }
-    let result = builder.alloc_logic(width);
-    builder.emit(SIRInstruction::Concat(result, values));
-    Some(result)
-}
-
-fn dynamic_array_index_guard_sir(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    index: celox_sir::RegisterId,
-    element_count: usize,
-) -> Option<(celox_sir::RegisterId, celox_sir::RegisterId)> {
-    let element_count = u64::try_from(element_count).ok()?;
-    let two_state_index = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Unary(
-        two_state_index,
-        UnaryOp::ToTwoState,
-        index,
-    ));
-    let known = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Binary(
-        known,
-        index,
-        BinaryOp::EqCase,
-        two_state_index,
-    ));
-    let bound = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(bound, SIRValue::new(element_count)));
-    let in_range = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Binary(
-        in_range,
-        index,
-        BinaryOp::LtU,
-        bound,
-    ));
-    let valid = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Binary(
-        valid,
-        known,
-        BinaryOp::LogicAnd,
-        in_range,
-    ));
-    let zero = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-    let safe_index = builder.alloc_bit(64, false);
-    builder.emit(SIRInstruction::Mux(safe_index, valid, index, zero));
-    Some((safe_index, valid))
-}
-
-fn guard_dynamic_array_read_sir(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    valid: celox_sir::RegisterId,
-    value: celox_sir::RegisterId,
-    value_width: usize,
-    is_4state: bool,
-) -> celox_sir::RegisterId {
-    let unknown = builder.alloc_logic(value_width);
-    if is_4state {
-        let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
-        builder.emit(SIRInstruction::Imm(
-            unknown,
-            SIRValue::new_four_state(BigUint::default(), unknown_mask),
-        ));
-    } else {
-        builder.emit(SIRInstruction::Imm(unknown, SIRValue::new(0u8)));
-    }
-    let guarded = builder.alloc_logic(value_width);
-    builder.emit(SIRInstruction::Mux(guarded, valid, value, unknown));
-    guarded
-}
-
 type SvFfBlocks = (
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
@@ -5318,11 +4579,7 @@ type SvFfBlocks = (
 
 fn lower_ff_processes(
     module: &sv::ir::Module,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    four_state: bool,
+    pm: &mut procedural::ProcModule<'_>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
@@ -5334,24 +4591,16 @@ fn lower_ff_processes(
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        let clock_id = *name_to_id
-            .get(clock.signal())
+        let clock_id = pm
+            .id(clock.signal())
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        if variables
+        if pm
+            .variables
             .get(&clock_id)
             .is_some_and(|variable| variable.width != 1)
         {
             return Err(sv::AnalyzerError::Unsupported(
                 "multi-bit always_ff event signal".to_string(),
-            ));
-        }
-        if four_state
-            && variables
-                .get(&clock_id)
-                .is_some_and(|variable| variable.is_4state)
-        {
-            return Err(sv::AnalyzerError::Unsupported(
-                "four-state always_ff event signal".to_string(),
             ));
         }
         if reset_edges.contains_key(&clock_id) {
@@ -5372,24 +4621,16 @@ fn lower_ff_processes(
             .iter()
             .filter(|event| event.signal() != clock.signal())
         {
-            let reset_id = *name_to_id.get(reset.signal()).ok_or_else(|| {
+            let reset_id = pm.id(reset.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
-            if variables
+            if pm
+                .variables
                 .get(&reset_id)
                 .is_some_and(|variable| variable.width != 1)
             {
                 return Err(sv::AnalyzerError::Unsupported(
                     "multi-bit always_ff event signal".to_string(),
-                ));
-            }
-            if four_state
-                && variables
-                    .get(&reset_id)
-                    .is_some_and(|variable| variable.is_4state)
-            {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "four-state always_ff event signal".to_string(),
                 ));
             }
             if clock_edges.contains_key(&reset_id) {
@@ -5406,34 +4647,31 @@ fn lower_ff_processes(
                 ));
             }
         }
-        let trigger_set = trigger_set_from_ff_process(process, name_to_id)
+        let trigger_set = trigger_set_from_ff_process(process, pm.name_to_id)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        // A reset shared by several clock domains is associated with the
+        // first; the association only names a clock for the reset signal.
         for reset in &trigger_set.resets {
-            if reset_clock_map
-                .get(reset)
-                .is_some_and(|clock| *clock != trigger_set.clock)
-            {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "shared reset associated with multiple clocks".to_string(),
-                ));
-            }
-            reset_clock_map.insert(*reset, trigger_set.clock);
+            reset_clock_map.entry(*reset).or_insert(trigger_set.clock);
         }
-        let (eval_only, apply, eval_apply) = lower_ff_process(
-            process,
-            &trigger_set,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            four_state,
-        )
-        .ok_or_else(|| {
-            sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
-        })?;
+        let sites_before = pm.runtime_event_sites.len();
+        let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
+        // A process without writes still runs for its runtime events.
+        let has_effects = pm.runtime_event_sites.len() > sites_before;
+        if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
+            continue;
+        }
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
-        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
-        insert_or_merge_ff_unit(&mut eval_apply_ff_blocks, trigger_set, eval_apply);
+        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set, apply);
+    }
+    // Every process of a trigger evaluates against the pre-edge state before
+    // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
+    // all evaluations first and all commits afterwards.
+    for (trigger_set, eval_only) in &eval_only_ff_blocks {
+        let apply = &apply_ff_blocks[trigger_set];
+        let mut eval_apply = merge_sir_eus(&[eval_only.clone(), apply.clone()]).0;
+        ff::prune_unreachable_blocks(&mut eval_apply);
+        eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply);
     }
 
     Ok((
@@ -5450,7 +4688,9 @@ fn insert_or_merge_ff_unit(
     unit: ExecutionUnit<RegionedVarAddr>,
 ) {
     if let Some(existing) = blocks.remove(&trigger_set) {
-        blocks.insert(trigger_set, merge_sir_eus(&[existing, unit]).0);
+        let mut merged = merge_sir_eus(&[existing, unit]).0;
+        ff::prune_unreachable_blocks(&mut merged);
+        blocks.insert(trigger_set, merged);
     } else {
         blocks.insert(trigger_set, unit);
     }
@@ -5470,12 +4710,22 @@ fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::F
 }
 
 fn ff_event_used_as_condition(process: &sv::ir::FfProcess, event: &sv::ir::FfEvent) -> bool {
-    process.assignments().iter().any(|assignment| {
-        assignment
-            .condition()
-            .is_some_and(|condition| expr_references_ident(condition, event.signal()))
-            || expr_uses_ident_as_condition(assignment.assignment().rhs(), event.signal())
-    })
+    let mut used = false;
+    for stmt in process.body() {
+        stmt.walk(&mut |stmt| match stmt {
+            sv::ir::Stmt::If { condition, .. } => {
+                used |= expr_references_ident(condition, event.signal());
+            }
+            sv::ir::Stmt::Case { selector, .. } => {
+                used |= expr_references_ident(selector, event.signal());
+            }
+            sv::ir::Stmt::Assign { rhs, .. } | sv::ir::Stmt::AssignConcat { rhs, .. } => {
+                used |= expr_uses_ident_as_condition(rhs, event.signal());
+            }
+            _ => {}
+        });
+    }
+    used
 }
 
 fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
@@ -5530,59 +4780,6 @@ fn trigger_set_from_ff_process(
     })
 }
 
-fn lower_ff_process(
-    process: &sv::ir::FfProcess,
-    trigger_set: &TriggerSet<SourceVarId>,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    four_state: bool,
-) -> Option<(
-    ExecutionUnit<RegionedVarAddr>,
-    ExecutionUnit<RegionedVarAddr>,
-    ExecutionUnit<RegionedVarAddr>,
-)> {
-    let targets = ff_targets(process, variables, name_to_id, constants, parameter_types)?;
-    let mut eval_builder = SIRBuilder::new();
-    emit_ff_seeds(&mut eval_builder, &targets);
-    emit_ff_assignment_stores(
-        &mut eval_builder,
-        process,
-        &targets,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        four_state,
-    )?;
-    let eval_only = seal_builder(eval_builder);
-
-    let mut apply_builder = SIRBuilder::new();
-    emit_ff_commits(&mut apply_builder, &targets);
-    let apply = seal_builder(apply_builder);
-
-    let mut eval_apply_builder = SIRBuilder::new();
-    emit_ff_seeds(&mut eval_apply_builder, &targets);
-    emit_ff_assignment_stores(
-        &mut eval_apply_builder,
-        process,
-        &targets,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        four_state,
-    )?;
-    emit_ff_commits(&mut eval_apply_builder, &targets);
-    let eval_apply = seal_builder(eval_apply_builder);
-
-    if trigger_set.resets.is_empty() && targets.is_empty() {
-        return None;
-    }
-    Some((eval_only, apply, eval_apply))
-}
-
 fn seal_builder(mut builder: SIRBuilder<RegionedVarAddr>) -> ExecutionUnit<RegionedVarAddr> {
     builder.seal_block(SIRTerminator::Return);
     let (blocks, register_map, _) = builder.drain();
@@ -5591,45 +4788,6 @@ fn seal_builder(mut builder: SIRBuilder<RegionedVarAddr>) -> ExecutionUnit<Regio
         blocks,
         register_map,
     }
-}
-
-fn ff_targets(
-    process: &sv::ir::FfProcess,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<Vec<VarAtomBase<SourceVarId>>> {
-    let mut targets = Vec::new();
-    for assignment in process.assignments() {
-        let lvalue = assignment.assignment().lhs_value();
-        let dynamic =
-            dynamic_array_element_lvalue(lvalue, variables, name_to_id, constants, parameter_types);
-        let packed =
-            dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types);
-        let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
-            .or_else(|| {
-                dynamic.as_ref().and_then(|(id, _, _, _)| {
-                    variables
-                        .get(id)
-                        .and_then(|variable| variable.width.checked_sub(1))
-                        .map(|msb| VarAtomBase::new(*id, 0, msb))
-                })
-            })
-            .or_else(|| {
-                // A runtime-positioned packed write updates the whole vector.
-                packed.as_ref().and_then(|write| {
-                    write
-                        .vector_width
-                        .checked_sub(1)
-                        .map(|msb| VarAtomBase::new(write.id, 0, msb))
-                })
-            })?;
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-    }
-    Some(targets)
 }
 
 fn emit_ff_seeds(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtomBase<SourceVarId>]) {
@@ -5668,612 +4826,6 @@ fn emit_ff_commits(
             target.access.msb - target.access.lsb + 1,
             Vec::new(),
         ));
-    }
-}
-
-fn emit_ff_assignment_stores(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    process: &sv::ir::FfProcess,
-    targets: &[VarAtomBase<SourceVarId>],
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    four_state: bool,
-) -> Option<()> {
-    let mut target_ids = Vec::new();
-    for target in targets {
-        if !target_ids.contains(&target.id) {
-            target_ids.push(target.id);
-        }
-    }
-
-    for target_id in target_ids {
-        let variable = variables.get(&target_id)?;
-        let width = variable.width;
-        let mut value = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Load(
-            value,
-            RegionedVarAddrBase {
-                // Each process seeds the slices it owns before evaluating.  Read
-                // the shared working value here so a later merged always_ff
-                // process preserves disjoint slices written by an earlier one.
-                region: WORKING_REGION,
-                var_id: target_id,
-            },
-            sv_memory_offset(variable, 0, width),
-            width,
-        ));
-        let mut value_dirty = false;
-        for assignment in process.assignments() {
-            let lvalue = assignment.assignment().lhs_value();
-            let dynamic = dynamic_array_element_lvalue(
-                lvalue,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-            );
-            let packed =
-                dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types);
-            let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
-                .or_else(|| {
-                    dynamic.as_ref().and_then(|(id, _, _, _)| {
-                        variables
-                            .get(id)
-                            .and_then(|variable| variable.width.checked_sub(1))
-                            .map(|msb| VarAtomBase::new(*id, 0, msb))
-                    })
-                })
-                .or_else(|| {
-                    packed.as_ref().and_then(|write| {
-                        write
-                            .vector_width
-                            .checked_sub(1)
-                            .map(|msb| VarAtomBase::new(write.id, 0, msb))
-                    })
-                })?;
-            if target.id != target_id {
-                continue;
-            }
-            let target_width = match (&dynamic, &packed) {
-                (Some((_, _, _, access)), _) => access.msb - access.lsb + 1,
-                (None, Some(write)) => write.select_width,
-                (None, None) => target.access.msb - target.access.lsb + 1,
-            };
-            let rhs_expr = expr_for_state_mode(assignment.assignment().rhs(), four_state);
-            let rhs = match &rhs_expr {
-                sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
-                    Some(fill) => lower_unbased_fill_literal(builder, fill, target_width)?,
-                    None => {
-                        let rhs = lower_expr_to_sir_with_context(
-                            builder,
-                            &rhs_expr,
-                            variables,
-                            name_to_id,
-                            constants,
-                            parameter_types,
-                            Some(target_width),
-                            Some(sv_expr_is_signed_with_parameters(
-                                &rhs_expr,
-                                variables,
-                                name_to_id,
-                                parameter_types,
-                            )),
-                        )?;
-                        resize_sir_register(
-                            builder,
-                            rhs,
-                            target_width,
-                            sv_expr_is_signed_with_parameters(
-                                &rhs_expr,
-                                variables,
-                                name_to_id,
-                                parameter_types,
-                            ),
-                        )?
-                    }
-                },
-                _ => {
-                    let rhs = lower_expr_to_sir_with_context(
-                        builder,
-                        &rhs_expr,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                        Some(target_width),
-                        Some(sv_expr_is_signed_with_parameters(
-                            &rhs_expr,
-                            variables,
-                            name_to_id,
-                            parameter_types,
-                        )),
-                    )?;
-                    resize_sir_register(
-                        builder,
-                        rhs,
-                        target_width,
-                        sv_expr_is_signed_with_parameters(
-                            &rhs_expr,
-                            variables,
-                            name_to_id,
-                            parameter_types,
-                        ),
-                    )?
-                }
-            };
-            let rhs = permute_reversed_lvalue_rhs_sir(
-                builder,
-                lvalue,
-                rhs,
-                target_width,
-                constants,
-                parameter_types,
-            )?;
-            let rhs = if variables.get(&target.id)?.is_4state
-                && (four_state || !expr_is_unknown_literal(&rhs_expr))
-            {
-                rhs
-            } else {
-                let two_state = builder.alloc_bit(target_width, false);
-                builder.emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, rhs));
-                two_state
-            };
-            if let Some((_, element_width, offset, access)) = dynamic {
-                // Flush preceding static assignments before a dynamic store so
-                // the direct element write observes the current working value.
-                if value_dirty {
-                    builder.emit(SIRInstruction::Store(
-                        RegionedVarAddrBase {
-                            region: WORKING_REGION,
-                            var_id: target_id,
-                        },
-                        sv_memory_offset(variable, 0, width),
-                        width,
-                        value,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                    value_dirty = false;
-                }
-                let index = lower_dynamic_array_element_index(
-                    builder,
-                    &offset,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    element_width,
-                )?;
-                let element_count = variable.width.checked_div(element_width)?;
-                let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
-                let packed_element_width = unpacked_element_width(variable)?;
-                if element_width != packed_element_width {
-                    if access.lsb != 0 || target_width != element_width {
-                        return None;
-                    }
-                    let inner_count = element_width.checked_div(packed_element_width)?;
-                    let inner_count_value = builder.alloc_bit(64, false);
-                    builder.emit(SIRInstruction::Imm(
-                        inner_count_value,
-                        SIRValue::new(u64::try_from(inner_count).ok()?),
-                    ));
-                    let scaled_index = builder.alloc_bit(64, false);
-                    builder.emit(SIRInstruction::Binary(
-                        scaled_index,
-                        index,
-                        BinaryOp::Mul,
-                        inner_count_value,
-                    ));
-                    for inner_index in 0..inner_count {
-                        let element_index = if inner_index == 0 {
-                            scaled_index
-                        } else {
-                            let inner_index_value = builder.alloc_bit(64, false);
-                            builder.emit(SIRInstruction::Imm(
-                                inner_index_value,
-                                SIRValue::new(u64::try_from(inner_index).ok()?),
-                            ));
-                            let element_index = builder.alloc_bit(64, false);
-                            builder.emit(SIRInstruction::Binary(
-                                element_index,
-                                scaled_index,
-                                BinaryOp::Add,
-                                inner_index_value,
-                            ));
-                            element_index
-                        };
-                        let old = builder.alloc_logic(packed_element_width);
-                        builder.emit(SIRInstruction::Load(
-                            old,
-                            RegionedVarAddrBase {
-                                region: WORKING_REGION,
-                                var_id: target_id,
-                            },
-                            SIROffset::Element {
-                                index: element_index,
-                                element_width: packed_element_width,
-                                bit_offset: 0,
-                                dynamic_bit_offset: None,
-                            },
-                            packed_element_width,
-                        ));
-                        let rhs_part = builder.alloc_logic(packed_element_width);
-                        builder.emit(SIRInstruction::Slice(
-                            rhs_part,
-                            rhs,
-                            inner_index * packed_element_width,
-                            packed_element_width,
-                        ));
-                        let selected_value = match assignment.condition() {
-                            Some(condition) => {
-                                let condition = lower_procedural_condition(
-                                    builder,
-                                    condition,
-                                    variables,
-                                    name_to_id,
-                                    constants,
-                                    parameter_types,
-                                )?;
-                                let mux = builder.alloc_logic(packed_element_width);
-                                builder.emit(SIRInstruction::Mux(mux, condition, rhs_part, old));
-                                mux
-                            }
-                            None => rhs_part,
-                        };
-                        let store_value = builder.alloc_logic(packed_element_width);
-                        builder.emit(SIRInstruction::Mux(store_value, valid, selected_value, old));
-                        builder.emit(SIRInstruction::Store(
-                            RegionedVarAddrBase {
-                                region: WORKING_REGION,
-                                var_id: target_id,
-                            },
-                            SIROffset::Element {
-                                index: element_index,
-                                element_width: packed_element_width,
-                                bit_offset: 0,
-                                dynamic_bit_offset: None,
-                            },
-                            packed_element_width,
-                            store_value,
-                            Vec::new(),
-                            Vec::new(),
-                        ));
-                    }
-                    value = builder.alloc_logic(width);
-                    builder.emit(SIRInstruction::Load(
-                        value,
-                        RegionedVarAddrBase {
-                            region: WORKING_REGION,
-                            var_id: target_id,
-                        },
-                        sv_memory_offset(variable, 0, width),
-                        width,
-                    ));
-                    continue;
-                }
-                let old = builder.alloc_logic(target_width);
-                builder.emit(SIRInstruction::Load(
-                    old,
-                    RegionedVarAddrBase {
-                        region: WORKING_REGION,
-                        var_id: target_id,
-                    },
-                    SIROffset::Element {
-                        index,
-                        element_width,
-                        bit_offset: access.lsb,
-                        dynamic_bit_offset: None,
-                    },
-                    target_width,
-                ));
-                let selected_value = match assignment.condition() {
-                    Some(condition) => {
-                        let condition = lower_procedural_condition(
-                            builder,
-                            condition,
-                            variables,
-                            name_to_id,
-                            constants,
-                            parameter_types,
-                        )?;
-                        let mux = builder.alloc_logic(target_width);
-                        builder.emit(SIRInstruction::Mux(mux, condition, rhs, old));
-                        mux
-                    }
-                    None => rhs,
-                };
-                let store_value = builder.alloc_logic(target_width);
-                builder.emit(SIRInstruction::Mux(store_value, valid, selected_value, old));
-                builder.emit(SIRInstruction::Store(
-                    RegionedVarAddrBase {
-                        region: WORKING_REGION,
-                        var_id: target_id,
-                    },
-                    SIROffset::Element {
-                        index,
-                        element_width,
-                        bit_offset: access.lsb,
-                        dynamic_bit_offset: None,
-                    },
-                    target_width,
-                    store_value,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-                value = builder.alloc_logic(width);
-                builder.emit(SIRInstruction::Load(
-                    value,
-                    RegionedVarAddrBase {
-                        region: WORKING_REGION,
-                        var_id: target_id,
-                    },
-                    sv_memory_offset(variable, 0, width),
-                    width,
-                ));
-                continue;
-            }
-            let assigned = match &packed {
-                Some(write) => replace_sir_slice_at_runtime_position(
-                    builder,
-                    value,
-                    rhs,
-                    write,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                )?,
-                None => {
-                    replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?
-                }
-            };
-            value = match assignment.condition() {
-                Some(condition) => {
-                    let condition = lower_procedural_condition(
-                        builder,
-                        condition,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                    )?;
-                    let mux = builder.alloc_logic(width);
-                    builder.emit(SIRInstruction::Mux(mux, condition, assigned, value));
-                    mux
-                }
-                None => assigned,
-            };
-            value_dirty = true;
-        }
-        if !value_dirty {
-            continue;
-        }
-        for target in targets.iter().filter(|target| target.id == target_id) {
-            let target_width = target.access.msb - target.access.lsb + 1;
-            let store_value = if target.access.lsb == 0 && target_width == width {
-                value
-            } else {
-                let slice = builder.alloc_logic(target_width);
-                builder.emit(SIRInstruction::Slice(
-                    slice,
-                    value,
-                    target.access.lsb,
-                    target_width,
-                ));
-                slice
-            };
-            builder.emit(SIRInstruction::Store(
-                RegionedVarAddrBase {
-                    region: WORKING_REGION,
-                    var_id: target_id,
-                },
-                sv_memory_offset(variable, target.access.lsb, target_width),
-                target_width,
-                store_value,
-                Vec::new(),
-                Vec::new(),
-            ));
-        }
-    }
-    Some(())
-}
-
-fn lower_procedural_condition(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    condition: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<celox_sir::RegisterId> {
-    let condition = lower_expr_to_sir(
-        builder,
-        condition,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-    )?;
-    let width = builder.register(&condition).width();
-    let two_state = builder.alloc_bit(width, false);
-    builder.emit(SIRInstruction::Unary(
-        two_state,
-        UnaryOp::ToTwoState,
-        condition,
-    ));
-    if width == 1 {
-        return Some(two_state);
-    }
-    let truth = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Unary(truth, UnaryOp::Or, two_state));
-    Some(truth)
-}
-
-/// `(current & ~(mask << low)) | (replacement << low)`: write `replacement`
-/// into `current` at the runtime bit position `write.low`. Bits that would land
-/// outside the vector are dropped by the shift.
-fn replace_sir_slice_at_runtime_position(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    current: celox_sir::RegisterId,
-    replacement: celox_sir::RegisterId,
-    write: &DynamicPackedWrite,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<celox_sir::RegisterId> {
-    let width = write.vector_width;
-    let mut amount = |expr: &sv::ir::Expr| {
-        lower_expr_to_sir_with_context(
-            builder,
-            expr,
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            None,
-            Some(false),
-        )
-    };
-    let up = amount(&write.up)?;
-    let down = amount(&write.down)?;
-    let replacement = resize_sir_register(builder, replacement, width, false)?;
-    let mask = builder.alloc_bit(width, false);
-    builder.emit(SIRInstruction::Imm(
-        mask,
-        SIRValue::new((BigUint::from(1u8) << write.select_width) - BigUint::from(1u8)),
-    ));
-    let shift = |builder: &mut SIRBuilder<RegionedVarAddr>, value| {
-        let raised = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Binary(raised, value, BinaryOp::Shl, up));
-        let shifted = builder.alloc_logic(width);
-        builder.emit(SIRInstruction::Binary(shifted, raised, BinaryOp::Shr, down));
-        shifted
-    };
-    let shifted_mask = shift(builder, mask);
-    let shifted_replacement = shift(builder, replacement);
-    let keep_mask = builder.alloc_logic(width);
-    builder.emit(SIRInstruction::Unary(
-        keep_mask,
-        UnaryOp::BitNot,
-        shifted_mask,
-    ));
-    let kept = builder.alloc_logic(width);
-    builder.emit(SIRInstruction::Binary(
-        kept,
-        current,
-        BinaryOp::And,
-        keep_mask,
-    ));
-    let result = builder.alloc_logic(width);
-    builder.emit(SIRInstruction::Binary(
-        result,
-        kept,
-        BinaryOp::Or,
-        shifted_replacement,
-    ));
-    Some(result)
-}
-
-fn replace_sir_slice(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    current: celox_sir::RegisterId,
-    replacement: celox_sir::RegisterId,
-    lsb: usize,
-    replacement_width: usize,
-    total_width: usize,
-) -> Option<celox_sir::RegisterId> {
-    if lsb == 0 && replacement_width == total_width {
-        return Some(replacement);
-    }
-    let end = lsb.checked_add(replacement_width)?;
-    if end > total_width {
-        return None;
-    }
-
-    let mut parts = Vec::with_capacity(3);
-    if end < total_width {
-        let upper_width = total_width - end;
-        let upper = builder.alloc_logic(upper_width);
-        builder.emit(SIRInstruction::Slice(upper, current, end, upper_width));
-        parts.push(upper);
-    }
-    parts.push(replacement);
-    if lsb != 0 {
-        let lower = builder.alloc_logic(lsb);
-        builder.emit(SIRInstruction::Slice(lower, current, 0, lsb));
-        parts.push(lower);
-    }
-
-    let result = builder.alloc_logic(total_width);
-    builder.emit(SIRInstruction::Concat(result, parts));
-    Some(result)
-}
-
-fn permute_reversed_lvalue_rhs_sir(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    lvalue: &sv::ir::LValue,
-    rhs: celox_sir::RegisterId,
-    target_width: usize,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<celox_sir::RegisterId> {
-    let sv::ir::LValue::Select {
-        array_slice_width: Some(array_slice_width),
-        array_slice_reversed: true,
-        ..
-    } = lvalue
-    else {
-        return Some(rhs);
-    };
-    let element_width = usize::try_from(sv::typecheck::eval_const_expr_with_types(
-        array_slice_width,
-        constants,
-        parameter_types,
-    )?)
-    .ok()
-    .filter(|width| *width != 0)?;
-    if !target_width.is_multiple_of(element_width) {
-        return None;
-    }
-    let element_count = target_width / element_width;
-    if element_count <= 1 {
-        return Some(rhs);
-    }
-    let mut parts = Vec::with_capacity(element_count);
-    for lsb in (0..target_width).step_by(element_width) {
-        let part = builder.alloc_logic(element_width);
-        builder.emit(SIRInstruction::Slice(part, rhs, lsb, element_width));
-        parts.push(part);
-    }
-    let result = builder.alloc_logic(target_width);
-    builder.emit(SIRInstruction::Concat(result, parts));
-    Some(result)
-}
-
-fn lvalue_atom(
-    lvalue: &sv::ir::LValue,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<VarAtomBase<SourceVarId>> {
-    let id = *name_to_id.get(lvalue.name())?;
-    let width = variables.get(&id)?.width;
-    match lvalue {
-        sv::ir::LValue::Ident(_) => Some(VarAtomBase::new(id, 0, width.checked_sub(1)?)),
-        sv::ir::LValue::Select { msb, lsb, .. } => {
-            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
-            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
-            let variable = variables.get(&id)?;
-            let msb = packed_index_offset(variable, msb)?;
-            let lsb = packed_index_offset(variable, lsb)?;
-            let high = msb.max(lsb);
-            let low = msb.min(lsb);
-            (low <= high && high < width).then(|| VarAtomBase::new(id, low, high))
-        }
     }
 }
 
@@ -6388,6 +4940,19 @@ fn sv_expr_is_signed_with_parameters(
             }
             _ => false,
         },
+        // The division-by-zero guard takes the type of the division it
+        // guards; its unknown arm is internal.
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(
+            &**then_expr,
+            sv::ir::Expr::Literal(literal) if literal == sv::DIV_ZERO_UNKNOWN_LITERAL
+        ) =>
+        {
+            sv_expr_is_signed_with_parameters(else_expr, variables, name_to_id, parameter_types)
+        }
         sv::ir::Expr::Mux {
             then_expr,
             else_expr,
@@ -6402,51 +4967,6 @@ fn sv_expr_is_signed_with_parameters(
                 )
         }
     }
-}
-
-fn resize_sir_register(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    source: celox_sir::RegisterId,
-    target_width: usize,
-    sign_extend: bool,
-) -> Option<celox_sir::RegisterId> {
-    let source_type = builder.register(&source).clone();
-    let source_width = source_type.width();
-    if source_width == target_width {
-        return Some(source);
-    }
-
-    let alloc_like = |builder: &mut SIRBuilder<RegionedVarAddr>, width| match &source_type {
-        RegisterType::Logic { .. } => builder.alloc_logic(width),
-        RegisterType::Bit { signed, .. } => builder.alloc_bit(width, *signed && sign_extend),
-    };
-
-    if source_width > target_width {
-        let resized = alloc_like(builder, target_width);
-        builder.emit(SIRInstruction::Slice(resized, source, 0, target_width));
-        return Some(resized);
-    }
-
-    let extension_width = target_width - source_width;
-    let mut parts = Vec::with_capacity(extension_width.saturating_add(1));
-    if sign_extend {
-        let sign = alloc_like(builder, 1);
-        builder.emit(SIRInstruction::Slice(
-            sign,
-            source,
-            source_width.checked_sub(1)?,
-            1,
-        ));
-        parts.extend(std::iter::repeat_n(sign, extension_width));
-    } else {
-        let zero = alloc_like(builder, extension_width);
-        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-        parts.push(zero);
-    }
-    parts.push(source);
-    let resized = alloc_like(builder, target_width);
-    builder.emit(SIRInstruction::Concat(resized, parts));
-    Some(resized)
 }
 
 fn unbased_fill_literal(literal: &str) -> Option<char> {
@@ -6494,40 +5014,6 @@ fn lower_unbased_fill_literal_slt<A: std::hash::Hash + Eq + Clone>(
     arena
         .alloc(SLTNode::Constant(value, mask, width, false))
         .ok()
-}
-
-fn lower_unbased_fill_literal(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    fill: char,
-    width: usize,
-) -> Option<celox_sir::RegisterId> {
-    let (value, mask) = unbased_fill_value(fill, width)?;
-    let register = builder.alloc_logic(width);
-    builder.emit(SIRInstruction::Imm(
-        register,
-        SIRValue::new_four_state(value, mask),
-    ));
-    Some(register)
-}
-
-fn lower_expr_to_sir(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    expr: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<celox_sir::RegisterId> {
-    lower_expr_to_sir_with_context(
-        builder,
-        expr,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        None,
-        None,
-    )
 }
 
 fn sv_expr_natural_width(
@@ -6681,656 +5167,6 @@ fn sv_comparison_operand_width(
             sv_expr_natural_width(right, variables, name_to_id, constants, parameter_types)?,
         ),
     )
-}
-
-/// The parsed literal of a `==?` pattern, when it has wildcard (`x`/`z`/`?`) bits.
-fn wildcard_literal(pattern: &sv::ir::Expr) -> Option<sv::typecheck::IntegralLiteral> {
-    let sv::ir::Expr::Literal(literal) = pattern else {
-        return None;
-    };
-    sv::typecheck::parse_integral_literal(literal)
-        .filter(|literal| literal.mask != BigUint::default())
-}
-
-fn lower_expr_to_sir_with_context(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    expr: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-    context_width: Option<usize>,
-    context_signed: Option<bool>,
-) -> Option<celox_sir::RegisterId> {
-    match expr {
-        sv::ir::Expr::Ident(name) => {
-            let Some(id) = name_to_id.get(name).copied() else {
-                let value = constants.get(name)?;
-                let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
-                let reg = builder.alloc_logic(width);
-                builder.emit(SIRInstruction::Imm(
-                    reg,
-                    SIRValue::new_four_state(parameter_value_bits(*value, width), 0u32),
-                ));
-                return resize_sir_register(
-                    builder,
-                    reg,
-                    context_width.unwrap_or(width),
-                    context_signed.unwrap_or(signed),
-                );
-            };
-            let var = variables.get(&id)?;
-            let reg = if var.is_4state {
-                builder.alloc_logic(var.width)
-            } else {
-                builder.alloc_bit(var.width, var.signed)
-            };
-            builder.emit(SIRInstruction::Load(
-                reg,
-                RegionedVarAddrBase {
-                    region: STABLE_REGION,
-                    var_id: id,
-                },
-                sv_memory_offset(var, 0, var.width),
-                var.width,
-            ));
-            resize_sir_register(
-                builder,
-                reg,
-                context_width.unwrap_or(var.width),
-                context_signed.unwrap_or(var.signed),
-            )
-        }
-        sv::ir::Expr::Literal(literal) => {
-            if let Some(width) = context_width
-                && let Some(fill) = unbased_fill_literal(literal)
-            {
-                return lower_unbased_fill_literal(builder, fill, width);
-            }
-            let literal = sv::typecheck::parse_integral_literal(literal)?;
-            let width = literal.width;
-            let signed = literal.signed;
-            let reg = builder.alloc_logic(literal.width);
-            builder.emit(SIRInstruction::Imm(
-                reg,
-                SIRValue::new_four_state(literal.value, literal.mask),
-            ));
-            resize_sir_register(
-                builder,
-                reg,
-                context_width.unwrap_or(width),
-                context_signed.unwrap_or(signed),
-            )
-        }
-        sv::ir::Expr::Select {
-            expr,
-            msb,
-            lsb,
-            signed,
-        } => {
-            if let Some(rewritten) = runtime_select_as_shift(
-                expr,
-                msb,
-                lsb,
-                *signed,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-            ) {
-                return lower_expr_to_sir_with_context(
-                    builder,
-                    &rewritten,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    context_width,
-                    context_signed,
-                );
-            }
-            if let Some((id, element_width, access)) = dynamic_array_element_subselection(
-                expr,
-                msb,
-                lsb,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-            ) {
-                let index = lower_dynamic_array_element_index(
-                    builder,
-                    lsb,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    element_width,
-                )?;
-                let width = access.msb - access.lsb + 1;
-                let variable = variables.get(&id)?;
-                let element_count = variable.width.checked_div(element_width)?;
-                let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
-                let reg = lower_dynamic_array_selection_sir(
-                    builder,
-                    RegionedVarAddrBase {
-                        region: STABLE_REGION,
-                        var_id: id,
-                    },
-                    index,
-                    access,
-                    element_width,
-                    variable,
-                )?;
-                let reg =
-                    guard_dynamic_array_read_sir(builder, valid, reg, width, variable.is_4state);
-                return resize_sir_register(
-                    builder,
-                    reg,
-                    context_width.unwrap_or(width),
-                    context_signed.unwrap_or(*signed),
-                );
-            }
-            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
-            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
-            let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
-            let high = msb.max(lsb);
-            let low = msb.min(lsb);
-            let width = high - low + 1;
-            if let sv::ir::Expr::Ident(name) = &**expr
-                && let Some(var) = name_to_id.get(name).and_then(|id| variables.get(id))
-                && !var.array_dims.is_empty()
-            {
-                let reg = builder.alloc_logic(width);
-                builder.emit(SIRInstruction::Load(
-                    reg,
-                    RegionedVarAddrBase {
-                        region: STABLE_REGION,
-                        var_id: *name_to_id.get(name)?,
-                    },
-                    sv_memory_offset(var, low, width),
-                    width,
-                ));
-                return resize_sir_register(
-                    builder,
-                    reg,
-                    context_width.unwrap_or(width),
-                    context_signed.unwrap_or(*signed),
-                );
-            }
-            let inner = lower_expr_to_sir_with_context(
-                builder,
-                expr,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                None,
-                None,
-            )?;
-            let reg = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Slice(reg, inner, low, width));
-            resize_sir_register(
-                builder,
-                reg,
-                context_width.unwrap_or(width),
-                context_signed.unwrap_or(*signed),
-            )
-        }
-        sv::ir::Expr::Resize {
-            expr,
-            width,
-            signed,
-        } => {
-            let inner = lower_expr_to_sir_with_context(
-                builder,
-                expr,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                Some(*width),
-                Some(*signed),
-            )?;
-            let resized = resize_sir_register(builder, inner, *width, *signed)?;
-            resize_sir_register(
-                builder,
-                resized,
-                context_width.unwrap_or(*width),
-                context_signed.unwrap_or(*signed),
-            )
-        }
-        sv::ir::Expr::Unary { op, expr } => {
-            let one_bit_result = matches!(
-                op,
-                sv::ir::UnaryOp::LogicNot
-                    | sv::ir::UnaryOp::RedAnd
-                    | sv::ir::UnaryOp::RedOr
-                    | sv::ir::UnaryOp::RedXor
-            );
-            let inner = lower_expr_to_sir_with_context(
-                builder,
-                expr,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                (!one_bit_result).then_some(context_width).flatten(),
-                context_signed,
-            )?;
-            let width = if one_bit_result {
-                1
-            } else {
-                builder.register(&inner).width()
-            };
-            let reg = if matches!(op, sv::ir::UnaryOp::ToTwoState) {
-                builder.alloc_bit(width, false)
-            } else {
-                builder.alloc_logic(width)
-            };
-            builder.emit(SIRInstruction::Unary(reg, unary_op_from_sv(*op)?, inner));
-            Some(reg)
-        }
-        sv::ir::Expr::Binary { left, op, right }
-            if matches!(
-                op,
-                sv::ir::BinaryOp::EqWildcard | sv::ir::BinaryOp::NeWildcard
-            ) && wildcard_literal(right).is_some() =>
-        {
-            // The wildcard bits of a literal pattern are known up front. Force
-            // them to one on both sides and compare the rest, which needs no
-            // unknown-bit state and is exact for any left operand.
-            let pattern = wildcard_literal(right)?;
-            let left = lower_expr_to_sir_with_context(
-                builder,
-                left,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                sv_comparison_operand_width(
-                    left,
-                    right,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                ),
-                Some(false),
-            )?;
-            let width = builder.register(&left).width().max(pattern.width);
-            let left = resize_sir_register(builder, left, width, false)?;
-            let imm = |builder: &mut SIRBuilder<RegionedVarAddr>, bits: BigUint| {
-                let reg = builder.alloc_bit(width, false);
-                builder.emit(SIRInstruction::Imm(
-                    reg,
-                    SIRValue::new_four_state(bits, BigUint::default()),
-                ));
-                reg
-            };
-            let wildcard = imm(builder, pattern.mask.clone());
-            let expected = imm(builder, &pattern.value | &pattern.mask);
-            let forced = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Binary(
-                forced,
-                left,
-                celox_design::BinaryOp::Or,
-                wildcard,
-            ));
-            let reg = builder.alloc_logic(1);
-            builder.emit(SIRInstruction::Binary(
-                reg,
-                forced,
-                if matches!(op, sv::ir::BinaryOp::EqWildcard) {
-                    celox_design::BinaryOp::Eq
-                } else {
-                    celox_design::BinaryOp::Ne
-                },
-                expected,
-            ));
-            Some(reg)
-        }
-        sv::ir::Expr::Binary { left, op, right } => {
-            let left_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
-            let operands_signed = left_signed
-                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
-            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                left_signed
-            } else {
-                operands_signed
-            };
-            let comparison = matches!(
-                op,
-                sv::ir::BinaryOp::Eq
-                    | sv::ir::BinaryOp::Ne
-                    | sv::ir::BinaryOp::EqCase
-                    | sv::ir::BinaryOp::NeCase
-                    | sv::ir::BinaryOp::EqWildcard
-                    | sv::ir::BinaryOp::NeWildcard
-                    | sv::ir::BinaryOp::Lt
-                    | sv::ir::BinaryOp::Le
-                    | sv::ir::BinaryOp::Gt
-                    | sv::ir::BinaryOp::Ge
-            );
-            let shift = matches!(
-                op,
-                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
-            );
-            let context_determined = !comparison
-                && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
-            let operation_context = context_width.map(|context_width| {
-                context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
-                        .unwrap_or(context_width),
-                )
-            });
-            let comparison_context = comparison
-                .then(|| {
-                    sv_comparison_operand_width(
-                        left,
-                        right,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                    )
-                })
-                .flatten();
-            let left_context = if comparison {
-                comparison_context
-            } else {
-                context_determined.then_some(operation_context).flatten()
-            };
-            let right_context = if comparison {
-                comparison_context
-            } else {
-                (context_determined && !shift)
-                    .then_some(operation_context)
-                    .flatten()
-            };
-            let right_fill = match &**right {
-                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
-                _ => None,
-            };
-            let left_fill = match &**left {
-                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
-                _ => None,
-            };
-            let (mut left, mut right) = if let Some(fill) = right_fill {
-                let left = lower_expr_to_sir_with_context(
-                    builder,
-                    left,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    left_context,
-                    Some(if shift { left_signed } else { operands_signed }),
-                )?;
-                let width = if shift {
-                    1
-                } else {
-                    builder.register(&left).width()
-                };
-                (left, lower_unbased_fill_literal(builder, fill, width)?)
-            } else if let Some(fill) = left_fill {
-                let right = lower_expr_to_sir_with_context(
-                    builder,
-                    right,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    right_context,
-                    Some(operands_signed),
-                )?;
-                let width = left_context.unwrap_or_else(|| builder.register(&right).width());
-                (lower_unbased_fill_literal(builder, fill, width)?, right)
-            } else {
-                (
-                    lower_expr_to_sir_with_context(
-                        builder,
-                        left,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                        left_context,
-                        Some(if shift { left_signed } else { operands_signed }),
-                    )?,
-                    lower_expr_to_sir_with_context(
-                        builder,
-                        right,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                        right_context,
-                        Some(operands_signed),
-                    )?,
-                )
-            };
-            if comparison {
-                let common_width = builder
-                    .register(&left)
-                    .width()
-                    .max(builder.register(&right).width());
-                left = resize_sir_register(builder, left, common_width, operands_signed)?;
-                right = resize_sir_register(builder, right, common_width, operands_signed)?;
-            }
-            let width = match op {
-                sv::ir::BinaryOp::LogicAnd
-                | sv::ir::BinaryOp::LogicOr
-                | sv::ir::BinaryOp::Eq
-                | sv::ir::BinaryOp::Ne
-                | sv::ir::BinaryOp::EqCase
-                | sv::ir::BinaryOp::NeCase
-                | sv::ir::BinaryOp::EqWildcard
-                | sv::ir::BinaryOp::NeWildcard
-                | sv::ir::BinaryOp::Lt
-                | sv::ir::BinaryOp::Le
-                | sv::ir::BinaryOp::Gt
-                | sv::ir::BinaryOp::Ge => 1,
-                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
-                    builder.register(&left).width()
-                }
-                _ => builder
-                    .register(&left)
-                    .width()
-                    .max(builder.register(&right).width()),
-            };
-            let reg = if matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) {
-                builder.alloc_bit(width, false)
-            } else {
-                builder.alloc_logic(width)
-            };
-            builder.emit(SIRInstruction::Binary(
-                reg,
-                left,
-                binary_op_from_sv(*op, operator_signed)?,
-                right,
-            ));
-            Some(reg)
-        }
-        sv::ir::Expr::Concat(parts) => {
-            let mut regs = Vec::new();
-            for part in parts {
-                regs.push(lower_expr_to_sir_with_context(
-                    builder,
-                    part,
-                    variables,
-                    name_to_id,
-                    constants,
-                    parameter_types,
-                    expr_unbased_fill_literal(part).map(|_| 1),
-                    None,
-                )?);
-            }
-            let width = regs
-                .iter()
-                .map(|reg| builder.register(reg).width())
-                .sum::<usize>();
-            let reg = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Concat(reg, regs));
-            Some(reg)
-        }
-        sv::ir::Expr::RepeatConcat { count, parts } => {
-            let count =
-                sv::typecheck::eval_const_expr_with_types(count, constants, parameter_types)?;
-            let count = usize::try_from(count).ok()?;
-            let mut regs = Vec::new();
-            for _ in 0..count {
-                for part in parts {
-                    regs.push(lower_expr_to_sir_with_context(
-                        builder,
-                        part,
-                        variables,
-                        name_to_id,
-                        constants,
-                        parameter_types,
-                        expr_unbased_fill_literal(part).map(|_| 1),
-                        None,
-                    )?);
-                }
-            }
-            let width = regs
-                .iter()
-                .map(|reg| builder.register(reg).width())
-                .sum::<usize>();
-            let reg = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Concat(reg, regs));
-            Some(reg)
-        }
-        sv::ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            let arms_signed = sv_expr_is_signed_with_parameters(
-                then_expr,
-                variables,
-                name_to_id,
-                parameter_types,
-            ) && sv_expr_is_signed_with_parameters(
-                else_expr,
-                variables,
-                name_to_id,
-                parameter_types,
-            ) && context_signed != Some(false);
-            let arm_context =
-                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
-                    .map(|natural_width| {
-                        context_width.map_or(natural_width, |width| width.max(natural_width))
-                    })
-                    .or(context_width);
-            let condition = lower_expr_to_sir_with_context(
-                builder,
-                condition,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                None,
-                None,
-            )?;
-            let mut then_expr = lower_expr_to_sir_with_context(
-                builder,
-                then_expr,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arm_context,
-                Some(arms_signed),
-            )?;
-            let mut else_expr = lower_expr_to_sir_with_context(
-                builder,
-                else_expr,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arm_context,
-                Some(arms_signed),
-            )?;
-            let width = builder
-                .register(&then_expr)
-                .width()
-                .max(builder.register(&else_expr).width());
-            then_expr = resize_sir_register(builder, then_expr, width, arms_signed)?;
-            else_expr = resize_sir_register(builder, else_expr, width, arms_signed)?;
-            let reg = builder.alloc_logic(width);
-            builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
-            Some(reg)
-        }
-        sv::ir::Expr::Inside { expr, items } => lower_expr_to_sir_with_context(
-            builder,
-            &inside_as_comparisons(expr, items),
-            variables,
-            name_to_id,
-            constants,
-            parameter_types,
-            context_width,
-            context_signed,
-        ),
-        sv::ir::Expr::Call { name, args }
-            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
-        {
-            let arg = &args[0];
-            let width =
-                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
-            let inner = lower_expr_to_sir_with_context(
-                builder,
-                arg,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                Some(width),
-                None,
-            )?;
-            let known = builder.alloc_bit(width, false);
-            builder.emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, inner));
-            let (return_width, signed) =
-                sv::typecheck::bit_vector_function_return_type(name, args.len())?;
-            let result = if name == "$isunknown" {
-                let result = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
-                    result,
-                    inner,
-                    BinaryOp::NeCase,
-                    known,
-                ));
-                result
-            } else {
-                let count = builder.alloc_bit(UnaryOp::PopCount.result_width(width), false);
-                builder.emit(SIRInstruction::Unary(count, UnaryOp::PopCount, known));
-                let count = resize_sir_register(builder, count, 32, false)?;
-                if name == "$countones" {
-                    count
-                } else {
-                    let one = builder.alloc_bit(32, false);
-                    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-                    let result = builder.alloc_bit(1, false);
-                    let op = if name == "$onehot" {
-                        BinaryOp::Eq
-                    } else {
-                        BinaryOp::LeU
-                    };
-                    builder.emit(SIRInstruction::Binary(result, count, op, one));
-                    result
-                }
-            };
-            resize_sir_register(
-                builder,
-                result,
-                context_width.unwrap_or(return_width),
-                context_signed.unwrap_or(signed),
-            )
-        }
-        sv::ir::Expr::Call { .. } => None,
-    }
 }
 
 fn module_constants_with_overrides(

@@ -354,6 +354,13 @@ impl From<celox_frontend_core::ParserError> for ParserError {
                 detail,
                 source_location: source_location.map(Into::into),
             },
+            CoreError::MemoryFile {
+                detail,
+                source_location,
+            } => Self::MemoryFile {
+                detail,
+                source_location: source_location.map(Into::into),
+            },
             CoreError::TopNotFound { name } => Self::TopNotFound { name },
             CoreError::GenericTop { name } => Self::GenericTop { name },
             CoreError::SirVerify {

@@ -633,6 +633,10 @@ fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
             error.to_string(),
             None,
         ),
+        celox_frontend_sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
+            detail,
+            source_location: None,
+        },
         error => ParserError::illegal_context("systemverilog analysis", error.to_string(), None),
     }
 }

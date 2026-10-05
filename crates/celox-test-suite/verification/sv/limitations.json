@@ -113,6 +113,23 @@
     }
   },
   {
+    "id": "sv_icarus_unpacked_array_parameters",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "procedural::aggregate_parameters_are_constant_tables"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_internal_error",
     "category": "simulator_internal_error",
     "phase": "compile",
