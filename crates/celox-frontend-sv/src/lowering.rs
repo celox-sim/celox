@@ -4673,13 +4673,16 @@ fn runtime_select_position(
 ) -> Option<RuntimePosition> {
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
         Some(variable) => {
-            let [range] = variable.packed_ranges.as_slice() else {
-                return None;
-            };
             if !variable.array_dims.is_empty() {
                 return None;
             }
-            *range
+            match variable.packed_ranges.as_slice() {
+                [range] => *range,
+                // The analyzer flattens the selects of several packed
+                // dimensions into bit offsets from bit 0.
+                [_, _, ..] => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
+                [] => return None,
+            }
         }
         None => {
             constants.get(name)?;
@@ -4769,13 +4772,55 @@ fn runtime_select_as_shift(
     };
     // Bring the selection down to bit 0: right by `up`, or left by `down`
     // when it hangs over the bottom.
-    let moved = shift(
-        shift(expr.clone(), sv::ir::BinaryOp::Shl, position.down),
-        sv::ir::BinaryOp::Shr,
-        position.up,
-    );
+    let move_down = |value: sv::ir::Expr| sv::ir::Expr::Select {
+        expr: Box::new(shift(
+            shift(value, sv::ir::BinaryOp::Shl, position.down.clone()),
+            sv::ir::BinaryOp::Shr,
+            position.up.clone(),
+        )),
+        msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+        lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+        signed: false,
+    };
+    let moved = move_down(expr.clone());
+    let variable = name_to_id.get(name).and_then(|id| variables.get(id));
+    let value = match variable.filter(|variable| variable.is_4state) {
+        // Bits outside a four-state vector read as X (IEEE 1800-2023
+        // 11.5.1). The vector's own bits, moved the same way, mark the
+        // positions that lie inside it.
+        Some(variable) => {
+            let inside = move_down(sv::ir::Expr::Literal(format!(
+                "{}'b{}",
+                variable.width,
+                "1".repeat(variable.width)
+            )));
+            let unknown = sv::ir::Expr::Literal(format!(
+                "{}'b{}",
+                position.width,
+                "x".repeat(position.width)
+            ));
+            let binary = |left, op, right| sv::ir::Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            binary(
+                binary(moved, sv::ir::BinaryOp::BitAnd, inside.clone()),
+                sv::ir::BinaryOp::BitOr,
+                binary(
+                    unknown,
+                    sv::ir::BinaryOp::BitAnd,
+                    sv::ir::Expr::Unary {
+                        op: sv::ir::UnaryOp::BitNot,
+                        expr: Box::new(inside),
+                    },
+                ),
+            )
+        }
+        None => moved,
+    };
     Some(sv::ir::Expr::Select {
-        expr: Box::new(moved),
+        expr: Box::new(value),
         msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed,

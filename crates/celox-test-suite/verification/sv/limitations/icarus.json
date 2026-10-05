@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 6,
+    "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 23,
+    "compile_error": 24,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -270,6 +270,22 @@
       "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:8: error: A reference to a net or variable (`k') is not allowed in a constant expression.\n<case>/source_0.sv:8: error: Array index expressions must be constant here.\n<case>/source_0.sv:8: error: Unable to elaborate r-value: t[k][j]\n<case>/source_0.sv:9: error: A reference to a net or variable (`k') is not allowed in a constant expression.\n<case>/source_0.sv:9: error: Array index expressions must be constant here.\n<case>/source_0.sv:9: error: Unable to elaborate r-value: t[k]['sd2:'sd1]\n<case>/source_0.sv:16: error: A reference to a net or variable (`k') is not allowed in a constant expression.\n<case>/source_0.sv:16: error: Array index expressions must be constant here.\n<case>/source_0.sv:20: error: A reference to a net or variable (`k') is not allowed in a constant expression.\n<case>/source_0.sv:20: error: Array index expressions must be constant here.\n<case>/source_0.sv:20: assert: elab_lval.cc:757: failed assertion rc\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indices_select_within_multidimensional_packed_elements",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::out_of_range_inner_indices_stay_in_their_element at 742:7: assert_eq b: expected 0xX, got 0x0 (b)",
+      "expectation": "Simulation",
+      "name": "indexed_select::out_of_range_inner_indices_stay_in_their_element",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

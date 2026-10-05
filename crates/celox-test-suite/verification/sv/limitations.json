@@ -288,6 +288,40 @@
     }
   },
   {
+    "id": "sv_icarus_runtime_packed_subselect",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array (t[k][j], t[k][2:1]: \"Array index expressions must be constant here\"). Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::runtime_indices_select_within_multidimensional_packed_elements"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_packed_inner_index_range",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::out_of_range_inner_indices_stay_in_their_element"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_constant_unknown_bits",
     "category": "simulator_two_state",
     "phase": "execute",

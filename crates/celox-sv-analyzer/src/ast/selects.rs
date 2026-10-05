@@ -1131,6 +1131,31 @@ fn flatten_select_range(
     Some((add_expr(offset.clone(), msb), add_expr(offset, lsb)))
 }
 
+/// Whether `index` lies between the bounds of `dimension`.
+fn packed_index_in_range(index: &ConstExpr, dimension: &PackedDimension) -> ConstExpr {
+    let binary = |left: ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let between = |low: &ConstExpr, high: &ConstExpr| {
+        binary(
+            binary(index.clone(), BinaryOp::Ge, low.clone()),
+            BinaryOp::LogicAnd,
+            binary(index.clone(), BinaryOp::Le, high.clone()),
+        )
+    };
+    ConstExpr::Mux {
+        condition: Box::new(binary(
+            dimension.left.clone(),
+            BinaryOp::Ge,
+            dimension.right.clone(),
+        )),
+        then_expr: Box::new(between(&dimension.right, &dimension.left)),
+        else_expr: Box::new(between(&dimension.left, &dimension.right)),
+    }
+}
+
 fn flatten_packed_select(
     name: &str,
     indices: &[ConstExpr],
@@ -1185,6 +1210,33 @@ fn flatten_packed_select(
             }
         };
         offset = add_expr(offset, term);
+    }
+
+    // A runtime index past its own dimension can still flatten to a position
+    // in another element. Move the whole selection above the vector instead,
+    // where a read gives X and a write is ignored (IEEE 1800-2023 11.5.1).
+    let in_range = indices
+        .iter()
+        .zip(dimensions)
+        .filter(|(index, _)| eval_ast_const_expr(index, &packed_dimensions.const_env).is_none())
+        .map(|(index, dimension)| packed_index_in_range(index, dimension))
+        .reduce(|left, right| ConstExpr::Binary {
+            left: Box::new(left),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(right),
+        });
+    if let Some(in_range) = in_range {
+        let total_width = product_expr(
+            &dimensions
+                .iter()
+                .map(|dimension| dimension.width.clone())
+                .collect::<Vec<_>>(),
+        );
+        offset = ConstExpr::Mux {
+            condition: Box::new(in_range),
+            then_expr: Box::new(offset),
+            else_expr: Box::new(total_width),
+        };
     }
 
     let remaining_width = product_expr(
