@@ -1,0 +1,72 @@
+%start Document
+%grammar_type 'lalr(1)'
+%title "lydite language"
+%line_comment "//"
+%block_comment "/\*" "\*/"
+%%
+Document: DocKind String DocumentBody;
+DocumentBody: "\{"^ { Entry } "\}"^ | { Entry };
+DocKind: "design|specification|lemmas";
+Entry: Use | ActionFrame | Invocation | NamedEntry | Block | Declaration | Assignment | Property;
+Invocation: Id "\("^ [ InvocationInputs ] "\)"^ "=>"^ Expr ";"^;
+InvocationInputs: InvocationInput { ","^ InvocationInput };
+InvocationInput: Id ":"^ Expr;
+ActionFrame: "actions" "\("^ [ Args ] "\)"^ "\{"^ { Entry } "\}"^;
+NamedEntry: Id Id NamedBody;
+NamedBody: "\{"^ { Entry } "\}"^ | ":"^ Type ";"^ | "="^ Expr ";"^ | SignatureBody;
+SignatureBody: "\("^ [ Ports ] "\)"^ "\{"^ { Entry } "\}"^;
+Ports: Port { ","^ Port };
+Port: Id Id ":"^ Type;
+Use: "use" Id [ ":"^ Id ] "\("^ [ Connections ] "\)"^ ";"^;
+Connections: Connection { ","^ Connection };
+Connection: Id ":"^ Id;
+Block: Id "\{"^ { Entry } "\}"^;
+Declaration: Id ":"^ Type ";"^;
+Assignment: Id "="^ Expr ";"^;
+Property: Id Expr ";"^;
+Type: "bool" | "bv" Lt^ UInt Gt^ | "mem" Lt^ UInt ","^ UInt Gt^;
+Expr: Or;
+Or: And { OrOp And };
+OrOp: "\|\|";
+And: BitOr { AndOp BitOr };
+AndOp: "&&";
+BitOr: BitXor { BitOrOp BitXor };
+BitOrOp: "\|";
+BitXor: BitAnd { BitXorOp BitAnd };
+BitXorOp: "\^";
+BitAnd: Compare { BitAndOp Compare };
+BitAndOp: "&";
+Compare: Shift { CompareOp Shift };
+CompareOp: Equal | Unequal | Le | Ge | Lt | Gt;
+Equal: "==";
+Unequal: "!=";
+Le: "<=";
+Ge: ">=";
+Lt: "<";
+Gt: ">";
+Shift: Sum { ShiftOp Sum };
+ShiftOp: "<<|>>";
+Sum: Product { SumOp Product };
+SumOp: Plus | Minus;
+Plus: "\+";
+Minus: "-";
+Product: Unary { ProductOp Unary };
+ProductOp: "\*";
+Unary: PrefixOp Unary | Postfix;
+PrefixOp: Bang | Tilde | Minus;
+Bang: "!";
+Tilde: "~";
+Postfix: Primary { "\["^ Expr "\]"^ };
+Primary: Primed | Word | UInt | Boolean | IfExpr | Named | "\("^ Expr "\)"^;
+Boolean: "true|false";
+IfExpr: "if"^ Expr "\{"^ Expr "\}"^ "else"^ "\{"^ Expr "\}"^;
+Primed: Id Prime { Prime };
+Prime: "'";
+Named: Id [ "\("^ Args "\)"^ ];
+Args: Expr { ","^ Expr };
+Word: "[0-9]+u[0-9]+";
+UInt: "[0-9]+";
+String: /"([^"\\]|\\.)*"/;
+Id: PropertyId | "use" | "actions";
+PropertyId: Ident | "bv" | "mem" | "bool" | DocKind;
+Ident: "[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*";

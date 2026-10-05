@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "protocol": "AXI4-Lite",
+  "normative_issue": "Arm IHI 0022H ID040120",
+  "source": "https://developer.arm.com/-/media/Arm%20Developer%20Community/PDF/IHI0022H_amba_axi_protocol_spec.pdf",
+  "inventory_status": "partial; pending independent normative completeness audit",
+  "overall_compliance": "not_established",
+  "profile": "full Lite signal set or explicit subordinate_no_error_responses profile with both response-code outputs absent; no IDs/bursts/extensions; capacities are tool bounds",
+  "rules": [
+    {
+      "id": "channel_stability",
+      "sections": [
+        "A3.2.1",
+        "A3.2.2"
+      ],
+      "applicability": "all five channels",
+      "enforcement": "sampled",
+      "evidence_or_gap": "VALID and every payload field stable after a stalled sample",
+      "tests": [
+        "test_every_channel_valid_and_payload_stability"
+      ]
+    },
+    {
+      "id": "response_prerequisites_accounting",
+      "sections": [
+        "A3.3",
+        "A3.3.1"
+      ],
+      "applicability": "AXI4-Lite single beat",
+      "enforcement": "sampled",
+      "evidence_or_gap": "prior independent AW/W or AR counts, decrement on accepted response",
+      "tests": [
+        "test_precise_response_prerequisites_and_duplicate_accounting"
+      ]
+    },
+    {
+      "id": "reset_valid",
+      "sections": [
+        "A3.1.2"
+      ],
+      "applicability": "manager AW/W/AR; subordinate B/R",
+      "enforcement": "partial",
+      "evidence_or_gap": "reset-established sampled VALID only; not asynchronous behavior or release timing",
+      "tests": [
+        "test_reset_roles_no_circular_assumptions_and_scope",
+        "b_reset_comb"
+      ]
+    },
+    {
+      "id": "clock_reset_timing",
+      "sections": [
+        "A3.1.1",
+        "A3.1.2"
+      ],
+      "applicability": "physical interface",
+      "enforcement": "unsupported",
+      "evidence_or_gap": "single-clock two-state sampled model has no physical setup/hold or asynchronous reset timing evidence",
+      "tests": []
+    },
+    {
+      "id": "reset_release_valid",
+      "sections": [
+        "A3.1.2"
+      ],
+      "applicability": "manager VALID after reset release",
+      "enforcement": "sampled",
+      "evidence_or_gap": "manager_reset_release_valid checks AW/W/ARVALID low in settled pre-edge values on the first released tick; post-edge assertion is permitted immediately. Generic first_release_guard lowers to native state/reset/next expressions. Source evidence retains both phases and declared polarity; one initial reset only. No physical deassertion/glitch/recovery/removal claim.",
+      "tests": [
+        "test_first_release_pre_edge_only_and_subordinate_rules",
+        "test_generic_first_release_guard_is_plain_native_ir",
+        "release_good_0",
+        "release_good_1",
+        "release_early_aw_0",
+        "release_early_w_0",
+        "release_early_ar_0",
+        "release_early_aw_1",
+        "release_early_w_1",
+        "release_early_ar_1"
+      ],
+      "subordinate_scope": "A3.1.2 requires B/RVALID low during reset but names only manager AW/W/ARVALID for earliest release. Existing B/R prerequisites separately reject unsolicited first-edge responses; no invented subordinate idle-cycle rule."
+    },
+    {
+      "id": "no_comb_path",
+      "sections": [
+        "A3.2.1"
+      ],
+      "applicability": "AXI protocol input to output ports; clock/reset timing separate",
+      "enforcement": "partial",
+      "evidence_or_gap": "generic native no_comb_path over complete supported source-variable graph; no synthesized-netlist/physical claim",
+      "tests": [
+        "test_data_control_and_cancelled_expression_paths",
+        "test_registered_boundary_and_native_source_locations",
+        "test_alias_and_hierarchy_paths_and_cuts",
+        "structural_cancelled_input"
+      ]
+    },
+    {
+      "id": "offer_dependency",
+      "sections": [
+        "A3.3.1"
+      ],
+      "applicability": "per-role intra/cross-channel dependency diagram",
+      "enforcement": "partial",
+      "evidence_or_gap": "Explicit native application idle-offer resource/launch contracts with actual source bindings detect registered READY waits. One-step launch is a declared application contract, not an AXI deadline or complete history-sensitive dependency proof. Real DUT offer/resource meaning remains required.",
+      "tests": [
+        "registered_ready_wait",
+        "write_registered_ready_wait",
+        "read_registered_ready_wait"
+      ]
+    },
+    {
+      "id": "widths_fixed_signals",
+      "sections": [
+        "B1.1",
+        "B1.1.1",
+        "B1.1.2"
+      ],
+      "applicability": "32/64-bit single-beat nonexclusive profile",
+      "enforcement": "partial",
+      "evidence_or_gap": "data/response/strobe widths checked; omitted fixed AXI4 attributes are profile assumptions, not inferred RTL guarantees",
+      "tests": [
+        "test_widths_capacity_and_strict_configuration"
+      ]
+    },
+    {
+      "id": "response_codes",
+      "sections": [
+        "B1.1.1"
+      ],
+      "applicability": "AXI4-Lite B/R",
+      "enforcement": "sampled",
+      "evidence_or_gap": "EXOKAY rejected; OKAY/SLVERR/DECERR permitted",
+      "tests": [
+        "test_precise_response_prerequisites_and_duplicate_accounting"
+      ]
+    },
+    {
+      "id": "address_strobe_consistency",
+      "sections": [
+        "A3.2.2",
+        "A3.4.4 (A3-54, A3-56)",
+        "B1.1.3"
+      ],
+      "applicability": "manager writes, full bus width, including W-before-AW",
+      "enforcement": "sampled",
+      "evidence_or_gap": "Earliest known corresponding AW/W payloads: oldest accepted queue head or current VALID offer when empty. Checks before READY, including both stalled, accepted AW plus stalled W and accepted W plus stalled AW; handshakes alone advance positions. Missing counterparts report pending, not validated; no fairness, eventual acceptance or subordinate write-effect claim.",
+      "tests": [
+        "test_address_strobe_offsets_zero_sparse_and_roles",
+        "test_ordered_pairing_w_first_capacity_shift_and_reset",
+        "manager_illegal_strobe_32",
+        "manager_illegal_strobe_64",
+        "test_stalled_offers_checked_before_ready_and_pending_is_explicit",
+        "test_live_offers_do_not_skip_accepted_queue_positions",
+        "test_truncated_pair_queues_cannot_accuse_after_capacity_overflow",
+        "manager_illegal_strobe_32-stalled",
+        "manager_illegal_strobe_64-stalled"
+      ]
+    },
+    {
+      "id": "strobe_consumption",
+      "sections": [
+        "B1.1.3"
+      ],
+      "applicability": "memory versus peripheral subordinate",
+      "enforcement": "partial",
+      "evidence_or_gap": "Explicit source-bound 32/64-bit memory template verifies actual accepted AW/W storage, apply/applied lifecycle, byte-enabled memory-register transitions and response status. Disabled lanes and other cells remain unchanged. Separate byte-array oracle and real RTL mutants validate both widths; arbitrary peripheral semantics remain declared, not inferred.",
+      "tests": [
+        "memory_32_all_searches",
+        "memory_64_all_searches",
+        "memory_32_zero_strobes",
+        "memory_64_sparse_strobes",
+        "memory_mutant_ignore_strobes",
+        "memory_mutant_disabled_lane_clobber"
+      ]
+    },
+    {
+      "id": "response_correspondence_order",
+      "sections": [
+        "B1.1.4",
+        "A6.5.3",
+        "A6.6.1"
+      ],
+      "applicability": "single fixed ID AXI4-Lite, including multiple outstanding",
+      "enforcement": "partial",
+      "evidence_or_gap": "Reusable source-bound FIFO storage/capacity/response/stall obligations plus independently authored response function. Two-slot ROM example detects actual younger-first responses while ordinary sampled AXI checks pass. No response-time monitor tags; equal responses and arbitrary write/effect origin remain unresolved. The memory template separately verifies one outstanding write pair through actual byte application and response retirement, rejecting acknowledgment without application.",
+      "tests": [
+        "read_all_independent_obligations",
+        "two_outstanding_stalls",
+        "reversed_source_responses",
+        "wrong_storage_binding",
+        "repeat_address",
+        "memory_mutant_ack_without_effect",
+        "memory_mutant_duplicate_application"
+      ],
+      "next_evidence": "Extend declared origin/effect bindings to real DUTs and multi-outstanding writes when supplied. Current read FIFO and one-pair memory models remain bounded, with equal-value origin ambiguity and no general peripheral semantics or external visibility claim."
+    },
+    {
+      "id": "location_ordering",
+      "sections": [
+        "A6.6.1"
+      ],
+      "applicability": "memory versus peripheral locations",
+      "enforcement": "partial",
+      "evidence_or_gap": "The explicit two-cell memory example checks serialized single-outstanding write effects and declared read-before-write sampling on simultaneous edges. It does not infer general region ordering, multi-outstanding execution or peripheral side effects.",
+      "tests": [
+        "memory_32_successive_writes",
+        "memory_64_successive_writes",
+        "memory_32_read_write_same_edge",
+        "memory_64_stalled_read_during_write"
+      ]
+    },
+    {
+      "id": "optional_defaults",
+      "sections": [
+        "A9.2.1\u2013A9.2.4",
+        "A9.3 Tables A9-1\u2013A9-4",
+        "A9.3.1\u2013A9.3.7",
+        "B1.1.4",
+        "B1.2"
+      ],
+      "applicability": "reduced/optional signal configurations",
+      "enforcement": "partial",
+      "evidence_or_gap": "Version 2 subordinate_no_error_responses requires explicit false exclusive/error capabilities, both BRESP/RRESP declared absent with bv<2> type, frontend absence checks, and complete remaining top-level output coverage. Typed OKAY defaults are disclosed; capability declarations and physical default integration are not proved. Partial omission, additional outputs and other profiles remain unsupported.",
+      "tests": [
+        "optional_response_equivalence_32",
+        "optional_response_equivalence_64",
+        "optional_response_mutant_32",
+        "optional_response_mutant_64",
+        "profile_reject_missing_valid",
+        "profile_present_False",
+        "profile_present_True",
+        "profile_reject_wrong_width",
+        "profile_reject_wrong_direction",
+        "profile_implicit_defaults"
+      ],
+      "next_evidence": "Represent exact direction/capability conditions and integration evidence before adding any other omission/default. Do not infer functional error behavior from absence or invent response transaction origins."
+    },
+    {
+      "id": "forward_progress",
+      "sections": [
+        "A3.3.1"
+      ],
+      "applicability": "causal dependency rules",
+      "enforcement": "unchecked",
+      "evidence_or_gap": "no arbitrary response deadline or READY fairness is an AXI safety rule; optional performance contracts remain separate",
+      "tests": []
+    }
+  ]
+}

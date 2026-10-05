@@ -1,0 +1,22 @@
+specification "Enabled four-bit counter"
+input rst: bool;
+input en: bool;
+observation count: bv<4>;
+operation advance {}
+component Counter {
+  state value: bv<4>;
+  init s.value == 0u4;
+  invariant o.count == s.value;
+  steps { advance = n.value == s.value + 1u4; }
+}
+composition Checked { members compose(Counter); }
+implementation {
+  composition Checked;
+  reset_input rst;
+  state count: bv<4>;
+  state fault: bool;
+  reset { count = 0u4; fault = false; }
+  next { count = if i.en { s.count + 1u4 } else { s.count }; fault = s.fault; }
+  operations { advance = i.en; }
+  binding { bind Counter { value = s.count; } observations { count = s.count; } }
+}

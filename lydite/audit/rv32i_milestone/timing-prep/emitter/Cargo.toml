@@ -1,0 +1,15 @@
+[package]
+name = "veryl-timing-emit"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+veryl-emitter = "=0.21.0"
+veryl-analyzer = "=0.21.0"
+veryl-parser = { version = "=0.21.0", default-features = false }
+veryl-metadata = { version = "=0.21.0", default-features = false, features = ["git-command"] }
+[patch.crates-io]
+veryl-analyzer = { path = "../../lydite-git-publish/conformance/veryl-proof/work/analyzer" }
+veryl-metadata = { path = "../../lydite-git-publish/conformance/veryl-proof/work/celox/vendor/veryl-metadata" }
+[profile.dev]
+debug = false

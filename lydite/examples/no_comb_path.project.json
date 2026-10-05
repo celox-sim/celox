@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "top": "Top",
+  "sources": [
+    "no_comb_path.veryl"
+  ],
+  "specification": "no_comb_path.lyd"
+}

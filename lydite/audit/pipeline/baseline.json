@@ -1,0 +1,115 @@
+[
+  {
+    "case": "pipeline",
+    "status": "stuttering_refinement_verified",
+    "exit_code": 0,
+    "seconds": 0.11030390599989914,
+    "engine": {
+      "custom_closed": 3,
+      "kernel_compute_seconds": 0.004175976,
+      "not_run": 0,
+      "query_seconds": 0.106767203,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 5,
+      "z3_seconds": 0.09895021600000001
+    },
+    "failures": []
+  },
+  {
+    "case": "pipeline_bad_forward",
+    "status": "counterexample",
+    "exit_code": 1,
+    "seconds": 0.22221511699899565,
+    "engine": {
+      "custom_closed": 3,
+      "kernel_compute_seconds": 0.004021188,
+      "not_run": 0,
+      "query_seconds": 0.217837136,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 5,
+      "z3_seconds": 0.21017038799999999
+    },
+    "failures": [
+      "microstep_refinement"
+    ]
+  },
+  {
+    "case": "pipeline_bad_interlock",
+    "status": "counterexample",
+    "exit_code": 1,
+    "seconds": 0.22113647500009392,
+    "engine": {
+      "custom_closed": 3,
+      "kernel_compute_seconds": 0.003810407,
+      "not_run": 0,
+      "query_seconds": 0.21795366600000002,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 5,
+      "z3_seconds": 0.21106702200000002
+    },
+    "failures": [
+      "microstep_refinement"
+    ]
+  },
+  {
+    "case": "pipeline_bad_priority",
+    "status": "counterexample",
+    "exit_code": 1,
+    "seconds": 0.2686054179994244,
+    "engine": {
+      "custom_closed": 3,
+      "kernel_compute_seconds": 0.004312723,
+      "not_run": 0,
+      "query_seconds": 0.265400284,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 5,
+      "z3_seconds": 0.25781507800000003
+    },
+    "failures": [
+      "microstep_refinement"
+    ]
+  },
+  {
+    "case": "pipeline_bad_retire",
+    "status": "counterexample",
+    "exit_code": 1,
+    "seconds": 0.22177091199955612,
+    "engine": {
+      "custom_closed": 3,
+      "kernel_compute_seconds": 0.004245202,
+      "not_run": 0,
+      "query_seconds": 0.218689931,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 5,
+      "z3_seconds": 0.20979627999999997
+    },
+    "failures": [
+      "microstep_refinement"
+    ]
+  },
+  {
+    "case": "pipeline_bad_stall",
+    "status": "counterexample",
+    "exit_code": 1,
+    "seconds": 0.37335046699990926,
+    "engine": {
+      "custom_closed": 2,
+      "kernel_compute_seconds": 0.004422657,
+      "not_run": 0,
+      "query_seconds": 0.370176406,
+      "scoring_seconds": 0.0,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 6,
+      "z3_seconds": 0.361919236
+    },
+    "failures": [
+      "microstep_refinement",
+      "hold_contract"
+    ]
+  }
+]

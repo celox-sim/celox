@@ -1,0 +1,179 @@
+{
+  "compositions": {},
+  "kind": "specification",
+  "name": "Named expectations with nested alternatives",
+  "specs": {
+    "Counter": {
+      "examples": {
+        "guard_cannot_be_dropped": {
+          "expect": "negative",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  3
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  3
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        },
+        "large_amount_holds_state": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  3
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  0
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        },
+        "small_amount_changes_state": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "inputs": {
+        "amount": {
+          "bv": 4
+        }
+      },
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "and",
+          [
+            "or",
+            [
+              "and",
+              [
+                "ule",
+                "amount",
+                [
+                  "bv",
+                  4,
+                  2
+                ]
+              ],
+              [
+                "eq",
+                "n.value",
+                [
+                  "add",
+                  "s.value",
+                  "amount"
+                ]
+              ]
+            ],
+            [
+              "and",
+              [
+                "ult",
+                [
+                  "bv",
+                  4,
+                  2
+                ],
+                "amount"
+              ],
+              [
+                "eq",
+                "n.value",
+                "s.value"
+              ]
+            ]
+          ],
+          [
+            "eq",
+            "no.count",
+            "n.value"
+          ]
+        ]
+      },
+      "outputs": {
+        "count": {
+          "bv": 4
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      }
+    }
+  },
+  "version": 4
+}

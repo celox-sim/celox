@@ -1,0 +1,9 @@
+/target/
+/.rustup/
+/.cargo/
+
+__pycache__/
+*.pyc
+/editor/vscode/node_modules/
+/editor/vscode/*.vsix
+/editor/vscode/.vscode-test/

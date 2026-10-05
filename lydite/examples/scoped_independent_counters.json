@@ -1,0 +1,443 @@
+{
+  "version": 4,
+  "kind": "specification",
+  "name": "Independent repeated counters with nested port remapping",
+  "specs": {
+    "Counter": {
+      "inputs": {
+        "amount": {
+          "bv": 4
+        }
+      },
+      "outputs": {
+        "count": {
+          "bv": 4
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "eq",
+          "n.value",
+          [
+            "add",
+            "s.value",
+            "amount"
+          ]
+        ]
+      },
+      "examples": {
+        "add_two": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        },
+        "wrong_arithmetic": {
+          "expect": "negative",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  3
+                ]
+              },
+              "operation": "add"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "compositions": {
+    "Pair": {
+      "inputs": {
+        "left_amount": {
+          "bv": 4
+        },
+        "right_amount": {
+          "bv": 4
+        }
+      },
+      "outputs": {
+        "left_count": {
+          "bv": 4
+        },
+        "right_count": {
+          "bv": 4
+        }
+      },
+      "instances": {
+        "left": {
+          "target": "Counter",
+          "connections": {
+            "amount": "left_amount",
+            "count": "left_count"
+          }
+        },
+        "right": {
+          "target": "Counter",
+          "connections": {
+            "amount": "right_amount",
+            "count": "right_count"
+          }
+        }
+      },
+      "examples": {
+        "independent_values": {
+          "expect": "positive",
+          "initial": {
+            "left_count": [
+              "bv",
+              4,
+              0
+            ],
+            "right_count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "add",
+              "inputs": {
+                "left_amount": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "right_amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "left_count": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "right_count": [
+                  "bv",
+                  4,
+                  2
+                ]
+              }
+            }
+          ]
+        },
+        "reject_coupled_values": {
+          "expect": "negative",
+          "initial": {
+            "left_count": [
+              "bv",
+              4,
+              0
+            ],
+            "right_count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "add",
+              "inputs": {
+                "left_amount": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "right_amount": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "left_count": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "right_count": [
+                  "bv",
+                  4,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Nested": {
+      "inputs": {
+        "first": {
+          "bv": 4
+        },
+        "second": {
+          "bv": 4
+        }
+      },
+      "outputs": {
+        "first_total": {
+          "bv": 4
+        },
+        "second_total": {
+          "bv": 4
+        }
+      },
+      "instances": {
+        "pair": {
+          "target": "Pair",
+          "connections": {
+            "left_amount": "first",
+            "right_amount": "second",
+            "left_count": "first_total",
+            "right_count": "second_total"
+          }
+        }
+      },
+      "examples": {
+        "two_independent_steps": {
+          "expect": "positive",
+          "initial": {
+            "first_total": [
+              "bv",
+              4,
+              0
+            ],
+            "second_total": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "add",
+              "inputs": {
+                "first": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "second": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "first_total": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "second_total": [
+                  "bv",
+                  4,
+                  2
+                ]
+              }
+            },
+            {
+              "operation": "add",
+              "inputs": {
+                "first": [
+                  "bv",
+                  4,
+                  3
+                ],
+                "second": [
+                  "bv",
+                  4,
+                  1
+                ]
+              },
+              "observe": {
+                "first_total": [
+                  "bv",
+                  4,
+                  4
+                ],
+                "second_total": [
+                  "bv",
+                  4,
+                  3
+                ]
+              }
+            }
+          ]
+        },
+        "reject_swapped_outputs": {
+          "expect": "negative",
+          "initial": {
+            "first_total": [
+              "bv",
+              4,
+              0
+            ],
+            "second_total": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "add",
+              "inputs": {
+                "first": [
+                  "bv",
+                  4,
+                  1
+                ],
+                "second": [
+                  "bv",
+                  4,
+                  2
+                ]
+              },
+              "observe": {
+                "first_total": [
+                  "bv",
+                  4,
+                  2
+                ],
+                "second_total": [
+                  "bv",
+                  4,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "implementation": {
+    "composition": "Nested",
+    "inputs": {
+      "rst": "bool",
+      "first": {
+        "bv": 4
+      },
+      "second": {
+        "bv": 4
+      }
+    },
+    "reset_input": "rst",
+    "state": {
+      "left": {
+        "bv": 4
+      },
+      "right": {
+        "bv": 4
+      }
+    },
+    "reset": {
+      "left": [
+        "bv",
+        4,
+        0
+      ],
+      "right": [
+        "bv",
+        4,
+        0
+      ]
+    },
+    "next": {
+      "left": [
+        "add",
+        "s.left",
+        "i.first"
+      ],
+      "right": [
+        "add",
+        "s.right",
+        "i.second"
+      ]
+    },
+    "operations": {
+      "add": true
+    },
+    "binding": {
+      "states": {
+        "pair.left": {
+          "value": "s.left"
+        },
+        "pair.right": {
+          "value": "s.right"
+        }
+      },
+      "outputs": {
+        "first_total": "s.left",
+        "second_total": "s.right"
+      }
+    }
+  }
+}

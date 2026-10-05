@@ -1,0 +1,107 @@
+{
+ "concurrent_initial::clock_periods": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::control_flow": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::gated_drive": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::hierarchy": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::mixed_edges": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::reset": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::reset_between_edges": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::reset_only_clock": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::shared_clock": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "concurrent_initial::simultaneous_edges": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a negative constant for-range bound (InvalidForRange::NegativeBound).",
+  "panic": "compile flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops: analyzer-diagnostics:{\"detail\":\"[InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            clk: input clock,\\\\n            q_fwd: output logic<32>,\\\\n            q_rev_last: output logic<32>\\\\n        ) {\\\\n            always_ff (clk) {\\\\n                q_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    q_fwd += i as 32;\\\\n                }\\\\n\\\\n                q_rev_last = 32'hdead_beef;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    q_rev_last = (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(224), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }, InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            clk: input clock,\\\\n            q_fwd: output logic<32>,\\\\n            q_rev_last: output logic<32>\\\\n        ) {\\\\n            always_ff (clk) {\\\\n                q_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    q_fwd += i as 32;\\\\n                }\\\\n\\\\n                q_rev_last = 32'hdead_beef;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    q_rev_last = (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(368), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"},{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"}],\"stage\":\"analyzer\"}"
+ },
+ "hierarchical_assignment::disjoint_loop": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "hierarchical_assignment::selections": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection": {
+  "kind": "known_celox_failure",
+  "reason": "Instance arrays are unsupported by the Celox Veryl frontend; Celox ignores this case on every backend (crates/celox/tests/hierarchy.rs).",
+  "panic": "compile hierarchy::test_instance_array_broadcast_and_unpacked_array_connection: lower: IllegalContext { feature: \"output port destination\", detail: \"destination slice 0..8 does not fit output width 4\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\nmodule Child (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>\\n) {\\nassign y = if en ? ~a : a;\\n}\\nmodule Top (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>[2]\\n) {\\ninst u: Child [2] (\\na,\\nen,\\ny,\\n);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(210), length: 1 } }) }"
+ },
+ "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a negative constant for-range bound (InvalidForRange::NegativeBound).",
+  "panic": "compile synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops: analyzer-diagnostics:{\"detail\":\"[InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            sum_fwd: output logic<32>,\\\\n            sum_rev: output logic<32>\\\\n        ) {\\\\n            always_comb {\\\\n                sum_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    sum_fwd += i as 32;\\\\n                }\\\\n\\\\n                sum_rev = 0;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    sum_rev = sum_rev * 10 + (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(191), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }, InvalidForRange { kind: NegativeBound, help: \\\"for-loop range bounds are elaborated as unsigned; rewrite the range to start at 0 and offset inside the body\\\", input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\n        module Top (\\\\n            sum_fwd: output logic<32>,\\\\n            sum_rev: output logic<32>\\\\n        ) {\\\\n            always_comb {\\\\n                sum_fwd = 0;\\\\n                for i in (0 - 1)..=1 {\\\\n                    sum_fwd += i as 32;\\\\n                }\\\\n\\\\n                sum_rev = 0;\\\\n                for i in rev (0 - 1)..=1 {\\\\n                    sum_rev = sum_rev * 10 + (i + 1) as 32;\\\\n                }\\\\n            }\\\\n        }\\\\n    \\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(322), length: 11 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"},{\"code\":\"InvalidForRange\",\"kind\":\"NegativeBound\"}],\"stage\":\"analyzer\"}"
+ },
+ "system_function::test_direct_comb_clog2_system_function": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
+  "panic": "compile system_function::test_direct_comb_clog2_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$clog2\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    d: input logic<8>,\\\\n    q: output logic<32>,\\\\n) {\\\\n    always_comb {\\\\n        q = $clog2(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(103), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
+ },
+ "system_function::test_direct_comb_onehot_system_function": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
+  "panic": "compile system_function::test_direct_comb_onehot_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$onehot\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    d: input logic<8>,\\\\n    q: output logic,\\\\n) {\\\\n    always_comb {\\\\n        q = $onehot(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(100), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
+ },
+ "system_function::test_direct_ff_clog2_system_function": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
+  "panic": "compile system_function::test_direct_ff_clog2_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$clog2\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    clk: input clock,\\\\n    d: input logic<8>,\\\\n    q: output logic<32>,\\\\n) {\\\\n    always_ff (clk) {\\\\n        q = $clog2(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(129), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
+ },
+ "system_function::test_direct_ff_onehot_system_function": {
+  "kind": "veryl_language_restriction",
+  "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
+  "panic": "compile system_function::test_direct_ff_onehot_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$onehot\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    clk: input clock,\\\\n    d: input logic<8>,\\\\n    q: output logic,\\\\n) {\\\\n    always_ff (clk) {\\\\n        q = $onehot(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(126), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
+ },
+ "veryl_context_regressions::case_compares_each_label_as_an_if_does": {
+  "kind": "known_celox_failure",
+  "reason": "Celox returns 0 rather than 2 for the mixed-sign y7 case; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
+  "panic": "veryl_context_regressions::case_compares_each_label_as_an_if_does at 521:3: assert_eq y7: expected 0x2, got 0x0 (output y7)"
+ },
+ "veryl_context_regressions::folded_const_select_keeps_its_sign": {
+  "kind": "known_celox_failure",
+  "reason": "Celox returns 0 rather than 0xfffb for the runtime-selected y5; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
+  "panic": "veryl_context_regressions::folded_const_select_keeps_its_sign at 372:3: assert_eq y5: expected 0xfffb, got 0x0 (output y5)"
+ }
+}

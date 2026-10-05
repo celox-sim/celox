@@ -1,0 +1,17 @@
+[package]
+name = "lydite-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+lydite-ir.workspace = true
+lydite-solver.workspace = true
+
+[dev-dependencies]
+lydite-syntax.workspace = true
+
+[lints]
+workspace = true

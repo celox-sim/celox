@@ -1,0 +1,3264 @@
+{
+  "version": 2,
+  "name": "veryl_branch_pipeline_w32",
+  "inputs": {
+    "rst": "bool",
+    "stall": "bool",
+    "rom0": {
+      "bv": 37
+    },
+    "rom1": {
+      "bv": 37
+    },
+    "rom2": {
+      "bv": 37
+    },
+    "rom3": {
+      "bv": 37
+    },
+    "data0": {
+      "bv": 32
+    },
+    "data1": {
+      "bv": 32
+    },
+    "data2": {
+      "bv": 32
+    },
+    "data3": {
+      "bv": 32
+    },
+    "rom4": {
+      "bv": 37
+    },
+    "rom5": {
+      "bv": 37
+    },
+    "rom6": {
+      "bv": 37
+    },
+    "rom7": {
+      "bv": 37
+    },
+    "data4": {
+      "bv": 32
+    },
+    "data5": {
+      "bv": 32
+    },
+    "data6": {
+      "bv": 32
+    },
+    "data7": {
+      "bv": 32
+    }
+  },
+  "reset_input": "rst",
+  "spec": {
+    "state": {
+      "pc": {
+        "bv": 3
+      },
+      "r0": {
+        "bv": 32
+      },
+      "r1": {
+        "bv": 32
+      },
+      "rom0": {
+        "bv": 37
+      },
+      "rom1": {
+        "bv": 37
+      },
+      "rom2": {
+        "bv": 37
+      },
+      "rom3": {
+        "bv": 37
+      },
+      "data0": {
+        "bv": 32
+      },
+      "data1": {
+        "bv": 32
+      },
+      "data2": {
+        "bv": 32
+      },
+      "data3": {
+        "bv": 32
+      },
+      "rom4": {
+        "bv": 37
+      },
+      "rom5": {
+        "bv": 37
+      },
+      "rom6": {
+        "bv": 37
+      },
+      "rom7": {
+        "bv": 37
+      },
+      "data4": {
+        "bv": 32
+      },
+      "data5": {
+        "bv": 32
+      },
+      "data6": {
+        "bv": 32
+      },
+      "data7": {
+        "bv": 32
+      }
+    },
+    "reset": {
+      "pc": [
+        "bv",
+        3,
+        0
+      ],
+      "r0": [
+        "bv",
+        32,
+        0
+      ],
+      "r1": [
+        "bv",
+        32,
+        0
+      ],
+      "rom0": "i.rom0",
+      "rom1": "i.rom1",
+      "rom2": "i.rom2",
+      "rom3": "i.rom3",
+      "data0": "i.data0",
+      "data1": "i.data1",
+      "data2": "i.data2",
+      "data3": "i.data3",
+      "rom4": "i.rom4",
+      "rom5": "i.rom5",
+      "rom6": "i.rom6",
+      "rom7": "i.rom7",
+      "data4": "i.data4",
+      "data5": "i.data5",
+      "data6": "i.data6",
+      "data7": "i.data7"
+    },
+    "wires": {
+      "ir": [
+        "ite",
+        [
+          "eq",
+          "s.pc",
+          [
+            "bv",
+            3,
+            0
+          ]
+        ],
+        "s.rom0",
+        [
+          "ite",
+          [
+            "eq",
+            "s.pc",
+            [
+              "bv",
+              3,
+              1
+            ]
+          ],
+          "s.rom1",
+          [
+            "ite",
+            [
+              "eq",
+              "s.pc",
+              [
+                "bv",
+                3,
+                2
+              ]
+            ],
+            "s.rom2",
+            [
+              "ite",
+              [
+                "eq",
+                "s.pc",
+                [
+                  "bv",
+                  3,
+                  3
+                ]
+              ],
+              "s.rom3",
+              [
+                "ite",
+                [
+                  "eq",
+                  "s.pc",
+                  [
+                    "bv",
+                    3,
+                    4
+                  ]
+                ],
+                "s.rom4",
+                [
+                  "ite",
+                  [
+                    "eq",
+                    "s.pc",
+                    [
+                      "bv",
+                      3,
+                      5
+                    ]
+                  ],
+                  "s.rom5",
+                  [
+                    "ite",
+                    [
+                      "eq",
+                      "s.pc",
+                      [
+                        "bv",
+                        3,
+                        6
+                      ]
+                    ],
+                    "s.rom6",
+                    "s.rom7"
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ],
+      "result": [
+        "ite",
+        [
+          "eq",
+          [
+            "extract",
+            36,
+            34,
+            "w.ir"
+          ],
+          [
+            "bv",
+            3,
+            0
+          ]
+        ],
+        [
+          "extract",
+          31,
+          0,
+          "w.ir"
+        ],
+        [
+          "ite",
+          [
+            "eq",
+            [
+              "extract",
+              36,
+              34,
+              "w.ir"
+            ],
+            [
+              "bv",
+              3,
+              1
+            ]
+          ],
+          [
+            "add",
+            [
+              "ite",
+              [
+                "eq",
+                [
+                  "extract",
+                  32,
+                  32,
+                  "w.ir"
+                ],
+                [
+                  "bv",
+                  1,
+                  0
+                ]
+              ],
+              "s.r0",
+              "s.r1"
+            ],
+            [
+              "extract",
+              31,
+              0,
+              "w.ir"
+            ]
+          ],
+          [
+            "ite",
+            [
+              "eq",
+              [
+                "extract",
+                36,
+                34,
+                "w.ir"
+              ],
+              [
+                "bv",
+                3,
+                2
+              ]
+            ],
+            [
+              "bxor",
+              [
+                "ite",
+                [
+                  "eq",
+                  [
+                    "extract",
+                    32,
+                    32,
+                    "w.ir"
+                  ],
+                  [
+                    "bv",
+                    1,
+                    0
+                  ]
+                ],
+                "s.r0",
+                "s.r1"
+              ],
+              [
+                "extract",
+                31,
+                0,
+                "w.ir"
+              ]
+            ],
+            [
+              "ite",
+              [
+                "eq",
+                [
+                  "extract",
+                  2,
+                  0,
+                  "w.ir"
+                ],
+                [
+                  "bv",
+                  3,
+                  0
+                ]
+              ],
+              "s.data0",
+              [
+                "ite",
+                [
+                  "eq",
+                  [
+                    "extract",
+                    2,
+                    0,
+                    "w.ir"
+                  ],
+                  [
+                    "bv",
+                    3,
+                    1
+                  ]
+                ],
+                "s.data1",
+                [
+                  "ite",
+                  [
+                    "eq",
+                    [
+                      "extract",
+                      2,
+                      0,
+                      "w.ir"
+                    ],
+                    [
+                      "bv",
+                      3,
+                      2
+                    ]
+                  ],
+                  "s.data2",
+                  [
+                    "ite",
+                    [
+                      "eq",
+                      [
+                        "extract",
+                        2,
+                        0,
+                        "w.ir"
+                      ],
+                      [
+                        "bv",
+                        3,
+                        3
+                      ]
+                    ],
+                    "s.data3",
+                    [
+                      "ite",
+                      [
+                        "eq",
+                        [
+                          "extract",
+                          2,
+                          0,
+                          "w.ir"
+                        ],
+                        [
+                          "bv",
+                          3,
+                          4
+                        ]
+                      ],
+                      "s.data4",
+                      [
+                        "ite",
+                        [
+                          "eq",
+                          [
+                            "extract",
+                            2,
+                            0,
+                            "w.ir"
+                          ],
+                          [
+                            "bv",
+                            3,
+                            5
+                          ]
+                        ],
+                        "s.data5",
+                        [
+                          "ite",
+                          [
+                            "eq",
+                            [
+                              "extract",
+                              2,
+                              0,
+                              "w.ir"
+                            ],
+                            [
+                              "bv",
+                              3,
+                              6
+                            ]
+                          ],
+                          "s.data6",
+                          "s.data7"
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ]
+    },
+    "next": {
+      "pc": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            [
+              "eq",
+              [
+                "extract",
+                36,
+                34,
+                "w.ir"
+              ],
+              [
+                "bv",
+                3,
+                4
+              ]
+            ]
+          ],
+          [
+            "eq",
+            [
+              "ite",
+              [
+                "eq",
+                [
+                  "extract",
+                  32,
+                  32,
+                  "w.ir"
+                ],
+                [
+                  "bv",
+                  1,
+                  0
+                ]
+              ],
+              "s.r0",
+              "s.r1"
+            ],
+            [
+              "bv",
+              32,
+              0
+            ]
+          ]
+        ],
+        [
+          "extract",
+          2,
+          0,
+          "w.ir"
+        ],
+        [
+          "add",
+          "s.pc",
+          [
+            "bv",
+            3,
+            1
+          ]
+        ]
+      ],
+      "r0": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            [
+              "eq",
+              [
+                "extract",
+                36,
+                36,
+                "w.ir"
+              ],
+              [
+                "bv",
+                1,
+                0
+              ]
+            ]
+          ],
+          [
+            "eq",
+            [
+              "extract",
+              33,
+              33,
+              "w.ir"
+            ],
+            [
+              "bv",
+              1,
+              0
+            ]
+          ]
+        ],
+        "w.result",
+        "s.r0"
+      ],
+      "r1": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            [
+              "eq",
+              [
+                "extract",
+                36,
+                36,
+                "w.ir"
+              ],
+              [
+                "bv",
+                1,
+                0
+              ]
+            ]
+          ],
+          [
+            "eq",
+            [
+              "extract",
+              33,
+              33,
+              "w.ir"
+            ],
+            [
+              "bv",
+              1,
+              1
+            ]
+          ]
+        ],
+        "w.result",
+        "s.r1"
+      ],
+      "rom0": "s.rom0",
+      "rom1": "s.rom1",
+      "rom2": "s.rom2",
+      "rom3": "s.rom3",
+      "data0": "s.data0",
+      "data1": "s.data1",
+      "data2": "s.data2",
+      "data3": "s.data3",
+      "rom4": "s.rom4",
+      "rom5": "s.rom5",
+      "rom6": "s.rom6",
+      "rom7": "s.rom7",
+      "data4": "s.data4",
+      "data5": "s.data5",
+      "data6": "s.data6",
+      "data7": "s.data7"
+    },
+    "outputs": {
+      "can_step": true
+    }
+  },
+  "impl": {
+    "state": {
+      "pc": {
+        "bv": 3
+      },
+      "r0": {
+        "bv": 32
+      },
+      "r1": {
+        "bv": 32
+      },
+      "rom0": {
+        "bv": 37
+      },
+      "rom1": {
+        "bv": 37
+      },
+      "rom2": {
+        "bv": 37
+      },
+      "rom3": {
+        "bv": 37
+      },
+      "data0": {
+        "bv": 32
+      },
+      "data1": {
+        "bv": 32
+      },
+      "data2": {
+        "bv": 32
+      },
+      "data3": {
+        "bv": 32
+      },
+      "fetch_pc": {
+        "bv": 3
+      },
+      "d_valid": "bool",
+      "d_pc": {
+        "bv": 3
+      },
+      "d_ir": {
+        "bv": 37
+      },
+      "x_valid": "bool",
+      "x_pc": {
+        "bv": 3
+      },
+      "x_ir": {
+        "bv": 37
+      },
+      "w_valid": "bool",
+      "w_pc": {
+        "bv": 3
+      },
+      "w_ir": {
+        "bv": 37
+      },
+      "x_operand": {
+        "bv": 32
+      },
+      "w_result": {
+        "bv": 32
+      },
+      "w_next_pc": {
+        "bv": 3
+      },
+      "rom4": {
+        "bv": 37
+      },
+      "rom5": {
+        "bv": 37
+      },
+      "rom6": {
+        "bv": 37
+      },
+      "rom7": {
+        "bv": 37
+      },
+      "data4": {
+        "bv": 32
+      },
+      "data5": {
+        "bv": 32
+      },
+      "data6": {
+        "bv": 32
+      },
+      "data7": {
+        "bv": 32
+      }
+    },
+    "reset": {
+      "d_ir": [
+        "bv",
+        37,
+        0
+      ],
+      "d_pc": [
+        "bv",
+        3,
+        0
+      ],
+      "d_valid": false,
+      "data0": "i.data0",
+      "data1": "i.data1",
+      "data2": "i.data2",
+      "data3": "i.data3",
+      "data4": "i.data4",
+      "data5": "i.data5",
+      "data6": "i.data6",
+      "data7": "i.data7",
+      "fetch_pc": [
+        "bv",
+        3,
+        0
+      ],
+      "pc": [
+        "bv",
+        3,
+        0
+      ],
+      "r0": [
+        "bv",
+        32,
+        0
+      ],
+      "r1": [
+        "bv",
+        32,
+        0
+      ],
+      "rom0": "i.rom0",
+      "rom1": "i.rom1",
+      "rom2": "i.rom2",
+      "rom3": "i.rom3",
+      "rom4": "i.rom4",
+      "rom5": "i.rom5",
+      "rom6": "i.rom6",
+      "rom7": "i.rom7",
+      "w_ir": [
+        "bv",
+        37,
+        0
+      ],
+      "w_next_pc": [
+        "bv",
+        3,
+        0
+      ],
+      "w_pc": [
+        "bv",
+        3,
+        0
+      ],
+      "w_result": [
+        "bv",
+        32,
+        0
+      ],
+      "w_valid": false,
+      "x_ir": [
+        "bv",
+        37,
+        0
+      ],
+      "x_operand": [
+        "bv",
+        32,
+        0
+      ],
+      "x_pc": [
+        "bv",
+        3,
+        0
+      ],
+      "x_valid": false
+    },
+    "wires": {
+      "sir0": [
+        "not",
+        "i.stall"
+      ],
+      "sir1": [
+        "not",
+        "s.w_valid"
+      ],
+      "sir10": [
+        "and",
+        "w.sir4",
+        "w.sir6"
+      ],
+      "sir100": [
+        "and",
+        "w.sir96",
+        "w.sir49"
+      ],
+      "sir101": [
+        "extract",
+        2,
+        0,
+        "s.x_ir"
+      ],
+      "sir102": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          0
+        ]
+      ],
+      "sir103": [
+        "not",
+        "w.sir102"
+      ],
+      "sir104": [
+        "and",
+        "w.sir100",
+        "w.sir103"
+      ],
+      "sir105": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir106": [
+        "not",
+        "w.sir105"
+      ],
+      "sir107": [
+        "and",
+        "w.sir104",
+        "w.sir106"
+      ],
+      "sir108": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          2
+        ]
+      ],
+      "sir109": [
+        "not",
+        "w.sir108"
+      ],
+      "sir11": [
+        "extract",
+        33,
+        33,
+        "s.w_ir"
+      ],
+      "sir110": [
+        "and",
+        "w.sir107",
+        "w.sir109"
+      ],
+      "sir111": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          3
+        ]
+      ],
+      "sir112": [
+        "not",
+        "w.sir111"
+      ],
+      "sir113": [
+        "and",
+        "w.sir110",
+        "w.sir112"
+      ],
+      "sir114": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          4
+        ]
+      ],
+      "sir115": [
+        "not",
+        "w.sir114"
+      ],
+      "sir116": [
+        "and",
+        "w.sir113",
+        "w.sir115"
+      ],
+      "sir117": [
+        "not",
+        "w.sir116"
+      ],
+      "sir118": [
+        "and",
+        "w.sir113",
+        "w.sir114"
+      ],
+      "sir119": [
+        "not",
+        "w.sir118"
+      ],
+      "sir12": [
+        "eq",
+        "w.sir11",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      "sir120": [
+        "and",
+        "w.sir117",
+        "w.sir119"
+      ],
+      "sir121": [
+        "and",
+        "w.sir110",
+        "w.sir111"
+      ],
+      "sir122": [
+        "not",
+        "w.sir121"
+      ],
+      "sir123": [
+        "and",
+        "w.sir120",
+        "w.sir122"
+      ],
+      "sir124": [
+        "and",
+        "w.sir107",
+        "w.sir108"
+      ],
+      "sir125": [
+        "not",
+        "w.sir124"
+      ],
+      "sir126": [
+        "and",
+        "w.sir123",
+        "w.sir125"
+      ],
+      "sir127": [
+        "and",
+        "w.sir104",
+        "w.sir105"
+      ],
+      "sir128": [
+        "not",
+        "w.sir127"
+      ],
+      "sir129": [
+        "and",
+        "w.sir126",
+        "w.sir128"
+      ],
+      "sir13": [
+        "and",
+        "w.sir10",
+        "w.sir12"
+      ],
+      "sir130": [
+        "and",
+        "w.sir100",
+        "w.sir102"
+      ],
+      "sir131": [
+        "not",
+        "w.sir130"
+      ],
+      "sir132": [
+        "and",
+        "w.sir129",
+        "w.sir131"
+      ],
+      "sir133": [
+        "and",
+        "w.sir99",
+        "w.sir132"
+      ],
+      "sir134": [
+        "and",
+        "w.sir93",
+        "w.sir94"
+      ],
+      "sir135": [
+        "not",
+        "w.sir134"
+      ],
+      "sir136": [
+        "and",
+        "w.sir133",
+        "w.sir135"
+      ],
+      "sir137": [
+        "and",
+        "w.sir136",
+        "w.sir93"
+      ],
+      "sir138": [
+        "not",
+        "w.sir137"
+      ],
+      "sir139": [
+        "and",
+        "w.sir46",
+        "w.sir97"
+      ],
+      "sir14": [
+        "not",
+        "w.sir13"
+      ],
+      "sir140": [
+        "not",
+        "w.sir139"
+      ],
+      "sir141": [
+        "and",
+        "w.sir138",
+        "w.sir140"
+      ],
+      "sir142": [
+        "not",
+        "w.sir141"
+      ],
+      "sir143": [
+        "and",
+        "w.sir138",
+        "w.sir139"
+      ],
+      "sir144": [
+        "not",
+        "w.sir143"
+      ],
+      "sir145": [
+        "and",
+        "w.sir142",
+        "w.sir144"
+      ],
+      "sir146": [
+        "not",
+        "w.sir145"
+      ],
+      "sir147": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          0
+        ]
+      ],
+      "sir148": [
+        "and",
+        "w.sir146",
+        "w.sir147"
+      ],
+      "sir149": [
+        "not",
+        "w.sir147"
+      ],
+      "sir15": [
+        "not",
+        "w.sir12"
+      ],
+      "sir150": [
+        "and",
+        "w.sir146",
+        "w.sir149"
+      ],
+      "sir151": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir152": [
+        "and",
+        "w.sir150",
+        "w.sir151"
+      ],
+      "sir153": [
+        "not",
+        "w.sir151"
+      ],
+      "sir154": [
+        "and",
+        "w.sir150",
+        "w.sir153"
+      ],
+      "sir155": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          2
+        ]
+      ],
+      "sir156": [
+        "and",
+        "w.sir154",
+        "w.sir155"
+      ],
+      "sir157": [
+        "not",
+        "w.sir155"
+      ],
+      "sir158": [
+        "and",
+        "w.sir154",
+        "w.sir157"
+      ],
+      "sir159": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          3
+        ]
+      ],
+      "sir16": [
+        "and",
+        "w.sir10",
+        "w.sir15"
+      ],
+      "sir160": [
+        "and",
+        "w.sir158",
+        "w.sir159"
+      ],
+      "sir161": [
+        "not",
+        "w.sir159"
+      ],
+      "sir162": [
+        "and",
+        "w.sir158",
+        "w.sir161"
+      ],
+      "sir163": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          4
+        ]
+      ],
+      "sir164": [
+        "and",
+        "w.sir162",
+        "w.sir163"
+      ],
+      "sir165": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          5
+        ]
+      ],
+      "sir166": [
+        "eq",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          6
+        ]
+      ],
+      "sir167": [
+        "ite",
+        "w.sir166",
+        "s.rom6",
+        "s.rom7"
+      ],
+      "sir168": [
+        "ite",
+        "w.sir165",
+        "s.rom5",
+        "w.sir167"
+      ],
+      "sir169": [
+        "ite",
+        "w.sir164",
+        "s.rom4",
+        "w.sir168"
+      ],
+      "sir17": [
+        "not",
+        "w.sir16"
+      ],
+      "sir170": [
+        "ite",
+        "w.sir160",
+        "s.rom3",
+        "w.sir169"
+      ],
+      "sir171": [
+        "ite",
+        "w.sir156",
+        "s.rom2",
+        "w.sir170"
+      ],
+      "sir172": [
+        "ite",
+        "w.sir152",
+        "s.rom1",
+        "w.sir171"
+      ],
+      "sir173": [
+        "ite",
+        "w.sir148",
+        "s.rom0",
+        "w.sir172"
+      ],
+      "sir174": [
+        "ite",
+        "w.sir78",
+        "w.sir173",
+        "s.d_ir"
+      ],
+      "sir175": [
+        "ite",
+        "w.sir91",
+        "w.sir174",
+        "s.d_ir"
+      ],
+      "sir176": [
+        "ite",
+        "w.sir78",
+        "s.fetch_pc",
+        "s.d_pc"
+      ],
+      "sir177": [
+        "ite",
+        "w.sir91",
+        "w.sir176",
+        "s.d_pc"
+      ],
+      "sir178": [
+        "ite",
+        "w.sir69",
+        true,
+        "s.d_valid"
+      ],
+      "sir179": [
+        "ite",
+        "w.sir72",
+        false,
+        "w.sir178"
+      ],
+      "sir18": [
+        "and",
+        "w.sir14",
+        "w.sir17"
+      ],
+      "sir180": [
+        "ite",
+        "w.sir91",
+        "w.sir179",
+        "s.d_valid"
+      ],
+      "sir181": [
+        "add",
+        "s.fetch_pc",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir182": [
+        "ite",
+        "w.sir85",
+        "w.sir181",
+        "s.fetch_pc"
+      ],
+      "sir183": [
+        "ite",
+        "w.sir88",
+        "w.sir101",
+        "w.sir182"
+      ],
+      "sir184": [
+        "ite",
+        "w.sir91",
+        "w.sir183",
+        "s.fetch_pc"
+      ],
+      "sir185": [
+        "not",
+        "w.sir19"
+      ],
+      "sir186": [
+        "ite",
+        "w.sir185",
+        "s.w_next_pc",
+        "s.pc"
+      ],
+      "sir187": [
+        "ite",
+        "w.sir91",
+        "w.sir186",
+        "s.pc"
+      ],
+      "sir188": [
+        "not",
+        "w.sir18"
+      ],
+      "sir189": [
+        "ite",
+        "w.sir16",
+        "s.r0",
+        "s.w_result"
+      ],
+      "sir19": [
+        "and",
+        "w.sir9",
+        "w.sir18"
+      ],
+      "sir190": [
+        "ite",
+        "w.sir188",
+        "w.sir189",
+        "s.r0"
+      ],
+      "sir191": [
+        "ite",
+        "w.sir185",
+        "w.sir190",
+        "s.r0"
+      ],
+      "sir192": [
+        "ite",
+        "w.sir91",
+        "w.sir191",
+        "s.r0"
+      ],
+      "sir193": [
+        "ite",
+        "w.sir16",
+        "s.w_result",
+        "s.r1"
+      ],
+      "sir194": [
+        "ite",
+        "w.sir188",
+        "w.sir193",
+        "s.r1"
+      ],
+      "sir195": [
+        "ite",
+        "w.sir185",
+        "w.sir194",
+        "s.r1"
+      ],
+      "sir196": [
+        "ite",
+        "w.sir91",
+        "w.sir195",
+        "s.r1"
+      ],
+      "sir197": [
+        "ite",
+        "w.sir91",
+        "s.x_ir",
+        "s.w_ir"
+      ],
+      "sir198": [
+        "add",
+        "s.x_pc",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir199": [
+        "ite",
+        "w.sir64",
+        "w.sir101",
+        "w.sir198"
+      ],
+      "sir2": [
+        "and",
+        "w.sir0",
+        "w.sir1"
+      ],
+      "sir20": [
+        "and",
+        "w.sir3",
+        "w.sir19"
+      ],
+      "sir200": [
+        "ite",
+        "w.sir91",
+        "w.sir199",
+        "s.w_next_pc"
+      ],
+      "sir201": [
+        "ite",
+        "w.sir91",
+        "s.x_pc",
+        "s.w_pc"
+      ],
+      "sir202": [
+        "extract",
+        31,
+        0,
+        "s.x_ir"
+      ],
+      "sir203": [
+        "add",
+        "s.x_operand",
+        "w.sir202"
+      ],
+      "sir204": [
+        "bxor",
+        "s.x_operand",
+        "w.sir202"
+      ],
+      "sir205": [
+        "not",
+        "w.sir132"
+      ],
+      "sir206": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          5
+        ]
+      ],
+      "sir207": [
+        "eq",
+        "w.sir101",
+        [
+          "bv",
+          3,
+          6
+        ]
+      ],
+      "sir208": [
+        "ite",
+        "w.sir207",
+        "s.data6",
+        "s.data7"
+      ],
+      "sir209": [
+        "ite",
+        "w.sir206",
+        "s.data5",
+        "w.sir208"
+      ],
+      "sir21": [
+        "not",
+        "w.sir20"
+      ],
+      "sir210": [
+        "ite",
+        "w.sir118",
+        "s.data4",
+        "w.sir209"
+      ],
+      "sir211": [
+        "ite",
+        "w.sir121",
+        "s.data3",
+        "w.sir210"
+      ],
+      "sir212": [
+        "ite",
+        "w.sir124",
+        "s.data2",
+        "w.sir211"
+      ],
+      "sir213": [
+        "ite",
+        "w.sir127",
+        "s.data1",
+        "w.sir212"
+      ],
+      "sir214": [
+        "ite",
+        "w.sir130",
+        "s.data0",
+        "w.sir213"
+      ],
+      "sir215": [
+        "ite",
+        "w.sir205",
+        "w.sir214",
+        "w.sir202"
+      ],
+      "sir216": [
+        "ite",
+        "w.sir134",
+        "w.sir204",
+        "w.sir215"
+      ],
+      "sir217": [
+        "ite",
+        "w.sir92",
+        "w.sir203",
+        "w.sir216"
+      ],
+      "sir218": [
+        "ite",
+        "w.sir91",
+        "w.sir217",
+        "s.w_result"
+      ],
+      "sir219": [
+        "ite",
+        "w.sir91",
+        "s.x_valid",
+        "s.w_valid"
+      ],
+      "sir22": [
+        "not",
+        "s.d_valid"
+      ],
+      "sir220": [
+        "ite",
+        "w.sir91",
+        "s.d_ir",
+        "s.x_ir"
+      ],
+      "sir221": [
+        "and",
+        "s.w_valid",
+        "w.sir6"
+      ],
+      "sir222": [
+        "eq",
+        "w.sir11",
+        "w.sir44"
+      ],
+      "sir223": [
+        "and",
+        "w.sir221",
+        "w.sir222"
+      ],
+      "sir224": [
+        "eq",
+        "w.sir44",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      "sir225": [
+        "not",
+        "w.sir224"
+      ],
+      "sir226": [
+        "ite",
+        "w.sir225",
+        "s.r1",
+        "s.r0"
+      ],
+      "sir227": [
+        "ite",
+        "w.sir223",
+        "s.w_result",
+        "w.sir226"
+      ],
+      "sir228": [
+        "ite",
+        "w.sir143",
+        "w.sir217",
+        "w.sir227"
+      ],
+      "sir229": [
+        "ite",
+        "w.sir91",
+        "w.sir228",
+        "s.x_operand"
+      ],
+      "sir23": [
+        "and",
+        "w.sir21",
+        "w.sir22"
+      ],
+      "sir230": [
+        "ite",
+        "w.sir91",
+        "s.d_pc",
+        "s.x_pc"
+      ],
+      "sir231": [
+        "and",
+        "w.sir53",
+        "w.sir65"
+      ],
+      "sir232": [
+        "ite",
+        "w.sir57",
+        "w.sir231",
+        false
+      ],
+      "sir233": [
+        "ite",
+        "w.sir91",
+        "w.sir232",
+        "s.x_valid"
+      ],
+      "sir24": [
+        "not",
+        "w.sir23"
+      ],
+      "sir25": [
+        "and",
+        "w.sir21",
+        "s.d_valid"
+      ],
+      "sir26": [
+        "not",
+        "w.sir25"
+      ],
+      "sir27": [
+        "and",
+        "w.sir24",
+        "w.sir26"
+      ],
+      "sir28": [
+        "not",
+        "w.sir27"
+      ],
+      "sir29": [
+        "extract",
+        36,
+        34,
+        "s.d_ir"
+      ],
+      "sir3": [
+        "not",
+        "w.sir2"
+      ],
+      "sir30": [
+        "eq",
+        "w.sir29",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir31": [
+        "not",
+        "w.sir30"
+      ],
+      "sir32": [
+        "eq",
+        "w.sir29",
+        [
+          "bv",
+          3,
+          2
+        ]
+      ],
+      "sir33": [
+        "not",
+        "w.sir32"
+      ],
+      "sir34": [
+        "and",
+        "w.sir31",
+        "w.sir33"
+      ],
+      "sir35": [
+        "eq",
+        "w.sir29",
+        [
+          "bv",
+          3,
+          4
+        ]
+      ],
+      "sir36": [
+        "not",
+        "w.sir35"
+      ],
+      "sir37": [
+        "and",
+        "w.sir34",
+        "w.sir36"
+      ],
+      "sir38": [
+        "not",
+        "w.sir37"
+      ],
+      "sir39": [
+        "and",
+        "s.d_valid",
+        "w.sir38"
+      ],
+      "sir4": [
+        "and",
+        "w.sir0",
+        "s.w_valid"
+      ],
+      "sir40": [
+        "extract",
+        36,
+        36,
+        "s.x_ir"
+      ],
+      "sir41": [
+        "eq",
+        "w.sir40",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      "sir42": [
+        "and",
+        "s.x_valid",
+        "w.sir41"
+      ],
+      "sir43": [
+        "extract",
+        33,
+        33,
+        "s.x_ir"
+      ],
+      "sir44": [
+        "extract",
+        32,
+        32,
+        "s.d_ir"
+      ],
+      "sir45": [
+        "eq",
+        "w.sir43",
+        "w.sir44"
+      ],
+      "sir46": [
+        "and",
+        "w.sir42",
+        "w.sir45"
+      ],
+      "sir47": [
+        "and",
+        "w.sir39",
+        "w.sir46"
+      ],
+      "sir48": [
+        "extract",
+        36,
+        34,
+        "s.x_ir"
+      ],
+      "sir49": [
+        "eq",
+        "w.sir48",
+        [
+          "bv",
+          3,
+          3
+        ]
+      ],
+      "sir5": [
+        "extract",
+        36,
+        36,
+        "s.w_ir"
+      ],
+      "sir50": [
+        "and",
+        "w.sir47",
+        "w.sir49"
+      ],
+      "sir51": [
+        "not",
+        "w.sir50"
+      ],
+      "sir52": [
+        "and",
+        "s.d_valid",
+        "w.sir51"
+      ],
+      "sir53": [
+        "ite",
+        "w.sir25",
+        "w.sir52",
+        false
+      ],
+      "sir54": [
+        "not",
+        "w.sir53"
+      ],
+      "sir55": [
+        "and",
+        "w.sir28",
+        "w.sir54"
+      ],
+      "sir56": [
+        "not",
+        "w.sir55"
+      ],
+      "sir57": [
+        "and",
+        "w.sir28",
+        "w.sir53"
+      ],
+      "sir58": [
+        "not",
+        "w.sir57"
+      ],
+      "sir59": [
+        "and",
+        "w.sir56",
+        "w.sir58"
+      ],
+      "sir6": [
+        "eq",
+        "w.sir5",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      "sir60": [
+        "not",
+        "w.sir59"
+      ],
+      "sir61": [
+        "eq",
+        "w.sir48",
+        [
+          "bv",
+          3,
+          4
+        ]
+      ],
+      "sir62": [
+        "and",
+        "s.x_valid",
+        "w.sir61"
+      ],
+      "sir63": [
+        "eq",
+        "s.x_operand",
+        [
+          "bv",
+          32,
+          0
+        ]
+      ],
+      "sir64": [
+        "and",
+        "w.sir62",
+        "w.sir63"
+      ],
+      "sir65": [
+        "not",
+        "w.sir64"
+      ],
+      "sir66": [
+        "and",
+        "w.sir60",
+        "w.sir65"
+      ],
+      "sir67": [
+        "and",
+        "w.sir66",
+        "w.sir50"
+      ],
+      "sir68": [
+        "not",
+        "w.sir67"
+      ],
+      "sir69": [
+        "and",
+        "w.sir66",
+        "w.sir51"
+      ],
+      "sir7": [
+        "not",
+        "w.sir6"
+      ],
+      "sir70": [
+        "not",
+        "w.sir69"
+      ],
+      "sir71": [
+        "and",
+        "w.sir68",
+        "w.sir70"
+      ],
+      "sir72": [
+        "and",
+        "w.sir60",
+        "w.sir64"
+      ],
+      "sir73": [
+        "not",
+        "w.sir72"
+      ],
+      "sir74": [
+        "and",
+        "w.sir71",
+        "w.sir73"
+      ],
+      "sir75": [
+        "not",
+        "w.sir74"
+      ],
+      "sir76": [
+        "and",
+        "w.sir75",
+        "w.sir50"
+      ],
+      "sir77": [
+        "not",
+        "w.sir76"
+      ],
+      "sir78": [
+        "and",
+        "w.sir75",
+        "w.sir51"
+      ],
+      "sir79": [
+        "not",
+        "w.sir78"
+      ],
+      "sir8": [
+        "and",
+        "w.sir4",
+        "w.sir7"
+      ],
+      "sir80": [
+        "and",
+        "w.sir77",
+        "w.sir79"
+      ],
+      "sir81": [
+        "not",
+        "w.sir80"
+      ],
+      "sir82": [
+        "and",
+        "w.sir81",
+        "w.sir65"
+      ],
+      "sir83": [
+        "and",
+        "w.sir82",
+        "w.sir50"
+      ],
+      "sir84": [
+        "not",
+        "w.sir83"
+      ],
+      "sir85": [
+        "and",
+        "w.sir82",
+        "w.sir51"
+      ],
+      "sir86": [
+        "not",
+        "w.sir85"
+      ],
+      "sir87": [
+        "and",
+        "w.sir84",
+        "w.sir86"
+      ],
+      "sir88": [
+        "and",
+        "w.sir81",
+        "w.sir64"
+      ],
+      "sir89": [
+        "not",
+        "w.sir88"
+      ],
+      "sir9": [
+        "not",
+        "w.sir8"
+      ],
+      "sir90": [
+        "and",
+        "w.sir87",
+        "w.sir89"
+      ],
+      "sir91": [
+        "not",
+        "w.sir90"
+      ],
+      "sir92": [
+        "eq",
+        "w.sir48",
+        [
+          "bv",
+          3,
+          1
+        ]
+      ],
+      "sir93": [
+        "not",
+        "w.sir92"
+      ],
+      "sir94": [
+        "eq",
+        "w.sir48",
+        [
+          "bv",
+          3,
+          2
+        ]
+      ],
+      "sir95": [
+        "not",
+        "w.sir94"
+      ],
+      "sir96": [
+        "and",
+        "w.sir93",
+        "w.sir95"
+      ],
+      "sir97": [
+        "not",
+        "w.sir49"
+      ],
+      "sir98": [
+        "and",
+        "w.sir96",
+        "w.sir97"
+      ],
+      "sir99": [
+        "not",
+        "w.sir98"
+      ]
+    },
+    "next": {
+      "d_ir": "w.sir175",
+      "d_pc": "w.sir177",
+      "d_valid": "w.sir180",
+      "data0": "s.data0",
+      "data1": "s.data1",
+      "data2": "s.data2",
+      "data3": "s.data3",
+      "data4": "s.data4",
+      "data5": "s.data5",
+      "data6": "s.data6",
+      "data7": "s.data7",
+      "fetch_pc": "w.sir184",
+      "pc": "w.sir187",
+      "r0": "w.sir192",
+      "r1": "w.sir196",
+      "rom0": "s.rom0",
+      "rom1": "s.rom1",
+      "rom2": "s.rom2",
+      "rom3": "s.rom3",
+      "rom4": "s.rom4",
+      "rom5": "s.rom5",
+      "rom6": "s.rom6",
+      "rom7": "s.rom7",
+      "w_ir": "w.sir197",
+      "w_next_pc": "w.sir200",
+      "w_pc": "w.sir201",
+      "w_result": "w.sir218",
+      "w_valid": "w.sir219",
+      "x_ir": "w.sir220",
+      "x_operand": "w.sir229",
+      "x_pc": "w.sir230",
+      "x_valid": "w.sir233"
+    },
+    "outputs": {
+      "commit": "w.sir4"
+    }
+  },
+  "binding": [
+    "and",
+    [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          [
+            "and",
+            [
+              "and",
+              [
+                "and",
+                [
+                  "and",
+                  [
+                    "and",
+                    [
+                      "and",
+                      [
+                        "and",
+                        [
+                          "and",
+                          [
+                            "and",
+                            [
+                              "and",
+                              [
+                                "and",
+                                [
+                                  "and",
+                                  [
+                                    "and",
+                                    [
+                                      "and",
+                                      [
+                                        "and",
+                                        [
+                                          "and",
+                                          [
+                                            "and",
+                                            [
+                                              "and",
+                                              [
+                                                "and",
+                                                true,
+                                                [
+                                                  "eq",
+                                                  "spec.pc",
+                                                  "impl.pc"
+                                                ]
+                                              ],
+                                              [
+                                                "eq",
+                                                "spec.r0",
+                                                "impl.r0"
+                                              ]
+                                            ],
+                                            [
+                                              "eq",
+                                              "spec.r1",
+                                              "impl.r1"
+                                            ]
+                                          ],
+                                          [
+                                            "eq",
+                                            "spec.rom0",
+                                            "impl.rom0"
+                                          ]
+                                        ],
+                                        [
+                                          "eq",
+                                          "spec.rom1",
+                                          "impl.rom1"
+                                        ]
+                                      ],
+                                      [
+                                        "eq",
+                                        "spec.rom2",
+                                        "impl.rom2"
+                                      ]
+                                    ],
+                                    [
+                                      "eq",
+                                      "spec.rom3",
+                                      "impl.rom3"
+                                    ]
+                                  ],
+                                  [
+                                    "eq",
+                                    "spec.data0",
+                                    "impl.data0"
+                                  ]
+                                ],
+                                [
+                                  "eq",
+                                  "spec.data1",
+                                  "impl.data1"
+                                ]
+                              ],
+                              [
+                                "eq",
+                                "spec.data2",
+                                "impl.data2"
+                              ]
+                            ],
+                            [
+                              "eq",
+                              "spec.data3",
+                              "impl.data3"
+                            ]
+                          ],
+                          [
+                            "implies",
+                            "impl.w_valid",
+                            [
+                              "and",
+                              [
+                                "and",
+                                [
+                                  "and",
+                                  [
+                                    "and",
+                                    true,
+                                    [
+                                      "eq",
+                                      "impl.w_pc",
+                                      "impl.pc"
+                                    ]
+                                  ],
+                                  [
+                                    "eq",
+                                    "impl.w_ir",
+                                    [
+                                      "ite",
+                                      [
+                                        "eq",
+                                        "impl.w_pc",
+                                        [
+                                          "bv",
+                                          3,
+                                          0
+                                        ]
+                                      ],
+                                      "impl.rom0",
+                                      [
+                                        "ite",
+                                        [
+                                          "eq",
+                                          "impl.w_pc",
+                                          [
+                                            "bv",
+                                            3,
+                                            1
+                                          ]
+                                        ],
+                                        "impl.rom1",
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            "impl.w_pc",
+                                            [
+                                              "bv",
+                                              3,
+                                              2
+                                            ]
+                                          ],
+                                          "impl.rom2",
+                                          [
+                                            "ite",
+                                            [
+                                              "eq",
+                                              "impl.w_pc",
+                                              [
+                                                "bv",
+                                                3,
+                                                3
+                                              ]
+                                            ],
+                                            "impl.rom3",
+                                            [
+                                              "ite",
+                                              [
+                                                "eq",
+                                                "impl.w_pc",
+                                                [
+                                                  "bv",
+                                                  3,
+                                                  4
+                                                ]
+                                              ],
+                                              "impl.rom4",
+                                              [
+                                                "ite",
+                                                [
+                                                  "eq",
+                                                  "impl.w_pc",
+                                                  [
+                                                    "bv",
+                                                    3,
+                                                    5
+                                                  ]
+                                                ],
+                                                "impl.rom5",
+                                                [
+                                                  "ite",
+                                                  [
+                                                    "eq",
+                                                    "impl.w_pc",
+                                                    [
+                                                      "bv",
+                                                      3,
+                                                      6
+                                                    ]
+                                                  ],
+                                                  "impl.rom6",
+                                                  "impl.rom7"
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ],
+                                [
+                                  "eq",
+                                  "impl.w_next_pc",
+                                  [
+                                    "ite",
+                                    [
+                                      "and",
+                                      [
+                                        "and",
+                                        true,
+                                        [
+                                          "eq",
+                                          [
+                                            "extract",
+                                            36,
+                                            34,
+                                            "impl.w_ir"
+                                          ],
+                                          [
+                                            "bv",
+                                            3,
+                                            4
+                                          ]
+                                        ]
+                                      ],
+                                      [
+                                        "eq",
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            [
+                                              "extract",
+                                              32,
+                                              32,
+                                              "impl.w_ir"
+                                            ],
+                                            [
+                                              "bv",
+                                              1,
+                                              0
+                                            ]
+                                          ],
+                                          "impl.r0",
+                                          "impl.r1"
+                                        ],
+                                        [
+                                          "bv",
+                                          32,
+                                          0
+                                        ]
+                                      ]
+                                    ],
+                                    [
+                                      "extract",
+                                      2,
+                                      0,
+                                      "impl.w_ir"
+                                    ],
+                                    [
+                                      "add",
+                                      "impl.w_pc",
+                                      [
+                                        "bv",
+                                        3,
+                                        1
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ],
+                              [
+                                "implies",
+                                [
+                                  "eq",
+                                  [
+                                    "extract",
+                                    36,
+                                    36,
+                                    "impl.w_ir"
+                                  ],
+                                  [
+                                    "bv",
+                                    1,
+                                    0
+                                  ]
+                                ],
+                                [
+                                  "eq",
+                                  "impl.w_result",
+                                  [
+                                    "ite",
+                                    [
+                                      "eq",
+                                      [
+                                        "extract",
+                                        36,
+                                        34,
+                                        "impl.w_ir"
+                                      ],
+                                      [
+                                        "bv",
+                                        3,
+                                        0
+                                      ]
+                                    ],
+                                    [
+                                      "extract",
+                                      31,
+                                      0,
+                                      "impl.w_ir"
+                                    ],
+                                    [
+                                      "ite",
+                                      [
+                                        "eq",
+                                        [
+                                          "extract",
+                                          36,
+                                          34,
+                                          "impl.w_ir"
+                                        ],
+                                        [
+                                          "bv",
+                                          3,
+                                          1
+                                        ]
+                                      ],
+                                      [
+                                        "add",
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            [
+                                              "extract",
+                                              32,
+                                              32,
+                                              "impl.w_ir"
+                                            ],
+                                            [
+                                              "bv",
+                                              1,
+                                              0
+                                            ]
+                                          ],
+                                          "impl.r0",
+                                          "impl.r1"
+                                        ],
+                                        [
+                                          "extract",
+                                          31,
+                                          0,
+                                          "impl.w_ir"
+                                        ]
+                                      ],
+                                      [
+                                        "ite",
+                                        [
+                                          "eq",
+                                          [
+                                            "extract",
+                                            36,
+                                            34,
+                                            "impl.w_ir"
+                                          ],
+                                          [
+                                            "bv",
+                                            3,
+                                            2
+                                          ]
+                                        ],
+                                        [
+                                          "bxor",
+                                          [
+                                            "ite",
+                                            [
+                                              "eq",
+                                              [
+                                                "extract",
+                                                32,
+                                                32,
+                                                "impl.w_ir"
+                                              ],
+                                              [
+                                                "bv",
+                                                1,
+                                                0
+                                              ]
+                                            ],
+                                            "impl.r0",
+                                            "impl.r1"
+                                          ],
+                                          [
+                                            "extract",
+                                            31,
+                                            0,
+                                            "impl.w_ir"
+                                          ]
+                                        ],
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            [
+                                              "extract",
+                                              2,
+                                              0,
+                                              "impl.w_ir"
+                                            ],
+                                            [
+                                              "bv",
+                                              3,
+                                              0
+                                            ]
+                                          ],
+                                          "impl.data0",
+                                          [
+                                            "ite",
+                                            [
+                                              "eq",
+                                              [
+                                                "extract",
+                                                2,
+                                                0,
+                                                "impl.w_ir"
+                                              ],
+                                              [
+                                                "bv",
+                                                3,
+                                                1
+                                              ]
+                                            ],
+                                            "impl.data1",
+                                            [
+                                              "ite",
+                                              [
+                                                "eq",
+                                                [
+                                                  "extract",
+                                                  2,
+                                                  0,
+                                                  "impl.w_ir"
+                                                ],
+                                                [
+                                                  "bv",
+                                                  3,
+                                                  2
+                                                ]
+                                              ],
+                                              "impl.data2",
+                                              [
+                                                "ite",
+                                                [
+                                                  "eq",
+                                                  [
+                                                    "extract",
+                                                    2,
+                                                    0,
+                                                    "impl.w_ir"
+                                                  ],
+                                                  [
+                                                    "bv",
+                                                    3,
+                                                    3
+                                                  ]
+                                                ],
+                                                "impl.data3",
+                                                [
+                                                  "ite",
+                                                  [
+                                                    "eq",
+                                                    [
+                                                      "extract",
+                                                      2,
+                                                      0,
+                                                      "impl.w_ir"
+                                                    ],
+                                                    [
+                                                      "bv",
+                                                      3,
+                                                      4
+                                                    ]
+                                                  ],
+                                                  "impl.data4",
+                                                  [
+                                                    "ite",
+                                                    [
+                                                      "eq",
+                                                      [
+                                                        "extract",
+                                                        2,
+                                                        0,
+                                                        "impl.w_ir"
+                                                      ],
+                                                      [
+                                                        "bv",
+                                                        3,
+                                                        5
+                                                      ]
+                                                    ],
+                                                    "impl.data5",
+                                                    [
+                                                      "ite",
+                                                      [
+                                                        "eq",
+                                                        [
+                                                          "extract",
+                                                          2,
+                                                          0,
+                                                          "impl.w_ir"
+                                                        ],
+                                                        [
+                                                          "bv",
+                                                          3,
+                                                          6
+                                                        ]
+                                                      ],
+                                                      "impl.data6",
+                                                      "impl.data7"
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ],
+                        [
+                          "implies",
+                          "impl.x_valid",
+                          [
+                            "and",
+                            [
+                              "and",
+                              [
+                                "and",
+                                true,
+                                [
+                                  "eq",
+                                  "impl.x_pc",
+                                  [
+                                    "ite",
+                                    "impl.w_valid",
+                                    "impl.w_next_pc",
+                                    "impl.pc"
+                                  ]
+                                ]
+                              ],
+                              [
+                                "eq",
+                                "impl.x_ir",
+                                [
+                                  "ite",
+                                  [
+                                    "eq",
+                                    "impl.x_pc",
+                                    [
+                                      "bv",
+                                      3,
+                                      0
+                                    ]
+                                  ],
+                                  "impl.rom0",
+                                  [
+                                    "ite",
+                                    [
+                                      "eq",
+                                      "impl.x_pc",
+                                      [
+                                        "bv",
+                                        3,
+                                        1
+                                      ]
+                                    ],
+                                    "impl.rom1",
+                                    [
+                                      "ite",
+                                      [
+                                        "eq",
+                                        "impl.x_pc",
+                                        [
+                                          "bv",
+                                          3,
+                                          2
+                                        ]
+                                      ],
+                                      "impl.rom2",
+                                      [
+                                        "ite",
+                                        [
+                                          "eq",
+                                          "impl.x_pc",
+                                          [
+                                            "bv",
+                                            3,
+                                            3
+                                          ]
+                                        ],
+                                        "impl.rom3",
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            "impl.x_pc",
+                                            [
+                                              "bv",
+                                              3,
+                                              4
+                                            ]
+                                          ],
+                                          "impl.rom4",
+                                          [
+                                            "ite",
+                                            [
+                                              "eq",
+                                              "impl.x_pc",
+                                              [
+                                                "bv",
+                                                3,
+                                                5
+                                              ]
+                                            ],
+                                            "impl.rom5",
+                                            [
+                                              "ite",
+                                              [
+                                                "eq",
+                                                "impl.x_pc",
+                                                [
+                                                  "bv",
+                                                  3,
+                                                  6
+                                                ]
+                                              ],
+                                              "impl.rom6",
+                                              "impl.rom7"
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ],
+                            [
+                              "implies",
+                              [
+                                "or",
+                                [
+                                  "or",
+                                  [
+                                    "eq",
+                                    [
+                                      "extract",
+                                      36,
+                                      34,
+                                      "impl.x_ir"
+                                    ],
+                                    [
+                                      "bv",
+                                      3,
+                                      1
+                                    ]
+                                  ],
+                                  [
+                                    "eq",
+                                    [
+                                      "extract",
+                                      36,
+                                      34,
+                                      "impl.x_ir"
+                                    ],
+                                    [
+                                      "bv",
+                                      3,
+                                      2
+                                    ]
+                                  ]
+                                ],
+                                [
+                                  "eq",
+                                  [
+                                    "extract",
+                                    36,
+                                    34,
+                                    "impl.x_ir"
+                                  ],
+                                  [
+                                    "bv",
+                                    3,
+                                    4
+                                  ]
+                                ]
+                              ],
+                              [
+                                "eq",
+                                "impl.x_operand",
+                                [
+                                  "ite",
+                                  [
+                                    "eq",
+                                    [
+                                      "extract",
+                                      32,
+                                      32,
+                                      "impl.x_ir"
+                                    ],
+                                    [
+                                      "bv",
+                                      1,
+                                      0
+                                    ]
+                                  ],
+                                  [
+                                    "ite",
+                                    [
+                                      "and",
+                                      [
+                                        "and",
+                                        [
+                                          "and",
+                                          true,
+                                          "impl.w_valid"
+                                        ],
+                                        [
+                                          "eq",
+                                          [
+                                            "extract",
+                                            36,
+                                            36,
+                                            "impl.w_ir"
+                                          ],
+                                          [
+                                            "bv",
+                                            1,
+                                            0
+                                          ]
+                                        ]
+                                      ],
+                                      [
+                                        "eq",
+                                        [
+                                          "extract",
+                                          33,
+                                          33,
+                                          "impl.w_ir"
+                                        ],
+                                        [
+                                          "bv",
+                                          1,
+                                          0
+                                        ]
+                                      ]
+                                    ],
+                                    "impl.w_result",
+                                    "impl.r0"
+                                  ],
+                                  [
+                                    "ite",
+                                    [
+                                      "and",
+                                      [
+                                        "and",
+                                        [
+                                          "and",
+                                          true,
+                                          "impl.w_valid"
+                                        ],
+                                        [
+                                          "eq",
+                                          [
+                                            "extract",
+                                            36,
+                                            36,
+                                            "impl.w_ir"
+                                          ],
+                                          [
+                                            "bv",
+                                            1,
+                                            0
+                                          ]
+                                        ]
+                                      ],
+                                      [
+                                        "eq",
+                                        [
+                                          "extract",
+                                          33,
+                                          33,
+                                          "impl.w_ir"
+                                        ],
+                                        [
+                                          "bv",
+                                          1,
+                                          1
+                                        ]
+                                      ]
+                                    ],
+                                    "impl.w_result",
+                                    "impl.r1"
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ],
+                      [
+                        "implies",
+                        "impl.d_valid",
+                        [
+                          "and",
+                          [
+                            "and",
+                            true,
+                            [
+                              "eq",
+                              "impl.d_pc",
+                              [
+                                "add",
+                                [
+                                  "ite",
+                                  "impl.w_valid",
+                                  "impl.w_next_pc",
+                                  "impl.pc"
+                                ],
+                                [
+                                  "ite",
+                                  "impl.x_valid",
+                                  [
+                                    "bv",
+                                    3,
+                                    1
+                                  ],
+                                  [
+                                    "bv",
+                                    3,
+                                    0
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ],
+                          [
+                            "eq",
+                            "impl.d_ir",
+                            [
+                              "ite",
+                              [
+                                "eq",
+                                "impl.d_pc",
+                                [
+                                  "bv",
+                                  3,
+                                  0
+                                ]
+                              ],
+                              "impl.rom0",
+                              [
+                                "ite",
+                                [
+                                  "eq",
+                                  "impl.d_pc",
+                                  [
+                                    "bv",
+                                    3,
+                                    1
+                                  ]
+                                ],
+                                "impl.rom1",
+                                [
+                                  "ite",
+                                  [
+                                    "eq",
+                                    "impl.d_pc",
+                                    [
+                                      "bv",
+                                      3,
+                                      2
+                                    ]
+                                  ],
+                                  "impl.rom2",
+                                  [
+                                    "ite",
+                                    [
+                                      "eq",
+                                      "impl.d_pc",
+                                      [
+                                        "bv",
+                                        3,
+                                        3
+                                      ]
+                                    ],
+                                    "impl.rom3",
+                                    [
+                                      "ite",
+                                      [
+                                        "eq",
+                                        "impl.d_pc",
+                                        [
+                                          "bv",
+                                          3,
+                                          4
+                                        ]
+                                      ],
+                                      "impl.rom4",
+                                      [
+                                        "ite",
+                                        [
+                                          "eq",
+                                          "impl.d_pc",
+                                          [
+                                            "bv",
+                                            3,
+                                            5
+                                          ]
+                                        ],
+                                        "impl.rom5",
+                                        [
+                                          "ite",
+                                          [
+                                            "eq",
+                                            "impl.d_pc",
+                                            [
+                                              "bv",
+                                              3,
+                                              6
+                                            ]
+                                          ],
+                                          "impl.rom6",
+                                          "impl.rom7"
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ],
+                    [
+                      "eq",
+                      "impl.fetch_pc",
+                      [
+                        "add",
+                        [
+                          "add",
+                          [
+                            "ite",
+                            "impl.w_valid",
+                            "impl.w_next_pc",
+                            "impl.pc"
+                          ],
+                          [
+                            "ite",
+                            "impl.x_valid",
+                            [
+                              "bv",
+                              3,
+                              1
+                            ],
+                            [
+                              "bv",
+                              3,
+                              0
+                            ]
+                          ]
+                        ],
+                        [
+                          "ite",
+                          "impl.d_valid",
+                          [
+                            "bv",
+                            3,
+                            1
+                          ],
+                          [
+                            "bv",
+                            3,
+                            0
+                          ]
+                        ]
+                      ]
+                    ]
+                  ],
+                  [
+                    "eq",
+                    "spec.rom4",
+                    "impl.rom4"
+                  ]
+                ],
+                [
+                  "eq",
+                  "spec.rom5",
+                  "impl.rom5"
+                ]
+              ],
+              [
+                "eq",
+                "spec.rom6",
+                "impl.rom6"
+              ]
+            ],
+            [
+              "eq",
+              "spec.rom7",
+              "impl.rom7"
+            ]
+          ],
+          [
+            "eq",
+            "spec.data4",
+            "impl.data4"
+          ]
+        ],
+        [
+          "eq",
+          "spec.data5",
+          "impl.data5"
+        ]
+      ],
+      [
+        "eq",
+        "spec.data6",
+        "impl.data6"
+      ]
+    ],
+    [
+      "eq",
+      "spec.data7",
+      "impl.data7"
+    ]
+  ],
+  "commit": "commit",
+  "can_step": "can_step",
+  "hold_when": "i.stall",
+  "progress": {
+    "enabled": [
+      "not",
+      "i.stall"
+    ],
+    "rank": [
+      "ite",
+      "impl.w_valid",
+      [
+        "bv",
+        3,
+        0
+      ],
+      [
+        "ite",
+        "impl.x_valid",
+        [
+          "bv",
+          3,
+          1
+        ],
+        [
+          "ite",
+          "impl.d_valid",
+          [
+            "bv",
+            3,
+            2
+          ],
+          [
+            "bv",
+            3,
+            3
+          ]
+        ]
+      ]
+    ]
+  }
+}

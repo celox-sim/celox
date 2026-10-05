@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "source_files_compared": 108,
+  "all_bytes_match": true,
+  "generated_inputs_present_at_start": false,
+  "binary_overrides_used": false,
+  "source_override_used": false
+}

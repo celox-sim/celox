@@ -1,0 +1,10 @@
+{
+  "status": "ended_before_final_report",
+  "output_directory": "/workspace/scratch/07f10565586c/automatic-proof-phase2-publication-selected/manual-compatible",
+  "stdout_bytes": 0,
+  "stderr_bytes": 0,
+  "child_exit_code_recorded": false,
+  "cause": "not established",
+  "disposition": "Complete isolated retry passed; partial duplicate sidecars are not included in Git. This interrupted attempt does not establish either proof or counterexample.",
+  "replacement": "merged-manual-retry-status.json"
+}

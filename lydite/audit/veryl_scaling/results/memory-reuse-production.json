@@ -1,0 +1,789 @@
+{
+  "run_status": {
+    "status": "passed",
+    "exit_code": 0,
+    "external_solver_invoked": false
+  },
+  "source_files_checked": 91,
+  "changed_since_gate_started": [],
+  "checker_sha256": "56c87594ac79fcb2b6b3943d565a8091ce0c92539b23003ca5b240eebb14fe1b",
+  "abstract_document_sha256": "3cc77911ae9764ae75663fa30cb6c70789043ca5e07ed699d1a9d1f461f1f933",
+  "cpu_isa_proof_runs": 1,
+  "cpu_scalar_state_bits": 482,
+  "abstract_memory_count": 2,
+  "concrete_backing_cells_in_cpu_proof": 0,
+  "microstep": {
+    "status": "passed",
+    "solver_result": "unsat",
+    "backend": "finite_bv",
+    "seconds": 0.225104999
+  },
+  "microstep_finite": {
+    "work": 15516506,
+    "clauses": 209072,
+    "control_cases": 32,
+    "control_cases_closed": 32
+  },
+  "capacities": [
+    4,
+    16,
+    64
+  ],
+  "negative_controls": 13,
+  "negative_faults": [
+    "load_address_association",
+    "load_response_corruption",
+    "fetch_address_high_drop",
+    "fetch_address",
+    "load_address",
+    "high_address_drop",
+    "fetch_response",
+    "load_response",
+    "stale_load",
+    "load_enable",
+    "no_flush",
+    "no_interlock",
+    "no_forward"
+  ],
+  "cpu_checker_seconds": 0.25037672300823033,
+  "memory_checker_seconds": {
+    "4": 0.01502978200733196,
+    "16": 0.052304190990980715,
+    "64": 0.24133718298980966
+  },
+  "scope": "whole_CPU_ISA_and_current_port_contract_with_independent_concrete_memory_discharge_no_CPU_backing_cell_expansion",
+  "base_commit": "1c732619b442a628a6eb6259193b7e18d6e1abf2",
+  "budgets": "unchanged finite 100M work / 1M allocated clauses / 10 seconds per query",
+  "differential_campaign": {
+    "seed": 391407,
+    "case_count": 1000,
+    "query_count": 8000,
+    "domains": "3 independent total arrays, 1-bit addresses and values; 2 scalar 1-bit variables; exhaustive 256 assignments per formula",
+    "checker_sha256": "56c87594ac79fcb2b6b3943d565a8091ce0c92539b23003ca5b240eebb14fe1b",
+    "counts": {
+      "sat": 4508,
+      "unsat": 3492,
+      "unknown": 0
+    },
+    "max_query_work": 1000704,
+    "elapsed_seconds": 11.160483877989464,
+    "full_evidence_sha256": "9c587c60ba87a6a9fa6959b454347cb838260901ff222a0d8e04bb13368b9257"
+  },
+  "negative_control_results": [
+    {
+      "fault": "load_address_association",
+      "status": "counterexample",
+      "seconds": 0.05477595599950291,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "load_response_corruption",
+      "status": "counterexample",
+      "seconds": 0.04860277200350538,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "fetch_address_high_drop",
+      "status": "counterexample",
+      "seconds": 0.03636401699623093,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "fetch_address",
+      "status": "counterexample",
+      "seconds": 0.037984608992701396,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "load_address",
+      "status": "counterexample",
+      "seconds": 0.05620919600187335,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "high_address_drop",
+      "status": "counterexample",
+      "seconds": 0.039707296004053205,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "fetch_response",
+      "status": "counterexample",
+      "seconds": 0.03538709400163498,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "load_response",
+      "status": "counterexample",
+      "seconds": 0.047823728004004806,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "stale_load",
+      "status": "counterexample",
+      "seconds": 0.04687816300429404,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "load_enable",
+      "status": "implementation_binding_failed",
+      "seconds": 0.13782955099304672,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "no_flush",
+      "status": "counterexample",
+      "seconds": 0.1057152510038577,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "no_interlock",
+      "status": "counterexample",
+      "seconds": 0.08929538699158002,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    },
+    {
+      "fault": "no_forward",
+      "status": "counterexample",
+      "seconds": 0.07853745199099649,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ]
+    }
+  ],
+  "earlier_unknown_attempts": [
+    {
+      "attempt": "memory-reuse-run1",
+      "result": "unknown",
+      "reason": "finite solver work budget exhausted",
+      "work": 100000001,
+      "counted_as_success": false
+    },
+    {
+      "attempt": "memory-reuse-run2",
+      "result": "unknown",
+      "reason": "finite solver work budget exhausted",
+      "work": 100000001,
+      "counted_as_success": false
+    }
+  ],
+  "legacy_gate_counts": {
+    "cases": 28,
+    "scaling-regression": 18,
+    "cpu-capacity-regression": 28,
+    "register-scaling-regression": 42,
+    "memory-contract-regression": 41
+  },
+  "workspace_validation": {
+    "rust_tests_passed": 260,
+    "cargo_fmt_check": "passed",
+    "strict_clippy": "passed",
+    "reuse_python_tests_passed": 12,
+    "full_symbolic_gate": "passed"
+  }
+}

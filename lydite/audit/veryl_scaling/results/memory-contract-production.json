@@ -1,0 +1,3043 @@
+{
+  "scope": "capacity-free_CPU_ISA_retirement_and_provenance_separate_concrete_memory_and_full_ISA_composition",
+  "base_commit": "1578e051213cce5351267189ee78d5075f83b204",
+  "capacity_summary": {
+    "cpu_contract_runs": 1,
+    "cpu_proof_has_no_capacity_parameter": true,
+    "cpu_document_sha256": "bbace51ae7d7f22c439bc5135d6d1119cdf1b6aa1cc9c1c0ca68fa5553889796",
+    "cpu_hardware_state_bits": 482,
+    "cpu_observer_bits": 47,
+    "address_bits": 6,
+    "registers": 8,
+    "capacities": [
+      4,
+      16,
+      64
+    ],
+    "full_ISA_proof_reused_component_certificates": false,
+    "limits": "unchanged finite100M work/1M allocated clauses/10 seconds per query",
+    "external_solver_invoked": false
+  },
+  "case_count": 41,
+  "normal_cases": 7,
+  "mutants": 34,
+  "correct_outcomes": 41,
+  "cases": [
+    {
+      "status": "spec_examples_and_binding_verified",
+      "correct_outcome": true,
+      "seconds": 0.30091847499716096,
+      "fault": null,
+      "document_sha256": "bbace51ae7d7f22c439bc5135d6d1119cdf1b6aa1cc9c1c0ca68fa5553889796",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "finite_bv",
+        "seconds": 0.167360924,
+        "finite": {
+          "clauses": 87916,
+          "control_cases": 32,
+          "control_cases_closed": 32,
+          "guarded_rewrites": 39,
+          "lookup_rewrites": 0,
+          "original_formula_validated": false,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "unsat",
+          "terms": 318,
+          "variables": 3580,
+          "word_rewrites": 128,
+          "work": 14570370
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1442,
+          "residual_complexity": 1310,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.012032814
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.1638022959959926,
+      "fault": "fetch_address",
+      "document_sha256": "3b8d31efda60b9d96c385955128dd1397cf58cf70d4a27b6cce14dae54247cae",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.011386789,
+        "finite": {
+          "clauses": 2200,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 77,
+          "variables": 1172,
+          "word_rewrites": 0,
+          "work": 42786
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1442,
+          "residual_complexity": 1312,
+          "rounds": 3,
+          "rules": {
+            "=": 148,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.008796731
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.12774053099565208,
+      "fault": "load_address",
+      "document_sha256": "938f308a61c82ea0453ed2439a0e7f8762bd8775a95c913f606f2ec6bc966051",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.007684423,
+        "finite": {
+          "clauses": 2219,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 78,
+          "variables": 1178,
+          "word_rewrites": 0,
+          "work": 42844
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1443,
+          "residual_complexity": 1313,
+          "rounds": 3,
+          "rules": {
+            "=": 142,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.005160175
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.14015574200311676,
+      "fault": "high_address_drop",
+      "document_sha256": "33a7245c245c0550a30d1dbbaa6029df6e1cb1d1e2364f05af31a5cdfbf6b0c3",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.007864645,
+        "finite": {
+          "clauses": 2189,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 79,
+          "variables": 1170,
+          "word_rewrites": 0,
+          "work": 42548
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1444,
+          "residual_complexity": 1314,
+          "rounds": 3,
+          "rules": {
+            "=": 144,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.005338083
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.14625146699836478,
+      "fault": "fetch_response",
+      "document_sha256": "e9110ccc92057b97796272d3358ad5984691bff2703e0cabc1f0d422ade1282d",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.009463647,
+        "finite": {
+          "clauses": 2180,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 79,
+          "variables": 1167,
+          "word_rewrites": 0,
+          "work": 42477
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1444,
+          "residual_complexity": 1312,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.00510355
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.154840023998986,
+      "fault": "load_response",
+      "document_sha256": "e54c5f626e2746820c1fdc814a0793cb7aa1bd8c3cfcc383a9cea55af39f9f58",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.016159699,
+        "finite": {
+          "clauses": 26214,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 198,
+          "variables": 2083,
+          "word_rewrites": 61,
+          "work": 373478
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1444,
+          "residual_complexity": 1312,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.006041665
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.1462203910050448,
+      "fault": "stale_load",
+      "document_sha256": "fdf35f40a14d0d2dbe67273f6482278161f89ce19b1db5bba202da59172d585f",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.013732718,
+        "finite": {
+          "clauses": 26214,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 196,
+          "variables": 2083,
+          "word_rewrites": 61,
+          "work": 373511
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1442,
+          "residual_complexity": 1310,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.005015166
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.1695217429951299,
+      "fault": "load_enable",
+      "document_sha256": "3402d980bd93a332c715beb5f44a7e681c6c692b4f2cae52d2935c87a2ec317a",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.008707576,
+        "finite": {
+          "clauses": 4396,
+          "control_cases": 32,
+          "control_cases_closed": 1,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 83,
+          "variables": 1172,
+          "word_rewrites": 0,
+          "work": 55149
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1443,
+          "residual_complexity": 1327,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.005237521
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.1596140710025793,
+      "fault": "no_flush",
+      "document_sha256": "adf6a73feb84a3c304a6145325db47ad223abedd4bf8801578286f8cf9d966c9",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.026309822,
+        "finite": {
+          "clauses": 41389,
+          "control_cases": 32,
+          "control_cases_closed": 5,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 204,
+          "variables": 2499,
+          "word_rewrites": 62,
+          "work": 1517778
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1439,
+          "residual_complexity": 1307,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 6
+          },
+          "seconds": 0.0052036
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.15111928500118665,
+      "fault": "no_interlock",
+      "document_sha256": "5ebcd69e0b51f89e332ea8988f60941c6e72e1e0dc3865d1d9afb037d5d242a0",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.027085521,
+        "finite": {
+          "clauses": 40809,
+          "control_cases": 32,
+          "control_cases_closed": 5,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 194,
+          "variables": 2408,
+          "word_rewrites": 62,
+          "work": 1736449
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1379,
+          "residual_complexity": 1247,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 162,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 1
+          },
+          "seconds": 0.005132563
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.1754059859958943,
+      "fault": "no_forward",
+      "document_sha256": "f1be56d54d3fc70767149ac64e59c4dc75a762a6f22523989f0111a06ca762bd",
+      "state_bits": 529,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "cpu_contract",
+      "capacity": null,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.055263231,
+        "finite": {
+          "clauses": 42086,
+          "control_cases": 32,
+          "control_cases_closed": 5,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 199,
+          "variables": 2444,
+          "word_rewrites": 61,
+          "work": 5132458
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1418,
+          "residual_complexity": 1286,
+          "rounds": 3,
+          "rules": {
+            "=": 143,
+            "=>": 2,
+            "and": 168,
+            "assumed_equality_substitution": 2,
+            "bvadd": 14,
+            "not": 5,
+            "or": 2
+          },
+          "seconds": 0.004820753
+        }
+      }
+    },
+    {
+      "status": "spec_examples_and_binding_verified",
+      "correct_outcome": true,
+      "seconds": 0.014054037004825659,
+      "fault": null,
+      "document_sha256": "de6c6f674f1c251e834ca4ad728dffaa94f8f4ee5a41629e3d5f00b0baeae2f6",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.000368536,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 205,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 55,
+            "=>": 2,
+            "and": 64,
+            "assumed_equality_substitution": 9,
+            "not": 5
+          },
+          "seconds": 0.000209006
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.01502091099973768,
+      "fault": "wrong_address",
+      "document_sha256": "de0201eb271ea56c1b1b4a0e915a9d8425d9887d46bf2a19edb6a1d47add1845",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.001248874,
+        "finite": {
+          "clauses": 2430,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 149,
+          "variables": 1340,
+          "word_rewrites": 0,
+          "work": 42033
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 205,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 72,
+            "=>": 2,
+            "and": 83,
+            "assumed_equality_substitution": 9,
+            "not": 8
+          },
+          "seconds": 0.000246192
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.016609027006779797,
+      "fault": "high_address_drop",
+      "document_sha256": "cff630bd9ce77a31b0059eb80784e63cc7533d12f66bcaa752b2559d397d96fd",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.001526844,
+        "finite": {
+          "clauses": 2430,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 154,
+          "variables": 1340,
+          "word_rewrites": 0,
+          "work": 44147
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 210,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 76,
+            "=>": 2,
+            "and": 83,
+            "assumed_equality_substitution": 9,
+            "not": 8
+          },
+          "seconds": 0.000260583
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.022053314998629503,
+      "fault": "wrong_value",
+      "document_sha256": "64a016da1b26834dcea268e08dc7a2016b35f53d6567baa0e38df22d57a05aab",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.001308213,
+        "finite": {
+          "clauses": 2226,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 164,
+          "variables": 1283,
+          "word_rewrites": 0,
+          "work": 36904
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 220,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 71,
+            "=>": 2,
+            "and": 89,
+            "assumed_equality_substitution": 9,
+            "not": 8
+          },
+          "seconds": 0.000339833
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.014748349000001326,
+      "fault": "recapture",
+      "document_sha256": "4688120d7af70ff17f151c3ab25d9363ee82d72d858743faa5a87b1145ffa27e",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.001279971,
+        "finite": {
+          "clauses": 1952,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 153,
+          "variables": 1213,
+          "word_rewrites": 0,
+          "work": 33345
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 210,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 76,
+            "=>": 2,
+            "and": 89,
+            "assumed_equality_substitution": 9,
+            "not": 8
+          },
+          "seconds": 0.000252931
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.01628603000426665,
+      "fault": "wrong_reset",
+      "document_sha256": "14822040735afd8c6acc617e53d5beb67b07ab191f3ec8a5cb8205794da5e439",
+      "state_bits": 657,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 4,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.000471191,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 205,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 55,
+            "=>": 2,
+            "and": 64,
+            "assumed_equality_substitution": 9,
+            "not": 5
+          },
+          "seconds": 0.000277689
+        }
+      }
+    },
+    {
+      "status": "stuttering_refinement_verified",
+      "correct_outcome": true,
+      "seconds": 0.1603472020069603,
+      "fault": null,
+      "document_sha256": "af5fd8415183f67faca26ab89003f491cb64331e5c329a14175920d6f6bdbe6f",
+      "state_bits": 774,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 4,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "finite_bv",
+        "seconds": 0.13593923,
+        "finite": {
+          "clauses": 115509,
+          "control_cases": 32,
+          "control_cases_closed": 32,
+          "guarded_rewrites": 39,
+          "lookup_rewrites": 8,
+          "original_formula_validated": false,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "unsat",
+          "terms": 494,
+          "variables": 4778,
+          "word_rewrites": 128,
+          "work": 12146876
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1925,
+          "residual_complexity": 1775,
+          "rounds": 3,
+          "rules": {
+            "=": 301,
+            "and": 108,
+            "assumed_equality_substitution": 18,
+            "bvadd": 15,
+            "ite": 8,
+            "or": 2
+          },
+          "seconds": 0.004099395
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.04722607599978801,
+      "fault": "load_address_association",
+      "document_sha256": "00a945ed2e90483c0f1b4e2a2fe71519bd894bcc19cbec634a05e6b834ca2cf1",
+      "state_bits": 774,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 4,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.019516403,
+        "finite": {
+          "clauses": 39331,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 373,
+          "variables": 3290,
+          "word_rewrites": 61,
+          "work": 587729
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1921,
+          "residual_complexity": 1771,
+          "rounds": 3,
+          "rules": {
+            "=": 297,
+            "and": 108,
+            "assumed_equality_substitution": 18,
+            "bvadd": 15,
+            "ite": 8,
+            "or": 2
+          },
+          "seconds": 0.005199153
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.043884481012355536,
+      "fault": "load_response_corruption",
+      "document_sha256": "20f3d0cc8588581fef532610146016a96ed5b4a4e0c612014acc10e8d226553d",
+      "state_bits": 774,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 4,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.016831606,
+        "finite": {
+          "clauses": 38612,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 380,
+          "variables": 3310,
+          "word_rewrites": 61,
+          "work": 558697
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1927,
+          "residual_complexity": 1777,
+          "rounds": 3,
+          "rules": {
+            "=": 301,
+            "and": 108,
+            "assumed_equality_substitution": 18,
+            "bvadd": 15,
+            "ite": 8,
+            "or": 2
+          },
+          "seconds": 0.004398802
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.03870023600757122,
+      "fault": "fetch_address_high_drop",
+      "document_sha256": "31a35ffdb836ab45f7812ce539b581016182d1a04bedec6ffab9e088ae27c1b5",
+      "state_bits": 774,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 4,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.007616523,
+        "finite": {
+          "clauses": 4292,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 167,
+          "variables": 2207,
+          "word_rewrites": 0,
+          "work": 85977
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 1926,
+          "residual_complexity": 1776,
+          "rounds": 3,
+          "rules": {
+            "=": 301,
+            "and": 108,
+            "assumed_equality_substitution": 18,
+            "bvadd": 15,
+            "ite": 8,
+            "or": 2
+          },
+          "seconds": 0.004265621
+        }
+      }
+    },
+    {
+      "status": "spec_examples_and_binding_verified",
+      "correct_outcome": true,
+      "seconds": 0.05218759500712622,
+      "fault": null,
+      "document_sha256": "20f9327ef5dbfd74de73f6797b796ffe899aa974ee632c49380d344b1fb6055c",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.00157886,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 713,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 187,
+            "=>": 2,
+            "and": 213,
+            "assumed_equality_substitution": 33,
+            "not": 5
+          },
+          "seconds": 0.000871003
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.07563876401400194,
+      "fault": "wrong_address",
+      "document_sha256": "a0dd9678ab03549abd12eff5f8495cb8e1e4c0066084097d61537aac74509e9f",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.005444698,
+        "finite": {
+          "clauses": 7713,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 489,
+          "variables": 4432,
+          "word_rewrites": 0,
+          "work": 150796
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 713,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 252,
+            "=>": 2,
+            "and": 280,
+            "assumed_equality_substitution": 33,
+            "not": 8
+          },
+          "seconds": 0.001082532
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.06582277599954978,
+      "fault": "high_address_drop",
+      "document_sha256": "ae864f2adb7f59042683e1bf512fd70d6b18c5207bbbdbd22cf7f4ab55289c2a",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.004243357,
+        "finite": {
+          "clauses": 6178,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 506,
+          "variables": 4048,
+          "word_rewrites": 0,
+          "work": 132677
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 730,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 268,
+            "=>": 2,
+            "and": 280,
+            "assumed_equality_substitution": 33,
+            "not": 8
+          },
+          "seconds": 0.001176744
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.0691161610011477,
+      "fault": "wrong_value",
+      "document_sha256": "88199a1fcad69f98c9b4e03662dc67979621f585e86c68d69ca4ecf0ab270bde",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.011879199,
+        "finite": {
+          "clauses": 7692,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 600,
+          "variables": 4435,
+          "word_rewrites": 0,
+          "work": 140758
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 824,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 251,
+            "=>": 2,
+            "and": 338,
+            "assumed_equality_substitution": 33,
+            "not": 8
+          },
+          "seconds": 0.006455122
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.08764457500365097,
+      "fault": "recapture",
+      "document_sha256": "99b0364d91c2645f7dee852e37fdc0f22b6b4b939de3bcbc81c735cbfe0b7854",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.004106992,
+        "finite": {
+          "clauses": 5702,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 495,
+          "variables": 3921,
+          "word_rewrites": 0,
+          "work": 113823
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 720,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 256,
+            "=>": 2,
+            "and": 288,
+            "assumed_equality_substitution": 33,
+            "not": 8
+          },
+          "seconds": 0.001055882
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.052358426997670904,
+      "fault": "wrong_reset",
+      "document_sha256": "a18f3946fdf10152e3fc5f8e4a173509bf5bc2a81752278c201071eb952da7ec",
+      "state_bits": 2409,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 16,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.00131962,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 713,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 187,
+            "=>": 2,
+            "and": 213,
+            "assumed_equality_substitution": 33,
+            "not": 5
+          },
+          "seconds": 0.000876211
+        }
+      }
+    },
+    {
+      "status": "stuttering_refinement_verified",
+      "correct_outcome": true,
+      "seconds": 0.28430489399761427,
+      "fault": null,
+      "document_sha256": "4aa60c4c0bd186b94d132d20d1aeeda5273d7e42ea723436f7cced96679b5563",
+      "state_bits": 1650,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 16,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "finite_bv",
+        "seconds": 0.240878764,
+        "finite": {
+          "clauses": 212573,
+          "control_cases": 32,
+          "control_cases_closed": 32,
+          "guarded_rewrites": 39,
+          "lookup_rewrites": 8,
+          "original_formula_validated": false,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "unsat",
+          "terms": 822,
+          "variables": 9498,
+          "word_rewrites": 128,
+          "work": 20067916
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 3329,
+          "residual_complexity": 2819,
+          "rounds": 3,
+          "rules": {
+            "=": 685,
+            "and": 234,
+            "assumed_equality_substitution": 42,
+            "bvadd": 15,
+            "ite": 32,
+            "or": 2
+          },
+          "seconds": 0.009474294
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.08421683699998539,
+      "fault": "load_address_association",
+      "document_sha256": "59e2e48611e97b3c698e79fd69d3530f24aa59248d2dbcac837f3284f7619676",
+      "state_bits": 1650,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 16,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.033525253,
+        "finite": {
+          "clauses": 80163,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 665,
+          "variables": 7440,
+          "word_rewrites": 61,
+          "work": 1242747
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 3313,
+          "residual_complexity": 2803,
+          "rounds": 3,
+          "rules": {
+            "=": 669,
+            "and": 234,
+            "assumed_equality_substitution": 42,
+            "bvadd": 15,
+            "ite": 32,
+            "or": 2
+          },
+          "seconds": 0.008621768
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.07781742900260724,
+      "fault": "load_response_corruption",
+      "document_sha256": "37a8c9a8c77b2035f26e49672374810e8b47564149b10e357673e42cb1a478e2",
+      "state_bits": 1650,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 16,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.031503765,
+        "finite": {
+          "clauses": 76850,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 684,
+          "variables": 7500,
+          "word_rewrites": 61,
+          "work": 1110547
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 3331,
+          "residual_complexity": 2821,
+          "rounds": 3,
+          "rules": {
+            "=": 685,
+            "and": 234,
+            "assumed_equality_substitution": 42,
+            "bvadd": 15,
+            "ite": 32,
+            "or": 2
+          },
+          "seconds": 0.007978839
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.059553815008257516,
+      "fault": "fetch_address_high_drop",
+      "document_sha256": "b228ed089b8c01822c902d821c5395a3e61eb2d9fd46db5bab7565b4f8050690",
+      "state_bits": 1650,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 16,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.014170133,
+        "finite": {
+          "clauses": 8034,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 375,
+          "variables": 4913,
+          "word_rewrites": 0,
+          "work": 179327
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 3330,
+          "residual_complexity": 2820,
+          "rounds": 3,
+          "rules": {
+            "=": 685,
+            "and": 234,
+            "assumed_equality_substitution": 42,
+            "bvadd": 15,
+            "ite": 32,
+            "or": 2
+          },
+          "seconds": 0.008008844
+        }
+      }
+    },
+    {
+      "status": "spec_examples_and_binding_verified",
+      "correct_outcome": true,
+      "seconds": 0.23246792299323715,
+      "fault": null,
+      "document_sha256": "b980f7cc49996b6a2da0209e3de25518b937eb2bd8989d11343f429d02a44e5a",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.008097037,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 2731,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 715,
+            "=>": 2,
+            "and": 791,
+            "assumed_equality_substitution": 129,
+            "not": 5
+          },
+          "seconds": 0.006808855
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.26904486799321603,
+      "fault": "wrong_address",
+      "document_sha256": "126ddbb82f664978e8c81cf9f066aca3cdad1af7e237488ba6206dceb68d11e1",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.036631536,
+        "finite": {
+          "clauses": 28330,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 1835,
+          "variables": 16608,
+          "word_rewrites": 0,
+          "work": 1940161
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 2731,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 972,
+            "=>": 2,
+            "and": 1050,
+            "assumed_equality_substitution": 129,
+            "not": 8
+          },
+          "seconds": 0.007923876
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.24606191499333363,
+      "fault": "high_address_drop",
+      "document_sha256": "c431911f1014f27d080786b50e2b8531caf23d719f6c1606a48d133dc4ccf859",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.020469778,
+        "finite": {
+          "clauses": 20582,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 1900,
+          "variables": 14688,
+          "word_rewrites": 0,
+          "work": 530737
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 2796,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 1036,
+            "=>": 2,
+            "and": 1050,
+            "assumed_equality_substitution": 129,
+            "not": 8
+          },
+          "seconds": 0.007907514
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.49209567801153753,
+      "fault": "wrong_value",
+      "document_sha256": "38c3e8f27f7418cb175ed6a5a177ae6d930ec990d12774585ba61ca1c0eb184e",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.236763332,
+        "finite": {
+          "clauses": 28960,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 2330,
+          "variables": 16851,
+          "word_rewrites": 0,
+          "work": 638265
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 3226,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 971,
+            "=>": 2,
+            "and": 1348,
+            "assumed_equality_substitution": 129,
+            "not": 8
+          },
+          "seconds": 0.221855482
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.25158303100033663,
+      "fault": "recapture",
+      "document_sha256": "fa4f5925a86fc5b7721cf246609c25c5a5c027b45fde3c079a18a57d9e30d12d",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.020581858,
+        "finite": {
+          "clauses": 20106,
+          "control_cases": 0,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "single_search",
+          "solver_result": "sat",
+          "terms": 1843,
+          "variables": 14561,
+          "word_rewrites": 0,
+          "work": 495820
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 2740,
+          "residual_complexity": 1,
+          "rounds": 3,
+          "rules": {
+            "=": 976,
+            "=>": 2,
+            "and": 1060,
+            "assumed_equality_substitution": 129,
+            "not": 8
+          },
+          "seconds": 0.007544648
+        }
+      }
+    },
+    {
+      "status": "implementation_binding_failed",
+      "correct_outcome": true,
+      "seconds": 0.26770176900026854,
+      "fault": "wrong_reset",
+      "document_sha256": "bb5ba6cdf39e07f4eff33ad396d056e4464fc382a2b83768cf3ca4d8a655f21f",
+      "state_bits": 9417,
+      "obligations": [
+        {
+          "name": "binding_reset_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_reset_establishes_product",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "binding_product_preservation",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        }
+      ],
+      "kind": "memory_contract",
+      "capacity": 64,
+      "query": {
+        "name": "binding_product_preservation",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "seconds": 0.008563483,
+        "finite": {},
+        "kernel": {
+          "closed": true,
+          "original_complexity": 2731,
+          "residual_complexity": 1,
+          "rounds": 2,
+          "rules": {
+            "=": 715,
+            "=>": 2,
+            "and": 791,
+            "assumed_equality_substitution": 129,
+            "not": 5
+          },
+          "seconds": 0.006993976
+        }
+      }
+    },
+    {
+      "status": "stuttering_refinement_verified",
+      "correct_outcome": true,
+      "seconds": 0.6729022409999743,
+      "fault": null,
+      "document_sha256": "5f140fefddd037067450d01eec73462cdc21705be7f4ce18827ecb9fd878b1ba",
+      "state_bits": 5154,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 64,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "finite_bv",
+        "seconds": 0.534137118,
+        "finite": {
+          "clauses": 584883,
+          "control_cases": 32,
+          "control_cases_closed": 32,
+          "guarded_rewrites": 39,
+          "lookup_rewrites": 8,
+          "original_formula_validated": false,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "unsat",
+          "terms": 2120,
+          "variables": 27830,
+          "word_rewrites": 128,
+          "work": 40036569
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 8945,
+          "residual_complexity": 6995,
+          "rounds": 3,
+          "rules": {
+            "=": 2221,
+            "and": 714,
+            "assumed_equality_substitution": 138,
+            "bvadd": 15,
+            "ite": 128,
+            "or": 2
+          },
+          "seconds": 0.030720818
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.24261667000246234,
+      "fault": "load_address_association",
+      "document_sha256": "93a8fd8c63273094d0b508d55e37d27258506ae709fdad730e881e0e1125bf59",
+      "state_bits": 5154,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 64,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.102778682,
+        "finite": {
+          "clauses": 239122,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 1819,
+          "variables": 23677,
+          "word_rewrites": 61,
+          "work": 2841989
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 8881,
+          "residual_complexity": 6931,
+          "rounds": 3,
+          "rules": {
+            "=": 2157,
+            "and": 714,
+            "assumed_equality_substitution": 138,
+            "bvadd": 15,
+            "ite": 128,
+            "or": 2
+          },
+          "seconds": 0.030996242
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.24927463100175373,
+      "fault": "load_response_corruption",
+      "document_sha256": "fccee457b2724ee226a66ed25cb26de29f0d1877cb5761a78b0a2ceb959d1af2",
+      "state_bits": 5154,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 64,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.105113663,
+        "finite": {
+          "clauses": 224295,
+          "control_cases": 32,
+          "control_cases_closed": 4,
+          "guarded_rewrites": 18,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 1886,
+          "variables": 23801,
+          "word_rewrites": 61,
+          "work": 2693839
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 8947,
+          "residual_complexity": 6997,
+          "rounds": 3,
+          "rules": {
+            "=": 2221,
+            "and": 714,
+            "assumed_equality_substitution": 138,
+            "bvadd": 15,
+            "ite": 128,
+            "or": 2
+          },
+          "seconds": 0.031142534
+        }
+      }
+    },
+    {
+      "status": "counterexample",
+      "correct_outcome": true,
+      "seconds": 0.18684320199827198,
+      "fault": "fetch_address_high_drop",
+      "document_sha256": "ad94c28c05b78eba95403b7804c6f4b19c23a872f9f08eaeea1d75f05955df80",
+      "state_bits": 5154,
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "microstep_refinement",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "structural_kernel"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat",
+          "backend": "finite_bv"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat",
+          "backend": "finite_bv"
+        }
+      ],
+      "kind": "concrete_ISA_composition",
+      "capacity": 64,
+      "query": {
+        "name": "microstep_refinement",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "seconds": 0.048521631,
+        "finite": {
+          "clauses": 22434,
+          "control_cases": 32,
+          "control_cases_closed": 0,
+          "guarded_rewrites": 0,
+          "lookup_rewrites": 0,
+          "original_formula_validated": true,
+          "reason": null,
+          "search_strategy": "control_cofactors",
+          "solver_result": "sat",
+          "terms": 1193,
+          "variables": 15552,
+          "word_rewrites": 0,
+          "work": 579991
+        },
+        "kernel": {
+          "closed": false,
+          "original_complexity": 8946,
+          "residual_complexity": 6996,
+          "rounds": 3,
+          "rules": {
+            "=": 2221,
+            "and": 714,
+            "assumed_equality_substitution": 138,
+            "bvadd": 15,
+            "ite": 128,
+            "or": 2
+          },
+          "seconds": 0.031208242
+        }
+      }
+    }
+  ]
+}

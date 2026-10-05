@@ -1,0 +1,50 @@
+[
+  {
+    "path": "crates/solver/src/automatic.rs",
+    "sha256": "b31e0d46f46f871e695fd55864f7415a211bf72f7f7b25ecccbb8f3710a4690f"
+  },
+  {
+    "path": "crates/solver/src/lib.rs",
+    "sha256": "ffca24ea51931c6d762b90e765cf59fbf4e335163d8a566456faebabb33ad24e"
+  },
+  {
+    "path": "crates/solver/src/conjunctive.rs",
+    "sha256": "4e6d811ef9edfb067445c4390ecd5bb37daec4d44735938815eced2c5168cca2"
+  },
+  {
+    "path": "crates/solver/src/proof_bundle.rs",
+    "sha256": "57de39e09426e1ea59055a35d89bec1be4eaba4c9b0be3f629df41b464fbe0ec"
+  },
+  {
+    "path": "crates/solver/src/z3.rs",
+    "sha256": "16b1073b06341b3968cb8f0eccfe6c92fdfd8383e66fff5b660b1d03b18a5341"
+  },
+  {
+    "path": "README.md",
+    "sha256": "f0ad21ae49a1705b5204ca70d5b2aa03430b045d1589a40819fb9cf4c4b01d53"
+  },
+  {
+    "path": "AUTOMATIC-PROOFS.md",
+    "sha256": "7255a5c3a2ca9eb02a2a6eacf8280b7b79bb10330bbec875e4344acc611d4742"
+  },
+  {
+    "path": "audit/automatic_proof/evidence-summary.json",
+    "sha256": "021b9c56bd20a642fa675af89a51b769535ff4ed42ae9c099d13d380c250edd1"
+  },
+  {
+    "path": "audit/automatic_proof/README.md",
+    "sha256": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e"
+  },
+  {
+    "path": "audit/automatic_proof/run.py",
+    "sha256": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e"
+  },
+  {
+    "path": "audit/automatic_proof/generate.py",
+    "sha256": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf"
+  },
+  {
+    "path": "audit/automatic_proof/test_generate.py",
+    "sha256": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df"
+  }
+]

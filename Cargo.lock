@@ -2554,6 +2554,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "lydite"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "lydite-solver",
+ "lydite-syntax",
+ "lydite-verify",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-celox"
+version = "0.10.1"
+dependencies = [
+ "celox",
+ "celox-design",
+ "celox-frontend-core",
+ "celox-frontend-veryl",
+ "celox-runtime",
+ "celox-sir",
+ "celox-test-suite",
+ "lydite-ir",
+ "lydite-solver",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "veryl-analyzer",
+ "veryl-metadata",
+ "veryl-parser",
+]
+
+[[package]]
+name = "lydite-ir"
+version = "0.10.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-solver"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-syntax"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "parol",
+ "parol_runtime",
+ "scnr2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-verify"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "lydite-solver",
+ "lydite-syntax",
+ "serde_json",
+]
+
+[[package]]
 name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

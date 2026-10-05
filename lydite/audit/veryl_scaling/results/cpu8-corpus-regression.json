@@ -1,0 +1,18 @@
+{
+  "status": "coverage_contract_passed",
+  "negative_controls": 652,
+  "observation_verified": 652,
+  "reads": 8174,
+  "smoke_only": 3,
+  "blocked_language_restriction": 2,
+  "expected_compilation_rejection": 8,
+  "total": 665,
+  "actual_passes": 663,
+  "raw_failures": 2,
+  "queries": 75241,
+  "blocked_cases": [
+    "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops",
+    "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops"
+  ],
+  "raw_exit_code": 1
+}

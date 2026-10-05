@@ -3933,7 +3933,10 @@ impl<'a> FfParser<'a> {
                     if let Some(bound) = defs.get(var_id)
                         && expanding.insert(*var_id)
                     {
-                        let whole = self.substitute_function_expr_inner(bound, defs, expanding);
+                        // State entries already hold the value captured at assignment.
+                        // Re-expanding against later definitions would reread variables
+                        // that were still unassigned then, such as mutable locals or formals.
+                        let whole = bound.clone();
                         expanding.remove(var_id);
                         if is_whole {
                             return whole;

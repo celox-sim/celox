@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "project": "manager-project.json",
+  "contract": {
+    "kind": "idle_offer_step",
+    "name": "WriteOffer",
+    "busy": "write_busy",
+    "valids": [
+      "bus_awvalid",
+      "bus_wvalid"
+    ],
+    "offer": "start_write",
+    "completion_valid": "bvalid",
+    "completion_ready": "bus_bready"
+  }
+}

@@ -1,0 +1,270 @@
+{
+  "claim": "Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions",
+  "limitations": [
+    "Z3 UNSAT, Rust lowering, specification and binding are trusted; no independent proof certificate",
+    "Progress is conditional on enabled at every noncommit step; external stalls may continue forever",
+    "Supplied binding adequacy is not inferred; no RTL import or synthesis claim",
+    "Nonvacuity checks are satisfiability in the relation, not reset reachability"
+  ],
+  "name": "Generic four-bit countdown",
+  "normalization": {
+    "fixed_width_literal": 23
+  },
+  "obligations": [
+    {
+      "context_symbols": {},
+      "evidence": "binding_nonempty.smt2",
+      "name": "binding_nonempty",
+      "seconds": 0.009326065,
+      "solver_output": "binding_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t27",
+        "binding_before": "t30",
+        "commit": "t6",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t16",
+        "impl_next.y": "t25",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t13",
+        "spec_next.y": "t22"
+      },
+      "evidence": "reset_binding.smt2",
+      "name": "reset_binding",
+      "seconds": 0.009689254,
+      "solver_output": "reset_binding.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t26",
+        "binding_before": "t2",
+        "commit": "t5",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t15",
+        "impl_next.y": "t24",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t12",
+        "spec_next.y": "t21"
+      },
+      "evidence": "microstep_refinement.smt2",
+      "name": "microstep_refinement",
+      "seconds": 0.009299241,
+      "solver_output": "microstep_refinement.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t31",
+        "binding_before": "t2",
+        "commit": "t6",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t20",
+        "impl_next.y": "t29",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t17",
+        "spec_next.y": "t26"
+      },
+      "evidence": "commit_eligible.smt2",
+      "name": "commit_eligible",
+      "seconds": 0.008660689,
+      "solver_output": "commit_eligible.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "progress_nonvacuity.smt2",
+      "name": "progress_nonvacuity",
+      "seconds": 0.009285619,
+      "solver_output": "progress_nonvacuity.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "commit_reachable_in_relation.smt2",
+      "name": "commit_reachable_in_relation",
+      "seconds": 0.010575638,
+      "solver_output": "commit_reachable_in_relation.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t34",
+        "binding_before": "t2",
+        "commit": "t10",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t23",
+        "impl_next.y": "t32",
+        "progress_enabled": "t6",
+        "rank": "t4",
+        "rank_next": "t4",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t20",
+        "spec_next.y": "t29"
+      },
+      "evidence": "noncommit_rank_decreases.smt2",
+      "name": "noncommit_rank_decreases",
+      "seconds": 0.00911702,
+      "solver_output": "noncommit_rank_decreases.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "program_pre_nonempty.smt2",
+      "name": "program_pre_nonempty",
+      "seconds": 0.010393226,
+      "solver_output": "program_pre_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t13",
+        "next.y": "t16",
+        "program_rank": "spec_x",
+        "program_rank_next": "t13",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_initialization.smt2",
+      "name": "program_initialization",
+      "seconds": 0.009877238,
+      "solver_output": "program_initialization.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "program_active_nonempty.smt2",
+      "name": "program_active_nonempty",
+      "seconds": 0.014099165,
+      "solver_output": "program_active_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t12",
+        "next.y": "t15",
+        "program_rank": "spec_x",
+        "program_rank_next": "t12",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_step_available.smt2",
+      "name": "program_step_available",
+      "seconds": 0.00813061,
+      "solver_output": "program_step_available.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t10",
+        "next.y": "t14",
+        "program_rank": "spec_x",
+        "program_rank_next": "t10",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved.smt2",
+      "name": "program_invariant_preserved",
+      "seconds": 0.0206198,
+      "solver_output": "program_invariant_preserved.out",
+      "solver_result": "sat",
+      "status": "counterexample"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t10",
+        "next.y": "t16",
+        "program_rank": "spec_x",
+        "program_rank_next": "t10",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_rank_decreases.smt2",
+      "name": "program_rank_decreases",
+      "seconds": 0.016627059,
+      "solver_output": "program_rank_decreases.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t11",
+        "next.y": "t14",
+        "program_rank": "spec_x",
+        "program_rank_next": "t11",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_postcondition.smt2",
+      "name": "program_postcondition",
+      "seconds": 0.009855742,
+      "solver_output": "program_postcondition.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t11",
+        "next.y": "t14",
+        "program_rank": "spec_x",
+        "program_rank_next": "t11",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_terminal_quiescent.smt2",
+      "name": "program_terminal_quiescent",
+      "seconds": 0.009019689,
+      "solver_output": "program_terminal_quiescent.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    }
+  ],
+  "partition_plan": {
+    "partition_count": 1,
+    "strategy": "none"
+  },
+  "program_contract": "ISA total correctness from precondition with immutable parameters; implementation transfer assumes no subsequent reset and continuously enabled progress until termination",
+  "reset": "active-high synchronous priority; reset expressions may use shared inputs",
+  "status": "counterexample"
+}

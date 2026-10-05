@@ -1,0 +1,212 @@
+{
+  "version": 4,
+  "kind": "specification",
+  "name": "Intent bug: shared output admits no synchronized advance",
+  "specs": {
+    "One": {
+      "inputs": {},
+      "outputs": {
+        "count": {
+          "bv": 4
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "advance": [
+          "eq",
+          "n.value",
+          [
+            "add",
+            "s.value",
+            [
+              "bv",
+              4,
+              1
+            ]
+          ]
+        ]
+      },
+      "examples": {
+        "one_step": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "advance",
+              "inputs": {},
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Two": {
+      "inputs": {},
+      "outputs": {
+        "count": {
+          "bv": 4
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "advance": [
+          "eq",
+          "n.value",
+          [
+            "add",
+            "s.value",
+            [
+              "bv",
+              4,
+              2
+            ]
+          ]
+        ]
+      },
+      "examples": {
+        "one_step": {
+          "expect": "positive",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "advance",
+              "inputs": {},
+              "observe": {
+                "count": [
+                  "bv",
+                  4,
+                  2
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "compositions": {
+    "Contradiction": {
+      "inputs": {},
+      "outputs": {
+        "value": {
+          "bv": 4
+        }
+      },
+      "instances": {
+        "One": {
+          "target": "One",
+          "connections": {
+            "count": "value"
+          }
+        },
+        "Two": {
+          "target": "Two",
+          "connections": {
+            "count": "value"
+          }
+        }
+      },
+      "examples": {
+        "common_initial_state": {
+          "expect": "positive",
+          "initial": {
+            "value": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": []
+        },
+        "no_joint_extension": {
+          "expect": "negative",
+          "initial": {},
+          "trace": [
+            {
+              "operation": "advance",
+              "inputs": {},
+              "observe": {}
+            }
+          ]
+        },
+        "intended_operation": {
+          "expect": "positive",
+          "initial": {
+            "value": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "trace": [
+            {
+              "operation": "advance",
+              "inputs": {},
+              "observe": {
+                "value": [
+                  "bv",
+                  4,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

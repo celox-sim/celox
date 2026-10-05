@@ -1,0 +1,12 @@
+module Counter (
+    clk: input clock, rst_n: input bit, en: input bit,
+    count: output bit<4>, fault: output bit,
+) {
+    always_ff (clk) {
+        if !rst_n { count = 0; fault = 0; }
+        else {
+            fault = fault;
+            if en { count = count + 4'd1; }
+        }
+    }
+}

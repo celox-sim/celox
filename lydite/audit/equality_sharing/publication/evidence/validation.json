@@ -1,0 +1,23 @@
+{
+  "archive_bytes_verified": 6276172,
+  "archives_verified": 3,
+  "extracted_to": "/tmp/phase2-publication-extraction-check",
+  "extraction_disposition": "verified temporary extraction removed after validation",
+  "members_verified": 17021,
+  "original_files_verified": 17021,
+  "recorded_artifact_maps": [
+    {
+      "document": "phase2-ci/automatic-proof-phase2-prior-ci/gate/run-status.json",
+      "entries": 1394,
+      "json_path": [
+        "artifacts"
+      ],
+      "verified": true
+    }
+  ],
+  "recorded_artifact_references_verified": 1394,
+  "saved_reports_create_proof_handles": false,
+  "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization",
+  "status": "verified",
+  "uncompressed_bytes_verified": 493660531
+}

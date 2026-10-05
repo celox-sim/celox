@@ -1,0 +1,442 @@
+{
+  "claim": "Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions",
+  "limitations": [
+    "Z3 UNSAT, Rust lowering, specification and binding are trusted; no independent proof certificate",
+    "Progress is conditional on enabled at every noncommit step; external stalls may continue forever",
+    "Supplied binding adequacy is not inferred; no RTL import or synthesis claim",
+    "Nonvacuity checks are satisfiability in the relation, not reset reachability"
+  ],
+  "name": "Generic four-bit countdown",
+  "normalization": {
+    "fixed_width_literal": 23
+  },
+  "obligations": [
+    {
+      "context_symbols": {},
+      "evidence": "binding_nonempty.smt2",
+      "name": "binding_nonempty",
+      "seconds": 0.012368298,
+      "solver_output": "binding_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t27",
+        "binding_before": "t30",
+        "commit": "t6",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t16",
+        "impl_next.y": "t25",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t13",
+        "spec_next.y": "t22"
+      },
+      "evidence": "reset_binding.smt2",
+      "name": "reset_binding",
+      "seconds": 0.010385784,
+      "solver_output": "reset_binding.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t26",
+        "binding_before": "t2",
+        "commit": "t5",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t15",
+        "impl_next.y": "t24",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t12",
+        "spec_next.y": "t21"
+      },
+      "evidence": "microstep_refinement.smt2",
+      "name": "microstep_refinement",
+      "seconds": 0.009410517,
+      "solver_output": "microstep_refinement.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t31",
+        "binding_before": "t2",
+        "commit": "t6",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t20",
+        "impl_next.y": "t29",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t17",
+        "spec_next.y": "t26"
+      },
+      "evidence": "commit_eligible.smt2",
+      "name": "commit_eligible",
+      "seconds": 0.009530595,
+      "solver_output": "commit_eligible.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "progress_nonvacuity.smt2",
+      "name": "progress_nonvacuity",
+      "seconds": 0.008917072,
+      "solver_output": "progress_nonvacuity.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "commit_reachable_in_relation.smt2",
+      "name": "commit_reachable_in_relation",
+      "seconds": 0.011779444,
+      "solver_output": "commit_reachable_in_relation.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "binding_after": "t34",
+        "binding_before": "t2",
+        "commit": "t10",
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "impl.x": "impl_x",
+        "impl.y": "impl_y",
+        "impl_next.x": "t23",
+        "impl_next.y": "t32",
+        "progress_enabled": "t6",
+        "rank": "t4",
+        "rank_next": "t4",
+        "spec.x": "spec_x",
+        "spec.y": "spec_y",
+        "spec_next.x": "t20",
+        "spec_next.y": "t29"
+      },
+      "evidence": "noncommit_rank_decreases.smt2",
+      "name": "noncommit_rank_decreases",
+      "seconds": 0.00847769,
+      "solver_output": "noncommit_rank_decreases.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "program_pre_nonempty.smt2",
+      "name": "program_pre_nonempty",
+      "seconds": 0.011313635,
+      "solver_output": "program_pre_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t13",
+        "next.y": "t16",
+        "program_rank": "spec_x",
+        "program_rank_next": "t13",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_initialization.smt2",
+      "name": "program_initialization",
+      "seconds": 0.01041437,
+      "solver_output": "program_initialization.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {},
+      "evidence": "program_active_nonempty.smt2",
+      "name": "program_active_nonempty",
+      "seconds": 0.01124762,
+      "solver_output": "program_active_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t12",
+        "next.y": "t15",
+        "program_rank": "spec_x",
+        "program_rank_next": "t12",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_step_available.smt2",
+      "name": "program_step_available",
+      "seconds": 0.010189219,
+      "solver_output": "program_step_available.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t13",
+        "next.y": "t17",
+        "program_rank": "spec_x",
+        "program_rank_next": "t13",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_0_auto_x_0.smt2",
+      "name": "program_invariant_preserved_auto_y_0_auto_x_0",
+      "seconds": 0.008332673,
+      "solver_output": "program_invariant_preserved_auto_y_0_auto_x_0.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t14",
+        "next.y": "t18",
+        "program_rank": "spec_x",
+        "program_rank_next": "t14",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_0_auto_x_8.smt2",
+      "name": "program_invariant_preserved_auto_y_0_auto_x_8",
+      "seconds": 0.011821522,
+      "solver_output": "program_invariant_preserved_auto_y_0_auto_x_8.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t15",
+        "next.y": "t17",
+        "program_rank": "spec_x",
+        "program_rank_next": "t15",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_0_auto_x_10.smt2",
+      "name": "program_invariant_preserved_auto_y_0_auto_x_10",
+      "seconds": 0.018804506,
+      "solver_output": "program_invariant_preserved_auto_y_0_auto_x_10.out",
+      "solver_result": "sat",
+      "status": "counterexample"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t21",
+        "next.y": "t23",
+        "program_rank": "spec_x",
+        "program_rank_next": "t21",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_0_auto_x_other.smt2",
+      "name": "program_invariant_preserved_auto_y_0_auto_x_other",
+      "seconds": 0.008541282,
+      "solver_output": "program_invariant_preserved_auto_y_0_auto_x_other.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t16",
+        "next.y": "t20",
+        "program_rank": "spec_x",
+        "program_rank_next": "t16",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_other_auto_x_0.smt2",
+      "name": "program_invariant_preserved_auto_y_other_auto_x_0",
+      "seconds": 0.0092444,
+      "solver_output": "program_invariant_preserved_auto_y_other_auto_x_0.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t17",
+        "next.y": "t21",
+        "program_rank": "spec_x",
+        "program_rank_next": "t17",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_other_auto_x_8.smt2",
+      "name": "program_invariant_preserved_auto_y_other_auto_x_8",
+      "seconds": 0.010009745,
+      "solver_output": "program_invariant_preserved_auto_y_other_auto_x_8.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t18",
+        "next.y": "t20",
+        "program_rank": "spec_x",
+        "program_rank_next": "t18",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_other_auto_x_10.smt2",
+      "name": "program_invariant_preserved_auto_y_other_auto_x_10",
+      "seconds": 0.010218857,
+      "solver_output": "program_invariant_preserved_auto_y_other_auto_x_10.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t23",
+        "next.y": "t25",
+        "program_rank": "spec_x",
+        "program_rank_next": "t23",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_invariant_preserved_auto_y_other_auto_x_other.smt2",
+      "name": "program_invariant_preserved_auto_y_other_auto_x_other",
+      "seconds": 0.010180543,
+      "solver_output": "program_invariant_preserved_auto_y_other_auto_x_other.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t41",
+        "next.y": "t42",
+        "program_rank": "spec_x",
+        "program_rank_next": "t41",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_cases_cover.smt2",
+      "name": "program_cases_cover",
+      "seconds": 0.014043131,
+      "solver_output": "program_cases_cover.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t10",
+        "next.y": "t16",
+        "program_rank": "spec_x",
+        "program_rank_next": "t10",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_rank_decreases.smt2",
+      "name": "program_rank_decreases",
+      "seconds": 0.014086063,
+      "solver_output": "program_rank_decreases.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t11",
+        "next.y": "t14",
+        "program_rank": "spec_x",
+        "program_rank_next": "t11",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_postcondition.smt2",
+      "name": "program_postcondition",
+      "seconds": 0.009139826,
+      "solver_output": "program_postcondition.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    },
+    {
+      "context_symbols": {
+        "i.initial": "input_initial",
+        "i.reset": "input_reset",
+        "next.x": "t11",
+        "next.y": "t14",
+        "program_rank": "spec_x",
+        "program_rank_next": "t11",
+        "s.x": "spec_x",
+        "s.y": "spec_y"
+      },
+      "evidence": "program_terminal_quiescent.smt2",
+      "name": "program_terminal_quiescent",
+      "seconds": 0.010447887,
+      "solver_output": "program_terminal_quiescent.out",
+      "solver_result": "unsat",
+      "status": "passed"
+    }
+  ],
+  "partition_plan": {
+    "candidates": [
+      {
+        "decision": "selected",
+        "source": "invariant comparison (possibly also model)",
+        "state": "y",
+        "values": [
+          0
+        ]
+      },
+      {
+        "decision": "selected",
+        "source": "invariant comparison (possibly also model)",
+        "state": "x",
+        "values": [
+          0,
+          8,
+          10
+        ]
+      }
+    ],
+    "max_axes": 3,
+    "max_partitions": 128,
+    "max_values_per_axis": 32,
+    "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+    "partition_count": 8,
+    "partition_query_timeout_ms": 1000,
+    "partition_scheduling_budget_ms": 30000,
+    "selected_axes": 2,
+    "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+    "strategy": "automatic_literal_comparisons_v2"
+  },
+  "program_contract": "ISA total correctness from precondition with immutable parameters; implementation transfer assumes no subsequent reset and continuously enabled progress until termination",
+  "reset": "active-high synchronous priority; reset expressions may use shared inputs",
+  "status": "counterexample"
+}

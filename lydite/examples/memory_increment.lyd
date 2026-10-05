@@ -1,0 +1,101 @@
+design "memory increment with irrelevant invariant scalars"
+
+input rst: bool;
+input stall: bool;
+input address: bv<2>;
+input mem: mem<2, 8>;
+input distract0: bv<8>;
+input distract1: bv<8>;
+input distract2: bv<8>;
+reset_input rst;
+
+spec {
+  state count: bv<4>;
+  state address: bv<2>;
+  state mem: mem<2, 8>;
+  state shadow: bv<8>;
+  state distract0: bv<8>;
+  state distract1: bv<8>;
+  state distract2: bv<8>;
+  reset {
+    count = bv(4, 3);
+    address = i.address;
+    mem = i.mem;
+    shadow = read(i.mem, i.address);
+    distract0 = i.distract0;
+    distract1 = i.distract1;
+    distract2 = i.distract2;
+  }
+  next {
+    count = ite((s.count != bv(4, 0)), (s.count - bv(4, 1)), s.count);
+    address = s.address;
+    mem = ite(
+      (s.count != bv(4, 0)),
+      write(s.mem, s.address, (read(s.mem, s.address) + bv(8, 1))),
+      s.mem
+    );
+    shadow = ite((s.count != bv(4, 0)), (s.shadow + bv(8, 1)), s.shadow);
+    distract0 = s.distract0;
+    distract1 = s.distract1;
+    distract2 = s.distract2;
+  }
+  outputs {
+    can_step = (s.count != bv(4, 0));
+  }
+}
+
+impl {
+  state count: bv<4>;
+  state address: bv<2>;
+  state mem: mem<2, 8>;
+  state shadow: bv<8>;
+  state distract0: bv<8>;
+  state distract1: bv<8>;
+  state distract2: bv<8>;
+  reset {
+    count = bv(4, 3);
+    address = i.address;
+    mem = i.mem;
+    shadow = read(i.mem, i.address);
+    distract0 = i.distract0;
+    distract1 = i.distract1;
+    distract2 = i.distract2;
+  }
+  next {
+    count = ite(i.stall, s.count, ite((s.count != bv(4, 0)), (s.count - bv(4, 1)), s.count));
+    address = ite(i.stall, s.address, s.address);
+    mem = ite(
+      i.stall,
+      s.mem,
+      ite(
+        (s.count != bv(4, 0)),
+        write(write(s.mem, s.address, bv(8, 199)), s.address, (read(s.mem, s.address) + bv(8, 1))),
+        s.mem
+      )
+    );
+    shadow = ite(i.stall, s.shadow, ite((s.count != bv(4, 0)), (s.shadow + bv(8, 1)), s.shadow));
+    distract0 = ite(i.stall, s.distract0, s.distract0);
+    distract1 = ite(i.stall, s.distract1, s.distract1);
+    distract2 = ite(i.stall, s.distract2, s.distract2);
+  }
+  outputs {
+    commit = (((true && (!i.rst)) && (!i.stall)) && (s.count != bv(4, 0)));
+  }
+}
+
+binding (((((((true && (spec.count == impl.count)) && (spec.address == impl.address)) && (spec.mem == impl.mem)) && (spec.shadow == impl.shadow)) && (spec.distract0 == impl.distract0)) && (spec.distract1 == impl.distract1)) && (spec.distract2 == impl.distract2));
+commit commit;
+can_step can_step;
+hold_when ((true && (!i.rst)) && i.stall);
+progress {
+  enabled ((true && (!i.stall)) && (impl.count != bv(4, 0)));
+  rank bv(1, 0);
+}
+
+contract {
+  pre true;
+  invariant (((((true && (s.count <= bv(4, 3))) && (s.shadow == read(s.mem, s.address))) && (s.distract0 <= bv(8, 255))) && (s.distract1 <= bv(8, 255))) && (s.distract2 <= bv(8, 255)));
+  terminal (s.count == bv(4, 0));
+  post (s.shadow == read(s.mem, s.address));
+  rank s.count;
+}

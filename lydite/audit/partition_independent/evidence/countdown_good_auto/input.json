@@ -1,0 +1,175 @@
+{
+  "version": 2,
+  "name": "Generic four-bit countdown",
+  "inputs": {
+    "reset": "bool",
+    "initial": {
+      "bv": 4
+    }
+  },
+  "reset_input": "reset",
+  "spec": {
+    "state": {
+      "x": {
+        "bv": 4
+      },
+      "y": {
+        "bv": 4
+      }
+    },
+    "reset": {
+      "x": "i.initial",
+      "y": [
+        "bv",
+        4,
+        0
+      ]
+    },
+    "next": {
+      "x": [
+        "ite",
+        [
+          "ne",
+          "s.x",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ],
+        [
+          "sub",
+          "s.x",
+          [
+            "bv",
+            4,
+            1
+          ]
+        ],
+        "s.x"
+      ],
+      "y": "s.y"
+    },
+    "outputs": {
+      "can": [
+        "ne",
+        "s.x",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ]
+    }
+  },
+  "binding": [
+    "and",
+    [
+      "eq",
+      "spec.x",
+      "impl.x"
+    ],
+    [
+      "eq",
+      "spec.y",
+      "impl.y"
+    ]
+  ],
+  "commit": "retire",
+  "can_step": "can",
+  "progress": {
+    "enabled": [
+      "ne",
+      "spec.x",
+      [
+        "bv",
+        4,
+        0
+      ]
+    ],
+    "rank": [
+      "bv",
+      4,
+      0
+    ]
+  },
+  "program_contract": {
+    "parameters": {},
+    "precondition": true,
+    "invariant": true,
+    "terminal": [
+      "eq",
+      "s.x",
+      [
+        "bv",
+        4,
+        0
+      ]
+    ],
+    "postcondition": [
+      "eq",
+      "s.x",
+      [
+        "bv",
+        4,
+        0
+      ]
+    ],
+    "rank": "s.x",
+    "partitioning": "auto"
+  },
+  "impl": {
+    "state": {
+      "x": {
+        "bv": 4
+      },
+      "y": {
+        "bv": 4
+      }
+    },
+    "reset": {
+      "x": "i.initial",
+      "y": [
+        "bv",
+        4,
+        0
+      ]
+    },
+    "next": {
+      "x": [
+        "ite",
+        [
+          "ne",
+          "s.x",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ],
+        [
+          "sub",
+          "s.x",
+          [
+            "bv",
+            4,
+            1
+          ]
+        ],
+        "s.x"
+      ],
+      "y": "s.y"
+    },
+    "outputs": {
+      "retire": [
+        "ne",
+        "s.x",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ]
+    }
+  }
+}
