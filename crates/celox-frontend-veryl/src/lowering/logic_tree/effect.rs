@@ -2012,6 +2012,8 @@ fn collect_function_body_effects(
             iter_store.insert(id, loop_store);
         }
         iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+        let _loop_range = super::LoopRangeScope::enter(for_stmt);
+        let _loop_range = super::LoopRangeScope::enter(for_stmt);
         let iter_store_before = iter_store.fork();
 
         let observer_start = collector.observers.len();

@@ -188,6 +188,9 @@ pub(super) struct AccessGuard {
     indices: Option<RegisterId>,
     /// A runtime part-select anchor, which may be partly in range.
     part: Option<PartGuard>,
+    /// The raw bits of some index other than a part-select anchor can
+    /// address memory outside its dimension.
+    clamp: bool,
 }
 
 /// A part select whose runtime `lsb` selects `elements` consecutive
@@ -282,6 +285,38 @@ fn offset_plus_bits<A>(offset: &SIROffset, bits: usize, builder: &mut SIRBuilder
             element_width: *element_width,
             bit_offset: bit_offset + bits,
             dynamic_bit_offset: *dynamic_bit_offset,
+        },
+    }
+}
+
+/// `offset` with every runtime component replaced by 0 unless `condition`
+/// holds. The static components of a validated select address the variable.
+fn clamp_offset<A>(
+    builder: &mut SIRBuilder<A>,
+    offset: &SIROffset,
+    condition: RegisterId,
+) -> SIROffset {
+    let clamp = |builder: &mut SIRBuilder<A>, register: RegisterId| {
+        let width = builder.register(&register).width();
+        let zero = alloc_like(builder, register, width);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let clamped = alloc_like(builder, register, width);
+        builder.emit(SIRInstruction::Mux(clamped, condition, register, zero));
+        clamped
+    };
+    match offset {
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => offset.clone(),
+        SIROffset::Dynamic(register) => SIROffset::Dynamic(clamp(builder, *register)),
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => SIROffset::Element {
+            index: clamp(builder, *index),
+            element_width: *element_width,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: dynamic_bit_offset.map(|register| clamp(builder, register)),
         },
     }
 }
@@ -398,8 +433,8 @@ fn emit_guarded_store<A>(
 }
 
 /// Emit a load through a guarded dynamic select into `dest`'s type. An
-/// out-of-range index reads unknown bits from a four-state register and 0
-/// from a two-state one, per bit for a partly out-of-range part select
+/// out-of-range index reads X from a four-state register and 0 from a
+/// two-state one, per bit for a partly out-of-range part select
 /// (IEEE 1800-2023 7.4.6, 11.5.1). The memory is never read out of range.
 fn emit_guarded_load<A>(
     builder: &mut SIRBuilder<A>,
@@ -416,10 +451,10 @@ fn emit_guarded_load<A>(
     let unknown = |builder: &mut SIRBuilder<A>, width: usize| {
         let register = alloc_like(builder, dest, width);
         let value = if matches!(builder.register(&register), RegisterType::Logic { .. }) {
-            // Like the comb and SystemVerilog lowerings, keep the value bits
-            // clear, so a two-state simulation reads 0.
+            // X sets both the value and the mask bit. A two-state simulation
+            // reads it as 0 (`celox_sir::two_state`).
             let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-            SIRValue::new_four_state(BigUint::zero(), mask)
+            SIRValue::new_four_state(mask.clone(), mask)
         } else {
             SIRValue::new(0u8)
         };
@@ -427,8 +462,19 @@ fn emit_guarded_load<A>(
         register
     };
     let Some(part) = &guard.part else {
+        // Branch-free: load through an address that is redirected to the
+        // first element when an index can leave the variable, then select X.
+        let offset = if guard.clamp {
+            clamp_offset(builder, &offset, whole)
+        } else {
+            offset
+        };
+        let loaded = alloc_like(builder, dest, width);
+        builder.emit(SIRInstruction::Load(loaded, address(), offset, width));
         let default = unknown(builder, width);
-        return emit_load_when(builder, whole, dest, &address, offset, width, default);
+        let result = alloc_like(builder, dest, width);
+        builder.emit(SIRInstruction::Mux(result, whole, loaded, default));
+        return result;
     };
     let load_block = builder.new_block();
     let partial_block = builder.new_block();
@@ -472,6 +518,14 @@ fn emit_guarded_load<A>(
     builder.seal_block(SIRTerminator::Jump(merge_block, vec![partial]));
     builder.switch_to_block(merge_block);
     result
+}
+
+/// The raw bits of a `width`-bit index can address position `limit` or above.
+fn index_bits_exceed(width: usize, limit: usize) -> bool {
+    u32::try_from(width)
+        .ok()
+        .and_then(|bits| 1u64.checked_shl(bits))
+        .is_none_or(|values| values > limit as u64)
 }
 
 fn and_condition<A>(
@@ -2837,6 +2891,8 @@ impl<'a> FfParser<'a> {
                 if let Some(guard) = guard.as_deref_mut() {
                     let outer = if i == 0 { total_width } else { strides[i - 1] };
                     let limit = outer / stride.max(1);
+                    guard.clamp |=
+                        index_bits_exceed(ir_builder.register(&index_reg).width(), limit);
                     and_index_guard(
                         &mut guard.indices,
                         index_reg,
@@ -2964,13 +3020,19 @@ impl<'a> FfParser<'a> {
                                 element_bits: scale,
                             });
                         }
-                        _ => and_index_guard(
-                            &mut guard.indices,
-                            index_reg,
-                            signed,
-                            Some(dimension_width),
-                            ir_builder,
-                        ),
+                        _ => {
+                            guard.clamp |= index_bits_exceed(
+                                ir_builder.register(&index_reg).width(),
+                                dimension_width,
+                            );
+                            and_index_guard(
+                                &mut guard.indices,
+                                index_reg,
+                                signed,
+                                Some(dimension_width),
+                                ir_builder,
+                            )
+                        }
                     }
                 }
                 let term_reg = scale_offset(index_reg, scale, ir_builder);

@@ -1363,6 +1363,7 @@ pub(super) fn eval_function_body_return(
             symbolic_store.insert(*id, loop_store);
         }
         symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+        let _loop_range = super::LoopRangeScope::enter(for_stmt);
         let iter_store_before = symbolic_store.fork();
 
         let iter_state = for_stmt.body.iter().try_fold(
@@ -3346,6 +3347,10 @@ fn eval_factor(
                     indices: dynamic_indices,
                     sources: offset_sources,
                     boundaries: all_bounds,
+                    indices_valid,
+                    valid,
+                    clamp,
+                    partial,
                     ..
                 } = super::eval_dynamic_select_offset(
                     module,
@@ -3387,21 +3392,84 @@ fn eval_factor(
                     ));
                 }
 
-                let extracted_expr = if is_unmodified {
+                // An invalid index reads X (IEEE 1800-2023 7.4.6); a partly
+                // out-of-range part select reads X only for its
+                // out-of-range bits (11.5.1).
+                let extracted_expr = if let Some(partial) = partial {
+                    let placement = partial.window(arena, element_width)?;
+                    let window = if is_unmodified {
+                        // Load only the clamped window. The row indices must
+                        // address the variable even when they are invalid.
+                        let mut window_indices =
+                            dynamic_indices[..dynamic_indices.len() - 1].to_vec();
+                        window_indices =
+                            super::safe_slt_indices(arena, window_indices, indices_valid, clamp)?;
+                        window_indices.push(SLTIndex {
+                            node: placement.start,
+                            stride: partial.element_bits,
+                            kind: SLTIndexKind::Packed,
+                        });
+                        let raw_input = arena.alloc(SLTNode::Input {
+                            variable: *var_id,
+                            signed: false,
+                            index: window_indices,
+                            access: BitAccess::new(0, width - 1),
+                        })?;
+                        arena.alloc(SLTNode::Slice {
+                            expr: raw_input,
+                            access: BitAccess::new(0, element_width - 1),
+                        })?
+                    } else {
+                        let (current_expr, current_sources) = combine_parts_with_default(
+                            *var_id,
+                            0,
+                            parts.expect("a modified variable has a symbolic range"),
+                            arena,
+                        )?;
+                        all_sources.extend(current_sources);
+                        let element_bits = arena.alloc(SLTNode::Constant(
+                            BigUint::from(partial.element_bits),
+                            BigUint::from(0u8),
+                            64,
+                            false,
+                        ))?;
+                        let start_bits = arena.alloc(SLTNode::Binary(
+                            placement.start,
+                            BinaryOp::Mul,
+                            element_bits,
+                        ))?;
+                        let offset = arena.alloc(SLTNode::Binary(
+                            partial.row_offset,
+                            BinaryOp::Add,
+                            start_bits,
+                        ))?;
+                        let shifted =
+                            arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset))?;
+                        arena.alloc(SLTNode::Slice {
+                            expr: shifted,
+                            access: BitAccess::new(0, element_width - 1),
+                        })?
+                    };
+                    let selected = partial.align(arena, window, &placement, element_width)?;
+                    super::slt_or_unknown(arena, indices_valid, selected, element_width)?
+                } else if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
                     // Keep the SLT input footprint conservative for dependency analysis.
                     // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
                     // and emits a narrow dynamic load.
+                    let dynamic_indices =
+                        super::safe_slt_indices(arena, dynamic_indices, valid, clamp)?;
                     let raw_input = arena.alloc(SLTNode::Input {
                         variable: *var_id,
                         signed: module.variables[var_id].r#type.signed,
                         index: dynamic_indices,
                         access: BitAccess::new(0, width - 1),
                     })?;
-                    arena.alloc(SLTNode::Slice {
+                    let selected = arena.alloc(SLTNode::Slice {
                         expr: raw_input,
                         access: BitAccess::new(0, element_width - 1),
-                    })?
+                    })?;
+                    super::slt_or_unknown(arena, valid, selected, element_width)?
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
@@ -3415,10 +3483,11 @@ fn eval_factor(
 
                     let shifted =
                         arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node))?;
-                    arena.alloc(SLTNode::Slice {
+                    let selected = arena.alloc(SLTNode::Slice {
                         expr: shifted,
                         access: BitAccess::new(0, element_width - 1),
-                    })?
+                    })?;
+                    super::slt_or_unknown(arena, valid, selected, element_width)?
                 };
 
                 let extracted_expr =
