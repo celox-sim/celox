@@ -526,7 +526,7 @@ dependencies = [
  "celox-state-layout",
  "fxhash",
  "num-bigint",
- "wasm-encoder 0.260.0",
+ "wasm-encoder 0.261.0",
  "wasmtime",
 ]
 
@@ -971,7 +971,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1044,7 +1044,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1732,7 +1732,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2332,7 +2332,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3637,7 +3637,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4115,10 +4115,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4806,12 +4806,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.260.0"
+version = "0.261.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e9692da9ef627c5ee12b45378f68ac2689ce306f88078f5cf849b7c3444ed8"
+checksum = "2608e8bb6d67fd68f5a8d0eb1363d6e7bcbc1f8ded5a0bd3a1e382462b876b22"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.260.0",
+ "wasmparser 0.261.0",
 ]
 
 [[package]]
@@ -4852,9 +4852,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.260.0"
+version = "0.261.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c94519d78304dc4a4bb5925eda6ff153bf06167467cff9233dc9593bae28fdd"
+checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
 dependencies = [
  "bitflags 2.13.0",
  "indexmap",
@@ -5171,7 +5171,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
