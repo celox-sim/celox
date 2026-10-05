@@ -5,8 +5,6 @@ mod test_utils;
 
 all_backends! {
     fn constant_arrays_initialize_comb_and_ff_reads(sim) {
-        // SV frontend issue #64: constant arrays and four-state FF event signals.
-        @ignore_on(sv);
         @case "veryl_regressions::constant_arrays_initialize_comb_and_ff_reads";
     }
 
@@ -15,8 +13,6 @@ all_backends! {
     }
 
     fn inside_outside_range_endpoints(sim) {
-        // SV frontend issue #64: unsupported set-membership assignment expressions.
-        @ignore_on(sv);
         @case "veryl_language::inside_outside_range_endpoints";
     }
     fn parameter_expression_type_cast_widths(sim) {
@@ -51,8 +47,6 @@ all_backends! {
         @case "veryl_regressions::inst_port_default_value_connected_not_folded";
     }
     fn inlined_function_per_callsite_scratch_in_continuous_assign(sim) {
-        // SV frontend issue #64: unsupported cast expressions.
-        @ignore_on(sv);
         @case "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign";
     }
 }

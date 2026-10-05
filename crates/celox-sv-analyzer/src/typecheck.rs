@@ -20,7 +20,7 @@ pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usiz
         return None;
     }
     match name {
-        "$countones" => Some((32, true)),
+        "$countones" | "$clog2" => Some((32, true)),
         "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
         _ => None,
     }
@@ -200,68 +200,76 @@ pub(crate) fn eval_generate_case_operand(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    fn evaluate(expr: &ConstExpr, width: usize, signed: bool) -> Option<IntegralLiteral> {
-        if let Some(fill) = unbased_fill_from_const_expr(expr) {
-            let mut literal = integral_fill_literal(fill, width)?;
-            literal.signed = signed;
-            return Some(literal);
-        }
-        let literal = match expr {
-            ConstExpr::Unary { op, expr }
-                if matches!(op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot) =>
-            {
-                eval_integral_unary(*op, evaluate(expr, width, signed)?)
-            }
-            ConstExpr::Binary { left, op, right }
-                if matches!(
-                    op,
-                    BinaryOp::Add
-                        | BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::Mod
-                        | BinaryOp::Pow
-                        | BinaryOp::BitAnd
-                        | BinaryOp::BitOr
-                        | BinaryOp::BitXor
-                ) =>
-            {
-                eval_four_state_binary_literal(
-                    &evaluate(left, width, signed)?,
-                    *op,
-                    &evaluate(right, width, signed)?,
-                    signed,
-                )?
-            }
-            ConstExpr::Binary { left, op, right }
-                if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
-            {
-                eval_integral_shift(
-                    evaluate(left, width, signed)?,
-                    *op,
-                    self_determined_integral_literal(right)?,
-                )
-            }
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                let then_literal = evaluate(then_expr, width, signed)?;
-                let else_literal = evaluate(else_expr, width, signed)?;
-                match integral_literal_truth(&integral_literal_from_const_expr(condition)?) {
-                    Some(true) => then_literal,
-                    Some(false) => else_literal,
-                    None => merge_unknown_integral_literals(then_literal, else_literal),
-                }
-            }
-            _ => integral_literal_from_const_expr(expr)?,
-        };
-        let extension = signed_extension(&literal, signed && literal.signed);
-        Some(resize_integral_literal(literal, width, signed, extension))
-    }
     let expr = substitute_typed_constants(expr.clone(), constants, types);
-    evaluate(&expr, width, signed)
+    eval_integral_in_context(&expr, width, signed)
+}
+
+/// A literal-only integral expression evaluated in a context of `width` bits
+/// and the given signedness: the context propagates into arithmetic
+/// operands before they are evaluated (IEEE 1800-2023 11.6.1).
+fn eval_integral_in_context(
+    expr: &ConstExpr,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    if let Some(fill) = unbased_fill_from_const_expr(expr) {
+        let mut literal = integral_fill_literal(fill, width)?;
+        literal.signed = signed;
+        return Some(literal);
+    }
+    let literal = match expr {
+        ConstExpr::Unary { op, expr }
+            if matches!(op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot) =>
+        {
+            eval_integral_unary(*op, eval_integral_in_context(expr, width, signed)?)
+        }
+        ConstExpr::Binary { left, op, right }
+            if matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+            ) =>
+        {
+            eval_four_state_binary_literal(
+                &eval_integral_in_context(left, width, signed)?,
+                *op,
+                &eval_integral_in_context(right, width, signed)?,
+                signed,
+            )?
+        }
+        ConstExpr::Binary { left, op, right }
+            if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
+        {
+            eval_integral_shift(
+                eval_integral_in_context(left, width, signed)?,
+                *op,
+                self_determined_integral_literal(right)?,
+            )
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let then_literal = eval_integral_in_context(then_expr, width, signed)?;
+            let else_literal = eval_integral_in_context(else_expr, width, signed)?;
+            match integral_literal_truth(&integral_literal_from_const_expr(condition)?) {
+                Some(true) => then_literal,
+                Some(false) => else_literal,
+                None => merge_unknown_integral_literals(then_literal, else_literal),
+            }
+        }
+        _ => integral_literal_from_const_expr(expr)?,
+    };
+    let extension = signed_extension(&literal, signed && literal.signed);
+    Some(resize_integral_literal(literal, width, signed, extension))
 }
 
 pub fn format_integral_literal_binary(literal: &IntegralLiteral) -> String {
@@ -814,13 +822,13 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                     | BinaryOp::Ge
             ) =>
         {
-            let (mut left, mut right) = integral_binary_operands(left, right)?;
-            let width = left.width.max(right.width);
-            let signed = left.signed && right.signed;
-            let left_extension = signed_extension(&left, signed);
-            let right_extension = signed_extension(&right, signed);
-            left = resize_integral_literal(left, width, signed, left_extension);
-            right = resize_integral_literal(right, width, signed, right_extension);
+            let (left_literal, right_literal) = integral_binary_operands(left, right)?;
+            let width = left_literal.width.max(right_literal.width);
+            let signed = left_literal.signed && right_literal.signed;
+            // The operands are evaluated at their common width, which
+            // propagates into nested arithmetic.
+            let left = eval_integral_in_context(left, width, signed)?;
+            let right = eval_integral_in_context(right, width, signed)?;
             eval_four_state_binary_literal(&left, *op, &right, signed)
         }
         ConstExpr::Mux {
@@ -861,7 +869,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
     }
 }
 
-fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {
+pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {
     if literal.width > 128 || literal.mask != BigUint::default() {
         return None;
     }
@@ -1017,6 +1025,9 @@ fn eval_const_function(
     args: &[ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<i128> {
+    if !name.starts_with('$') {
+        return crate::ast::const_functions::eval_call(name, args, constants);
+    }
     let [arg] = args else {
         return None;
     };

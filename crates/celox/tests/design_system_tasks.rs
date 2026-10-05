@@ -20,7 +20,6 @@ all_backends! {
 // the file does not name keep their values (IEEE 1800-2023 21.4).
 fn test_always_ff_readmemh_reloads_named_locations(sim) {
     @omit_veryl;
-    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file("ff_readmemh", "12\n@2\n56\n");
         let code = format!(r#"
@@ -73,7 +72,6 @@ fn test_always_ff_readmemh_reloads_named_locations(sim) {
 
 fn test_always_comb_readmemh_drives_file_contents(sim) {
     @omit_veryl;
-    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file("comb_readmemh", "12\n34\n56\n78\n");
         let code = format!(r#"

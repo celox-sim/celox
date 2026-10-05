@@ -8,5 +8,6 @@
 pub mod artifact;
 pub mod assembly;
 pub mod flattening;
+pub mod pow;
 pub mod remap;
 pub mod width;

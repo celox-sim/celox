@@ -2,6 +2,17 @@
 
 use crate::{ast, symbol::ModuleId, typecheck};
 
+pub use crate::procedural::{
+    CaseKind, CaseLabel, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
+};
+
+/// A procedural statement of the analyzed IR.
+pub type Stmt = StmtBase<Expr, LValue>;
+pub type CaseItem = crate::procedural::CaseItemBase<Expr, LValue>;
+pub type LocalVariable = crate::procedural::LocalVariableBase<Type>;
+pub type Subroutine = crate::procedural::SubroutineBase<Expr, LValue, Type>;
+pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ir {
     modules: Vec<Module>,
@@ -28,9 +39,13 @@ pub struct Module {
     assignments: Vec<Assignment>,
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
+    initial_processes: Vec<InitialProcess>,
+    locals: Vec<LocalVariable>,
+    subroutines: Vec<Subroutine>,
 }
 
 impl Module {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: ModuleId,
         name: String,
@@ -41,6 +56,9 @@ impl Module {
         assignments: Vec<Assignment>,
         comb_processes: Vec<CombProcess>,
         ff_processes: Vec<FfProcess>,
+        initial_processes: Vec<InitialProcess>,
+        locals: Vec<LocalVariable>,
+        subroutines: Vec<Subroutine>,
     ) -> Self {
         Self {
             id,
@@ -52,7 +70,25 @@ impl Module {
             assignments,
             comb_processes,
             ff_processes,
+            initial_processes,
+            locals,
+            subroutines,
         }
+    }
+
+    /// `initial` processes, which run once at the start of simulation.
+    pub fn initial_processes(&self) -> &[InitialProcess] {
+        &self.initial_processes
+    }
+
+    /// Variables declared inside procedural blocks and subroutines.
+    pub fn locals(&self) -> &[LocalVariable] {
+        &self.locals
+    }
+
+    /// Functions and tasks, with their statement bodies.
+    pub fn subroutines(&self) -> &[Subroutine] {
+        &self.subroutines
     }
 
     pub fn id(&self) -> ModuleId {
@@ -620,6 +656,7 @@ pub struct CombProcess {
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
+    body: Vec<Stmt>,
 }
 
 impl CombProcess {
@@ -627,12 +664,20 @@ impl CombProcess {
         kind: CombProcessKind,
         condition: Option<ConstExpr>,
         assignments: Vec<Assignment>,
+        body: Vec<Stmt>,
     ) -> Self {
         Self {
             kind,
             condition,
             assignments,
+            body,
         }
+    }
+
+    /// The statements of an `always_comb` (or `always @*`) process. A
+    /// continuous assignment has one blocking assignment statement.
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
     }
 
     pub fn kind(&self) -> CombProcessKind {
@@ -657,23 +702,42 @@ pub enum CombProcessKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
     events: Vec<FfEvent>,
-    assignments: Vec<ConditionalAssignment>,
+    body: Vec<Stmt>,
 }
 
 impl FfProcess {
-    pub(crate) fn new(events: Vec<FfEvent>, assignments: Vec<ConditionalAssignment>) -> Self {
-        Self {
-            events,
-            assignments,
-        }
+    pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
+        Self { events, body }
     }
 
     pub fn events(&self) -> &[FfEvent] {
         &self.events
     }
 
-    pub fn assignments(&self) -> &[ConditionalAssignment] {
-        &self.assignments
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
+    }
+}
+
+/// An `initial` process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialProcess {
+    condition: Option<ConstExpr>,
+    body: Vec<Stmt>,
+}
+
+impl InitialProcess {
+    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
+        Self { condition, body }
+    }
+
+    /// The condition of the enclosing conditional generate block, if any.
+    pub fn condition(&self) -> Option<&ConstExpr> {
+        self.condition.as_ref()
+    }
+
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
     }
 }
 
@@ -700,29 +764,6 @@ impl FfEvent {
 
     pub fn signal(&self) -> &str {
         &self.signal
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConditionalAssignment {
-    condition: Option<Expr>,
-    assignment: Assignment,
-}
-
-impl ConditionalAssignment {
-    pub(crate) fn new(condition: Option<Expr>, assignment: Assignment) -> Self {
-        Self {
-            condition,
-            assignment,
-        }
-    }
-
-    pub fn condition(&self) -> Option<&Expr> {
-        self.condition.as_ref()
-    }
-
-    pub fn assignment(&self) -> &Assignment {
-        &self.assignment
     }
 }
 
@@ -925,6 +966,12 @@ impl From<ast::CombProcess> for CombProcess {
                 .cloned()
                 .map(Into::into)
                 .collect(),
+            process
+                .body()
+                .iter()
+                .cloned()
+                .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
+                .collect(),
         )
     }
 }
@@ -943,10 +990,24 @@ impl From<ast::FfProcess> for FfProcess {
         Self::new(
             process.events().iter().cloned().map(Into::into).collect(),
             process
-                .assignments()
+                .body()
                 .iter()
                 .cloned()
-                .map(Into::into)
+                .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
+                .collect(),
+        )
+    }
+}
+
+impl From<ast::InitialProcess> for InitialProcess {
+    fn from(process: ast::InitialProcess) -> Self {
+        Self::new(
+            process.condition().cloned().map(Into::into),
+            process
+                .body()
+                .iter()
+                .cloned()
+                .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
         )
     }
@@ -964,15 +1025,6 @@ impl From<ast::FfEdge> for FfEdge {
 impl From<ast::FfEvent> for FfEvent {
     fn from(event: ast::FfEvent) -> Self {
         Self::new(event.edge().into(), event.signal().to_string())
-    }
-}
-
-impl From<ast::ConditionalAssignment> for ConditionalAssignment {
-    fn from(assignment: ast::ConditionalAssignment) -> Self {
-        Self::new(
-            assignment.condition().cloned().map(Into::into),
-            assignment.assignment().clone().into(),
-        )
     }
 }
 

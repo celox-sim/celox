@@ -67,7 +67,6 @@ all_backends! {
     }
 
     fn test_pow_operator_constant_exponent(sim) {
-        @ignore_on(sv);
         @case "operators::test_pow_operator_constant_exponent";
     }
 
@@ -76,18 +75,16 @@ all_backends! {
     }
 
     fn test_pow_operator_constant_exponent_ff(sim) {
-        @ignore_on(sv);
         @case "operators::test_pow_operator_constant_exponent_ff";
     }
 
     fn test_pow_operator_runtime_exponent_comb_and_ff(sim) {
         @omit_veryl;
-        @ignore_on(sv);
+        @omit_sv;
         @case "operators::test_pow_operator_runtime_exponent_comb_and_ff";
     }
 
     fn test_pow_operator_runtime_signed_and_unknown_operands(sim) {
-        @ignore_on(sv);
         @case "operators::test_pow_operator_runtime_signed_and_unknown_operands";
     }
 
@@ -137,13 +134,11 @@ all_backends! {
 
     // XNOR in always_comb: ~(a ^ b)
     fn test_comb_bitxnor(sim) {
-        @ignore_on(sv);
         @case "operators::test_comb_bitxnor";
     }
 
     // XNOR in always_ff.
     fn test_ff_bitxnor(sim) {
-        @ignore_on(sv);
         @case "operators::test_ff_bitxnor";
     }
 
@@ -181,7 +176,6 @@ all_backends! {
     }
 
     fn test_mixed_signed_unsigned_comparison(sim) {
-        @ignore_on(sv);
         @case "operators::test_mixed_signed_unsigned_comparison";
     }
 }
