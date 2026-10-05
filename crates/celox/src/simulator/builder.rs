@@ -1437,6 +1437,15 @@ mod host {
             self
         }
 
+        /// Replace the builder's Veryl sources with SystemVerilog sources,
+        /// keeping its configuration.
+        #[cfg(feature = "systemverilog")]
+        pub fn into_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
+            self.sources.clear();
+            self.sv_sources = sources;
+            self
+        }
+
         /// Returns the top module name.
         pub fn top(&self) -> &str {
             if !self.sources.is_empty() {

@@ -20,7 +20,7 @@ pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usiz
         return None;
     }
     match name {
-        "$countones" => Some((32, true)),
+        "$countones" | "$clog2" => Some((32, true)),
         "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
         _ => None,
     }
@@ -886,7 +886,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
     }
 }
 
-fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {
+pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {
     if literal.width > 128 || literal.mask != BigUint::default() {
         return None;
     }
@@ -1042,6 +1042,9 @@ fn eval_const_function(
     args: &[ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<i128> {
+    if !name.starts_with('$') {
+        return crate::ast::const_functions::eval_call(name, args, constants);
+    }
     let [arg] = args else {
         return None;
     };

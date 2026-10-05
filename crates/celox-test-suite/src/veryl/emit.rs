@@ -76,6 +76,18 @@ pub fn emit_verification_sources(sources: &[(&str, &Path)], top: &str) -> Emitte
     emit_sources(sources, Some(top))
 }
 
+/// Whether an analyzer error blocks emission. Celox's Veryl tests may
+/// authorize combinational loops per path, and the emitted SystemVerilog
+/// expresses such a loop directly; every other error blocks emission.
+fn blocks_emission(error: &veryl_analyzer::AnalyzerError, testbench: Option<&str>) -> bool {
+    error.is_error()
+        && (testbench.is_some()
+            || !matches!(
+                error,
+                veryl_analyzer::AnalyzerError::CombinationalLoop { .. }
+            ))
+}
+
 fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSources {
     symbol_table::clear();
     attribute_table::clear();
@@ -112,14 +124,14 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
     for (_, _, parsed) in &parsed_sources {
         let errors = analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
         assert!(
-            !errors.iter().any(|error| error.is_error()),
+            !errors.iter().any(|error| blocks_emission(error, testbench)),
             "Veryl analyze_pass2 errors: {errors:?}"
         );
     }
 
     let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(
-        !errors.iter().any(|error| error.is_error()),
+        !errors.iter().any(|error| blocks_emission(error, testbench)),
         "Veryl analyze_post_pass2 errors: {errors:?}"
     );
 

@@ -16,12 +16,10 @@ all_backends! {
     }
 
     fn test_direct_comb_bits_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_bits_system_function";
     }
 
     fn test_direct_comb_size_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_size_system_function";
     }
 
@@ -31,12 +29,11 @@ all_backends! {
     }
 
     fn test_comb_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_comb_function_body_clog2_system_function";
     }
 
     fn test_comb_function_body_bits_size_system_functions(sim) {
-        @ignore_on(sv);
         @case "system_function::test_comb_function_body_bits_size_system_functions";
     }
 
@@ -53,42 +50,34 @@ all_backends! {
     }
 
     fn test_comb_function_body_signed_unsigned_system_functions(sim) {
-        @ignore_on(sv);
         @case "system_function::test_comb_function_body_signed_unsigned_system_functions";
     }
 
     fn test_direct_comb_bits_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_bits_type_system_function";
     }
 
     fn test_direct_ff_bits_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_system_function";
     }
 
     fn test_direct_ff_bits_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_type_system_function";
     }
 
     fn test_direct_ff_bits_array_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_array_system_function";
     }
 
     fn test_direct_ff_size_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_system_function";
     }
 
     fn test_direct_ff_size_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_type_system_function";
     }
 
     fn test_direct_ff_size_packed_multidimensional_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_system_function";
     }
 
@@ -103,7 +92,7 @@ all_backends! {
     }
 
     fn test_ff_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_ff_function_body_clog2_system_function";
     }
 

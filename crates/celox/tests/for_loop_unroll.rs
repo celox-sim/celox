@@ -11,18 +11,15 @@ mod test_utils;
 all_backends! {
 
 fn test_for_loop_unroll_shift_register(sim) {
-    @ignore_on(sv);
     @case "for_loop_unroll::test_for_loop_unroll_shift_register";
 }
 
 fn test_for_loop_unroll_break_in_always_ff(sim) {
-    @ignore_on(sv);
     @case "for_loop_unroll::test_for_loop_unroll_break_in_always_ff";
 }
 
 // Default array reset combined with a shift-register `for` loop.
 fn test_for_loop_unroll_with_default_zero_reset(sim) {
-    @ignore_on(sv);
     @case "for_loop_unroll::test_for_loop_unroll_with_default_zero_reset";
 }
 

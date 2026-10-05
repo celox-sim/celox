@@ -130,6 +130,10 @@ pub(super) fn parameters_from_ref_node(
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
+            // An unpacked array parameter is a constant variable, not a value.
+            if array_parameters::is_array_parameter(param) {
+                continue;
+            }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let mut const_env = base_const_env.clone();
             const_env.extend(const_env_from_parameters(parameters));

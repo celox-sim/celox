@@ -63,7 +63,6 @@ all_backends! {
     }
 
     fn test_always_comb_read_before_write_uses_previous_value(sim) {
-        @ignore_on(sv);
         @case "basic::test_always_comb_read_before_write_uses_previous_value";
     }
 
@@ -76,7 +75,6 @@ all_backends! {
     }
 
     fn test_comb_function_call_partial_write_local_temp(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_partial_write_local_temp";
     }
 
@@ -85,22 +83,18 @@ all_backends! {
     }
 
     fn test_comb_function_call_constant_folded_if_return(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_constant_folded_if_return";
     }
 
     fn test_comb_function_call_return_inside_for(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_return_inside_for";
     }
 
     fn test_comb_function_call_break_inside_for(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_break_inside_for";
     }
 
     fn test_comb_function_call_break_inside_dynamic_for(sim) {
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     count: input logic<3>,
@@ -144,7 +138,6 @@ module Top (
     }
 
     fn test_comb_function_call_nested_break_inside_dynamic_for(sim) {
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     count: input logic<3>,
@@ -195,32 +188,26 @@ module Top (
     }
 
     fn test_comb_function_call_statement_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_with_output_argument";
     }
 
     fn test_comb_function_call_expression_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_with_output_argument";
     }
 
     fn test_comb_function_call_expression_output_is_visible_to_later_operand(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_output_is_visible_to_later_operand";
     }
 
     fn test_comb_function_call_expression_with_constant_input_keeps_output_write(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_with_constant_input_keeps_output_write";
     }
 
     fn test_comb_function_call_expression_output_survives_system_function_wrapper(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_output_survives_system_function_wrapper";
     }
 
     fn test_comb_function_call_with_output_argument_in_display_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_display_argument";
     }
 
@@ -235,117 +222,102 @@ module Top (
     }
 
     fn test_comb_function_call_expression_output_is_guarded_by_ternary(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_is_guarded_by_ternary";
     }
 
     fn test_comb_function_call_expression_output_respects_short_circuit(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_respects_short_circuit";
     }
 
     fn test_comb_function_call_with_output_argument_in_if_condition(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_if_condition";
     }
 
     fn test_comb_function_call_with_output_argument_in_case_target(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_case_target";
     }
 
     fn test_comb_function_call_with_output_argument_in_loop_condition(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_loop_condition";
     }
 
     fn test_comb_nested_function_output_call_in_function_condition(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_nested_function_output_call_in_function_condition";
     }
 
     fn test_comb_case_target_output_call_is_evaluated_once(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_case_target_output_call_is_evaluated_once";
     }
 
     fn test_comb_loop_bound_output_call_writes_back_once(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_loop_bound_output_call_writes_back_once";
     }
 
     fn test_comb_value_system_function_statement_applies_argument_outputs(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_value_system_function_statement_applies_argument_outputs";
     }
 
     fn test_comb_value_system_function_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_value_system_function_after_dynamic_break_stays_inactive";
     }
 
     fn test_comb_effectful_if_condition_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_effectful_if_condition_after_dynamic_break_stays_inactive";
     }
 
     fn test_statement_call_inputs_follow_output_writeback_order(sim) {
-        @ignore_on(sv);
         @case "basic::test_statement_call_inputs_follow_output_writeback_order";
     }
 
     fn test_comb_effectful_case_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_effectful_case_after_dynamic_break_stays_inactive";
     }
 
     fn test_comb_function_condition_output_is_guarded_after_early_return(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_condition_output_is_guarded_after_early_return";
     }
 
     fn test_comb_function_call_statement_ignores_return_value(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_ignores_return_value";
     }
 
     fn test_comb_returning_output_function_reads_current_caller_store(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_returning_output_function_reads_current_caller_store";
     }
 
     fn test_comb_returning_output_function_allows_nested_output_call(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_returning_output_function_allows_nested_output_call";
     }
 
     fn test_comb_function_call_statement_preserves_return_control_flow(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_return_control_flow";
     }
 
     fn test_comb_function_call_statement_preserves_conditional_return_control_flow(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_conditional_return_control_flow";
     }
 
     fn test_comb_nested_function_call_statement_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_nested_function_call_statement_with_output_argument";
     }
 
     fn test_comb_function_call_output_reads_current_caller_store(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_output_reads_current_caller_store";
     }
 
     fn test_comb_function_call_statement_with_output_argument_in_loop(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_with_output_argument_in_loop";
     }
 
     fn test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits";
     }
 
