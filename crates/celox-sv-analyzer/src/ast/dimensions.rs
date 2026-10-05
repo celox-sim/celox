@@ -449,6 +449,7 @@ fn containing_function_dimensions(
                     signed: param.signed,
                     is_2state: param.is_2state,
                     members: Vec::new(),
+                    signed_element_depth: param.signed_element_depth,
                 },
             )
         }));
@@ -614,6 +615,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 signed: port.r#type().is_signed(),
                 is_2state: port.r#type().kind() == TypeKind::Bit,
                 members: port.r#type().members.clone(),
+                signed_element_depth: port.r#type().signed_element_depth,
             },
         );
     }
@@ -626,6 +628,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 signed: signal.r#type().is_signed(),
                 is_2state: signal.r#type().kind() == TypeKind::Bit,
                 members: signal.r#type().members.clone(),
+                signed_element_depth: signal.r#type().signed_element_depth,
             },
         );
     }
@@ -742,6 +745,18 @@ pub(super) fn parameter_width_marker(name: &str) -> String {
 
 pub(super) fn parameter_signed_marker(name: &str) -> String {
     format!("__parameter::signed::{name}")
+}
+
+pub(super) fn parameter_dimensions_marker(name: &str) -> String {
+    format!("__parameter::dimensions::{name}")
+}
+
+pub(super) fn parameter_dimension_marker(name: &str, index: usize, bound: &str) -> String {
+    format!("__parameter::dimension::{index}::{bound}::{name}")
+}
+
+pub(super) fn parameter_signed_element_marker(name: &str) -> String {
+    format!("__parameter::signed_element::{name}")
 }
 
 pub(super) fn variable_bits_marker(name: &str) -> String {
@@ -908,6 +923,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     signed: parameter.declared_signed.unwrap_or(false),
                     is_2state: parameter.declared_is_2state,
                     members: Vec::new(),
+                    signed_element_depth: parameter.signed_element_depth,
                 },
             )
         })

@@ -107,7 +107,8 @@
     "cases": {
       "icarus": [
         "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
-        "review_regressions::preserves_use_site_dimensions_in_function_alias_types"
+        "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+        "types::packed_parameters_of_signed_named_types_have_signed_elements"
       ]
     }
   },

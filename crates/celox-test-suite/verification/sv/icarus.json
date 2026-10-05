@@ -2147,6 +2147,40 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_packed_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+        "upstream": []
+      },
+      "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "types::preserves_integer_atom_state_kinds",
       "phase": "execute",
       "status": "passed",
@@ -2180,9 +2214,9 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 31,
+    "ignored": 32,
     "mismatch": 0,
-    "passed": 130,
+    "passed": 131,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,

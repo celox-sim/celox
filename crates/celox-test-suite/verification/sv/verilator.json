@@ -1845,6 +1845,28 @@
     },
     {
       "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "types::preserves_integer_atom_state_kinds",
@@ -1882,7 +1904,7 @@
     "emission_error": 0,
     "ignored": 6,
     "mismatch": 0,
-    "passed": 122,
+    "passed": 124,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
