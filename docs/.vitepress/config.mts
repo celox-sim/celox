@@ -81,6 +81,10 @@ export default defineConfig({
                   link: "/ja/guide/vcd",
                 },
                 {
+                  text: "チェックポイント",
+                  link: "/ja/guide/checkpoints",
+                },
+                {
                   text: "型変換",
                   link: "/ja/guide/type-conversion",
                 },
@@ -170,6 +174,7 @@ export default defineConfig({
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
             { text: "Child Instance Access", link: "/guide/hierarchy" },
             { text: "VCD Waveform Output", link: "/guide/vcd" },
+            { text: "Checkpoints", link: "/guide/checkpoints" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
           ],
         },

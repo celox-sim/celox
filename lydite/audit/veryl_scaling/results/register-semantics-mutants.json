@@ -1,0 +1,263 @@
+[
+  {
+    "registers": 8,
+    "fault": "forward_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 8, 0, 7)"
+  },
+  {
+    "registers": 8,
+    "fault": "missing_high_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 8,
+    "fault": "missing_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 8,
+    "fault": "no_flush",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 8, 5, 8)"
+  },
+  {
+    "registers": 8,
+    "fault": "no_forward",
+    "result": "concrete_rejected",
+    "program_index": 2,
+    "reason": "('retirement ISA', 8, 2, 6)"
+  },
+  {
+    "registers": 8,
+    "fault": "no_interlock",
+    "result": "concrete_rejected",
+    "program_index": 3,
+    "reason": "('retirement ISA', 8, 3, 6)"
+  },
+  {
+    "registers": 8,
+    "fault": "read_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 8, 1, 8)"
+  },
+  {
+    "registers": 8,
+    "fault": "register_read_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 8, 1, 8)"
+  },
+  {
+    "registers": 8,
+    "fault": "register_write_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 8, 1, 5)"
+  },
+  {
+    "registers": 8,
+    "fault": "write_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 8, 0, 6)"
+  },
+  {
+    "registers": 8,
+    "fault": "wrong_add",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 8, 0, 7)"
+  },
+  {
+    "registers": 8,
+    "fault": "wrong_destination",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 8, 0, 5)"
+  },
+  {
+    "registers": 8,
+    "fault": "wrong_target",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 8, 5, 11)"
+  },
+  {
+    "registers": 16,
+    "fault": "forward_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 16, 0, 7)"
+  },
+  {
+    "registers": 16,
+    "fault": "missing_high_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 16,
+    "fault": "missing_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 16,
+    "fault": "no_flush",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 16, 5, 8)"
+  },
+  {
+    "registers": 16,
+    "fault": "no_forward",
+    "result": "concrete_rejected",
+    "program_index": 2,
+    "reason": "('retirement ISA', 16, 2, 6)"
+  },
+  {
+    "registers": 16,
+    "fault": "no_interlock",
+    "result": "concrete_rejected",
+    "program_index": 3,
+    "reason": "('retirement ISA', 16, 3, 6)"
+  },
+  {
+    "registers": 16,
+    "fault": "read_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 16, 1, 8)"
+  },
+  {
+    "registers": 16,
+    "fault": "register_read_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 16, 1, 8)"
+  },
+  {
+    "registers": 16,
+    "fault": "register_write_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 16, 1, 5)"
+  },
+  {
+    "registers": 16,
+    "fault": "write_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 16, 0, 6)"
+  },
+  {
+    "registers": 16,
+    "fault": "wrong_add",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 16, 0, 7)"
+  },
+  {
+    "registers": 16,
+    "fault": "wrong_destination",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 16, 0, 5)"
+  },
+  {
+    "registers": 16,
+    "fault": "wrong_target",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 16, 5, 11)"
+  },
+  {
+    "registers": 32,
+    "fault": "forward_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 32, 0, 7)"
+  },
+  {
+    "registers": 32,
+    "fault": "missing_high_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 32,
+    "fault": "missing_reset",
+    "result": "reset_prestate_rejected"
+  },
+  {
+    "registers": 32,
+    "fault": "no_flush",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 32, 5, 8)"
+  },
+  {
+    "registers": 32,
+    "fault": "no_forward",
+    "result": "concrete_rejected",
+    "program_index": 2,
+    "reason": "('retirement ISA', 32, 2, 6)"
+  },
+  {
+    "registers": 32,
+    "fault": "no_interlock",
+    "result": "concrete_rejected",
+    "program_index": 3,
+    "reason": "('retirement ISA', 32, 3, 6)"
+  },
+  {
+    "registers": 32,
+    "fault": "read_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 32, 1, 8)"
+  },
+  {
+    "registers": 32,
+    "fault": "register_read_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 32, 1, 8)"
+  },
+  {
+    "registers": 32,
+    "fault": "register_write_alias",
+    "result": "concrete_rejected",
+    "program_index": 1,
+    "reason": "('retirement ISA', 32, 1, 5)"
+  },
+  {
+    "registers": 32,
+    "fault": "write_high_bit_drop",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 32, 0, 6)"
+  },
+  {
+    "registers": 32,
+    "fault": "wrong_add",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 32, 0, 7)"
+  },
+  {
+    "registers": 32,
+    "fault": "wrong_destination",
+    "result": "concrete_rejected",
+    "program_index": 0,
+    "reason": "('retirement ISA', 32, 0, 5)"
+  },
+  {
+    "registers": 32,
+    "fault": "wrong_target",
+    "result": "concrete_rejected",
+    "program_index": 5,
+    "reason": "('retirement order', 32, 5, 11)"
+  }
+]

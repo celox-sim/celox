@@ -82,6 +82,18 @@ pub trait SimBackend {
     /// Exposing a retained writable view must permanently disable sparse VCD
     /// tracking in backend-owned state outside the returned memory range.
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
+    /// Overwrite `bytes.len()` bytes of the memory image at `offset`.
+    ///
+    /// Unlike [`Self::memory_as_mut_ptr`], this keeps VCD change tracking
+    /// enabled. The write marks no VCD activity, so the caller must have the
+    /// next dump scan every signal.
+    fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
+        let (ptr, len) = self.memory_as_mut_ptr();
+        assert!(offset + bytes.len() <= len, "write past the memory image");
+        // Safety: the backend exposes `len` writable bytes at `ptr`.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), bytes.len()) };
+    }
+
     /// Return an opaque owner that keeps the memory allocation alive.
     ///
     /// Host integrations that expose the raw memory outside Rust can retain

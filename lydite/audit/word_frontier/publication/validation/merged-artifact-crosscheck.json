@@ -1,0 +1,42 @@
+{
+  "rows": [
+    {
+      "summary": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alpha18073/summary.json",
+      "artifact_references_checked": 318
+    },
+    {
+      "summary": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alphaNone/summary.json",
+      "artifact_references_checked": 318
+    },
+    {
+      "summary": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width32-alphaNone/summary.json",
+      "artifact_references_checked": 318
+    },
+    {
+      "summary": "/workspace/scratch/07f10565586c/word-frontier-final-w32-candidate/summary.json",
+      "artifact_references_checked": 318
+    },
+    {
+      "summary": "/workspace/scratch/07f10565586c/word-frontier-final-w24-candidate/summary.json",
+      "artifact_references_checked": 318
+    },
+    {
+      "summary": "/workspace/scratch/07f10565586c/word-frontier-final-alpha-candidate/summary.json",
+      "artifact_references_checked": 318
+    }
+  ],
+  "source_files": {
+    "crates/solver/src/automatic.rs": "13b676b546a2c9ee5536d8e92f8dda84d5cf76c086ce0c19a0ccc39e906f96fb",
+    "WORD-FRONTIERS.md": "cd1e5429e5d65071d511e7d2d3eeec399a3cc2de0502bf5ec605f63154612f16",
+    "audit/word_frontier/compare.py": "af8a2e99448f4f55070b10c50fc887048eda1923426d070718fd423516f6a360",
+    "audit/word_frontier/evidence-summary.json": "397251ff2cc1eba6c57e623f2c30fed5e767a77c37a929faabc007135fc9e4e7",
+    "audit/word_frontier/README.md": "fea174354544c8d09a6a9118e5defa8532ebf08137cc876b6f1fcccce69596b6",
+    "audit/word_frontier/rv_address_replay.py": "351fca2f23a28141229a0e6d716f716215c1b2537ff2276ed09b1fc66711b0b4",
+    "audit/word_frontier/input-sha256.json": "9737823511c6d2477d635599c1dd26294775d7be82f42bed0a6d79a9084367db",
+    "audit/word_frontier/ci.py": "2a1210738396deaf073863e7c8ef2dc0f27cd1c5e1a955e78d19976b49592c3a",
+    "audit/word_frontier/run.py": "670248be2e94c28fd5167dcd510e720cbea71909c53e8b6ddc11251f199259f5",
+    "audit/word_frontier/generate.py": "9298e8f9ce28ac3c346d3981f112c6f2e636d829f83fc6d135dd445bf3768d35",
+    "audit/word_frontier/test_generate.py": "66b306f1127b2ee2a928a10776e8d4e72fa5a4145e1e270029ea5f0a1a951258",
+    "audit/word_frontier/test_ci.py": "74a7ded80c7f4f32ae82f8bb5026aa694d68bb514b7eb40b5450d58101fc4c25"
+  }
+}

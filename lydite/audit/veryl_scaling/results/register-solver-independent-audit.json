@@ -1,0 +1,135 @@
+{
+  "status": "pass",
+  "accepted_source_sha256": {
+    "finite.rs": "c9bb4b74c161284e05137a2f9b9b29719c0baaea8fe9960b0c2f9165fc7f7f4c",
+    "finite/control.rs": "af115b30e3e5a8d0550a945a5ef1ebc87548b4990312e814381ead3825a2887b",
+    "finite/lookup.rs": "c283bf8a88da4a263398db90974625daeaebc3c78bdf54818a2fc930fa1f6372",
+    "finite/guarded_tests.rs": "72353893828b98f4e601ba73f8b8015f12b898d152f3983d4a3362bdf1c41d5c"
+  },
+  "root_integrated_source_matches": true,
+  "production_prefix_matches": true,
+  "aggregate_counts": {
+    "api_checks": 15922,
+    "original_sat_replays": 12617,
+    "context_replays": 39256,
+    "enumerated_truth_rows": 2072370,
+    "sat": 12617,
+    "unsat": 3156,
+    "unknown": 149
+  },
+  "campaigns": {
+    "new": {
+      "status": "pass",
+      "counts": {
+        "api_checks": 10572,
+        "asserted_definitions": 14522,
+        "context_replays": 26610,
+        "direct_changed_cases": 722,
+        "direct_equivalence_cases": 895,
+        "direct_equivalence_rows": 123980,
+        "enumerated_truth_rows": 1747666,
+        "guard_depth_capacity_checks": 4,
+        "guard_fact_capacity_checks": 4,
+        "guarded_created": 17002,
+        "guarded_direct_rewrites": 278,
+        "guarded_equalities": 4464,
+        "guarded_expansion_cap_checks": 2,
+        "guarded_formula_changed_cases": 231,
+        "guarded_formula_equivalence_cases": 700,
+        "guarded_formula_equivalence_rows": 179200,
+        "guarded_rewrites": 7338,
+        "guarded_term_limit_checks": 5,
+        "guarded_term_limit_equivalence_rows": 60,
+        "hint_Sat_sat": 4379,
+        "hint_Sat_unknown": 21,
+        "hint_Sat_unsat": 886,
+        "hint_Unsat_sat": 4379,
+        "hint_Unsat_unknown": 21,
+        "hint_Unsat_unsat": 886,
+        "lookup_generated_nodes": 8542,
+        "lookup_rewrites": 686,
+        "normalization_term_limit_checks": 9,
+        "normalization_term_limit_equivalence_rows": 144,
+        "original_sat_replays": 8758,
+        "pinned_valuations": 776,
+        "sat": 8758,
+        "unknown": 42,
+        "unsat": 1772,
+        "word_created": 48108,
+        "word_rewrites": 6294
+      }
+    },
+    "cofactor_definition_regression": {
+      "status": "pass",
+      "counts": {
+        "api_checks": 3530,
+        "asserted_definitions": 3585,
+        "cofactored_queries": 528,
+        "context_replays": 7854,
+        "deadline_after_completed_cofactor": 13,
+        "enumerated_truth_rows": 324704,
+        "guard_changed_terms": 500,
+        "guard_fallback_checks": 2,
+        "guard_normalization_terms": 500,
+        "guard_normalization_truth_rows": 61152,
+        "hint_Sat_sat": 1418,
+        "hint_Sat_unknown": 34,
+        "hint_Sat_unsat": 234,
+        "hint_Unsat_sat": 1539,
+        "hint_Unsat_unknown": 51,
+        "hint_Unsat_unsat": 254,
+        "nonzero_deadline_checks": 27,
+        "original_sat_replays": 2957,
+        "sat": 2957,
+        "unknown": 85,
+        "unsat": 488
+      }
+    },
+    "lookup_regression": {
+      "status": "pass",
+      "counts": {
+        "api_checks": 1820,
+        "asserted_definitions": 5632,
+        "context_replays": 4792,
+        "direct_cumulative_expansion_cap": 1,
+        "direct_expansion_term_boundary": 2,
+        "direct_lookup_equivalence_rows": 9160,
+        "direct_rewrite_cases": 285,
+        "direct_successful_rewrites": 253,
+        "hint_Sat_sat": 451,
+        "hint_Sat_unknown": 11,
+        "hint_Sat_unsat": 448,
+        "hint_Unsat_sat": 451,
+        "hint_Unsat_unknown": 11,
+        "hint_Unsat_unsat": 448,
+        "lookup_generated_nodes": 56678,
+        "lookup_rewrites": 6134,
+        "original_sat_replays": 902,
+        "pinned_valuation_oracles": 448,
+        "sat": 902,
+        "unknown": 22,
+        "unsat": 896
+      }
+    }
+  },
+  "resolved_findings": [
+    {
+      "title": "Last-use source variable lost after exact normalization",
+      "impact": "A valid satisfiable query returned UNKNOWN during original-formula replay under both hints with empty context; no false SAT or UNSAT was observed",
+      "evidence": "preliminary/main.rs and preliminary/result.log",
+      "resolution": "Frozen source materializes missing original variables after root/context blasting, in sorted order; independent last-use and full SAT/context replay tests pass"
+    }
+  ],
+  "remaining_findings": [],
+  "bounds_and_interpretation": [
+    "Small-domain truth rows count assignments per expression instance; one oracle can feed multiple public API checks",
+    "Every accepted SAT result independently replays the original formula and all requested original contexts, checks each original variable name and sort, and checks original_formula_validated",
+    "Large capacity and context-only 64-bit cases are independently replayed from returned witnesses, not exhaustively enumerated",
+    "Lookup plus word rewriting share a 4096-created-node cap per solve_plain leaf; guarded rewriting has a separate4096 cap; both count against shared source+generated max_terms envelope",
+    "Global work, time and aggregate clause budgets are preserved across cofactors; per-leaf rewrite counters can sum above fixed leaf limits",
+    "Deadline probe pass/UNKNOWN counts can vary with host load",
+    "No Z3 or other external solver executed; generated regression SMT inputs were not run",
+    "Bounded independent audit and source review, not a formal proof or independent UNSAT certificate",
+    "Actual CPU workload, semantic mutants, alternate SAT-hint capacity and workspace regression results are separate parent/implementer evidence"
+  ]
+}

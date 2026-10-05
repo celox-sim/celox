@@ -1,0 +1,54 @@
+specification "Two-slot read source binding"
+input rst: bool;
+input araddr: bv<8>;
+input arprot: bv<3>;
+input arvalid: bool;
+input awaddr: bv<8>;
+input awprot: bv<3>;
+input awvalid: bool;
+input bready: bool;
+input rready: bool;
+input wdata: bv<32>;
+input wstrb: bv<4>;
+input wvalid: bool;
+operation tick {}
+component Clock { init true; invariant true; steps { tick = true; } }
+composition Peripheral { members compose(Clock); }
+implementation {
+  composition Peripheral;
+  reset_input rst;
+  state a_full: bool;
+  state d_full: bool;
+  state count: bv<2>;
+  state slot0: bv<8>;
+  state slot1: bv<8>;
+  state armed: bool;
+  state served_young: bool;
+  state rvalid: bool;
+  state rdata: bv<32>;
+  reset { a_full = false; d_full = false; count = 0u2; slot0 = 0u8; slot1 = 0u8; armed = false; served_young = false; rvalid = false; rdata = 0u32; }
+  next { a_full = s.a_full; d_full = s.d_full; count = s.count; slot0 = s.slot0; slot1 = s.slot1; armed = s.armed; served_young = s.served_young; rvalid = s.rvalid; rdata = s.rdata; }
+  wires {
+    bus_awvalid = i.awvalid;
+    bus_awready = false;
+    bus_wvalid = i.wvalid;
+    bus_wready = false;
+    bus_bvalid = false;
+    bus_bready = i.bready;
+    bus_arvalid = i.arvalid;
+    bus_arready = false;
+    bus_rvalid = false;
+    bus_rready = i.rready;
+    bus_awaddr = i.awaddr;
+    bus_araddr = i.araddr;
+    bus_awprot = i.awprot;
+    bus_arprot = i.arprot;
+    bus_wdata = i.wdata;
+    bus_rdata = 0u32;
+    bus_wstrb = i.wstrb;
+    bus_bresp = 0u2;
+    bus_rresp = 0u2;
+  }
+  operations { tick = true; }
+  binding { bind Clock {} }
+}

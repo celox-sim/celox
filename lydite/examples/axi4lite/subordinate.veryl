@@ -1,0 +1,31 @@
+// One outstanding write and read; AW and W have independent holding slots.
+// Protocol example, not a register-map implementation.
+module AxiLiteSubordinate (
+    clk: input clock, rst_n: input bit,
+    awvalid: input bit, awready: output bit, awaddr: input bit<8>, awprot: input bit<3>,
+    wvalid: input bit, wready: output bit, wdata: input bit<32>, wstrb: input bit<4>,
+    bvalid: output bit, bready: input bit, bresp: output bit<2>,
+    arvalid: input bit, arready: output bit, araddr: input bit<8>, arprot: input bit<3>,
+    rvalid: output bit, rready: input bit, rdata: output bit<32>, rresp: output bit<2>,
+) {
+    var a_full: bit;
+    var d_full: bit;
+    var r_full: bit;
+    assign awready = !a_full;
+    assign wready = !d_full;
+    assign bvalid = a_full && d_full;
+    assign bresp = 2'd0;
+    assign arready = !r_full;
+    assign rvalid = r_full;
+    assign rresp = 2'd0;
+    always_ff (clk) {
+        if !rst_n { a_full = 0; d_full = 0; r_full = 0; rdata = 0; }
+        else {
+            if awvalid && awready { a_full = 1; }
+            if wvalid && wready { d_full = 1; }
+            if bvalid && bready { a_full = 0; d_full = 0; }
+            if arvalid && arready { r_full = 1; rdata = 32'd42; }
+            if rvalid && rready { r_full = 0; }
+        }
+    }
+}

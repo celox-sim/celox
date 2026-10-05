@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "project": "manager-project.json",
+  "contract": {
+    "kind": "idle_offer_step",
+    "name": "ReadOffer",
+    "busy": "read_busy",
+    "valids": [
+      "bus_arvalid"
+    ],
+    "offer": "start_read",
+    "completion_valid": "rvalid",
+    "completion_ready": "bus_rready"
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "archives": [
+    {
+      "file": "selected-ci-23e1ee734fc548f23be50e73ebd10250eb3eaeeb1af80e8dc4949796db631889.tar.xz",
+      "id": "selected-ci",
+      "member_count": 7136,
+      "member_manifest": "selected-ci.members.json",
+      "member_manifest_sha256": "5351d75e88e99dc82379ee75a9b40dd11ddbb957d6cac031be0f2c9472e9bd0a",
+      "sha256": "23e1ee734fc548f23be50e73ebd10250eb3eaeeb1af80e8dc4949796db631889",
+      "size": 3712580,
+      "uncompressed_bytes": 308971665
+    },
+    {
+      "file": "final-proof-3db713fd9f4b3204b7e0574688e556d39166c67d8b3f3876f6b20f611f17fd8b.tar.xz",
+      "id": "final-proof",
+      "member_count": 3099,
+      "member_manifest": "final-proof.members.json",
+      "member_manifest_sha256": "a24ca197b6e0e85f899970763dd81b7d4ea15e922ee214e6b551c9663ee1b65d",
+      "sha256": "3db713fd9f4b3204b7e0574688e556d39166c67d8b3f3876f6b20f611f17fd8b",
+      "size": 2070312,
+      "uncompressed_bytes": 144651606
+    },
+    {
+      "file": "legacy-symbolic-83e4437bc6ecc29f1c3a5096a498e3652c4b4279e3af57c8f3845ee7ad4f65dc.tar.xz",
+      "id": "legacy-symbolic",
+      "member_count": 10008,
+      "member_manifest": "legacy-symbolic.members.json",
+      "member_manifest_sha256": "9ae2be9ad93c867f19eb2bc66d4fd05d670c55796ed03899959b2c0532c3300b",
+      "sha256": "83e4437bc6ecc29f1c3a5096a498e3652c4b4279e3af57c8f3845ee7ad4f65dc",
+      "size": 3540732,
+      "uncompressed_bytes": 333162878
+    },
+    {
+      "file": "independent-session-dbd0456494ea8fc2b62e2c9c56a430f27eec3b19e84a1504d781869b5be668a7.tar.xz",
+      "id": "independent-session",
+      "member_count": 3098,
+      "member_manifest": "independent-session.members.json",
+      "member_manifest_sha256": "338becd378a60fd2502ee0d61ea8c3dfaa59d40e3e52f0cc15d8cbe2c2375072",
+      "sha256": "dbd0456494ea8fc2b62e2c9c56a430f27eec3b19e84a1504d781869b5be668a7",
+      "size": 1987820,
+      "uncompressed_bytes": 144167782
+    },
+    {
+      "file": "independent-audit-f246bf3e70c558ac2dad87a6058de10e28f0bb51c9c2e5135fb99bacb3a42330.tar.xz",
+      "id": "independent-audit",
+      "member_count": 6,
+      "member_manifest": "independent-audit.members.json",
+      "member_manifest_sha256": "8d2a28f73b5eb63588aef9449244a11f05a1e39475ed6abb37c3f688f71a8ee0",
+      "sha256": "f246bf3e70c558ac2dad87a6058de10e28f0bb51c9c2e5135fb99bacb3a42330",
+      "size": 3860,
+      "uncompressed_bytes": 10464
+    }
+  ],
+  "description": "Exact-byte accepted RV32I milestone proof, selected CI replay, legacy symbolic regression, and independent audit evidence.",
+  "determinism": {
+    "directories": "implicit, no directory archive entries",
+    "file_mode": "0644",
+    "format": "POSIX pax tar, xz preset 6 with CRC64",
+    "gid": 0,
+    "gname": "",
+    "mtime": 0,
+    "order": "lexicographic source-relative file paths",
+    "uid": 0,
+    "uname": ""
+  },
+  "recorded_artifact_maps": [
+    {
+      "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-baseline/certificate.json",
+      "entries": 1381,
+      "json_path": [
+        "artifacts"
+      ]
+    },
+    {
+      "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-onehot/certificate.json",
+      "entries": 1525,
+      "json_path": [
+        "artifacts"
+      ]
+    },
+    {
+      "document": "rv32i-selected-ci-accepted-final/selected-proof/run-status.json",
+      "entries": 7131,
+      "json_path": [
+        "artifacts"
+      ]
+    },
+    {
+      "document": "rv32i-split-refinement-proof-program-final/result.json",
+      "entries": 3098,
+      "json_path": [
+        "artifacts"
+      ]
+    }
+  ],
+  "relocation_map": [
+    {
+      "archive_id": "selected-ci",
+      "archive_prefix": "rv32i-selected-ci-accepted-final",
+      "original_root": "/workspace/scratch/07f10565586c/rv32i-selected-ci-accepted-final",
+      "scope": "complete-tree"
+    },
+    {
+      "archive_id": "final-proof",
+      "archive_prefix": "rv32i-split-refinement-proof-program-final",
+      "original_root": "/workspace/scratch/07f10565586c/rv32i-split-refinement-proof-program-final",
+      "scope": "complete-tree"
+    },
+    {
+      "archive_id": "legacy-symbolic",
+      "archive_prefix": "rv32i-proof-accepted-legacy-symbolic",
+      "original_root": "/workspace/scratch/07f10565586c/rv32i-proof-accepted-legacy-symbolic",
+      "scope": "complete-tree"
+    },
+    {
+      "archive_id": "independent-session",
+      "archive_prefix": "rv32i-independent-audit/fresh-final-session",
+      "original_root": "/workspace/shared/rv32i-independent-audit/fresh-final-session",
+      "scope": "complete-tree"
+    },
+    {
+      "archive_id": "independent-audit",
+      "archive_prefix": "rv32i-independent-audit",
+      "original_root": "/workspace/shared/rv32i-independent-audit",
+      "scope": "selected-files",
+      "selected_files": [
+        "check_final_proof_session.py",
+        "final-acceptance.json",
+        "final-session-artifact-audit.json",
+        "rerun_final_session.py",
+        "selected-instruction-programs.json",
+        "selected_instruction_programs.py"
+      ]
+    }
+  ],
+  "saved_reports_authorize_composition": false,
+  "saved_reports_create_proof_handles": false,
+  "schema": "rv32i-evidence-bundle-v1",
+  "screening": {
+    "elf_pe_macho_ar_magic_forbidden": true,
+    "limitations": "Heuristic secret screening is not a proof of absence of every credential format. Paths/hashes for previously built tools remain as historical text metadata, never executable payloads.",
+    "nul_bytes_forbidden": true,
+    "private_key_github_token_aws_access_key_signatures_forbidden": true,
+    "regular_files_only": true,
+    "target_cache_credential_filenames_forbidden": true,
+    "utf8_text_only": true
+  },
+  "total_member_count": 23347,
+  "total_uncompressed_bytes": 930964395,
+  "trust_boundary": "Archive verification checks byte integrity and recorded artifact hash maps only; it does not rerun a proof, recreate process-local proof handles, or independently establish theorem validity."
+}

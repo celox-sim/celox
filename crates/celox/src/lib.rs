@@ -34,9 +34,11 @@ pub use celox_frontend_sdk::FrontendArtifact;
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
-    SignalDirection,
+    ScheduleRecord, ScheduledEvent, SignalDirection, StateDifference, StateFile, StateFileError,
+    StateObject, StateRole, format_state_value,
 };
 pub use celox_slt::scheduler::SchedulerError;
+pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
 pub(crate) use fxhash::FxHashMap as HashMap;
@@ -71,7 +73,7 @@ mod host_api {
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
-    pub use crate::simulation::Simulation;
+    pub use crate::simulation::{Simulation, SimulationCheckpoint};
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -79,8 +81,9 @@ mod host_api {
     ))]
     pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
-        DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal, RuntimeEvent,
-        RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder, SimulatorOptions,
+        Checkpoint, CheckpointError, DeadStorePolicy, DumpError, InstanceHierarchy, NamedEvent,
+        NamedSignal, RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator,
+        SimulatorBuilder, SimulatorOptions, StateError, StateImage, StateMismatch, StateSchema,
         TierPromotion,
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};

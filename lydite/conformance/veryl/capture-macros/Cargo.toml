@@ -1,0 +1,11 @@
+[package]
+name = "capture-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[lib]
+proc-macro = true
+[dependencies]
+syn = { version = "=2.0.119", features = ["full", "visit-mut", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

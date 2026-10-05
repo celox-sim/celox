@@ -1,0 +1,162 @@
+[
+  {
+    "case": "wrong_load",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 10,
+        "acc": 132,
+        "phase": 1,
+        "commit": true,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "wrong_branch",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 69,
+        "acc": 0,
+        "phase": 1,
+        "commit": true,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "ignores_stall",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 191,
+        "acc": 0,
+        "phase": 1,
+        "commit": true,
+        "reset": false,
+        "stall": true
+      },
+      {
+        "obligation": "hold_contract",
+        "replayed": true,
+        "pc": 253,
+        "acc": 98,
+        "phase": 1,
+        "commit": true,
+        "reset": false,
+        "stall": true
+      }
+    ]
+  },
+  {
+    "case": "missing_commit",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 254,
+        "acc": 245,
+        "phase": 1,
+        "commit": false,
+        "reset": false,
+        "stall": false
+      },
+      {
+        "obligation": "noncommit_rank_decreases",
+        "replayed": true,
+        "pc": 0,
+        "acc": 0,
+        "phase": 1,
+        "commit": false,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "hang_fetch",
+    "witnesses": [
+      {
+        "obligation": "noncommit_rank_decreases",
+        "replayed": true,
+        "pc": 0,
+        "acc": 0,
+        "phase": 0,
+        "commit": false,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "commit_after_halt",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 8,
+        "acc": 0,
+        "phase": 0,
+        "commit": true,
+        "reset": false,
+        "stall": true
+      },
+      {
+        "obligation": "commit_eligible",
+        "replayed": true,
+        "pc": 0,
+        "acc": 0,
+        "phase": 0,
+        "commit": true,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "wrong_reset",
+    "witnesses": [
+      {
+        "obligation": "reset_binding",
+        "replayed": true,
+        "pc": 0,
+        "acc": 0,
+        "phase": 0,
+        "commit": false,
+        "reset": false,
+        "stall": false
+      },
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 187,
+        "acc": 232,
+        "phase": 0,
+        "commit": false,
+        "reset": true,
+        "stall": false
+      }
+    ]
+  },
+  {
+    "case": "wrong_store",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 16,
+        "acc": 10,
+        "phase": 1,
+        "commit": true,
+        "reset": false,
+        "stall": false
+      }
+    ]
+  }
+]

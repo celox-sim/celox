@@ -1,0 +1,553 @@
+{
+  "version": 2,
+  "name": "memory increment with irrelevant invariant scalars",
+  "inputs": {
+    "rst": "bool",
+    "stall": "bool",
+    "address": {
+      "bv": 2
+    },
+    "mem": {
+      "mem": [
+        2,
+        8
+      ]
+    },
+    "distract0": {
+      "bv": 8
+    },
+    "distract1": {
+      "bv": 8
+    },
+    "distract2": {
+      "bv": 8
+    }
+  },
+  "reset_input": "rst",
+  "spec": {
+    "state": {
+      "count": {
+        "bv": 4
+      },
+      "address": {
+        "bv": 2
+      },
+      "mem": {
+        "mem": [
+          2,
+          8
+        ]
+      },
+      "shadow": {
+        "bv": 8
+      },
+      "distract0": {
+        "bv": 8
+      },
+      "distract1": {
+        "bv": 8
+      },
+      "distract2": {
+        "bv": 8
+      }
+    },
+    "reset": {
+      "count": [
+        "bv",
+        4,
+        3
+      ],
+      "address": "i.address",
+      "mem": "i.mem",
+      "shadow": [
+        "read",
+        "i.mem",
+        "i.address"
+      ],
+      "distract0": "i.distract0",
+      "distract1": "i.distract1",
+      "distract2": "i.distract2"
+    },
+    "next": {
+      "count": [
+        "ite",
+        [
+          "ne",
+          "s.count",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ],
+        [
+          "sub",
+          "s.count",
+          [
+            "bv",
+            4,
+            1
+          ]
+        ],
+        "s.count"
+      ],
+      "address": "s.address",
+      "mem": [
+        "ite",
+        [
+          "ne",
+          "s.count",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ],
+        [
+          "write",
+          "s.mem",
+          "s.address",
+          [
+            "add",
+            [
+              "read",
+              "s.mem",
+              "s.address"
+            ],
+            [
+              "bv",
+              8,
+              1
+            ]
+          ]
+        ],
+        "s.mem"
+      ],
+      "shadow": [
+        "ite",
+        [
+          "ne",
+          "s.count",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ],
+        [
+          "add",
+          "s.shadow",
+          [
+            "bv",
+            8,
+            1
+          ]
+        ],
+        "s.shadow"
+      ],
+      "distract0": "s.distract0",
+      "distract1": "s.distract1",
+      "distract2": "s.distract2"
+    },
+    "outputs": {
+      "can_step": [
+        "ne",
+        "s.count",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ]
+    }
+  },
+  "impl": {
+    "state": {
+      "count": {
+        "bv": 4
+      },
+      "address": {
+        "bv": 2
+      },
+      "mem": {
+        "mem": [
+          2,
+          8
+        ]
+      },
+      "shadow": {
+        "bv": 8
+      },
+      "distract0": {
+        "bv": 8
+      },
+      "distract1": {
+        "bv": 8
+      },
+      "distract2": {
+        "bv": 8
+      }
+    },
+    "reset": {
+      "count": [
+        "bv",
+        4,
+        3
+      ],
+      "address": "i.address",
+      "mem": "i.mem",
+      "shadow": [
+        "read",
+        "i.mem",
+        "i.address"
+      ],
+      "distract0": "i.distract0",
+      "distract1": "i.distract1",
+      "distract2": "i.distract2"
+    },
+    "next": {
+      "count": [
+        "ite",
+        "i.stall",
+        "s.count",
+        [
+          "ite",
+          [
+            "ne",
+            "s.count",
+            [
+              "bv",
+              4,
+              0
+            ]
+          ],
+          [
+            "sub",
+            "s.count",
+            [
+              "bv",
+              4,
+              1
+            ]
+          ],
+          "s.count"
+        ]
+      ],
+      "address": [
+        "ite",
+        "i.stall",
+        "s.address",
+        "s.address"
+      ],
+      "mem": [
+        "ite",
+        "i.stall",
+        "s.mem",
+        [
+          "ite",
+          [
+            "ne",
+            "s.count",
+            [
+              "bv",
+              4,
+              0
+            ]
+          ],
+          [
+            "write",
+            [
+              "write",
+              "s.mem",
+              "s.address",
+              [
+                "bv",
+                8,
+                199
+              ]
+            ],
+            [
+              "add",
+              "s.address",
+              [
+                "bv",
+                2,
+                1
+              ]
+            ],
+            [
+              "add",
+              [
+                "read",
+                "s.mem",
+                "s.address"
+              ],
+              [
+                "bv",
+                8,
+                1
+              ]
+            ]
+          ],
+          "s.mem"
+        ]
+      ],
+      "shadow": [
+        "ite",
+        "i.stall",
+        "s.shadow",
+        [
+          "ite",
+          [
+            "ne",
+            "s.count",
+            [
+              "bv",
+              4,
+              0
+            ]
+          ],
+          [
+            "add",
+            "s.shadow",
+            [
+              "bv",
+              8,
+              1
+            ]
+          ],
+          "s.shadow"
+        ]
+      ],
+      "distract0": [
+        "ite",
+        "i.stall",
+        "s.distract0",
+        "s.distract0"
+      ],
+      "distract1": [
+        "ite",
+        "i.stall",
+        "s.distract1",
+        "s.distract1"
+      ],
+      "distract2": [
+        "ite",
+        "i.stall",
+        "s.distract2",
+        "s.distract2"
+      ]
+    },
+    "outputs": {
+      "commit": [
+        "and",
+        [
+          "and",
+          [
+            "and",
+            true,
+            [
+              "not",
+              "i.rst"
+            ]
+          ],
+          [
+            "not",
+            "i.stall"
+          ]
+        ],
+        [
+          "ne",
+          "s.count",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ]
+      ]
+    }
+  },
+  "binding": [
+    "and",
+    [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          [
+            "and",
+            [
+              "and",
+              [
+                "and",
+                true,
+                [
+                  "eq",
+                  "spec.count",
+                  "impl.count"
+                ]
+              ],
+              [
+                "eq",
+                "spec.address",
+                "impl.address"
+              ]
+            ],
+            [
+              "eq",
+              "spec.mem",
+              "impl.mem"
+            ]
+          ],
+          [
+            "eq",
+            "spec.shadow",
+            "impl.shadow"
+          ]
+        ],
+        [
+          "eq",
+          "spec.distract0",
+          "impl.distract0"
+        ]
+      ],
+      [
+        "eq",
+        "spec.distract1",
+        "impl.distract1"
+      ]
+    ],
+    [
+      "eq",
+      "spec.distract2",
+      "impl.distract2"
+    ]
+  ],
+  "commit": "commit",
+  "can_step": "can_step",
+  "hold_when": [
+    "and",
+    [
+      "and",
+      true,
+      [
+        "not",
+        "i.rst"
+      ]
+    ],
+    "i.stall"
+  ],
+  "progress": {
+    "enabled": [
+      "and",
+      [
+        "and",
+        true,
+        [
+          "not",
+          "i.stall"
+        ]
+      ],
+      [
+        "ne",
+        "impl.count",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ]
+    ],
+    "rank": [
+      "bv",
+      1,
+      0
+    ]
+  },
+  "program_contract": {
+    "parameters": {},
+    "precondition": true,
+    "invariant": [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          [
+            "and",
+            [
+              "and",
+              true,
+              [
+                "ule",
+                "s.count",
+                [
+                  "bv",
+                  4,
+                  3
+                ]
+              ]
+            ],
+            [
+              "eq",
+              "s.shadow",
+              [
+                "read",
+                "s.mem",
+                "s.address"
+              ]
+            ]
+          ],
+          [
+            "ule",
+            "s.distract0",
+            [
+              "bv",
+              8,
+              255
+            ]
+          ]
+        ],
+        [
+          "ule",
+          "s.distract1",
+          [
+            "bv",
+            8,
+            255
+          ]
+        ]
+      ],
+      [
+        "ule",
+        "s.distract2",
+        [
+          "bv",
+          8,
+          255
+        ]
+      ]
+    ],
+    "terminal": [
+      "eq",
+      "s.count",
+      [
+        "bv",
+        4,
+        0
+      ]
+    ],
+    "postcondition": [
+      "eq",
+      "s.shadow",
+      [
+        "read",
+        "s.mem",
+        "s.address"
+      ]
+    ],
+    "rank": "s.count"
+  }
+}

@@ -1,0 +1,1063 @@
+{
+  "timing_note": "One sequential run per mode/case; not a statistical speed claim",
+  "runs": [
+    {
+      "mode": "default",
+      "case": "pipeline",
+      "status": "stuttering_refinement_verified",
+      "wall_seconds": 0.1228801460001705,
+      "exit_code": 0,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.0038689730000000004,
+        "not_run": 0,
+        "query_seconds": 0.118891044,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 5,
+        "z3_seconds": 0.11092406
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "default",
+      "case": "pipeline_bad_forward",
+      "status": "counterexample",
+      "wall_seconds": 0.22846620800009987,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.0037427420000000003,
+        "not_run": 0,
+        "query_seconds": 0.224876836,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 5,
+        "z3_seconds": 0.217412882
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "default",
+      "case": "pipeline_bad_priority",
+      "status": "counterexample",
+      "wall_seconds": 0.27225619399905554,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.0038873210000000004,
+        "not_run": 0,
+        "query_seconds": 0.268990421,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 5,
+        "z3_seconds": 0.260744325
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "default",
+      "case": "pipeline_bad_interlock",
+      "status": "counterexample",
+      "wall_seconds": 0.25288961399928667,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.0042626980000000005,
+        "not_run": 0,
+        "query_seconds": 0.24899712699999998,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 5,
+        "z3_seconds": 0.24078397699999998
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "default",
+      "case": "pipeline_bad_retire",
+      "status": "counterexample",
+      "wall_seconds": 0.2363420120000228,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.003950516,
+        "not_run": 0,
+        "query_seconds": 0.232787852,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 5,
+        "z3_seconds": 0.224746735
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "default",
+      "case": "pipeline_bad_stall",
+      "status": "counterexample",
+      "wall_seconds": 0.4436536939992948,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 2,
+        "finite_queries": 0,
+        "kernel_compute_seconds": 0.004545755,
+        "not_run": 0,
+        "query_seconds": 0.438587325,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 6,
+        "z3_seconds": 0.42699265300000006
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "z3",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "z3",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline",
+      "status": "stuttering_refinement_verified",
+      "wall_seconds": 1.9998251630004233,
+      "exit_code": 0,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 5,
+        "kernel_compute_seconds": 0.003937376,
+        "not_run": 0,
+        "query_seconds": 1.9888562870000002,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline_bad_forward",
+      "status": "counterexample",
+      "wall_seconds": 0.4912046210010885,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 5,
+        "kernel_compute_seconds": 0.0042359960000000006,
+        "not_run": 0,
+        "query_seconds": 0.48758712699999995,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline_bad_priority",
+      "status": "counterexample",
+      "wall_seconds": 1.0305681289992208,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 5,
+        "kernel_compute_seconds": 0.004067704,
+        "not_run": 0,
+        "query_seconds": 1.024826708,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline_bad_interlock",
+      "status": "counterexample",
+      "wall_seconds": 0.5181480169994757,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 5,
+        "kernel_compute_seconds": 0.0038903749999999997,
+        "not_run": 0,
+        "query_seconds": 0.5141740340000001,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline_bad_retire",
+      "status": "counterexample",
+      "wall_seconds": 0.8881405450010789,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 3,
+        "finite_queries": 5,
+        "kernel_compute_seconds": 0.006910683,
+        "not_run": 0,
+        "query_seconds": 0.8843709119999998,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    },
+    {
+      "mode": "finite",
+      "case": "pipeline_bad_stall",
+      "status": "counterexample",
+      "wall_seconds": 0.5737817469998845,
+      "exit_code": 1,
+      "engine_summary": {
+        "custom_closed": 2,
+        "finite_queries": 6,
+        "kernel_compute_seconds": 0.006277467,
+        "not_run": 0,
+        "query_seconds": 0.569448742,
+        "scoring_seconds": 0.0,
+        "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+        "z3_queries": 0,
+        "z3_seconds": 0.0
+      },
+      "obligations": [
+        {
+          "name": "binding_nonempty",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "microstep_refinement",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_eligible",
+          "backend": "structural_kernel",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "backend": "finite_bv",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "backend": "finite_bv",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ]
+    }
+  ],
+  "original_smt_rechecks": [
+    {
+      "case": "pipeline",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "microstep_refinement",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "hold_contract",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "microstep_refinement",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "hold_contract",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_forward",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "microstep_refinement",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "hold_contract",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_priority",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "microstep_refinement",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "hold_contract",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_interlock",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "microstep_refinement",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "hold_contract",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_retire",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "binding_nonempty",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "reset_binding",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "microstep_refinement",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "commit_eligible",
+      "result": "unsat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "hold_contract",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "progress_nonvacuity",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "commit_reachable_in_relation",
+      "result": "sat"
+    },
+    {
+      "case": "pipeline_bad_stall",
+      "obligation": "noncommit_rank_decreases",
+      "result": "unsat"
+    }
+  ]
+}

@@ -1,0 +1,208 @@
+{
+  "compositions": {},
+  "kind": "specification",
+  "name": "Every chosen input, every admitted counter execution",
+  "specs": {
+    "Corrected": {
+      "examples": {
+        "correction_can_depend_on_amount": {
+          "expect": "forall",
+          "initial": {
+            "count": [
+              "bv",
+              2,
+              0
+            ]
+          },
+          "quantifiers": [
+            {
+              "kind": "forall",
+              "variables": {
+                "a": {
+                  "bv": 2
+                }
+              }
+            },
+            {
+              "kind": "exists",
+              "variables": {
+                "b": {
+                  "bv": 2
+                }
+              }
+            }
+          ],
+          "trace": [
+            {
+              "ensure": [
+                "eq",
+                "count",
+                [
+                  "bv",
+                  2,
+                  0
+                ]
+              ],
+              "inputs": {
+                "amount": "q.a",
+                "correction": "q.b"
+              },
+              "observe": {},
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          2,
+          0
+        ]
+      ],
+      "inputs": {
+        "amount": {
+          "bv": 2
+        },
+        "correction": {
+          "bv": 2
+        }
+      },
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "eq",
+          "n.value",
+          [
+            "sub",
+            [
+              "add",
+              "s.value",
+              "amount"
+            ],
+            "correction"
+          ]
+        ]
+      },
+      "outputs": {
+        "count": {
+          "bv": 2
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 2
+        }
+      }
+    },
+    "Counter": {
+      "examples": {
+        "every_input_including_wraparound": {
+          "expect": "forall",
+          "initial": {
+            "count": [
+              "bv",
+              4,
+              0
+            ]
+          },
+          "quantifiers": [
+            {
+              "kind": "forall",
+              "variables": {
+                "a": {
+                  "bv": 4
+                }
+              }
+            }
+          ],
+          "trace": [
+            {
+              "ensure": [
+                "eq",
+                "count",
+                "q.a"
+              ],
+              "inputs": {
+                "amount": "q.a"
+              },
+              "observe": {},
+              "operation": "add"
+            },
+            {
+              "ensure": [
+                "eq",
+                "count",
+                [
+                  "add",
+                  "q.a",
+                  [
+                    "bv",
+                    4,
+                    1
+                  ]
+                ]
+              ],
+              "inputs": {
+                "amount": [
+                  "bv",
+                  4,
+                  1
+                ]
+              },
+              "observe": {},
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ],
+      "inputs": {
+        "amount": {
+          "bv": 4
+        }
+      },
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "eq",
+          "n.value",
+          [
+            "add",
+            "s.value",
+            "amount"
+          ]
+        ]
+      },
+      "outputs": {
+        "count": {
+          "bv": 4
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 4
+        }
+      }
+    }
+  },
+  "version": 4
+}

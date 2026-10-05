@@ -1,0 +1,1599 @@
+{
+  "phase": "checked_compound_equality_sharing",
+  "mode": "independent_lemmas",
+  "per_primitive_defaults_unchanged": true,
+  "per_primitive_limits": {
+    "max_work": 100000000,
+    "max_clauses": 1000000,
+    "timeout_ms": 10000
+  },
+  "single_query_speedup_claim": false,
+  "paired_inputs_identical": true,
+  "runs": [
+    {
+      "baseline": "/workspace/scratch/07f10565586c/equality-sharing-final-baseline32",
+      "candidate": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32",
+      "baseline_sha256": "64b98b2ad38dc8860c44e330c1e53c7de85dbe1a67204e45249e5e55392c3cf9",
+      "candidate_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+      "width": 32,
+      "alpha_seed": null
+    },
+    {
+      "baseline": "/workspace/scratch/07f10565586c/equality-sharing-final-baseline24",
+      "candidate": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate24",
+      "baseline_sha256": "64b98b2ad38dc8860c44e330c1e53c7de85dbe1a67204e45249e5e55392c3cf9",
+      "candidate_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+      "width": 24,
+      "alpha_seed": null
+    },
+    {
+      "baseline": "/workspace/scratch/07f10565586c/equality-sharing-final-baseline-alpha24",
+      "candidate": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate-alpha24",
+      "baseline_sha256": "64b98b2ad38dc8860c44e330c1e53c7de85dbe1a67204e45249e5e55392c3cf9",
+      "candidate_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+      "width": 24,
+      "alpha_seed": 9413
+    }
+  ],
+  "results": [
+    {
+      "case": "compound_sum_transport",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "c001e45f46345c72f57e864360fed2f62a3171216fe2f950542d48cc9d9485f9",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_sum_transport/report.json",
+      "evidence": {
+        "primitive_queries": 11,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.7051e-05,
+            "search_work": 156,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 1,
+            "fresh_edges": 1,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 1,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 14,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 202636861,
+        "emission_work_including_original_attempts": 469,
+        "bundle_work_including_validation_and_derived_steps": 3852,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "compound_product_transport",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "unknown",
+      "gain": false,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "9d9089a2543ec5cbbe9312f770f9bfb1f08793dd08bfbdf1be78e8659eb2510c",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_product_transport/report.json",
+      "evidence": {
+        "primitive_queries": 14,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.8343e-05,
+            "search_work": 156,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          },
+          {
+            "accepted": true,
+            "equalities": 4,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 3.9659e-05,
+            "search_work": 313,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 1,
+            "fresh_edges": 1,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 1,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 14,
+            "trusted": false
+          },
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 1,
+            "execution_cofactor_visits": 36,
+            "execution_path_visits": 0,
+            "fresh_edges": 0,
+            "fresh_guard_discharges": 0,
+            "instantiated_edges": 0,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 0,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 10,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 400239073,
+        "emission_work_including_original_attempts": 641,
+        "bundle_work_including_validation_and_derived_steps": 100244034,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          },
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement_lemma_0002_query_0001",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "4d693be3a8fc0a9c94fde1d770f774e5a83e0d74cca02a3f6b874c3dc8515e84",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/transitive_encoded_transport/report.json",
+      "evidence": {
+        "primitive_queries": 14,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.9904e-05,
+            "search_work": 163,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 3,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 20,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 203007179,
+        "emission_work_including_original_attempts": 707,
+        "bundle_work_including_validation_and_derived_steps": 6363,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "reversed_transitive_mac_shift",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "2d7534fcc0435ced1a905c2ae20109df57095cfcf7d6dc6181ab4fcd0a78d2f1",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/reversed_transitive_mac_shift/report.json",
+      "evidence": {
+        "primitive_queries": 12,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 3.5663e-05,
+            "search_work": 257,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 3,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 115,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 20,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 202993464,
+        "emission_work_including_original_attempts": 661,
+        "bundle_work_including_validation_and_derived_steps": 5475,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "guarded_compound_transport",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "d6aff22207842dd00c303573dcc91418679da9c9b34a02d13501ab4f1a5c528e",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/guarded_compound_transport/report.json",
+      "evidence": {
+        "primitive_queries": 18,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 3.8056e-05,
+            "search_work": 279,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 4,
+            "checked_cofactor_equivalences": 3,
+            "execution_cofactor_visits": 107,
+            "execution_path_visits": 2,
+            "fresh_edges": 1,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 1,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 31,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 203077149,
+        "emission_work_including_original_attempts": 1086,
+        "bundle_work_including_validation_and_derived_steps": 8149,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "nested_guard_compound_shift",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "stuttering_refinement_verified",
+      "candidate": "stuttering_refinement_verified",
+      "gain": false,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "85984b91a189a09ab1e25676934f08f931bc730da6534e6ec76fc16937baf8fe",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_shift/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 20022055,
+        "emission_work_including_original_attempts": 143,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "nested_guard_compound_mac",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "unknown",
+      "gain": false,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "73a51b5e540534a560e504d7ec17ab9bee0b7ae80610fbdb9b0df68f21d51084",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_mac/report.json",
+      "evidence": {
+        "primitive_queries": 16,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 4,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 5.323e-05,
+            "search_work": 470,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 4,
+            "checked_cofactor_equivalences": 1,
+            "execution_cofactor_visits": 106,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 2,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 28,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 303100852,
+        "emission_work_including_original_attempts": 1094,
+        "bundle_work_including_validation_and_derived_steps": 100027528,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement_lemma_0001_query_0006",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "branched_compound_reuse",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "dcbc00c23ce4c6996c01750d077babb846574970cb4422c64c942ad4cad3bb36",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/branched_compound_reuse/report.json",
+      "evidence": {
+        "primitive_queries": 15,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 2,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 5.7777e-05,
+            "search_work": 480,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 3,
+            "execution_cofactor_visits": 193,
+            "execution_path_visits": 2,
+            "fresh_edges": 1,
+            "fresh_guard_discharges": 2,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 2,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 14,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 202636861,
+        "emission_work_including_original_attempts": 747,
+        "bundle_work_including_validation_and_derived_steps": 7973,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "compound_sum_transport_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "62f8c2b45becac986b1d9053f259c7cb62d91b53ebfbe5ace8e18046d6ede8f9",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_sum_transport_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 339924,
+        "emission_work_including_original_attempts": 80,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "compound_sum_transport_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "0250ed2635b46b1c42d1f79f468bd4db65b3dd606abee937747aa6c145280282",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_sum_transport_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 342148,
+        "emission_work_including_original_attempts": 83,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "compound_product_transport_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "f4be14f54e3af8f28a36b3e27b9171fe746e664924b061e6bf2aaf3dcb8ef571",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_product_transport_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 891580,
+        "emission_work_including_original_attempts": 80,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "compound_product_transport_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "89691edcc6dbd48b87f641690ad32dd21e25525f73eedcd0f15992ab28c9a1f2",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/compound_product_transport_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 893866,
+        "emission_work_including_original_attempts": 83,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "82fb7455e5572bb5826bca235e61450ec81a2a1551755e8690a0a1628f7d3a1e",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/transitive_encoded_transport_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 1020731,
+        "emission_work_including_original_attempts": 102,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "00b7bef76175ba16fba62c8d706727f02611ec981d0581fd004a4d76c5e18ae0",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/transitive_encoded_transport_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 1028256,
+        "emission_work_including_original_attempts": 105,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "reversed_transitive_mac_shift_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "44ed04a0a317173d055ec5c9a21a8b313106d2b5ccbd2f4c7c743b6426501506",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/reversed_transitive_mac_shift_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 1556486,
+        "emission_work_including_original_attempts": 110,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "reversed_transitive_mac_shift_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "de2b06a230a2eaca6898adce00bec41a752e035b87c8823b9367acfa196525b6",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/reversed_transitive_mac_shift_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 1566652,
+        "emission_work_including_original_attempts": 113,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "guarded_compound_transport_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "d3da16a35580438935ba0d0effccae904c053b15cda5be1354d55440ffb09d4c",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/guarded_compound_transport_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 349165,
+        "emission_work_including_original_attempts": 135,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "guarded_compound_transport_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "51015485240883e319ff6d8d469ad83b954b1a72ca1cc06abe3867146e19e2f1",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/guarded_compound_transport_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 349655,
+        "emission_work_including_original_attempts": 138,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "nested_guard_compound_shift_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "de33cf663edb358e9bed7abd959736f5551e66282c18346480d0448a3e63d039",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_shift_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 161008,
+        "emission_work_including_original_attempts": 145,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "nested_guard_compound_shift_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "5d5625e013fb762384a291e698a4cad22404c2de960d73b1ea6077ff00a0e79a",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_shift_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 161523,
+        "emission_work_including_original_attempts": 148,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "nested_guard_compound_mac_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "faad00c6fb464b9e33ccd8bfb93d21885833755871f0fe6a656987fe46b8739c",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_mac_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 461493,
+        "emission_work_including_original_attempts": 153,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "nested_guard_compound_mac_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "175f0e4c04eac95c1c2a829a3b786204ad89fde88accc8b9684abfbb2c9c3e47",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/nested_guard_compound_mac_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 462075,
+        "emission_work_including_original_attempts": 156,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "branched_compound_reuse_wrong_result",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "bfa86af83d69928e8806a92d8e0c1090975a93b0c615f257c2d925aef2faff2a",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/branched_compound_reuse_wrong_result/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 521083,
+        "emission_work_including_original_attempts": 96,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "branched_compound_reuse_complement_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "82f88fe0dcb9ce6d7df1b472295bbcd1d7190d5ffd519b54418c037f0647a189",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/branched_compound_reuse_complement_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 523250,
+        "emission_work_including_original_attempts": 99,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "guarded_fact_escape_wrong",
+      "width": 32,
+      "alpha_seed": null,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "445c661ca74cbb3bf1502437d9e3f067631838d3d3afda56e731e2b63cff47ca",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate32/guarded_fact_escape_wrong/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 417316,
+        "emission_work_including_original_attempts": 127,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "compound_product_transport",
+      "width": 24,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "unknown",
+      "gain": false,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "27b9cbe57e8bc8cb711ade8148d61f7415e8daa2f1d154fe58ffdb4e6767810f",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate24/compound_product_transport/report.json",
+      "evidence": {
+        "primitive_queries": 14,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.8693e-05,
+            "search_work": 156,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          },
+          {
+            "accepted": true,
+            "equalities": 4,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 8.755e-05,
+            "search_work": 313,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 1,
+            "fresh_edges": 1,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 1,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 14,
+            "trusted": false
+          },
+          {
+            "asserted_facts": 2,
+            "checked_cofactor_equivalences": 1,
+            "execution_cofactor_visits": 36,
+            "execution_path_visits": 0,
+            "fresh_edges": 0,
+            "fresh_guard_discharges": 0,
+            "instantiated_edges": 0,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 0,
+            "reused_handles": 0,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 10,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 400129838,
+        "emission_work_including_original_attempts": 641,
+        "bundle_work_including_validation_and_derived_steps": 100134799,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          },
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement_lemma_0002_query_0001",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport",
+      "width": 24,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "467c89f469d876b43fa27987653b78e9cfdf41ae9477b387939e97ec4dd7b687",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate24/transitive_encoded_transport/report.json",
+      "evidence": {
+        "primitive_queries": 14,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.2674e-05,
+            "search_work": 163,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 3,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 20,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 201784738,
+        "emission_work_including_original_attempts": 707,
+        "bundle_work_including_validation_and_derived_steps": 6363,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "reversed_transitive_mac_shift",
+      "width": 24,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "2ddf29c984a5a000b2ec44748f6340ebe6be88f21d21189204ea4c043c68aa54",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate24/reversed_transitive_mac_shift/report.json",
+      "evidence": {
+        "primitive_queries": 12,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 3.4922e-05,
+            "search_work": 257,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 3,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 115,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 20,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 201777151,
+        "emission_work_including_original_attempts": 661,
+        "bundle_work_including_validation_and_derived_steps": 5475,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "nested_guard_compound_mac",
+      "width": 24,
+      "alpha_seed": null,
+      "baseline": "unknown",
+      "candidate": "unknown",
+      "gain": false,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "759fbc4cd53a4e5b67a2555a41abc1be5bd8a0f673a754bbfac22439f7e97ebb",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate24/nested_guard_compound_mac/report.json",
+      "evidence": {
+        "primitive_queries": 16,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 4,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 3,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 7.1807e-05,
+            "search_work": 470,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 4,
+            "checked_cofactor_equivalences": 1,
+            "execution_cofactor_visits": 106,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 2,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 28,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 302071081,
+        "emission_work_including_original_attempts": 1094,
+        "bundle_work_including_validation_and_derived_steps": 100021972,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement_lemma_0001_query_0006",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport__alpha_9413",
+      "width": 24,
+      "alpha_seed": 9413,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "inputs_identical": true,
+      "input_sha256": "6f7e5057e5f03b8c6581d91bfc79be416937d6b5d2684196ea79358452448404",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate-alpha24/transitive_encoded_transport__alpha_9413/report.json",
+      "evidence": {
+        "primitive_queries": 14,
+        "automatic_plans": [
+          {
+            "accepted": true,
+            "equalities": 1,
+            "heuristic": "bounded-structural-frontier-and-mux-splits",
+            "leaves": 2,
+            "max_cuts_per_leaf": 8,
+            "max_leaves": 8,
+            "max_search_ms": 1000,
+            "max_search_work": 100000,
+            "max_split_depth": 3,
+            "reason": null,
+            "saved_hints_used": false,
+            "search_seconds": 2.9634e-05,
+            "search_work": 163,
+            "search_work_unit": "planner visits; structural comparisons are not constant-time",
+            "source_names_used": false,
+            "trusted": false,
+            "version": 1
+          }
+        ],
+        "equality_sharing": [
+          {
+            "asserted_facts": 3,
+            "checked_cofactor_equivalences": 2,
+            "execution_cofactor_visits": 73,
+            "execution_path_visits": 2,
+            "fresh_edges": 2,
+            "fresh_guard_discharges": 1,
+            "instantiated_edges": 2,
+            "max_facts": 64,
+            "max_path_edges": 16,
+            "max_path_visits": 8192,
+            "max_scan_visits": 4224,
+            "max_source_scan_visits": 4096,
+            "proved_paths": 1,
+            "reused_handles": 1,
+            "rule": "fresh-handle-equality-path-reuse-v1",
+            "saved_proofs_used": false,
+            "scan_visits": 20,
+            "trusted": false
+          }
+        ],
+        "reported_counterexamples_original_validated": false,
+        "finite_work_including_original_attempts": 201784738,
+        "emission_work_including_original_attempts": 707,
+        "bundle_work_including_validation_and_derived_steps": 6363,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "case": "transitive_encoded_transport_wrong_result__alpha_9413",
+      "width": 24,
+      "alpha_seed": 9413,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "b5bc3bd90bc0ca1a546cfe65bac4282a4df4dd5127ab5448a06a0353c92087d9",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate-alpha24/transitive_encoded_transport_wrong_result__alpha_9413/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 526981,
+        "emission_work_including_original_attempts": 102,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "case": "transitive_encoded_transport_complement_wrong__alpha_9413",
+      "width": 24,
+      "alpha_seed": 9413,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "inputs_identical": true,
+      "input_sha256": "40dab0b64d62f93b862609be73ed1b51ec1d0205793aaa5bfe4e459561d87353",
+      "candidate_report": "/workspace/scratch/07f10565586c/equality-sharing-canonical-candidate-alpha24/transitive_encoded_transport_complement_wrong__alpha_9413/report.json",
+      "evidence": {
+        "primitive_queries": 1,
+        "automatic_plans": [],
+        "equality_sharing": [],
+        "reported_counterexamples_original_validated": true,
+        "finite_work_including_original_attempts": 532528,
+        "emission_work_including_original_attempts": 105,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [],
+  "positive_instances": 13,
+  "unknown_to_verified_instances": 8,
+  "gaining_shapes_excluding_width_and_alpha": [
+    "branched_compound_reuse",
+    "compound_sum_transport",
+    "guarded_compound_transport",
+    "reversed_transitive_mac_shift",
+    "transitive_encoded_transport"
+  ],
+  "mutants_replay_validated": 19,
+  "remaining_unknowns": [
+    {
+      "case": "compound_product_transport",
+      "width": 32
+    },
+    {
+      "case": "nested_guard_compound_mac",
+      "width": 32
+    },
+    {
+      "case": "compound_product_transport",
+      "width": 24
+    },
+    {
+      "case": "nested_guard_compound_mac",
+      "width": 24
+    }
+  ],
+  "status": "passed_with_remaining_unknowns",
+  "evaluation_source_sha256": {
+    "README.md": "540d879bc9eb43ed522de174233538bcc7215ff7b863137fefeef6cd96afa6be",
+    "compare.py": "44edbb33ddaccad0f9e3fd685dfd5ff9f6c644603d5a9b50487804efacee2a9e",
+    "generate.py": "797b1cb9cf8156c70e868c746873e7c6de341cf13b33cc157d0ac491248139e9",
+    "run.py": "02d73576213ab62ee676dae145871e3d2cf0aeaf6040ca36dfdb372365922925",
+    "test_evidence.py": "7d0c0f75935501ca976b7d63798491da0ffc55313b4a19ac4490ed2d3023dce1",
+    "test_generate.py": "bfa43c9665bb4d4580adb0f018803323150261d07e547431cac92f62f28b31d0"
+  }
+}

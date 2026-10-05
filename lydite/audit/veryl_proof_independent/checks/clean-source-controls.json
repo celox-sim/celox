@@ -1,0 +1,24 @@
+[
+  {
+    "control": "wrong_operator",
+    "status": "passed",
+    "original_case": "operators::test_bitwise_operations",
+    "raw_case_status": "failed",
+    "mutation": {
+      "before": "o_or  = a | b;",
+      "after": "o_or  = a & b;"
+    },
+    "original_source_hashes_unchanged": true
+  },
+  {
+    "control": "invalid_hdl",
+    "status": "passed",
+    "original_case": "operators::test_bitwise_operations",
+    "raw_case_status": "failed",
+    "mutation": {
+      "before": "o_or  = a | b;",
+      "after": "THIS_IS_INTENTIONALLY_INVALID_VERYL;"
+    },
+    "original_source_hashes_unchanged": true
+  }
+]

@@ -1,0 +1,353 @@
+{
+  "scope": "MODEL-LEVEL negative evaluation, not RTL extraction validation",
+  "total_mutants": 2,
+  "required_counterexample_criterion": "The original microstep_refinement obligation reports solver_result=sat and finite.original_formula_validated=true. Child SAT and other-obligation SAT do not count.",
+  "criterion_met_count": 0,
+  "overall_interpretation": "Both model-level mutants are inconclusive under the strict original-microstep counterexample criterion; neither is a successful strict negative control. Neither mutant is reported proved.",
+  "manifest": "manifest.json",
+  "candidate_sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+  "original_input_sha256_final": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+  "per_primitive_limits": {
+    "max_work": 100000000,
+    "max_clauses": 1000000,
+    "timeout_ms": 10000
+  },
+  "no_additional_mutants_or_solver_runs": true,
+  "rows": [
+    {
+      "name": "active_plus_one",
+      "exit_code": 3,
+      "wall_seconds": 105.75658069799829,
+      "candidate_sha256_after": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+      "original_input_sha256_after": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+      "variant_sha256_after": "3184dfa51be87f1ce27b79d10286efd0b1c61e37e13a64fc39d09d2d28d63b16",
+      "report_status": "unknown",
+      "microstep_status": "unknown",
+      "microstep_solver_result": "unknown",
+      "microstep_backend": "finite_bv",
+      "microstep_finite_original_formula_validated": false,
+      "microstep_original_source_validation": {
+        "includes_derived_context": true,
+        "nodes": 6287,
+        "seconds": 0.153576314,
+        "work": 13767
+      },
+      "criterion_met": false,
+      "other_obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ],
+      "interpretation": "INCONCLUSIVE: required original-microstep SAT with replay validation was not established",
+      "report_sha256": "a142689393ef30b682e4d315edd5744c25eb8ecf2b949464af757db819e20a3c",
+      "microstep": {
+        "name": "microstep_refinement",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": false,
+        "finite_reason": "finite solver aggregate split clause budget exhausted",
+        "reason": null,
+        "work": 13607535,
+        "clauses": 813143,
+        "evidence": "microstep_refinement_original_sat_recheck.smt2",
+        "finite_diagnostics": "microstep_refinement_original_sat_recheck.finite.json"
+      },
+      "original_attempt": {
+        "name": "microstep_refinement",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": false,
+        "finite_reason": "finite solver work budget exhausted",
+        "reason": null,
+        "work": 100000001,
+        "clauses": 759580,
+        "evidence": "microstep_refinement.smt2",
+        "finite_diagnostics": "microstep_refinement.finite.json"
+      },
+      "child_count": 436,
+      "child_statuses": {
+        "passed": 430,
+        "counterexample": 1,
+        "unknown": 5
+      },
+      "address_child_0360": {
+        "name": "microstep_refinement_lemma_0360",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": true,
+        "finite_reason": null,
+        "reason": null,
+        "work": 1469719,
+        "clauses": 108822,
+        "evidence": "microstep_refinement_lemma_0360_uncut.smt2",
+        "finite_diagnostics": "microstep_refinement_lemma_0360_uncut.finite.json"
+      },
+      "address_child_original_recheck": {
+        "name": null,
+        "status": null,
+        "solver_result": null,
+        "backend": null,
+        "finite_original_formula_validated": null,
+        "finite_reason": null,
+        "reason": null,
+        "work": null,
+        "clauses": null,
+        "evidence": null,
+        "finite_diagnostics": null
+      },
+      "microstep_descendant_sat_not_counted": [
+        {
+          "report_path": "microstep_refinement.conjunctive_children[360]",
+          "name": "microstep_refinement_lemma_0360",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv",
+          "finite_original_formula_validated": true,
+          "finite_reason": null,
+          "reason": null,
+          "work": 1469719,
+          "clauses": 108822,
+          "evidence": "microstep_refinement_lemma_0360_uncut.smt2",
+          "finite_diagnostics": "microstep_refinement_lemma_0360_uncut.finite.json"
+        },
+        {
+          "report_path": "microstep_refinement.conjunctive_children[366].children[2]",
+          "name": "microstep_refinement_lemma_0366_query_0002",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv",
+          "finite_original_formula_validated": true,
+          "finite_reason": null,
+          "reason": null,
+          "work": 957282,
+          "clauses": 51831,
+          "evidence": "microstep_refinement_lemma_0366_query_0002.smt2",
+          "finite_diagnostics": "microstep_refinement_lemma_0366_query_0002.finite.json"
+        }
+      ],
+      "hold_contract": {
+        "name": "hold_contract",
+        "status": "passed",
+        "solver_result": "unsat",
+        "backend": "structural_kernel",
+        "finite_original_formula_validated": null,
+        "finite_reason": null,
+        "reason": null,
+        "work": null,
+        "clauses": null,
+        "evidence": "hold_contract.smt2",
+        "finite_diagnostics": null
+      },
+      "other_nonpassed_obligations": []
+    },
+    {
+      "name": "complement_plus_one",
+      "exit_code": 1,
+      "wall_seconds": 111.50800965600502,
+      "candidate_sha256_after": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+      "original_input_sha256_after": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+      "variant_sha256_after": "8bd10c62f4fc919ac15661ecbfff9ffa4b55d77f96516cc175fae6b4ff6b0643",
+      "report_status": "counterexample",
+      "microstep_status": "unknown",
+      "microstep_solver_result": "unknown",
+      "microstep_backend": "conjunctive_lemmas",
+      "microstep_finite_original_formula_validated": null,
+      "microstep_original_source_validation": {
+        "includes_derived_context": true,
+        "nodes": 6287,
+        "seconds": 0.157326123,
+        "work": 13767
+      },
+      "criterion_met": false,
+      "other_obligations": [
+        {
+          "name": "binding_nonempty",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "reset_binding",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "commit_eligible",
+          "status": "passed",
+          "solver_result": "unsat"
+        },
+        {
+          "name": "hold_contract",
+          "status": "counterexample",
+          "solver_result": "sat"
+        },
+        {
+          "name": "progress_nonvacuity",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "commit_reachable_in_relation",
+          "status": "passed",
+          "solver_result": "sat"
+        },
+        {
+          "name": "noncommit_rank_decreases",
+          "status": "passed",
+          "solver_result": "unsat"
+        }
+      ],
+      "interpretation": "INCONCLUSIVE: required original-microstep SAT with replay validation was not established",
+      "report_sha256": "3414ebc282b914ea403f98953336ecface672ebb674867bc7d9d814b2cfffc68",
+      "microstep": {
+        "name": "microstep_refinement",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "conjunctive_lemmas",
+        "finite_original_formula_validated": null,
+        "finite_reason": null,
+        "reason": null,
+        "work": null,
+        "clauses": null,
+        "evidence": null,
+        "finite_diagnostics": null
+      },
+      "original_attempt": {
+        "name": "microstep_refinement",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": false,
+        "finite_reason": "finite solver work budget exhausted",
+        "reason": null,
+        "work": 100000001,
+        "clauses": 759580,
+        "evidence": "microstep_refinement.smt2",
+        "finite_diagnostics": "microstep_refinement.finite.json"
+      },
+      "child_count": 436,
+      "child_statuses": {
+        "passed": 430,
+        "unknown": 6
+      },
+      "address_child_0360": {
+        "name": "microstep_refinement_lemma_0360",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "checked_proof_bundle",
+        "finite_original_formula_validated": null,
+        "finite_reason": null,
+        "reason": "unproved auxiliary sequent: automatic frontier equality",
+        "work": null,
+        "clauses": null,
+        "evidence": "microstep_refinement_lemma_0360.smt2",
+        "finite_diagnostics": null
+      },
+      "address_child_original_recheck": {
+        "name": "microstep_refinement_lemma_0360_query_0006",
+        "status": "unknown",
+        "solver_result": "unknown",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": false,
+        "finite_reason": "finite solver aggregate split clause budget exhausted",
+        "reason": null,
+        "work": 13514384,
+        "clauses": 801069,
+        "evidence": "microstep_refinement_lemma_0360_query_0006.smt2",
+        "finite_diagnostics": "microstep_refinement_lemma_0360_query_0006.finite.json"
+      },
+      "microstep_descendant_sat_not_counted": [
+        {
+          "report_path": "microstep_refinement.children[360].children[5]",
+          "name": "microstep_refinement_lemma_0360_query_0005",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv",
+          "finite_original_formula_validated": true,
+          "finite_reason": null,
+          "reason": null,
+          "work": 791788,
+          "clauses": 73129,
+          "evidence": "microstep_refinement_lemma_0360_query_0005.smt2",
+          "finite_diagnostics": "microstep_refinement_lemma_0360_query_0005.finite.json"
+        },
+        {
+          "report_path": "microstep_refinement.children[366].children[2]",
+          "name": "microstep_refinement_lemma_0366_query_0002",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv",
+          "finite_original_formula_validated": true,
+          "finite_reason": null,
+          "reason": null,
+          "work": 957282,
+          "clauses": 51831,
+          "evidence": "microstep_refinement_lemma_0366_query_0002.smt2",
+          "finite_diagnostics": "microstep_refinement_lemma_0366_query_0002.finite.json"
+        }
+      ],
+      "hold_contract": {
+        "name": "hold_contract",
+        "status": "counterexample",
+        "solver_result": "sat",
+        "backend": "finite_bv",
+        "finite_original_formula_validated": true,
+        "finite_reason": null,
+        "reason": null,
+        "work": 1482181,
+        "clauses": 82375,
+        "evidence": "hold_contract.smt2",
+        "finite_diagnostics": "hold_contract.finite.json"
+      },
+      "other_nonpassed_obligations": [
+        {
+          "name": "hold_contract",
+          "status": "counterexample",
+          "solver_result": "sat",
+          "backend": "finite_bv",
+          "finite_original_formula_validated": true,
+          "finite_reason": null,
+          "reason": null,
+          "work": 1482181,
+          "clauses": 82375,
+          "evidence": "hold_contract.smt2",
+          "finite_diagnostics": "hold_contract.finite.json"
+        }
+      ]
+    }
+  ]
+}

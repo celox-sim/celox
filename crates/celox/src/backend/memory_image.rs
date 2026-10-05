@@ -74,6 +74,23 @@ impl MemoryImage {
         self.as_mut_ptr()
     }
 
+    /// Overwrite bytes of the image without exposing a writable view.
+    pub(crate) fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
+        assert!(
+            offset + bytes.len() <= self.logical_words * 8,
+            "write past the memory image"
+        );
+        // Safety: the range lies inside the logical image, which this value
+        // owns mutably, and `bytes` is a separate allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.as_mut_ptr().cast::<u8>().add(offset),
+                bytes.len(),
+            );
+        }
+    }
+
     pub(crate) fn vcd_tracking_enabled(&self) -> bool {
         !self.raw_view_exposed
     }

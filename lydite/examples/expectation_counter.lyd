@@ -1,0 +1,38 @@
+specification "Named expectations with nested alternatives"
+
+spec Counter(input amount: bv<4>, output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+
+  // Forward references are local to this spec, including repeated instances.
+  expectation permitted {
+    any {
+      all { expect amount <= 2u4; expect grows; }
+      all { expect amount > 2u4; expect holds; }
+    }
+  }
+  expectation grows { expect value' == value + amount; }
+  expectation holds { expect value' == value; }
+
+  operation add {
+    expect permitted;
+    expect count' == value';
+  }
+
+  example small_amount_changes_state {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+  }
+  example large_amount_holds_state {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 3u4; } observe { count = 0u4; } } }
+  }
+  example guard_cannot_be_dropped {
+    expect negative;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 3u4; } observe { count = 3u4; } } }
+  }
+}

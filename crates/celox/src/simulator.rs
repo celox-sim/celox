@@ -1,5 +1,9 @@
 mod builder;
+#[cfg(feature = "host-runtime")]
+mod checkpoint;
 mod error;
+#[cfg(feature = "host-runtime")]
+mod state_file;
 
 #[cfg(all(
     feature = "host-runtime",
@@ -15,8 +19,12 @@ pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromo
 pub use builder::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
+#[cfg(feature = "host-runtime")]
+pub use checkpoint::{Checkpoint, CheckpointError, StateImage};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
+#[cfg(feature = "host-runtime")]
+pub use state_file::{StateError, StateMismatch, StateSchema};
 
 #[cfg(feature = "host-runtime")]
 mod host {
@@ -92,12 +100,25 @@ mod host {
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
-        comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
-        comb_observer_initial_eval: bool,
+        pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+        pub(super) comb_observer_initial_eval: bool,
+        /// Identity of the state layout, computed on first checkpoint use.
+        pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
+        /// State objects as state files name them, built on first use.
+        pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
         pub(crate) diagnostics: crate::RuntimeDiagnostics,
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
         tick_timing_eval_comb_ns: u64,
+    }
+
+    /// Why [`Simulator::try_dump`] failed.
+    #[derive(Debug, thiserror::Error)]
+    pub enum DumpError {
+        #[error("evaluating combinational logic failed: {0}")]
+        Runtime(RuntimeErrorCode),
+        #[error(transparent)]
+        Io(std::io::Error),
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,7 +581,7 @@ mod host {
 
     // ── Generic methods available for any backend ────────────────────────
     impl<B: SimBackend> Simulator<B> {
-        fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
+        pub(super) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {
@@ -601,6 +622,8 @@ mod host {
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_initial_eval: true,
+                checkpoint_fingerprint: std::sync::OnceLock::new(),
+                state_schema: std::sync::OnceLock::new(),
                 diagnostics: crate::RuntimeDiagnostics::default(),
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,
@@ -894,17 +917,72 @@ mod host {
         }
 
         /// Captures the current state of all signals and writes them to the VCD file.
+        ///
+        /// # Panics
+        ///
+        /// Panics where [`Self::try_dump`] returns an error.
         pub fn dump(&mut self, timestamp: u64) {
+            if let Err(error) = self.try_dump(timestamp) {
+                panic!("VCD dump at {timestamp} failed: {error}");
+            }
+        }
+
+        /// Captures the current state of all signals and writes them to the
+        /// VCD file. Fails if combinational evaluation or writing fails, or
+        /// if `timestamp` is earlier than the last dumped timestamp.
+        pub fn try_dump(&mut self, timestamp: u64) -> Result<(), DumpError> {
             if self.dirty {
-                self.eval_comb_checked().unwrap();
+                self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer
                     .dump_backend(timestamp, &mut self.backend, &component_traces)
-                    .unwrap();
+                    .map_err(DumpError::Io)?;
             }
+            Ok(())
+        }
+
+        /// Dump unless `timestamp` precedes what the VCD file already
+        /// records, as after `run_until` to an earlier time.
+        pub(crate) fn dump_unless_rewound(&mut self, timestamp: u64) {
+            let rewound = self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+                .is_some_and(|last| timestamp < last);
+            if !rewound {
+                self.dump(timestamp);
+            }
+        }
+
+        /// Reject a return to `time` if the VCD file has already passed it.
+        pub(crate) fn check_vcd_rewind(&self, time: u64) -> Result<(), CheckpointError> {
+            match self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+            {
+                Some(last_dumped) if time < last_dumped => {
+                    Err(CheckpointError::VcdRewind { time, last_dumped })
+                }
+                _ => Ok(()),
+            }
+        }
+
+        /// Finish the current VCD file and continue the waveform in a new
+        /// file at `path`, whose timestamps start over. Use it to record a
+        /// simulation rewound by a restore. Fails if the simulator was built
+        /// without VCD output.
+        pub fn switch_vcd(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+            let writer = self.vcd_writer.as_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "VCD output was not enabled when the simulator was built",
+                )
+            })?;
+            writer.restart(path)
         }
 
         /// Make buffered waveform output visible and report write errors.
@@ -957,7 +1035,7 @@ mod host {
             Ok(())
         }
 
-        fn settle_dirty_for_runtime_event_drain(&mut self) {
+        pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_checked().unwrap();
                 self.dirty = false;
@@ -1032,7 +1110,7 @@ mod host {
             eval_result
         }
 
-        fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
+        pub(super) fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
             self.program
                 .runtime_schema
                 .comb_observers
