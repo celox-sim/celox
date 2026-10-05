@@ -170,6 +170,5 @@ equality_case!(equality_wide_narrow, 130, 8, "", false);
 equality_case!(equality_signed_8, 8, 8, "signed", false);
 equality_case!(equality_signed_130, 130, 130, "signed", false);
 
-// SV four-state event signals are not yet supported by the SV frontend.
-equality_case!(equality_ff_8, 8, 8, "", true, sv);
-equality_case!(equality_ff_130, 130, 130, "", true, sv);
+equality_case!(equality_ff_8, 8, 8, "", true);
+equality_case!(equality_ff_130, 130, 130, "", true);

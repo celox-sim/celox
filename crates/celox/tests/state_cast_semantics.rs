@@ -7,7 +7,6 @@ mod test_utils;
 all_backends! {
     fn type_cast_clears_unknown_bits_in_comb_and_ff(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "state_cast_semantics::type_cast_clears_unknown_bits_in_comb_and_ff";
     }
 
@@ -19,17 +18,15 @@ all_backends! {
 
     fn function_formal_type_clears_unknown_bits(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "state_cast_semantics::function_formal_type_clears_unknown_bits";
     }
 
     fn signed_four_state_function_formal_preserves_unknown_bits(sim) {
-        @ignore_on(sv);
         @case "state_cast_semantics::signed_four_state_function_formal_preserves_unknown_bits";
     }
 
     fn implicit_assignment_to_bit_clears_unknowns_without_mutating_source(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "state_cast_semantics::implicit_assignment_to_bit_clears_unknowns_without_mutating_source";
     }
 }

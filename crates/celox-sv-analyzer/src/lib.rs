@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
+pub mod procedural;
 pub mod symbol;
 pub mod syntax;
 pub mod typecheck;
@@ -34,6 +35,9 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A memory file read by `$readmemh` or `$readmemb` is missing or invalid.
+    #[error("Invalid $readmemh input: {0}")]
+    MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
@@ -59,8 +63,6 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// Dedicated tracking issues, keyed by the leading text of the construct name
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
-    ("blocking assignment inside always_ff", 421),
-    ("initial construct", 425),
     ("non-ANSI module port declarations", 426),
     ("ref port direction", 427),
     ("always and always_latch processes", 431),
@@ -70,23 +72,19 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
         "unpacked struct, union, or unsupported packed struct member",
         440,
     ),
-    ("procedural loop inside always_ff", 441),
     ("wildcard port connection", 442),
     ("mixed clock-edge polarities for one signal", 443),
     ("delayed continuous assignment", 444),
     ("duplicate internal signal", 445),
     ("loop-generate unroll limit exceeded", 448),
-    ("concatenated always_ff assignment target", 450),
     ("iff-qualified always_ff event", 452),
     ("nonblocking assignment inside always_comb", 453),
     ("genvar update operator", 455),
     ("reduction operator in parameter expression", 456),
     ("gate primitive instantiation", 457),
-    ("procedural loop inside always_comb", 459),
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
-    ("selected or composite assignment inside function", 466),
     ("mixed reset-edge polarities for one signal", 471),
 ];
 

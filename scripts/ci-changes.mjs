@@ -109,9 +109,13 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
 
     if (
       startsWithAny(path, ["crates/", "vendor/", ".cargo/"]) ||
-      ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".gitmodules"].includes(
-        path,
-      )
+      [
+        ".config/nextest.toml",
+        ".gitmodules",
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+      ].includes(path)
     ) {
       affected.rust = true;
       affected.napi = true;

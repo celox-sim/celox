@@ -1304,6 +1304,61 @@
       "tags": []
     },
     {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::aggregate_parameters_are_constant_tables",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::always_comb_case_compares_at_the_common_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::always_ff_blocking_assignments_and_run_time_loops",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::constant_functions_size_parameters_and_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::initial_blocks_define_the_initial_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Regression",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/parameters.sv:3:10: Instance attempts to override 'P' as a parameter, but it is a local parameter\n    3 |   Top #(.P(205)) dut ();\n      |          ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
       "expectation": "CompilationError",
@@ -1904,7 +1959,7 @@
     "emission_error": 0,
     "ignored": 6,
     "mismatch": 0,
-    "passed": 124,
+    "passed": 129,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,

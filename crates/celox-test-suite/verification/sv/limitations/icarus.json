@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 6,
     "emission_error": 0,
-    "compile_error": 23,
+    "compile_error": 24,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -150,6 +150,14 @@
       "name": "operators::propagates_child_input_width_into_connection_expressions",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:7: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "procedural::aggregate_parameters_are_constant_tables",
+      "phase": "compile",
+      "status": "compile_error"
     },
     {
       "category": "Regression",

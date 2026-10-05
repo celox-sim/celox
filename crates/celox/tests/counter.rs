@@ -15,7 +15,7 @@ all_backends! {
     }
 
     fn test_phase_state_ssa_preserves_eval_before_apply_and_four_state(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "counter::test_phase_state_ssa_preserves_eval_before_apply_and_four_state";
     }
 }
