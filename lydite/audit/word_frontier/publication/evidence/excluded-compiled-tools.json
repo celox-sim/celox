@@ -1,0 +1,122 @@
+[
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-alpha-baseline/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-alpha-candidate/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-w24-baseline/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-w24-candidate/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-w32-baseline/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-final-w32-candidate/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-phase3-strict/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-screen-baseline/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-screen-candidate/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-baseline/width24-alphaNone/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-baseline/width24-alpha18073/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-baseline/width32-alphaNone/checker",
+    "bytes": 4758408,
+    "sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-candidate/width24-alphaNone/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-candidate/width24-alpha18073/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/word-frontier-strict-controls-candidate/width32-alphaNone/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh/hwverify-rs",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/phase3-rv-address-mutants/checker",
+    "bytes": 4758672,
+    "sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alphaNone/checker",
+    "bytes": 4758664,
+    "sha256": "5893382d2ecc844e35da78f00240004b49d08a9e898de08c3ccffe20c00c10da",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alpha18073/checker",
+    "bytes": 4758664,
+    "sha256": "5893382d2ecc844e35da78f00240004b49d08a9e898de08c3ccffe20c00c10da",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  },
+  {
+    "original_path": "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width32-alphaNone/checker",
+    "bytes": 4758664,
+    "sha256": "5893382d2ecc844e35da78f00240004b49d08a9e898de08c3ccffe20c00c10da",
+    "reason": "Compiled checker/tool snapshot deliberately omitted; executable source scripts are retained."
+  }
+]

@@ -1,0 +1,47 @@
+{
+  "status": "pass",
+  "scope": "exhaustive 2-bit data, 4 cells, all addresses, two fixed stall patterns; not an unbounded proof",
+  "runs": [
+    {
+      "name": "memory_increment_good",
+      "trials": 2048,
+      "cycles": 24576,
+      "mismatch": null,
+      "status": "pass"
+    },
+    {
+      "name": "memory_increment_bad_shadow",
+      "trials": 1,
+      "cycles": 1,
+      "mismatch": {
+        "cells": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "address": 0,
+        "stall_pattern": false,
+        "cycle": 0
+      },
+      "status": "deliberate_mutation_rejected"
+    },
+    {
+      "name": "memory_increment_bad_alias",
+      "trials": 1,
+      "cycles": 1,
+      "mismatch": {
+        "cells": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "address": 0,
+        "stall_pattern": false,
+        "cycle": 0
+      },
+      "status": "deliberate_mutation_rejected"
+    }
+  ]
+}

@@ -8,6 +8,8 @@
  * @packageDocumentation
  */
 
+// Checkpoints
+export { SimulationCheckpoint, SimulatorCheckpoint } from "./checkpoint.js";
 /** @internal */
 export type { DirtyState } from "./dut.js";
 /** @internal */
@@ -67,8 +69,10 @@ export type {
 	FrontendSimulatorHandle,
 	LoopBreak,
 	ModuleDefinition,
+	NativeCheckpoint,
 	NativeFrontendSimulatorHandle,
 	NativeHandle,
+	NativeSimulationCheckpoint,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	OptimizeOptions,

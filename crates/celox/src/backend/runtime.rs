@@ -1121,6 +1121,10 @@ impl super::SimBackend for JitBackend {
         Some(self.memory.owner())
     }
 
+    fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
+        self.memory.write_bytes(offset, bytes);
+    }
+
     fn vcd_tracking_enabled(&self) -> bool {
         self.memory.vcd_tracking_enabled()
     }

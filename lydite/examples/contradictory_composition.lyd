@@ -1,0 +1,36 @@
+specification "Intent bug: individually usable specifications disagree on an operation"
+
+observation value: bv<4>;
+operation advance {}
+
+component One {
+  state x: bv<4>;
+  init s.x == 0u4;
+  invariant o.value == s.x;
+  steps { advance = n.x == s.x + 1u4; }
+  example one_step {
+    expect positive; initial { value = 0u4; }
+    trace { advance { observe { value = 1u4; } } }
+  }
+}
+
+component Two {
+  state x: bv<4>;
+  init s.x == 0u4;
+  invariant o.value == s.x;
+  steps { advance = n.x == s.x + 2u4; }
+  example one_step {
+    expect positive; initial { value = 0u4; }
+    trace { advance { observe { value = 2u4; } } }
+  }
+}
+
+composition Contradiction {
+  members compose(One, Two);
+  example common_initial_state { expect positive; initial { value = 0u4; } trace {} }
+  example no_joint_extension { expect negative; initial {} trace { advance {} } }
+  example intended_operation {
+    expect positive; initial { value = 0u4; }
+    trace { advance { observe { value = 1u4; } } }
+  }
+}

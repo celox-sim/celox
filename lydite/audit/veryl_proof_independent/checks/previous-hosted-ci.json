@@ -1,0 +1,19 @@
+{
+  "commit": "7add5b97ebb847f9029d2a52aa205bb5b1ade8f0",
+  "run_url": "https://github.com/tignear/hwverify/actions/runs/36858795960",
+  "conclusion": "success",
+  "runtime": {
+    "status": "passed",
+    "exit_code": 0,
+    "external_solver_invoked": false
+  },
+  "assertions_extracted": 6142,
+  "assertions_verified": 104,
+  "frames_verified": 118,
+  "coverage": {
+    "unsupported_frontend": 510,
+    "expected_pass": 46,
+    "unsupported_capture": 101,
+    "compile_rejection_fixture": 8
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "name": "lydite",
+  "displayName": "lydite",
+  "description": "Editing and explicit checked lemma proofs for lydite .lyd files",
+  "version": "0.1.0",
+  "publisher": "lydite-local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onLanguage:lydite"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lydite",
+        "aliases": [
+          "lydite"
+        ],
+        "extensions": [
+          ".lyd"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "lydite.check",
+        "title": "lydite: Check Target or Lemma"
+      },
+      {
+        "command": "lydite.associate",
+        "title": "lydite: Associate Lemma Sidecar with Model"
+      },
+      {
+        "command": "lydite.clearBase",
+        "title": "lydite: Clear Associated Model"
+      }
+    ],
+    "configuration": {
+      "title": "lydite",
+      "properties": {
+        "lydite.python": {
+          "type": "string",
+          "default": "python3",
+          "scope": "machine",
+          "description": "Python 3.10+ executable"
+        },
+        "lydite.server": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to lydite/editor/server.py"
+        },
+        "lydite.worker": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to target/release/lydite-editor"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "2.5.2"
+  },
+  "scripts": {
+    "test": "node test/run-extension-host.js",
+    "test:unit": "node test-extension.js && node test/hover-contract.test.js",
+    "test:rpc": "node test/rpc-integration.js"
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "compositions": {},
+  "kind": "specification",
+  "name": "One fixed correction cannot cancel every input",
+  "specs": {
+    "Corrected": {
+      "examples": {
+        "fixed_correction_is_insufficient": {
+          "expect": "forall",
+          "initial": {
+            "count": [
+              "bv",
+              2,
+              0
+            ]
+          },
+          "quantifiers": [
+            {
+              "kind": "exists",
+              "variables": {
+                "b": {
+                  "bv": 2
+                }
+              }
+            },
+            {
+              "kind": "forall",
+              "variables": {
+                "a": {
+                  "bv": 2
+                }
+              }
+            }
+          ],
+          "trace": [
+            {
+              "ensure": [
+                "eq",
+                "count",
+                [
+                  "bv",
+                  2,
+                  0
+                ]
+              ],
+              "inputs": {
+                "amount": "q.a",
+                "correction": "q.b"
+              },
+              "observe": {},
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          2,
+          0
+        ]
+      ],
+      "inputs": {
+        "amount": {
+          "bv": 2
+        },
+        "correction": {
+          "bv": 2
+        }
+      },
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "eq",
+          "n.value",
+          [
+            "sub",
+            [
+              "add",
+              "s.value",
+              "amount"
+            ],
+            "correction"
+          ]
+        ]
+      },
+      "outputs": {
+        "count": {
+          "bv": 2
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 2
+        }
+      }
+    }
+  },
+  "version": 4
+}

@@ -1,0 +1,12 @@
+/generated-suite/
+/metadata-snapshot/
+/target/
+/analyzer-probe/target/
+/cache/
+/provenance.json
+/build.log
+/traces.json
+/selected-traces.json
+/showcase-traces.json
+/reproduced/
+/veryl-source-controls-*/

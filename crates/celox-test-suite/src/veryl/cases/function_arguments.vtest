@@ -67,6 +67,37 @@
     (set! expected (trunc 8 (+ expected delta)))
     (assert_eq state expected)))
 
+(case test_ff_function_local_snapshot_ignores_later_assignment
+  ; `prev` captures `t` before `t` is assigned, so it keeps the call-entry
+  ; default value of the automatic local instead of the later write.
+  ; Veryl 0.22.0's simulator returns the later write for the always_comb call.
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, d: input bit<8>,
+            ff_prev: output bit<8>, comb_prev: output bit<8>,
+        ) {
+            function snapshot (x: input bit<8>) -> bit<8> {
+                var t: bit<8>;
+                var prev: bit<8>;
+                prev = t;
+                t = x;
+                return prev;
+            }
+            always_ff (clk) {
+                ff_prev = snapshot(d);
+            }
+            always_comb {
+                comb_prev = snapshot(d);
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 3 10 200 255)
+    (modify (set d value))
+    (tick clk)
+    (assert_eq ff_prev 0)
+    (assert_eq comb_prev 0)))
+
 (case test_comb_output_copyout_freezes_aliased_inputs_and_return
   (source "test.veryl" #"
         module Top (

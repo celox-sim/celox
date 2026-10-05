@@ -1,0 +1,124 @@
+{
+  "base_commit": "6d3de84c83a293254f5d7e0b2b952a1c1fd30994",
+  "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
+  "scope": "Native .hwv authoring over the shared typed candidate API; live query-index diagnostics and exact original-context identity; no automatic heuristic changes.",
+  "manual_migrated": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "2e82b701a0fb132e98437ae012680938b85e4c48169532062e531dcd9dd3ef49"
+  },
+  "manual_legacy_comparison": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "39621ad790d4be90978a29d78b14ac3f18293349cbb2eac0a7e87ce1571d8757"
+  },
+  "migrated_coverage": {
+    "programs": 6,
+    "checked_candidates": 27,
+    "checked_guard_uses": 8
+  },
+  "manual_smt_files_byte_identical": 1032,
+  "original_queries_byte_identical_manual": 437,
+  "hintfree": {
+    "status": "unknown",
+    "children_verified": 431,
+    "unknown_children": [
+      362,
+      364,
+      366,
+      430,
+      434
+    ],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3076007506,
+    "report_sha256": "c7cb4581cc075cbecd1e380274a338f18bcee3d6f676305b42afd672b2cb4f85"
+  },
+  "original_queries_byte_identical_hintfree": 437,
+  "source_model_and_environment_fields_unchanged": true,
+  "original_input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
+  "migrated_input_sha256": "589eb3bd590b5559dfd59cc19ea3d61fcef587c34192960dba96759f0c9a7f25",
+  "source_fields_sha256_excluding_proof_programs": "128c27eca249800908ec1983462b449bc06774a3d80ad767ac498923054d2a86",
+  "gates": {
+    "phase1": {
+      "status": "passed",
+      "positive_passed": 11,
+      "mutants_original_replayed": 18,
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16"
+    },
+    "phase2": {
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
+      "status": "passed_with_diagnostic_unknowns",
+      "verified_covered_positives": 9,
+      "validated_original_counterexamples": 19,
+      "diagnostic_unknowns": 4
+    },
+    "phase3": {
+      "status": "passed",
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
+      "positive_controls_verified": 6,
+      "original_formula_sat_mutants": 12
+    },
+    "guarded_expansion": {
+      "status": "passed",
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
+      "positive_controls_verified": 12,
+      "original_formula_sat_mutants": 36
+    },
+    "candidate_interface": {
+      "status": "passed"
+    }
+  },
+  "validation_logs_sha256": {
+    "native-release-workspace-tests.log": "28d6956a73b638a034a84f5c6e756527a1ea8c3b1cff0dea4fb0c8d3d6ca182e",
+    "native-clippy.log": "3d59f4fd94c8ee259988e83ddc5d65bd1bf1d7f75b43d812c5681acb05b5f26f",
+    "native-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "native-python-tests.log": "e933077d5ce48f154baf954676f35f3a4fb3f35204fd9aa65788878a071f683e",
+    "native-tests.log": "929fac1de1358b89a8315a720d38b5f155a94d8621ea62559b874cab1deb8a6b",
+    "native-debug-stack-recheck.log": "5f303456dc35c282e3b1def68480213f284bd64b0451e56e236df70ef351038a",
+    "native-authoring-tests.log": "62e4b14ea57cc633ae8ebe592e4864bc4fb9ac789335f3516c9d766c16aa4bfd",
+    "native-authoring-python.log": "2b237294bba88beebccdcf617bd60c5308e39e705b423a641354b08a6f5e2a2e",
+    "native-authoring-clippy.log": "83754df60fd01f3addda2830ec26a8ec735405c578eae01d7a526b7ef5b90bcb"
+  },
+  "python_tests_passed": 172,
+  "rust_workspace_tests": "release --workspace --locked passed",
+  "strict_clippy": "passed",
+  "formatting": "passed",
+  "hosted_full665_and_fresh_RTL_import": "required on updated PR3 head; not claimed by local archived-contract reruns",
+  "saved_reports_are_authority": false,
+  "evidence": "Complete local query/log trees in /workspace/lemma-candidates; hosted CI uploads complete fresh artifacts. No duplicate large archive committed.",
+  "publication_base": "8682f0f2f89c6791cc6f2d4e8f90ebd6235ddf8f",
+  "publication_base_tree_equals_tested_base": true,
+  "legacy_comparison_note": "Native manual run has all 1032 SMT files byte-identical to the prior API run, which matched the legacy manual run; all have the same finite work.",
+  "prior_api_checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+  "manual_native": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "2e82b701a0fb132e98437ae012680938b85e4c48169532062e531dcd9dd3ef49"
+  },
+  "native_input_sha256": "c7b236603e32d863d39aaf3a3ea6fcf786b979737415b5b95c531d812966a4d3",
+  "native_model_fields_unchanged": true,
+  "native_cli_and_interface": "passed; includes source-linked type/cycle/guard errors, prime/binder lowering, label collisions, stale context, real RV overlay preservation",
+  "review_fixes": [
+    "candidate/use diagnostics attribute live query indices, never labels",
+    "original model environment compared exactly before matching a query"
+  ],
+  "debug_profile_note": "Default debug test-thread stack overflowed in existing split_budgets_are_whole_query_not_per_branch; that exact debug test passed with RUST_MIN_STACK=16777216. Release workspace passed with default stack. No solver budget or code adjustment.",
+  "native_program_metadata_identical_except_three_source_locations": true,
+  "native_source_coverage": [
+    "m_address/ir",
+    "x_operand1/delivery",
+    "x_operand1/equality"
+  ],
+  "native_false_claim_source_and_no_dependent_handle": "passed",
+  "native_authoring_followup_note": "Only native example, tests and mandatory source-coverage gate changed after the full validation; checker binary is unchanged.",
+  "native_authoring_targeted_python_tests": 76
+}

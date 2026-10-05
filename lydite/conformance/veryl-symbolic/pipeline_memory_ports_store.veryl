@@ -1,0 +1,124 @@
+// Handwritten D/X/W CPU with combinational, zero-latency Harvard read ports and retirement writes.
+// 32-bit custom ISA, eight writable GPRs (including r0), fixed 6-bit word PC.
+// No memory storage or seed inputs live inside this CPU.
+module PipelineCPU (
+    clk: input clock, rst_n: input bit, stall: input bit,
+    imem_response: input bit<41>, dmem_response: input bit<32>,
+    imem_address: output bit<6>, dmem_address: output bit<6>,
+    imem_valid: output bit, dmem_valid: output bit,
+    write_enable: output bit, write_address: output bit<6>, write_data: output bit<32>,
+    pc: output bit<6>,
+    r0: output bit<32>,
+    r1: output bit<32>,
+    r2: output bit<32>,
+    r3: output bit<32>,
+    r4: output bit<32>,
+    r5: output bit<32>,
+    r6: output bit<32>,
+    r7: output bit<32>,
+    fetch_pc: output bit<6>,
+    d_valid: output bit, d_pc: output bit<6>, d_ir: output bit<41>,
+    x_valid: output bit, x_pc: output bit<6>, x_ir: output bit<41>,
+    w_valid: output bit, w_pc: output bit<6>, w_ir: output bit<41>,
+    x_operand: output bit<32>, w_result: output bit<32>,
+    w_next_pc: output bit<6>, commit: output bit,
+) {
+    var d_op: bit<3>;
+    var x_op: bit<3>;
+    var d_rs: bit<3>;
+    var x_rd: bit<3>;
+    var w_rd: bit<3>;
+    var x_match: bit;
+    var w_match: bit;
+    var hazard: bit;
+    var taken: bit;
+    var operand: bit<32>;
+    var result: bit<32>;
+    var fetched: bit<41>;
+    var next_pc: bit<6>;
+    always_comb {
+        d_op = d_ir[40:38];
+        x_op = x_ir[40:38];
+        d_rs = d_ir[34:32];
+        x_rd = x_ir[37:35];
+        w_rd = w_ir[37:35];
+        x_match = x_valid && !x_ir[40] && x_rd == d_rs;
+        w_match = w_valid && !w_ir[40] && w_rd == d_rs;
+        hazard = d_valid && (d_op == 3'd1 || d_op == 3'd2 || d_op == 3'd4 || d_op == 3'd5)
+                 && x_match && x_op == 3'd3;
+        result = x_ir[31:0];
+        if x_op == 3'd1 { result = x_operand + x_ir[31:0]; }
+        else if x_op == 3'd2 { result = x_operand ^ x_ir[31:0]; }
+        else if x_op == 3'd3 {
+            result = dmem_response;
+        }
+        if x_op == 3'd5 { result = x_operand; }
+        case d_rs {
+            3'd0: operand = r0;
+            3'd1: operand = r1;
+            3'd2: operand = r2;
+            3'd3: operand = r3;
+            3'd4: operand = r4;
+            3'd5: operand = r5;
+            3'd6: operand = r6;
+            default: operand = r7;
+        }
+        if w_match { operand = w_result; }
+        if x_match && x_op != 3'd3 { operand = result; }
+        taken = x_valid && x_op == 3'd4 && x_operand == '0;
+        next_pc = x_pc + 6'd1;
+        if taken { next_pc = x_ir[5:0]; }
+        fetched = imem_response;
+        // Pre-edge event: the OLD W instruction retires on this tick.
+        commit = !stall && w_valid;
+        write_enable = rst_n && !stall && w_valid && w_ir[40:38] == 3'd5;
+        write_address = w_ir[5:0];
+        write_data = w_result;
+        imem_address = fetch_pc;
+        dmem_address = x_ir[5:0];
+        imem_valid = !stall && !hazard && !taken;
+        dmem_valid = !stall && x_valid && x_op == 3'd3;
+    }
+    always_ff (clk) {
+        if !rst_n {
+            pc = '0; fetch_pc = '0;
+            r0 = '0;
+            r1 = '0;
+            r2 = '0;
+            r3 = '0;
+            r4 = '0;
+            r5 = '0;
+            r6 = '0;
+            r7 = '0;
+            d_valid = 0; d_pc = '0; d_ir = '0;
+            x_valid = 0; x_pc = '0; x_ir = '0;
+            w_valid = 0; w_pc = '0; w_ir = '0;
+            x_operand = '0; w_result = '0; w_next_pc = '0;
+        } else if !stall {
+            if w_valid {
+                pc = w_next_pc;
+                if !w_ir[40] {
+                    case w_rd {
+                        3'd0: r0 = w_result;
+                        3'd1: r1 = w_result;
+                        3'd2: r2 = w_result;
+                        3'd3: r3 = w_result;
+                        3'd4: r4 = w_result;
+                        3'd5: r5 = w_result;
+                        3'd6: r6 = w_result;
+                        default: r7 = w_result;
+                    }
+                }
+            }
+            w_valid = x_valid; w_pc = x_pc; w_ir = x_ir;
+            w_result = result; w_next_pc = next_pc;
+            x_valid = d_valid && !hazard && !taken;
+            x_pc = d_pc; x_ir = d_ir; x_operand = operand;
+            if taken { d_valid = 0; }
+            else if !hazard { d_valid = 1; }
+            if !hazard { d_pc = fetch_pc; d_ir = fetched; }
+            if taken { fetch_pc = x_ir[5:0]; }
+            else if !hazard { fetch_pc = fetch_pc + 6'd1; }
+        }
+    }
+}

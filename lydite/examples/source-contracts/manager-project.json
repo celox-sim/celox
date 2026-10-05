@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "name": "axi4lite_manager",
+  "sources": [
+    "manager.veryl"
+  ],
+  "top": "AxiLiteManager",
+  "specification": "manager.lyd",
+  "clock": "clk",
+  "reset": {
+    "input": "rst",
+    "active": 0
+  },
+  "inputs": {
+    "rst": "rst_n",
+    "arready": "arready",
+    "awready": "awready",
+    "bresp": "bresp",
+    "bvalid": "bvalid",
+    "rdata": "rdata",
+    "rresp": "rresp",
+    "rvalid": "rvalid",
+    "start_read": "start_read",
+    "start_write": "start_write",
+    "wready": "wready"
+  },
+  "state": {
+    "awvalid": "awvalid",
+    "wvalid": "wvalid",
+    "arvalid": "arvalid",
+    "write_busy": "write_busy",
+    "read_busy": "read_busy"
+  },
+  "signals": {
+    "bus_awvalid": {
+      "signal": "awvalid",
+      "type": "bool"
+    },
+    "bus_awready": {
+      "signal": "awready",
+      "type": "bool"
+    },
+    "bus_wvalid": {
+      "signal": "wvalid",
+      "type": "bool"
+    },
+    "bus_wready": {
+      "signal": "wready",
+      "type": "bool"
+    },
+    "bus_bvalid": {
+      "signal": "bvalid",
+      "type": "bool"
+    },
+    "bus_bready": {
+      "signal": "bready",
+      "type": "bool"
+    },
+    "bus_arvalid": {
+      "signal": "arvalid",
+      "type": "bool"
+    },
+    "bus_arready": {
+      "signal": "arready",
+      "type": "bool"
+    },
+    "bus_rvalid": {
+      "signal": "rvalid",
+      "type": "bool"
+    },
+    "bus_rready": {
+      "signal": "rready",
+      "type": "bool"
+    },
+    "bus_awaddr": {
+      "signal": "awaddr",
+      "type": {
+        "bv": 8
+      }
+    },
+    "bus_araddr": {
+      "signal": "araddr",
+      "type": {
+        "bv": 8
+      }
+    },
+    "bus_awprot": {
+      "signal": "awprot",
+      "type": {
+        "bv": 3
+      }
+    },
+    "bus_arprot": {
+      "signal": "arprot",
+      "type": {
+        "bv": 3
+      }
+    },
+    "bus_wdata": {
+      "signal": "wdata",
+      "type": {
+        "bv": 32
+      }
+    },
+    "bus_rdata": {
+      "signal": "rdata",
+      "type": {
+        "bv": 32
+      }
+    },
+    "bus_wstrb": {
+      "signal": "wstrb",
+      "type": {
+        "bv": 4
+      }
+    },
+    "bus_bresp": {
+      "signal": "bresp",
+      "type": {
+        "bv": 2
+      }
+    },
+    "bus_rresp": {
+      "signal": "rresp",
+      "type": {
+        "bv": 2
+      }
+    }
+  },
+  "property": "safety",
+  "depth": 6
+}

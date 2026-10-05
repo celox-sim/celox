@@ -27,6 +27,12 @@ members = [
     "crates/celox-ts-gen",
     "crates/celox-wasm",
     "crates/celox-vpi",
+    "crates/lydite-ir",
+    "crates/lydite",
+    "crates/lydite-celox",
+    "crates/lydite-solver",
+    "crates/lydite-syntax",
+    "crates/lydite-verify",
     "examples/my-frontend-napi",
 ]
 resolver = "2"
@@ -69,6 +75,12 @@ celox-sv-analyzer       = { version = "=0.10.1", path = "crates/celox-sv-analyze
 celox-test-suite         = { version = "=0.10.1", path = "crates/celox-test-suite" } # x-release-please-version
 celox-testbench         = { version = "=0.10.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.10.1", path = "crates/celox-ts-gen" } # x-release-please-version
+
+# lydite is developed in this repository but not published to crates.io.
+lydite-ir             = { path = "crates/lydite-ir" }
+lydite-solver         = { path = "crates/lydite-solver" }
+lydite-syntax         = { path = "crates/lydite-syntax" }
+lydite-verify         = { path = "crates/lydite-verify" }
 
 veryl-analyzer = "0.22.0"
 veryl-emitter  = "0.22.0"

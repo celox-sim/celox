@@ -1,0 +1,109 @@
+// Independently handwritten D/X/W register-scaling implementation.
+// Only register count / selector widths vary; datapath=32, ROM=data=4 words.
+// Generated placeholders expand declarations and exhaustive register choices,
+// never ISA reference expressions or proof-derived implementation behavior.
+// ROM/data are captured at reset, so the environment cannot change the program
+// halfway through an inductive execution. pc is the retired architectural PC.
+module PipelineCPU (
+    clk: input clock, rst_n: input bit, stall: input bit,
+    seed_rom0: input bit<@IW@>, seed_rom1: input bit<@IW@>,
+    seed_rom2: input bit<@IW@>, seed_rom3: input bit<@IW@>,
+    seed_data0: input bit<@W@>, seed_data1: input bit<@W@>,
+    seed_data2: input bit<@W@>, seed_data3: input bit<@W@>,
+    rom0: output bit<@IW@>, rom1: output bit<@IW@>,
+    rom2: output bit<@IW@>, rom3: output bit<@IW@>,
+    data0: output bit<@W@>, data1: output bit<@W@>,
+    data2: output bit<@W@>, data3: output bit<@W@>,
+    pc: output bit<2>,
+    @REGISTER_PORTS@
+    fetch_pc: output bit<2>,
+    d_valid: output bit, d_pc: output bit<2>, d_ir: output bit<@IW@>,
+    x_valid: output bit, x_pc: output bit<2>, x_ir: output bit<@IW@>,
+    w_valid: output bit, w_pc: output bit<2>, w_ir: output bit<@IW@>,
+    x_operand: output bit<@W@>, w_result: output bit<@W@>,
+    w_next_pc: output bit<2>, commit: output bit,
+) {
+    var d_op: bit<3>;
+    var x_op: bit<3>;
+    var d_rs: bit<@RB@>;
+    var x_rd: bit<@RB@>;
+    var w_rd: bit<@RB@>;
+    var x_match: bit;
+    var w_match: bit;
+    var hazard: bit;
+    var taken: bit;
+    var operand: bit<@W@>;
+    var result: bit<@W@>;
+    var fetched: bit<@IW@>;
+    var next_pc: bit<2>;
+    always_comb {
+        d_op = d_ir[@HI@:@OPLO@];
+        x_op = x_ir[@HI@:@OPLO@];
+        d_rs = d_ir[@RSHI@:@RSLO@];
+        x_rd = x_ir[@RDHI@:@RDLO@];
+        w_rd = w_ir[@RDHI@:@RDLO@];
+        x_match = x_valid && !x_ir[@HI@] && x_rd == d_rs;
+        w_match = w_valid && !w_ir[@HI@] && w_rd == d_rs;
+        hazard = d_valid && (d_op == 3'd1 || d_op == 3'd2 || d_op == 3'd4)
+                 && x_match && x_op == 3'd3;
+        result = x_ir[@IMMHI@:0];
+        if x_op == 3'd1 { result = x_operand + x_ir[@IMMHI@:0]; }
+        else if x_op == 3'd2 { result = x_operand ^ x_ir[@IMMHI@:0]; }
+        else if x_op == 3'd3 {
+            case x_ir[1:0] {
+                2'd0: result = data0;
+                2'd1: result = data1;
+                2'd2: result = data2;
+                default: result = data3;
+            }
+        }
+        case d_rs {
+            @REGISTER_READ@
+        }
+        if w_match { operand = w_result; }
+        if x_match && x_op != 3'd3 { operand = result; }
+        taken = x_valid && x_op == 3'd4 && x_operand == '0;
+        next_pc = x_pc + 2'd1;
+        if taken { next_pc = x_ir[1:0]; }
+        case fetch_pc {
+            2'd0: fetched = rom0;
+            2'd1: fetched = rom1;
+            2'd2: fetched = rom2;
+            default: fetched = rom3;
+        }
+        // Pre-edge event: the OLD W instruction retires on this tick.
+        commit = !stall && w_valid;
+    }
+    always_ff (clk) {
+        if !rst_n {
+            rom0 = seed_rom0; rom1 = seed_rom1;
+            rom2 = seed_rom2; rom3 = seed_rom3;
+            data0 = seed_data0; data1 = seed_data1;
+            data2 = seed_data2; data3 = seed_data3;
+            pc = '0; fetch_pc = '0;
+            @REGISTER_RESET@
+            d_valid = 0; d_pc = '0; d_ir = '0;
+            x_valid = 0; x_pc = '0; x_ir = '0;
+            w_valid = 0; w_pc = '0; w_ir = '0;
+            x_operand = '0; w_result = '0; w_next_pc = '0;
+        } else if !stall {
+            if w_valid {
+                pc = w_next_pc;
+                if !w_ir[@HI@] {
+                    case w_rd {
+                        @REGISTER_WRITE@
+                    }
+                }
+            }
+            w_valid = x_valid; w_pc = x_pc; w_ir = x_ir;
+            w_result = result; w_next_pc = next_pc;
+            x_valid = d_valid && !hazard && !taken;
+            x_pc = d_pc; x_ir = d_ir; x_operand = operand;
+            if taken { d_valid = 0; }
+            else if !hazard { d_valid = 1; }
+            if !hazard { d_pc = fetch_pc; d_ir = fetched; }
+            if taken { fetch_pc = x_ir[1:0]; }
+            else if !hazard { fetch_pc = fetch_pc + 2'd1; }
+        }
+    }
+}

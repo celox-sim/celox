@@ -335,18 +335,17 @@ mod activity {
                 writer.flush().unwrap();
                 reference.flush().unwrap();
 
-                // Fill the 256 KiB output buffer exactly with timestamps. The
-                // next timestamp must flush it before accepting any new bytes,
-                // so a sink error occurs after consuming activity but before
-                // comparing or updating any cached signal values.
-                writer.dump_with_activity(10, &[], &[], Some(&[])).unwrap();
-                reference
-                    .dump_with_activity(10, &[], &[], Some(&[]))
-                    .unwrap();
-                for _ in 0..(256 * 1024 - 4) / 3 {
-                    writer.dump_with_activity(0, &[], &[], Some(&[])).unwrap();
+                // Fill the 256 KiB output buffer exactly with eight-byte
+                // timestamp lines (`#100000\n` onwards). The next timestamp
+                // must flush it before accepting any new bytes, so a sink
+                // error occurs after consuming activity but before comparing
+                // or updating any cached signal values.
+                for timestamp in 100_000..100_000 + 256 * 1024 / 8 {
+                    writer
+                        .dump_with_activity(timestamp, &[], &[], Some(&[]))
+                        .unwrap();
                     reference
-                        .dump_with_activity(0, &[], &[], Some(&[]))
+                        .dump_with_activity(timestamp, &[], &[], Some(&[]))
                         .unwrap();
                 }
 
@@ -354,7 +353,7 @@ mod activity {
                 writer.get_ref().failures.set(failures);
                 let before = writer.statistics().comparisons;
                 for attempt in 0..failures {
-                    let error = writer.dump_backend(20, &mut backend, &[]).unwrap_err();
+                    let error = writer.dump_backend(200_000, &mut backend, &[]).unwrap_err();
                     assert_eq!(error.kind(), std::io::ErrorKind::Other);
                     assert_eq!(writer.statistics().comparisons, before);
                     if new_activity {
@@ -363,11 +362,11 @@ mod activity {
                         backend.set_wide(b, BigUint::from(22 + attempt));
                     }
                 }
-                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                writer.dump_backend(200_000, &mut backend, &[]).unwrap();
                 let (ptr, size) = backend.memory_as_ptr();
                 // SAFETY: backend owns this memory and is not mutated during the dump.
                 reference
-                    .dump(20, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .dump(200_000, unsafe { std::slice::from_raw_parts(ptr, size) })
                     .unwrap();
                 assert_eq!(
                     writer.statistics().comparisons - before,
@@ -375,7 +374,7 @@ mod activity {
                     "retry must visit each pending group exactly once"
                 );
                 let after = writer.statistics().comparisons;
-                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                writer.dump_backend(200_000, &mut backend, &[]).unwrap();
                 assert_eq!(writer.statistics().comparisons, after);
                 assert_eq!(
                     commands(&writer.into_inner().unwrap().bytes),

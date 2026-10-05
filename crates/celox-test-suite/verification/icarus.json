@@ -6154,6 +6154,17 @@
     },
     {
       "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "function_arguments::test_ff_function_local_snapshot_ignores_later_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Icarus 13.0 rejects inout function arguments (Function arguments must be input ports). Veryl analysis and SV emission succeed.",
       "expectation": "Simulation",
       "known_issue": {
@@ -10297,7 +10308,7 @@
     "emission_error": 0,
     "ignored": 196,
     "mismatch": 0,
-    "passed": 492,
+    "passed": 493,
     "rejected": 8,
     "runtime_error": 0,
     "unexpected_accept": 0,

@@ -1,0 +1,18 @@
+specification "Structural separation"
+input rst: bool;
+input a: bool;
+observation y: bool;
+operation tick {}
+component Isolation {
+  init true; invariant true; steps { tick = true; }
+  structure { no_comb_path isolated { from i.a; to o.y; } }
+}
+composition Inner { members compose(Isolation); }
+composition Checked { members compose(Inner); }
+implementation {
+ composition Checked; reset_input rst;
+ state q: bool; reset { q = false; } next { q = i.a; }
+ operations { tick = true; }
+ endpoints { i.a = a; o.y = y; }
+ binding { bind Isolation {} observation y = s.q; }
+}

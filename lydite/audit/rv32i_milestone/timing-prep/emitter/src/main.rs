@@ -1,0 +1,30 @@
+use std::path::PathBuf;
+use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
+use veryl_emitter::Emitter;
+use veryl_metadata::Metadata;
+use veryl_parser::Parser;
+fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    assert!(args.len() == 3, "usage: veryl-timing-emit INPUT.veryl OUTPUT.sv");
+    let input = PathBuf::from(&args[1]);
+    let output = PathBuf::from(&args[2]);
+    let code = std::fs::read_to_string(&input).expect("read source");
+    symbol_table::clear(); attribute_table::clear();
+    let parsed = Parser::parse(&code, &input).expect("parse");
+    let mut metadata = Metadata::create_default("prj").expect("metadata");
+    metadata.build.omit_project_prefix = true;
+    metadata.build.strip_comments = true;
+    let analyzer = Analyzer::new(&metadata);
+    let mut errors = analyzer.analyze_pass1("prj", &parsed.veryl);
+    errors.extend(Analyzer::analyze_post_pass1());
+    let mut context = Context::default(); let mut ir = Ir::default();
+    errors.extend(analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)));
+    errors.extend(context.drain_errors());
+    errors.extend(Analyzer::analyze_post_pass2(&ir));
+    let errors: Vec<_> = errors.into_iter().filter(|e| e.is_error()).collect();
+    assert!(errors.is_empty(), "analyzer diagnostics: {errors:?}");
+    let mut emitter = Emitter::new(&metadata, "prj", &input, &output, &output.with_extension("sv.map"));
+    emitter.emit(&parsed.veryl, &code);
+    std::fs::write(&output, emitter.as_str()).expect("write SV");
+    eprintln!("emitted {} bytes to {}", emitter.as_str().len(), output.display());
+}

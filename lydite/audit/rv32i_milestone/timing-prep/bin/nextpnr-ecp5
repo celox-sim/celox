@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The official GUI-enabled wrapper writes XDG files below HOME, so isolate this process only.
+HOME="$root/tool-home" exec "$root/oss-cad-suite/bin/nextpnr-ecp5" "$@"

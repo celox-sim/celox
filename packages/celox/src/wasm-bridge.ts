@@ -86,6 +86,43 @@ export function isWasmHandle(handle: unknown): boolean {
 // Bridge
 // ---------------------------------------------------------------------------
 
+/** Checkpoint of a bridge-driven simulator: a copy of its design state. */
+interface WasmCheckpoint {
+	readonly stateSize: number;
+	readonly fingerprint: string;
+	readonly state: Uint8Array;
+}
+
+/**
+ * Checkpoint methods for a bridge, which owns the simulation memory.
+ * The raw handle says which bytes hold design state and which layout they
+ * belong to; addons that predate checkpoints provide neither.
+ */
+function wasmCheckpointMethods(
+	raw: RawWasmSimulatorHandle,
+	memory: WebAssembly.Memory,
+	evalComb: () => void,
+): Pick<NativeSimulatorHandle, "checkpoint" | "restore"> {
+	const start = raw.stateOffset;
+	const fingerprint = raw.stateFingerprint;
+	if (start === undefined || fingerprint === undefined) return {};
+	const end = raw.stableSize;
+	return {
+		checkpoint(): WasmCheckpoint {
+			const state = new Uint8Array(memory.buffer, start, end - start).slice();
+			return { stateSize: state.byteLength, fingerprint, state };
+		},
+		restore(checkpoint): void {
+			const saved = checkpoint as Partial<WasmCheckpoint>;
+			if (saved.fingerprint !== fingerprint || !saved.state) {
+				throw new Error("the checkpoint was taken from a different design");
+			}
+			new Uint8Array(memory.buffer, start, end - start).set(saved.state);
+			evalComb();
+		},
+	};
+}
+
 /** Result of creating a WASM simulator bridge. */
 export interface WasmBridgeResult {
 	/** Handle compatible with the existing Simulator code. */
@@ -161,6 +198,9 @@ export function createWasmSimulatorBridge(
 		dispose(): void {
 			raw.dispose();
 		},
+		...wasmCheckpointMethods(raw, memory, () =>
+			(combInstance.exports.run as CallableFunction)(),
+		),
 	};
 
 	return { handle, sharedMemory };
@@ -229,6 +269,9 @@ export async function createWasmSimulatorBridgeAsync(
 		dispose(): void {
 			raw.dispose();
 		},
+		...wasmCheckpointMethods(raw, memory, () =>
+			(combInstance.exports.run as CallableFunction)(),
+		),
 	};
 
 	return { handle, sharedMemory };

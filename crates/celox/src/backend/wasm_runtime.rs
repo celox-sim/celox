@@ -106,6 +106,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         WasmBackend::memory_as_mut_ptr(self)
     }
+    fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
+        self.memory.data_mut(&mut self.store)[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
     fn vcd_tracking_enabled(&self) -> bool {
         !self.raw_view_exposed
     }

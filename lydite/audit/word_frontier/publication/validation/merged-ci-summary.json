@@ -1,0 +1,12 @@
+{
+  "status": "passed",
+  "checker_sha256": "5893382d2ecc844e35da78f00240004b49d08a9e898de08c3ccffe20c00c10da",
+  "positive_controls_verified": 6,
+  "original_formula_sat_mutants": 12,
+  "runs": [
+    "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width32-alphaNone/summary.json",
+    "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alphaNone/summary.json",
+    "/workspace/scratch/07f10565586c/phase3-publication-strict-ci/width24-alpha18073/summary.json"
+  ],
+  "input_manifest_sha256": "9737823511c6d2477d635599c1dd26294775d7be82f42bed0a6d79a9084367db"
+}

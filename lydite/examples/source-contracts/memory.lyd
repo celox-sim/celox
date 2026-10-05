@@ -1,0 +1,57 @@
+specification "Explicit byte memory source binding"
+input rst: bool;
+input araddr: bv<8>;
+input arprot: bv<3>;
+input arvalid: bool;
+input awaddr: bv<8>;
+input awprot: bv<3>;
+input awvalid: bool;
+input bready: bool;
+input rready: bool;
+input wdata: bv<32>;
+input wstrb: bv<4>;
+input wvalid: bool;
+operation tick {}
+component Clock { init true; invariant true; steps { tick = true; } }
+composition Peripheral { members compose(Clock); }
+implementation {
+  composition Peripheral;
+  reset_input rst;
+  state a_full: bool;
+  state d_full: bool;
+  state held_addr: bv<8>;
+  state held_data: bv<32>;
+  state held_strb: bv<4>;
+  state write_done: bool;
+  state mem0: bv<32>;
+  state mem1: bv<32>;
+  state rvalid: bool;
+  state rdata: bv<32>;
+  state rresp: bv<2>;
+  reset { a_full = false; d_full = false; held_addr = 0u8; held_data = 0u32; held_strb = 0u4; write_done = false; mem0 = 0u32; mem1 = 0u32; rvalid = false; rdata = 0u32; rresp = 0u2; }
+  next { a_full = s.a_full; d_full = s.d_full; held_addr = s.held_addr; held_data = s.held_data; held_strb = s.held_strb; write_done = s.write_done; mem0 = s.mem0; mem1 = s.mem1; rvalid = s.rvalid; rdata = s.rdata; rresp = s.rresp; }
+  wires {
+    event_apply = false;
+    bus_awvalid = i.awvalid;
+    bus_awready = false;
+    bus_wvalid = i.wvalid;
+    bus_wready = false;
+    bus_bvalid = false;
+    bus_bready = i.bready;
+    bus_arvalid = i.arvalid;
+    bus_arready = false;
+    bus_rvalid = false;
+    bus_rready = i.rready;
+    bus_awaddr = i.awaddr;
+    bus_araddr = i.araddr;
+    bus_awprot = i.awprot;
+    bus_arprot = i.arprot;
+    bus_wdata = i.wdata;
+    bus_rdata = 0u32;
+    bus_wstrb = i.wstrb;
+    bus_bresp = 0u2;
+    bus_rresp = 0u2;
+  }
+  operations { tick = true; }
+  binding { bind Clock {} }
+}

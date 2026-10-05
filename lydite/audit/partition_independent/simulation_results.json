@@ -1,0 +1,8 @@
+{
+  "status": "pass",
+  "cases": 8192,
+  "cycles": 153600,
+  "commits": 61440,
+  "seconds": 9.937504484998499,
+  "scope": "All256 factors \u00d716 counts \u00d72 stall schedules; independent integer oracle, no Z3. Test, not proof."
+}

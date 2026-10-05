@@ -33,6 +33,12 @@ cargo insta accept       # Accept snapshot changes
 | `crates/celox-bench-sv` | SystemVerilog generator for Verilator benchmarks |
 | `packages/celox` | TypeScript runtime package |
 | `packages/vite-plugin` | Vite plugin |
+| `crates/lydite-*` | lydite hardware refinement checker (unpublished; CLI is `lydite`) |
+| `lydite/` | lydite docs, examples, editor client, and proof/conformance gates (`.github/workflows/lydite.yml`) |
+
+### lydite
+
+lydite was imported from https://github.com/tignear/hwverify with its source history; generated evidence stayed in that repository. Its crates are ordinary workspace members that build into the repository-root `target/`; run lydite's scripts from `lydite/`. Solver tests need Z3 (`Z3_BIN=/path/to/z3`). The conformance gates (`lydite/conformance`) test the in-tree Celox through the `lydite-celox` binaries and need Python 3.12; `case-exceptions.json` and `coverage-manifest.json` in `lydite/conformance/veryl-proof` record the reviewed suite contract.
 
 ## Veryl Dependencies
 
