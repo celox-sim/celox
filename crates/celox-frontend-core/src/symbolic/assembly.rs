@@ -976,6 +976,7 @@ pub fn schedule_symbolic_rtl(
             comb_observers,
             testbench_read_roots: Default::default(),
             rtl_writes,
+            comb_writes: Default::default(),
         },
     };
 

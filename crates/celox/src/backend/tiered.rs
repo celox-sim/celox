@@ -1562,6 +1562,20 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.write_memory(offset, bytes),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.write_memory(offset, bytes),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.write_memory(offset, bytes),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn vcd_tracking_enabled(&self) -> bool {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.vcd_tracking_enabled(),

@@ -719,6 +719,7 @@ dependencies = [
  "num-bigint",
  "serde",
  "tempfile",
+ "thiserror 2.0.21",
  "vcd",
 ]
 

@@ -8,7 +8,10 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use celox::{NativeProgramImage, NativeProgramInstance};
+use celox::{
+    NativeProgramImage, NativeProgramInstance, StateDifference, StateFile, StateObject, StateRole,
+    format_state_value,
+};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -26,6 +29,43 @@ struct Cli {
 enum CliCommand {
     /// Build native executables for VPI testbenches.
     Vpi(VpiArgs),
+    /// Inspect saved simulation state files.
+    State(StateArgs),
+}
+
+#[derive(Args)]
+struct StateArgs {
+    #[command(subcommand)]
+    command: StateCommand,
+}
+
+#[derive(Subcommand)]
+enum StateCommand {
+    /// Print the saved values of a state file.
+    Dump(StateDumpArgs),
+    /// Print the objects whose saved values differ between two state files.
+    /// Exits with status 1 when they differ.
+    Diff(StateDiffArgs),
+}
+
+#[derive(Args)]
+struct StateDumpArgs {
+    file: PathBuf,
+
+    /// Also print combinational objects, which are recomputed on load.
+    #[arg(long)]
+    comb: bool,
+}
+
+#[derive(Args)]
+struct StateDiffArgs {
+    left: PathBuf,
+    right: PathBuf,
+
+    /// Also compare combinational objects. Optimizations may leave their
+    /// saved values stale.
+    #[arg(long)]
+    comb: bool,
 }
 
 #[derive(Args)]
@@ -349,22 +389,125 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     check_results(&python, &results_file)
 }
 
-fn run() -> Result<(), String> {
+fn read_state_file(path: &Path) -> Result<StateFile, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    StateFile::read_from(std::io::BufReader::new(file))
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))
+}
+
+fn format_object(object: &StateObject) -> String {
+    format_state_value(&object.value, object.mask.as_deref(), object.width)
+}
+
+fn dump_state(file: &StateFile, comb: bool, out: &mut impl Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "four-state: {}",
+        if file.four_state { "yes" } else { "no" }
+    )?;
+    if let Some(schedule) = &file.schedule {
+        writeln!(out, "time: {}", schedule.time)?;
+        for (event, period) in &schedule.clocks {
+            writeln!(out, "clock {event} period {period}")?;
+        }
+        let mut events: Vec<_> = schedule.events.iter().collect();
+        events.sort_by(|a, b| (a.time, &a.event).cmp(&(b.time, &b.event)));
+        for event in events {
+            writeln!(
+                out,
+                "event at {}: {} <= {} ({})",
+                event.time, event.signal, event.value, event.event
+            )?;
+        }
+    }
+    for object in &file.objects {
+        if object.role == StateRole::Comb && !comb {
+            continue;
+        }
+        let role = match object.role {
+            StateRole::State => "state",
+            StateRole::Comb => "comb ",
+        };
+        writeln!(
+            out,
+            "{role} {}[{}] = {}",
+            object.path,
+            object.width,
+            format_object(object)
+        )?;
+    }
+    Ok(())
+}
+
+/// Print the differences and report whether there were any.
+fn diff_state(
+    left: &StateFile,
+    right: &StateFile,
+    comb: bool,
+    out: &mut impl Write,
+) -> std::io::Result<bool> {
+    let differences = left.diff(right, comb);
+    for difference in &differences {
+        match difference {
+            StateDifference::Changed { path, left, right } => writeln!(
+                out,
+                "~ {path}: {} -> {}",
+                format_object(left),
+                format_object(right)
+            )?,
+            StateDifference::OnlyLeft(object) => {
+                writeln!(out, "- {} = {}", object.path, format_object(object))?
+            }
+            StateDifference::OnlyRight(object) => {
+                writeln!(out, "+ {} = {}", object.path, format_object(object))?
+            }
+        }
+    }
+    Ok(!differences.is_empty())
+}
+
+fn run_state(arguments: StateArgs) -> Result<ExitCode, String> {
+    let mut out = std::io::stdout().lock();
+    let io_error = |error: std::io::Error| format!("failed to write output: {error}");
+    match arguments.command {
+        StateCommand::Dump(arguments) => {
+            let file = read_state_file(&arguments.file)?;
+            dump_state(&file, arguments.comb, &mut out).map_err(io_error)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        StateCommand::Diff(arguments) => {
+            let left = read_state_file(&arguments.left)?;
+            let right = read_state_file(&arguments.right)?;
+            let differ = diff_state(&left, &right, arguments.comb, &mut out).map_err(io_error)?;
+            Ok(if differ {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+    }
+}
+
+fn run() -> Result<ExitCode, String> {
     match NativeProgramImage::discover_in_current_executable()
         .map_err(|error| format!("failed to inspect the celox executable: {error}"))?
     {
-        Some(attached) => run_simulation(attached.image, SimulationArgs::parse()),
+        Some(attached) => {
+            run_simulation(attached.image, SimulationArgs::parse()).map(|()| ExitCode::SUCCESS)
+        }
         None => match Cli::parse().command {
             CliCommand::Vpi(arguments) => match arguments.command {
-                VpiCommand::Build(arguments) => build(arguments),
+                VpiCommand::Build(arguments) => build(arguments).map(|()| ExitCode::SUCCESS),
             },
+            CliCommand::State(arguments) => run_state(arguments),
         },
     }
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             let _ = writeln!(std::io::stderr(), "celox: {error}");
             ExitCode::FAILURE
@@ -376,11 +519,73 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn state_file(count: u8, stale: u8) -> StateFile {
+        let object = |path: &str, role, value: u8, mask: u8| StateObject {
+            path: path.into(),
+            width: 8,
+            role,
+            is_4state: true,
+            value: vec![value],
+            mask: Some(vec![mask]),
+        };
+        StateFile {
+            four_state: true,
+            objects: vec![
+                object("count", StateRole::State, count, 0),
+                object("flags", StateRole::State, 0x30, 0x0f),
+                object("next", StateRole::Comb, stale, 0),
+            ],
+            schedule: None,
+        }
+    }
+
+    #[test]
+    fn state_dump_hides_combinational_objects_by_default() {
+        let mut out = Vec::new();
+        dump_state(&state_file(5, 6), false, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "four-state: yes\nstate count[8] = 05\nstate flags[8] = 3x\n"
+        );
+        let mut out = Vec::new();
+        dump_state(&state_file(5, 6), true, &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .ends_with("comb  next[8] = 06\n")
+        );
+    }
+
+    #[test]
+    fn state_diff_reports_changed_state() {
+        let mut out = Vec::new();
+        assert!(!diff_state(&state_file(5, 6), &state_file(5, 9), false, &mut out).unwrap());
+        assert!(out.is_empty());
+        assert!(diff_state(&state_file(5, 6), &state_file(7, 6), false, &mut out).unwrap());
+        assert_eq!(String::from_utf8(out).unwrap(), "~ count: 05 -> 07\n");
+    }
+
+    #[test]
+    fn state_subcommands_parse() {
+        let cli = Cli::try_parse_from(["celox", "state", "diff", "a.state", "b.state", "--comb"])
+            .expect("valid state diff command");
+        let CliCommand::State(StateArgs {
+            command: StateCommand::Diff(arguments),
+        }) = cli.command
+        else {
+            panic!("expected the state diff command");
+        };
+        assert!(arguments.comb);
+        assert_eq!(arguments.right, Path::new("b.state"));
+    }
+
     #[test]
     fn vpi_build_arguments_have_a_default_output() {
         let cli = Cli::try_parse_from(["celox", "vpi", "build", "top.veryl", "--top", "Top"])
             .expect("valid VPI build command");
-        let CliCommand::Vpi(arguments) = cli.command;
+        let CliCommand::Vpi(arguments) = cli.command else {
+            panic!("expected the vpi command");
+        };
         let VpiCommand::Build(arguments) = arguments.command;
         assert_eq!(arguments.output, Path::new("celox.out"));
     }
