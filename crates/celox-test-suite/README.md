@@ -228,7 +228,8 @@ module Top (a: input logic<8>, o: output logic<8>) {
 
 Clauses come first: one or more `(source PATH PART...)` (a part is text or a
 Veryl standard library file, `(std "fifo/fifo.veryl")`), `(top NAME)`, and
-optionally `(four_state)`, `(expect reject)` and `(tags TAG...)`. Statements
+optionally `(four_state)`, `(expect reject)`, `(tags TAG...)` and
+`(parameter NAME VALUE)`, which sets a parameter of the top module. Statements
 then drive the design: `set`, `eval`, `modify`, `tick`, `assert_eq`, `assert`,
 `let`, `set!`, `for`, `if`, `do`, and `expand` (a template that repeats
 statements with signal names substituted, so that every signal reference stays

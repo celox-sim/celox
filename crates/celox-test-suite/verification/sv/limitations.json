@@ -88,7 +88,8 @@
         "indexed_select::indexed_constants_work_in_ordinary_selection_indices",
         "indexed_select::indexed_runtime_replications_preserve_attached_selections",
         "indexed_select::indexed_select_multidimensional_packed_reads",
-        "synthesizable::struct_assignment_patterns_follow_the_target_layout"
+        "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+        "review_regressions::preserves_four_state_shift_and_bit_select_constants"
       ]
     }
   },
@@ -218,6 +219,74 @@
     }
   },
   {
+    "id": "sv_icarus_inside",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::inside_matches_values_ranges_and_wildcards"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_packed_element_size",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 2 for $size of an element of a multidimensional packed struct member (value.m[0] of logic [1:0][3:0]); IEEE 1800-2023 20.7 makes it the element's size, 4. Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_bounds_and_type_queries"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_mixed_state_struct_members",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_mixed_state_members"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unary_plus_unknown",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "review_regressions::preserves_four_state_arithmetic_case_constants"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_constant_unknown_bits",
     "category": "simulator_two_state",
     "phase": "execute",
@@ -299,6 +368,23 @@
     "cases": {
       "verilator": [
         "generate::rejects_an_escaped_generate_block_named_like_a_port"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_part_select_write_overhang",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 writes the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) into bit 7 instead of discarding it; IEEE 1800-2023 11.5.1 ignores writes to out-of-range bits. Icarus agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang"
       ]
     }
   }

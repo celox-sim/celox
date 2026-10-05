@@ -1712,7 +1712,7 @@ fn folds_compound_four_state_case_labels() {
         ("2'bxz", "{1'bx, 1'bz}"),
         ("2'bxx", "{2{1'bx}}"),
         ("1'bz", "(1'bx ? 1'bz : 1'bz)"),
-        ("2'bxx", "(1'b1 ? 1'sbx : 2'sb00)"),
+        ("2'b0x", "(1'b1 ? 1'sbx : 2'sb00)"),
         ("1'bx", "(1'bx < 1'b1)"),
         ("1'bx", "label()"),
         ("4'b1111", "'1"),
@@ -1753,10 +1753,8 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
     for (overrides, p_value, r_width, r_value) in [
         (HashMap::default(), 0xab, 8, 0xef),
         (
-            [("P".to_string(), 0xcd), ("N".to_string(), 4)]
-                .into_iter()
-                .collect(),
-            0xcd,
+            [("N".to_string(), 4)].into_iter().collect(),
+            0xab,
             16,
             0xcdef,
         ),
@@ -1772,7 +1770,7 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
         for (name, width, signed, value) in [
             ("P", Some(8), Some(false), p_value),
             ("L", Some(8), Some(false), p_value),
-            ("S", Some(8), Some(true), -85),
+            ("S", Some(8), Some(false), 0xab),
             ("F", Some(8), Some(false), 255),
             ("B", Some(8), Some(false), 0xab),
             ("BITS", None, None, 8),
@@ -1787,6 +1785,34 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
             assert_eq!(parameter.resolved_value(), Some(value), "{name}");
         }
     }
+}
+
+#[test]
+fn body_parameters_are_local_with_a_parameter_port_list() {
+    // IEEE 1800-2023 6.20.1: a parameter port list, even an empty one, turns
+    // a `parameter` in the module body into a localparam.
+    for header in ["#(parameter N = 2)", "#()"] {
+        let source = format!("module Top {header} (); parameter P = 1; endmodule");
+        let overrides = [("P".to_string(), 2)].into_iter().collect();
+        let error = analyze_source_with_module_parameter_overrides(
+            &source,
+            Path::new("body_parameter_override.sv"),
+            "Top",
+            &overrides,
+        )
+        .expect_err("a body parameter must not be overridable");
+        assert!(error.to_string().contains("localparam override"), "{error}");
+    }
+    let overrides = [("P".to_string(), 2)].into_iter().collect();
+    let ir = analyze_source_with_module_parameter_overrides(
+        "module Top (); parameter P = 1; endmodule",
+        Path::new("body_parameter_override.sv"),
+        "Top",
+        &overrides,
+    )
+    .expect("without a parameter port list a body parameter is overridable");
+    let parameter = &ir.modules()[0].parameters()[0];
+    assert_eq!(parameter.resolved_value(), Some(2));
 }
 
 #[test]
@@ -1828,11 +1854,14 @@ fn preserves_four_state_shift_and_select_case_constants() {
         ("2'bx0 >> 1", "2'b0x"),
         ("2'bz0 >> 1", "2'b0z"),
         ("4'b10xz << 1", "4'b0xz0"),
-        ("4'sbxz01 >>> 2", "4'bxxxz"),
-        ("4'sbz101 >>> 2", "4'bzzz1"),
+        // An unsigned label makes the comparison unsigned, so `>>>` on
+        // its context-determined operand shifts in zeros (IEEE 1800-2023
+        // 11.8.2).
+        ("4'sbxz01 >>> 2", "4'b00xz"),
+        ("4'sbz101 >>> 2", "4'b00z1"),
         ("4'bx101 >>> 2", "4'b00x1"),
         ("2'bx0 >> 1000", "2'b00"),
-        ("2'sbz0 >>> 1000", "2'bzz"),
+        ("2'sbz0 >>> 1000", "2'b00"),
         ("2'b00 << 1'bx", "2'bxx"),
         ("2'b11 >> 1'bz", "2'bxx"),
         ("{2'bx0}[1]", "1'bx"),
@@ -2021,13 +2050,16 @@ fn resolves_alias_casts_in_generate_local_parameters() {
 
 #[test]
 fn preserves_known_conditional_case_selector_types() {
+    // An unsigned label makes the whole comparison unsigned, so a signed arm
+    // of the selector is zero-extended (IEEE 1800-2023 11.8.2, 12.5).
     for (selector, label) in [
-        ("1'b1 ? 1'sb1 : 2'sb00", "2'b11"),
-        ("1'b0 ? 2'sb00 : 1'sb1", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'b01"),
+        ("1'b0 ? 2'sb00 : 1'sb1", "2'b01"),
         ("1'b1 ? 1'sb1 : 2'b00", "2'b01"),
-        ("1'b1 ? 1'sbx : 2'sb00", "2'bxx"),
+        ("1'b1 ? 1'sbx : 2'sb00", "2'b0x"),
         ("1'b1 ? 1'sbz : 2'b00", "2'b0z"),
         ("1'b1 ? '1 : 2'b00", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'sb11"),
     ] {
         let source = format!(
             "module Top(input logic a, output logic y); \
@@ -2035,6 +2067,19 @@ fn preserves_known_conditional_case_selector_types() {
         );
         analyze_source(&source, Path::new("known_conditional_case.sv"))
             .unwrap_or_else(|error| panic!("{selector}: {error}"));
+    }
+    for (selector, label) in [
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'b11"),
+        ("1'b0 ? 2'sb00 : 1'sb1", "2'b11"),
+        ("1'b1 ? 1'sbx : 2'sb00", "2'bxx"),
+    ] {
+        let source = format!(
+            "module Top(input logic a, output logic y); \
+             always_comb case ({selector}) {label}: y = a; endcase endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unmatched_conditional_case.sv"))
+            .expect_err("an unsigned label must not see a sign-extended selector");
+        assert!(error.to_string().contains("latch inference"), "{error}");
     }
 }
 

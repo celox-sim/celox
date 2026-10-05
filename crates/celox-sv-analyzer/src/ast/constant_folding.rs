@@ -138,7 +138,11 @@ pub(super) fn simplify_constant_mux_conditions(
                 .and_then(|condition| eval_ast_const_expr(&condition, const_env))
             {
                 Some(value) => {
-                    let selected = if value == 0 { else_expr } else { then_expr };
+                    let (selected, unselected) = if value == 0 {
+                        (else_expr, then_expr)
+                    } else {
+                        (then_expr, else_expr)
+                    };
                     let Some(result_type) = result_type else {
                         return selected;
                     };
@@ -154,6 +158,22 @@ pub(super) fn simplify_constant_mux_conditions(
                     let Some(selected_type) = arm_type(&selected) else {
                         return selected;
                     };
+                    // A signed ternary is extended in the context of its
+                    // enclosing expression (IEEE 1800-2023 11.8.2), which may
+                    // turn it unsigned. Keep the ternary so that context can
+                    // still reach the chosen operand.
+                    if result_type.signed {
+                        let (then_expr, else_expr) = if value == 0 {
+                            (unselected, selected)
+                        } else {
+                            (selected, unselected)
+                        };
+                        return Expr::Mux {
+                            condition: Box::new(condition),
+                            then_expr: Box::new(then_expr),
+                            else_expr: Box::new(else_expr),
+                        };
+                    }
                     // Both arms determine a ternary's type, even when its
                     // condition is known. Set that signedness before extending
                     // the chosen value so an unsigned peer prevents sign extension.

@@ -287,9 +287,14 @@ pub(super) fn two_state_case_item_reachability(
         .collect();
     let selector =
         substitute_expr_constants_with_parameter_literals(selector, const_env, &parameter_values);
+    // Folding evaluates an expression at its own width and signedness; the
+    // unfolded selector and labels keep the operands for the case's common
+    // comparison context.
+    let unfolded_selector = expr_to_const(selector.clone());
     let selector = simplify_constant_mux_conditions(selector, const_env);
     let selector = fold_const_integral_expr_preserving_mask(selector, const_env);
     let mut labels_by_item = Vec::new();
+    let mut unfolded_labels_by_item: Vec<Option<Vec<ConstExpr>>> = Vec::new();
     let mut default_index = None;
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
         match item {
@@ -321,21 +326,52 @@ pub(super) fn two_state_case_item_reachability(
                                 &parameter_values,
                             )
                         })
-                        .map(|label| simplify_constant_mux_conditions(label, const_env))
-                        .map(|label| fold_const_integral_expr_preserving_mask(label, const_env))
-                        .and_then(expr_to_const)
                     })
+                    .collect::<Option<Vec<_>>>()?;
+                unfolded_labels_by_item.push(
+                    labels
+                        .iter()
+                        .map(|label| expr_to_const(label.clone()))
+                        .collect::<Option<Vec<_>>>(),
+                );
+                let labels = labels
+                    .into_iter()
+                    .map(|label| simplify_constant_mux_conditions(label, const_env))
+                    .map(|label| fold_const_integral_expr_preserving_mask(label, const_env))
+                    .map(expr_to_const)
                     .collect::<Option<Vec<_>>>()?;
                 labels_by_item.push(Some(labels));
             }
             sv_parser::CaseItem::Default(_) => {
                 default_index = Some(labels_by_item.len());
                 labels_by_item.push(None);
+                unfolded_labels_by_item.push(None);
             }
         }
     }
     let (mut duplicate_reachability, mut has_duplicate) =
         case_item_duplicate_reachability(&labels_by_item, const_env, None);
+    // A constant selector picks its item at analysis time. Compare the
+    // unfolded operands in their common context when every label could be
+    // kept, and the folded ones otherwise.
+    let unfolded_labels_complete = unfolded_labels_by_item
+        .iter()
+        .zip(&labels_by_item)
+        .all(|(unfolded, folded)| unfolded.is_some() || folded.is_none());
+    let constant = match unfolded_selector.as_ref() {
+        Some(unfolded) if unfolded_labels_complete && is_constant(unfolded, const_env) => {
+            let unfolded_labels: Vec<Option<Vec<ConstExpr>>> = unfolded_labels_by_item
+                .iter()
+                .zip(&labels_by_item)
+                .map(|(unfolded, folded)| folded.as_ref().and(unfolded.clone()))
+                .collect();
+            constant_case_item_reachability(unfolded, &unfolded_labels, default_index, const_env)
+        }
+        _ => None,
+    };
+    if let Some(reachability) = constant {
+        return Some(reachability);
+    }
     let constant_selector = expr_to_const(selector.clone());
     if let Some(constant_selector) = constant_selector.as_ref()
         && eval_ast_const_expr(constant_selector, const_env).is_none()
@@ -508,6 +544,34 @@ fn constant_case_item_reachability(
     default_index: Option<usize>,
     const_env: &HashMap<String, i128>,
 ) -> Option<(Vec<bool>, bool)> {
+    // The selector and every label share one width and signing context
+    // (IEEE 1800-2023 12.5): an unsigned label makes the whole comparison
+    // unsigned, down to the operands of a conditional selector.
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let types: HashMap<String, (usize, bool)> = parameter_types
+        .iter()
+        .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
+        .collect();
+    let typed = |expr: &ConstExpr| -> crate::ir::ConstExpr {
+        substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types).into()
+    };
+    let self_type = |expr: &ConstExpr| -> Option<(usize, bool)> {
+        let literal =
+            typecheck::eval_const_integral_literal_with_types(&typed(expr), const_env, &types)?;
+        let fill = matches!(expr, ConstExpr::Literal(literal)
+            if resize_unbased_fill_literal_for_cast(literal, 1, false).is_some());
+        Some((if fill { 1 } else { literal.width }, literal.signed))
+    };
+    let (mut width, mut signed) = self_type(selector)?;
+    for label in labels_by_item.iter().flatten().flatten() {
+        let (label_width, label_signed) = self_type(label)?;
+        width = width.max(label_width);
+        signed &= label_signed;
+    }
+    let normalize = |expr: &ConstExpr| {
+        typecheck::eval_generate_case_operand(&typed(expr), const_env, &types, width, signed)
+    };
+    let selector = normalize(selector)?;
     let mut reachable = vec![false; labels_by_item.len()];
     let mut matched = None;
     for (index, labels) in labels_by_item.iter().enumerate() {
@@ -515,15 +579,8 @@ fn constant_case_item_reachability(
             continue;
         };
         for label in labels {
-            let equal = eval_ast_const_expr(
-                &ConstExpr::Binary {
-                    left: Box::new(selector.clone()),
-                    op: BinaryOp::EqCase,
-                    right: Box::new(label.clone()),
-                },
-                const_env,
-            )?;
-            if equal != 0 {
+            let label = normalize(label)?;
+            if label.value == selector.value && label.mask == selector.mask {
                 matched = Some(index);
                 break;
             }
@@ -743,4 +800,16 @@ pub(super) fn mark_exhaustive_fallback(
             fallback_assignments[index].exhaustive_fallback_start = Some(chain_start);
         }
     }
+}
+
+/// Whether `expr` has a value at analysis time, unknown bits included.
+fn is_constant(expr: &ConstExpr, const_env: &HashMap<String, i128>) -> bool {
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let types: HashMap<String, (usize, bool)> = parameter_types
+        .iter()
+        .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
+        .collect();
+    let typed: crate::ir::ConstExpr =
+        substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types).into();
+    typecheck::eval_const_integral_literal_with_types(&typed, const_env, &types).is_some()
 }
