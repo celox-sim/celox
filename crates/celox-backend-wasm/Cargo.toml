@@ -14,7 +14,7 @@ celox-design = { workspace = true }
 celox-sir = { workspace = true }
 celox-state-layout = { workspace = true }
 fxhash = { workspace = true }
-wasm-encoder = "0.260"
+wasm-encoder = "0.261"
 
 [dev-dependencies]
 celox-backend-cranelift = { workspace = true }
