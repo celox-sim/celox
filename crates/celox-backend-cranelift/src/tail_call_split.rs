@@ -454,58 +454,11 @@ fn compute_liveness_at_candidates(
 }
 
 fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-    }
+    inst.defined_register()
 }
 
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            out.push(*lhs);
-            out.push(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src) => {
-            out.push(*src);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-            out.push(*src);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
-        SIRInstruction::Slice(_, src, _, _) => {
-            out.push(*src);
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            out.push(*cond);
-            out.push(*then_val);
-            out.push(*else_val);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            out.push(*old);
-            out.push(*new);
-        }
-    }
+    inst.for_each_use(|register| out.push(register));
 }
 
 // ---------------------------------------------------------------------------

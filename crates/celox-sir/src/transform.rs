@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    BasicBlock, BlockId, ExecutionUnit, HashMap, HashSet, RegisterId, SIRInstruction, SIROffset,
+    BasicBlock, BlockId, ExecutionUnit, HashMap, HashSet, RegisterId, SIRInstruction,
     SIRSwitchCase, SIRTerminator,
 };
 
@@ -301,83 +301,15 @@ pub fn inline_single_predecessor_jumps<A: Clone>(
     }
     Ok(changed)
 }
-fn replace_sir_offset_uses(offset: &mut SIROffset, replacements: &HashMap<RegisterId, RegisterId>) {
-    match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => {
-            if let Some(&replacement) = replacements.get(register) {
-                *register = replacement;
-            }
-        }
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            if let Some(&replacement) = replacements.get(index) {
-                *index = replacement;
-            }
-            if let Some(register) = dynamic_bit_offset {
-                if let Some(&replacement) = replacements.get(register) {
-                    *register = replacement;
-                }
-            }
-        }
-    }
-}
 fn replace_sir_uses<A>(
     instruction: &mut SIRInstruction<A>,
     replacements: &HashMap<RegisterId, RegisterId>,
 ) {
-    let replace = |register: &mut RegisterId| {
+    instruction.for_each_use_mut(|register| {
         if let Some(&replacement) = replacements.get(register) {
             *register = replacement;
         }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            replace(source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            replace_sir_offset_uses(offset, replacements);
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_sir_offset_uses(offset, replacements);
-            replace(source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            replace_sir_offset_uses(offset, replacements);
-        }
-        SIRInstruction::Concat(_, sources) => {
-            for source in sources {
-                replace(source);
-            }
-        }
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            replace(condition);
-            replace(then_value);
-            replace(else_value);
-        }
-        SIRInstruction::RuntimeEvent { args, .. } => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            replace(old);
-            replace(new);
-        }
-    }
+    });
 }
 fn replace_sir_terminator_uses(
     terminator: &mut SIRTerminator,
@@ -422,86 +354,11 @@ fn renumber_sir_inst<A: Clone>(
     ro: usize,
     _bo: usize,
 ) -> SIRInstruction<A> {
-    let r = |reg: RegisterId| RegisterId(reg.0 + ro);
-    let off = |o: &SIROffset| match o {
-        SIROffset::Static(v) => SIROffset::Static(*v),
-        SIROffset::Dynamic(reg) => SIROffset::Dynamic(r(*reg)),
-        SIROffset::Element {
-            index,
-            element_width,
-            bit_offset,
-            dynamic_bit_offset,
-        } => SIROffset::Element {
-            index: r(*index),
-            element_width: *element_width,
-            bit_offset: *bit_offset,
-            dynamic_bit_offset: dynamic_bit_offset.map(r),
-        },
-        SIROffset::PackedElements {
-            bit_offset,
-            element_width,
-        } => SIROffset::PackedElements {
-            bit_offset: *bit_offset,
-            element_width: *element_width,
-        },
-    };
-
-    match inst {
-        SIRInstruction::Imm(dst, val) => SIRInstruction::Imm(r(*dst), val.clone()),
-        SIRInstruction::Load(dst, addr, offset, width) => {
-            SIRInstruction::Load(r(*dst), addr.clone(), off(offset), *width)
-        }
-        SIRInstruction::Store(addr, offset, width, src, triggers, comb_capture_sites) => {
-            SIRInstruction::Store(
-                addr.clone(),
-                off(offset),
-                *width,
-                r(*src),
-                triggers.clone(),
-                comb_capture_sites.clone(),
-            )
-        }
-        SIRInstruction::Commit(src, dst, offset, width, triggers) => SIRInstruction::Commit(
-            src.clone(),
-            dst.clone(),
-            off(offset),
-            *width,
-            triggers.clone(),
-        ),
-        SIRInstruction::Binary(dst, lhs, op, rhs) => {
-            SIRInstruction::Binary(r(*dst), r(*lhs), *op, r(*rhs))
-        }
-        SIRInstruction::Unary(dst, op, src) => SIRInstruction::Unary(r(*dst), *op, r(*src)),
-        SIRInstruction::Concat(dst, args) => {
-            SIRInstruction::Concat(r(*dst), args.iter().map(|a| r(*a)).collect())
-        }
-        SIRInstruction::Slice(dst, src, offset, width) => {
-            SIRInstruction::Slice(r(*dst), r(*src), *offset, *width)
-        }
-        SIRInstruction::Mux(dst, cond, then_val, else_val) => {
-            SIRInstruction::Mux(r(*dst), r(*cond), r(*then_val), r(*else_val))
-        }
-        SIRInstruction::RuntimeEvent { site_id, args } => SIRInstruction::RuntimeEvent {
-            site_id: *site_id,
-            args: args.iter().map(|a| r(*a)).collect(),
-        },
-        SIRInstruction::CombCaptureEvent {
-            site_id,
-            args,
-            fatal_error_code,
-            consume_enabled,
-        } => SIRInstruction::CombCaptureEvent {
-            site_id: *site_id,
-            args: args.iter().map(|a| r(*a)).collect(),
-            fatal_error_code: *fatal_error_code,
-            consume_enabled: *consume_enabled,
-        },
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
-            SIRInstruction::CombCaptureEnableIfChanged {
-                old: r(*old),
-                new: r(*new),
-                sites: sites.clone(),
-            }
-        }
+    let mut inst = inst.clone();
+    let renumber = |register: &mut RegisterId| register.0 += ro;
+    inst.for_each_use_mut(renumber);
+    if let Some(dst) = inst.defined_register_mut() {
+        renumber(dst);
     }
+    inst
 }

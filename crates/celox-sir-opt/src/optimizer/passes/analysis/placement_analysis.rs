@@ -14,8 +14,7 @@ use super::state_ssa::{MemoryVersionId, StateFragment, StateSsa, StateSsaError};
 use crate::HashMap;
 use crate::ir::cfg::{SirCfg, SirCfgError};
 use crate::ir::{
-    BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
-    SIRTerminator,
+    BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIRTerminator,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,6 +45,7 @@ pub(in crate::optimizer) struct StateToken {
 pub(in crate::optimizer) enum PinReason {
     BlockParameter,
     UnversionedStateRead,
+    EffectDefinition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,11 +107,9 @@ pub(in crate::optimizer) enum EffectToken {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::optimizer) enum EffectKind {
-    StateWrite,
-    Commit,
-    RuntimeEvent,
-    CaptureEvent,
-    CaptureEnable,
+    /// An instruction with a side effect.
+    Instruction,
+    /// An `Error` terminator.
     Error,
 }
 
@@ -296,12 +294,7 @@ impl PlacementAnalysis {
                     continue;
                 };
                 let safety = match instruction {
-                    SIRInstruction::Imm(..)
-                    | SIRInstruction::Binary(..)
-                    | SIRInstruction::Unary(..)
-                    | SIRInstruction::Concat(..)
-                    | SIRInstruction::Slice(..)
-                    | SIRInstruction::Mux(..) => ValueSafety::Pure,
+                    _ if instruction.is_pure() => ValueSafety::Pure,
                     SIRInstruction::Load(destination, address, ..) => {
                         if include_state_and_effects {
                             state
@@ -319,13 +312,8 @@ impl PlacementAnalysis {
                             ValueSafety::Pinned(PinReason::UnversionedStateRead)
                         }
                     }
-                    SIRInstruction::Store(..)
-                    | SIRInstruction::Commit(..)
-                    | SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-                        unreachable!("effect instruction cannot define a SIR register")
-                    }
+                    // A definition with an effect is executed where it stands.
+                    _ => ValueSafety::Pinned(PinReason::EffectDefinition),
                 };
                 insert_value(
                     &mut values,
@@ -877,34 +865,9 @@ fn collect_edge_uses(
 }
 
 fn instruction_operands(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
-    match instruction {
-        SIRInstruction::Imm(..) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            vec![*source]
-        }
-        SIRInstruction::Load(_, _, offset, _) => offset_operands(offset),
-        SIRInstruction::Store(_, offset, _, source, _, _) => offset_operands(offset)
-            .into_iter()
-            .chain(std::iter::once(*source))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => offset_operands(offset),
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => arguments.clone(),
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            vec![*condition, *true_value, *false_value]
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
-}
-
-fn offset_operands(offset: &SIROffset) -> Vec<RegisterId> {
-    offset.dynamic_registers().into_iter().flatten().collect()
+    let mut operands = Vec::new();
+    instruction.for_each_use(|register| operands.push(register));
+    operands
 }
 
 fn build_effect_ssa(
@@ -916,22 +879,9 @@ fn build_effect_ssa(
     let mut def_blocks = BTreeSet::<usize>::new();
     for (block, &block_id) in cfg.block_ids.iter().enumerate() {
         for (index, instruction) in eu.blocks[&block_id].instructions.iter().enumerate() {
-            let kind = match instruction {
-                SIRInstruction::Store(..) => Some(EffectKind::StateWrite),
-                SIRInstruction::Commit(..) => Some(EffectKind::Commit),
-                SIRInstruction::RuntimeEvent { .. } => Some(EffectKind::RuntimeEvent),
-                SIRInstruction::CombCaptureEvent { .. } => Some(EffectKind::CaptureEvent),
-                SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-                    Some(EffectKind::CaptureEnable)
-                }
-                SIRInstruction::Imm(..)
-                | SIRInstruction::Binary(..)
-                | SIRInstruction::Unary(..)
-                | SIRInstruction::Load(..)
-                | SIRInstruction::Concat(..)
-                | SIRInstruction::Slice(..)
-                | SIRInstruction::Mux(..) => None,
-            };
+            let kind = instruction
+                .has_side_effects()
+                .then_some(EffectKind::Instruction);
             if let Some(kind) = kind {
                 push_effect(
                     &mut effects,
@@ -1075,7 +1025,7 @@ fn push_effect(
 mod tests {
     use super::*;
     use crate::ir::{
-        BasicBlock, BinaryOp, InstanceId, RegisterType, SIRValue, STABLE_REGION, UnaryOp,
+        BasicBlock, BinaryOp, InstanceId, RegisterType, SIROffset, SIRValue, STABLE_REGION, UnaryOp,
     };
     use celox_design::StateObjectId as VarId;
 

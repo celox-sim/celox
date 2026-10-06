@@ -32,7 +32,7 @@ on:
         type: string
         default: ""
       suite_runner:
-        description: Backends to run, space-separated (empty runs all four; long workloads use separate groups)
+        description: Backends to run, space-separated (empty runs all; long workloads use separate groups)
         type: string
         default: ""
       suite_arch:

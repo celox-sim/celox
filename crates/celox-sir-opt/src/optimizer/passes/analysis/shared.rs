@@ -58,20 +58,16 @@ pub(in crate::optimizer) fn normalize_branch_condition<A>(
 
 /// Returns `Some(RegisterId)` for instructions that define a register.
 pub(in crate::optimizer) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(_, _, _, _, _, _)
-        | SIRInstruction::Commit(_, _, _, _, _)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-    }
+    inst.defined_register()
+}
+
+/// Whether an instruction can be removed because nothing uses the register it
+/// defines and it has no side effect.
+pub(in crate::optimizer) fn is_unused_definition<A>(
+    inst: &SIRInstruction<A>,
+    used: &HashSet<RegisterId>,
+) -> bool {
+    !inst.has_side_effects() && def_reg(inst).is_some_and(|register| !used.contains(&register))
 }
 
 /// Try to extract a u64 value from a SIRValue that represents a 2-state constant.
@@ -124,45 +120,9 @@ fn collect_used_regs_into(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     out: &mut HashSet<RegisterId>,
 ) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            out.insert(*lhs);
-            out.insert(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src) => {
-            out.insert(*src);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-            out.insert(*src);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args) => {
-            out.extend(args.iter().copied());
-        }
-        SIRInstruction::Slice(_, src, _, _) => {
-            out.insert(*src);
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            out.insert(*cond);
-            out.insert(*then_val);
-            out.insert(*else_val);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            out.extend(args.iter().copied());
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            out.insert(*old);
-            out.insert(*new);
-        }
-    }
+    inst.for_each_use(|register| {
+        out.insert(register);
+    });
 }
 
 fn collect_terminator_used_regs(term: &SIRTerminator, out: &mut HashSet<RegisterId>) {
@@ -398,101 +358,15 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
     }
 }
 
-pub(in crate::optimizer) fn replace_offset_registers(
-    offset: &mut SIROffset,
-    map: &HashMap<RegisterId, RegisterId>,
-) {
-    match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => {
-            if let Some(&replacement) = map.get(register) {
-                *register = replacement;
-            }
-        }
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            if let Some(&replacement) = map.get(index) {
-                *index = replacement;
-            }
-            if let Some(dynamic) = dynamic_bit_offset
-                && let Some(&replacement) = map.get(dynamic)
-            {
-                *dynamic = replacement;
-            }
-        }
-    }
-}
-
 pub(in crate::optimizer) fn batch_replace_in_inst(
     inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
     map: &HashMap<RegisterId, RegisterId>,
 ) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            if let Some(&to) = map.get(lhs) {
-                *lhs = to;
-            }
-            if let Some(&to) = map.get(rhs) {
-                *rhs = to;
-            }
+    inst.for_each_use_mut(|register| {
+        if let Some(&replacement) = map.get(register) {
+            *register = replacement;
         }
-        SIRInstruction::Unary(_, _, src) => {
-            if let Some(&to) = map.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Load(_, _, offset, _) => replace_offset_registers(offset, map),
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            replace_offset_registers(offset, map);
-            if let Some(&to) = map.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => replace_offset_registers(offset, map),
-        SIRInstruction::Concat(_, args) => {
-            for arg in args {
-                if let Some(&to) = map.get(arg) {
-                    *arg = to;
-                }
-            }
-        }
-        SIRInstruction::Slice(_, src, _, _) => {
-            if let Some(&to) = map.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            if let Some(&to) = map.get(cond) {
-                *cond = to;
-            }
-            if let Some(&to) = map.get(then_val) {
-                *then_val = to;
-            }
-            if let Some(&to) = map.get(else_val) {
-                *else_val = to;
-            }
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                if let Some(&to) = map.get(arg) {
-                    *arg = to;
-                }
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            if let Some(&to) = map.get(old) {
-                *old = to;
-            }
-            if let Some(&to) = map.get(new) {
-                *new = to;
-            }
-        }
-    }
+    });
 }
 
 pub(in crate::optimizer) fn batch_replace_in_terminator(

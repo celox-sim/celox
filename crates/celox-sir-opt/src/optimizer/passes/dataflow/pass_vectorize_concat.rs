@@ -750,40 +750,7 @@ fn push_instruction_uses(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     worklist: &mut Vec<RegisterId>,
 ) {
-    match inst {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            worklist.push(*lhs);
-            worklist.push(*rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-            worklist.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            worklist.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            worklist.push(*source);
-            worklist.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            worklist.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            worklist.extend(args.iter().copied());
-        }
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            worklist.push(*condition);
-            worklist.push(*then_value);
-            worklist.push(*else_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            worklist.push(*old);
-            worklist.push(*new);
-        }
-    }
+    inst.for_each_use(|register| worklist.push(register));
 }
 
 fn push_terminator_control_uses(terminator: &SIRTerminator, worklist: &mut Vec<RegisterId>) {
@@ -838,9 +805,9 @@ fn collect_register_use_counts(
     counts
 }
 
-/// Remove dead pure definitions in one O(instructions + operand edges)
-/// mark/sweep. Loads are pure SIR values; stores, commits and runtime/capture
-/// events are observable roots. Block parameters are phi definitions: an
+/// Remove dead definitions in one O(instructions + operand edges)
+/// mark/sweep. Instructions with side effects are roots; other definitions,
+/// including loads, are removed when unused. Block parameters are phi definitions: an
 /// incoming edge argument is live only when its corresponding parameter is
 /// live. Treating every edge argument as a root retains complete producer
 /// cones for unused merge parameters.
@@ -853,7 +820,8 @@ pub(in crate::optimizer) fn remove_dead_definitions(eu: &mut ExecutionUnit<Regio
         for (instruction_index, inst) in block.instructions.iter().enumerate() {
             if let Some(definition) = def_reg(inst) {
                 definitions.insert(definition, (block_id, instruction_index));
-            } else {
+            }
+            if inst.has_side_effects() {
                 push_instruction_uses(inst, &mut worklist);
             }
         }
@@ -949,7 +917,7 @@ pub(in crate::optimizer) fn remove_dead_definitions(eu: &mut ExecutionUnit<Regio
             let Some(definition) = def_reg(inst) else {
                 return true;
             };
-            let retain = live.contains(&definition);
+            let retain = inst.has_side_effects() || live.contains(&definition);
             if !retain {
                 removed_registers.insert(definition);
             }

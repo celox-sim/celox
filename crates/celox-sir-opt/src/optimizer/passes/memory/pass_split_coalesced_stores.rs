@@ -66,29 +66,14 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
                 _ => None,
             }
             .max(last_observable);
-            match inst {
-                SIRInstruction::Load(_, addr, ..) => {
-                    last_access.insert(*addr, si);
-                }
-                SIRInstruction::Store(addr, _, _, _, triggers, sites) => {
-                    last_access.insert(*addr, si);
-                    if !triggers.is_empty() || !sites.is_empty() {
-                        last_observable = Some(si);
-                    }
-                }
-                SIRInstruction::Commit(src, dst, _, _, triggers) => {
-                    last_access.insert(*src, si);
-                    last_access.insert(*dst, si);
-                    if !triggers.is_empty() {
-                        last_observable = Some(si);
-                    }
-                }
-                SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-                    last_observable = Some(si);
-                }
-                _ => {}
+            for access in [inst.memory_read(), inst.memory_write()]
+                .into_iter()
+                .flatten()
+            {
+                last_access.insert(*access.addr, si);
+            }
+            if inst.is_observable() {
+                last_observable = Some(si);
             }
             let (addr, offset, width, src_reg, comb_capture_sites) = match inst {
                 SIRInstruction::Store(
@@ -257,20 +242,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
 }
 
 fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(d, _)
-        | SIRInstruction::Load(d, _, _, _)
-        | SIRInstruction::Binary(d, _, _, _)
-        | SIRInstruction::Unary(d, _, _)
-        | SIRInstruction::Concat(d, _)
-        | SIRInstruction::Slice(d, _, _, _)
-        | SIRInstruction::Mux(d, _, _, _) => Some(*d),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-    }
+    inst.defined_register()
 }
 
 #[cfg(test)]

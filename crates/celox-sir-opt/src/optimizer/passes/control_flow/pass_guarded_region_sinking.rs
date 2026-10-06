@@ -1791,57 +1791,11 @@ fn replace_register_uses_in_instruction(
     old: RegisterId,
     new: RegisterId,
 ) {
-    let replace = |register: &mut RegisterId| {
+    instruction.for_each_use_mut(|register| {
         if *register == old {
             *register = new;
         }
-    };
-    let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => replace(register),
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            replace(index);
-            if let Some(offset) = dynamic_bit_offset {
-                replace(offset);
-            }
-        }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-            replace(source)
-        }
-        SIRInstruction::Load(_, _, offset, _) => replace_offset(offset),
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_offset(offset);
-            replace(source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => replace_offset(offset),
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            replace(condition);
-            replace(true_value);
-            replace(false_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            replace(old);
-            replace(new);
-        }
-    }
+    });
 }
 
 fn replace_register_uses_in_terminator(
@@ -3548,58 +3502,17 @@ fn clone_pure_instruction(
     dst: RegisterId,
     replacements: &HashMap<RegisterId, RegisterId>,
 ) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
-    let mapped = |value: RegisterId| replacements.get(&value).copied().unwrap_or(value);
-    Some(match inst {
-        SIRInstruction::Imm(_, value) => SIRInstruction::Imm(dst, value.clone()),
-        SIRInstruction::Binary(_, lhs, op, rhs) => {
-            SIRInstruction::Binary(dst, mapped(*lhs), *op, mapped(*rhs))
+    if inst.has_side_effects() {
+        return None;
+    }
+    let mut clone = inst.clone();
+    clone.for_each_use_mut(|value| {
+        if let Some(&replacement) = replacements.get(value) {
+            *value = replacement;
         }
-        SIRInstruction::Unary(_, op, source) => SIRInstruction::Unary(dst, *op, mapped(*source)),
-        SIRInstruction::Concat(_, args) => {
-            SIRInstruction::Concat(dst, args.iter().copied().map(mapped).collect())
-        }
-        SIRInstruction::Slice(_, source, lsb, width) => {
-            SIRInstruction::Slice(dst, mapped(*source), *lsb, *width)
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => SIRInstruction::Mux(
-            dst,
-            mapped(*condition),
-            mapped(*true_value),
-            mapped(*false_value),
-        ),
-        SIRInstruction::Load(_, address, offset, width) => SIRInstruction::Load(
-            dst,
-            *address,
-            match offset {
-                SIROffset::Static(offset) => SIROffset::Static(*offset),
-                SIROffset::Dynamic(offset) => SIROffset::Dynamic(mapped(*offset)),
-                SIROffset::Element {
-                    index,
-                    element_width,
-                    bit_offset,
-                    dynamic_bit_offset,
-                } => SIROffset::Element {
-                    index: mapped(*index),
-                    element_width: *element_width,
-                    bit_offset: *bit_offset,
-                    dynamic_bit_offset: dynamic_bit_offset.map(mapped),
-                },
-                SIROffset::PackedElements {
-                    bit_offset,
-                    element_width,
-                } => SIROffset::PackedElements {
-                    bit_offset: *bit_offset,
-                    element_width: *element_width,
-                },
-            },
-            *width,
-        ),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => return None,
-    })
+    });
+    *clone.defined_register_mut()? = dst;
+    Some(clone)
 }
 
 fn instruction_is_same_predicate_region_value(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
@@ -4186,14 +4099,7 @@ fn instruction_is_movable(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
 }
 
 fn instruction_has_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::Store(..)
-            | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    inst.has_side_effects()
 }
 
 #[cfg(test)]

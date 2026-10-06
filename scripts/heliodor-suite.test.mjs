@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { matrix, suiteRevision, prepareSuiteTestbench, validateResults, runners, workloads } from "./heliodor-suite.mjs";
+import { matrix, suiteRevision, prepareSuiteTestbench, validateResults, runners, workloads, parallelRunner } from "./heliodor-suite.mjs";
 
 test("default runs, acceptance gate, and suite share one pinned revision", () => {
   const refs = execFileSync("bash", ["-c", 'unset HELIODOR_REF; source scripts/run-heliodor-bench.sh; printf "%s\\n" "$HELIODOR_REF" "$GATE_HELIODOR_REF"'], { encoding: "utf8" }).trim().split("\n");
@@ -12,21 +12,23 @@ test("default runs, acceptance gate, and suite share one pinned revision", () =>
   assert.deepEqual(refs, [suiteRevision, suiteRevision]);
 });
 
-test("suite splits only long comparisons and runs all 72 backend cases exactly once", () => {
+test("suite splits only long comparisons and runs all 82 backend cases exactly once", () => {
   const jobs = matrix().include;
-  assert.equal(jobs.length, 26);
-  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.group}`)).size, 26);
+  assert.equal(jobs.length, 36);
+  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.group}`)).size, 36);
   const cases = jobs.flatMap(j => j.runner.split(" ").map(r => `${j.arch}/${j.test}/${r}`));
-  assert.equal(cases.length, 72);
-  assert.equal(new Set(cases).size, 72);
+  assert.equal(cases.length, 82);
+  assert.equal(new Set(cases).size, 82);
   for (const arch of ["x86_64", "aarch64"]) {
     for (const test of workloads) {
       const groups = jobs.filter(j => j.arch === arch && j.test === test).map(j => j.runner.split(" "));
-      if (test.endsWith("8hart")) assert.deepEqual(groups, runners.map(r => [r]));
+      // Multi-threaded Celox runs only on SMP workloads, in its own group.
+      const parallel = test.includes("_smp_") ? [[parallelRunner]] : [];
+      if (test.endsWith("8hart")) assert.deepEqual(groups, [...runners.map(r => [r]), ...parallel]);
       else if (arch === "aarch64" && test.endsWith("4hart")) assert.deepEqual(groups, [
-        ["veryl-cc-sync", "celox"], ["celox-tiered", "veryl-cc-tiered"],
+        ["veryl-cc-sync", "celox"], ["celox-tiered", "veryl-cc-tiered"], ...parallel,
       ]);
-      else assert.deepEqual(groups, [runners]);
+      else assert.deepEqual(groups, [runners, ...parallel]);
     }
   }
   for (const job of jobs) {
@@ -49,7 +51,7 @@ test("N=8 runner time remains available after a cold build inside the group budg
     assert.ok(buildSeconds + job.timeout_sec + 30 < job.group_timeout_sec,
       `${job.runner}: group must allow the runner to finish and record its result`);
   }
-  for (const runner of runners) {
+  for (const runner of [...runners, parallelRunner]) {
     assert.deepEqual(matrix({ test: "test_soc_smp_linux_boot_8hart", arch: "aarch64", runner }).include,
       jobs.filter(job => job.runner === runner));
   }
@@ -74,6 +76,8 @@ test("explicit backends retain their groups and run in the requested order withi
   assert.deepEqual(paired.map(j => [j.group, j.runner]), [["sync", "celox veryl-cc-sync"], ["tiered", "veryl-cc-tiered"]]);
   assert.equal(matrix({ runner: "celox" }).include.length, 18);
   assert.equal(matrix({ runner: "celox" }).include.every(job => job.runner === "celox"), true);
+  assert.equal(matrix({ runner: parallelRunner }).include.length, 10);
+  assert.ok(matrix({ runner: parallelRunner }).include.every(job => job.test.includes("_smp_") && job.group === "parallel"));
   assert.throws(() => matrix({ runner: "celox celox" }), /Duplicate/);
   assert.throws(() => matrix({ runner: "celox invalid" }), /Unknown suite runner/);
 });
