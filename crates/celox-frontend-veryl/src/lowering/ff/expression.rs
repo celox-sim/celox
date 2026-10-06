@@ -2891,8 +2891,10 @@ impl<'a> FfParser<'a> {
                 if let Some(guard) = guard.as_deref_mut() {
                     let outer = if i == 0 { total_width } else { strides[i - 1] };
                     let limit = outer / stride.max(1);
-                    guard.clamp |=
-                        index_bits_exceed(ir_builder.register(&index_reg).width(), limit);
+                    // A negative index is sign-extended when it is scaled, so
+                    // its raw bits do not bound the address.
+                    guard.clamp |= expr.comptime().r#type.signed
+                        || index_bits_exceed(ir_builder.register(&index_reg).width(), limit);
                     and_index_guard(
                         &mut guard.indices,
                         index_reg,
@@ -3021,10 +3023,11 @@ impl<'a> FfParser<'a> {
                             });
                         }
                         _ => {
-                            guard.clamp |= index_bits_exceed(
-                                ir_builder.register(&index_reg).width(),
-                                dimension_width,
-                            );
+                            guard.clamp |= signed
+                                || index_bits_exceed(
+                                    ir_builder.register(&index_reg).width(),
+                                    dimension_width,
+                                );
                             and_index_guard(
                                 &mut guard.indices,
                                 index_reg,

@@ -3177,6 +3177,19 @@ fn slt_index_exceeds(arena: &SLTNodeArena<VarId>, node: NodeId, limit: usize) ->
     slt_max_value(arena, node) >= BigUint::from(limit)
 }
 
+/// A signed index whose sign bit can be set. Scaling sign-extends it, so its
+/// raw bits do not bound the address it reaches.
+fn slt_index_may_be_negative(
+    arena: &SLTNodeArena<VarId>,
+    node: NodeId,
+    expression: &Expression,
+) -> bool {
+    let width = expr::get_width(node, arena);
+    expression.comptime().r#type.signed
+        && width > 0
+        && slt_max_value(arena, node) >> (width - 1) != BigUint::zero()
+}
+
 /// The condition that a runtime index is known, non-negative and less than
 /// `limit` (`None`: unbounded), or `None` when it always is
 /// (IEEE 1800-2023 7.4.6).
@@ -3446,7 +3459,8 @@ fn eval_dynamic_select_offset(
                 token,
             )
         })?;
-        clamp |= slt_index_exceeds(arena, node, dimension_width(dimension));
+        clamp |= slt_index_may_be_negative(arena, node, expression)
+            || slt_index_exceeds(arena, node, dimension_width(dimension));
         if let Some(guard) =
             slt_index_guard(arena, node, expression, Some(dimension_width(dimension)))?
         {
@@ -3521,7 +3535,10 @@ fn eval_dynamic_select_offset(
                     indices_valid = Some(and_slt_condition(arena, indices_valid, guard)?);
                 }
                 let width = dimension_width(geometry.dimension_count);
-                let anchor_max = slt_max_value(arena, anchor).to_u64();
+                // A possibly negative anchor takes the clamped partial path.
+                let anchor_max = (!slt_index_may_be_negative(arena, anchor, anchor_expression))
+                    .then(|| slt_max_value(arena, anchor).to_u64())
+                    .flatten();
                 // `position` is the lowest element plus `pad`; it is never
                 // negative once the anchor is.
                 let (start, position, pad, may_be_partial) = match part {

@@ -417,3 +417,75 @@ fn test_out_of_range_dynamic_read_in_function_is_unknown(sim) {
     assert_eq!(sim.get(ff_q), 0x11u8.into());
 }
 }
+
+all_backends! {
+// A negative signed index is invalid (IEEE 1800-2023 7.4.6). Its raw bits fit
+// the outer dimension, but scaling it by the inner dimension sign-extends it,
+// so a read must still redirect its address instead of loading far outside
+// the array.
+fn test_negative_signed_index_reads_and_writes_nothing(sim) {
+    @ignore_on(veryl);
+    @setup {
+        let source = r#"
+            module Top (
+                clk   : input  clock,
+                idx   : input  signed bit<2>,
+                v     : input  logic<8>,
+                comb_q: output logic<8>,
+                ff_q  : output logic<8>,
+                mem_q : output logic<32>,
+            ) {
+                var src: logic<8> [4, 2];
+                var dst: logic<8> [4, 2];
+                var rd : logic<8>;
+                always_comb {
+                    for i in 0..4 {
+                        src[i][0] = (i + 1) as 8;
+                        src[i][1] = 8'h00;
+                    }
+                }
+                always_ff (clk) {
+                    dst[idx][0] = v;
+                    rd          = src[idx][0];
+                }
+                assign comb_q = src[idx][0];
+                assign ff_q   = rd;
+                assign mem_q  = {dst[3][0], dst[2][0], dst[1][0], dst[0][0]};
+            }
+        "#;
+    }
+    @build celox::SimulatorBuilder::new(source, "Top");
+    let clk = sim.event("clk");
+    let idx = sim.signal("idx");
+    let v = sim.signal("v");
+    let comb_q = sim.signal("comb_q");
+    let ff_q = sim.signal("ff_q");
+    let mem_q = sim.signal("mem_q");
+    // Clear `dst` through the in-range indices first.
+    for i in 0u8..2 {
+        sim.modify(|io| {
+            io.set(idx, i);
+            io.set(v, 0u8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+    }
+    // 2'b10 and 2'b11 are -2 and -1.
+    for raw in [2u8, 3] {
+        sim.modify(|io| {
+            io.set(idx, raw);
+            io.set(v, 0xabu8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(comb_q), 0u8.into(), "comb read of idx={raw:#b}");
+        assert_eq!(sim.get(ff_q), 0u8.into(), "always_ff read of idx={raw:#b}");
+        assert_eq!(sim.get(mem_q), 0u8.into(), "always_ff write of idx={raw:#b}");
+    }
+    sim.modify(|io| io.set(idx, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(comb_q), 2u8.into());
+    assert_eq!(sim.get(ff_q), 2u8.into());
+    assert_eq!(sim.get(mem_q), 0xab00u32.into());
+}
+}
