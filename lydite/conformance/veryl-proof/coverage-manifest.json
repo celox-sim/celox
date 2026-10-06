@@ -9266,7 +9266,7 @@
       "source": {
         "file": "src/veryl/cases/nba_dynamic_array.vtest",
         "line": 482,
-        "script_sha256": "2002b7a230eaad0180f7e19d338437ea86305e4e8ea20441e24210d0d3b34ccd"
+        "script_sha256": "cbb3c3c3162cdfa86d1e79082901f4c3fdb56f605ecfaedd9c7f1b7984b01232"
       },
       "disposition": "observation_verified",
       "designs": [
@@ -9297,69 +9297,6 @@
           "reads": 4,
           "commands": 18,
           "operations": 4,
-          "diagnostic": null
-        }
-      ]
-    },
-    {
-      "case": "nba_dynamic_array::test_out_of_range_dynamic_comb_access",
-      "expectation": "Simulation",
-      "category": "Arrays",
-      "source": {
-        "file": "src/veryl/cases/nba_dynamic_array.vtest",
-        "line": 725,
-        "script_sha256": "8d23772eda6b5616401f51916e4434bd727e041c67585312e8b63084a06523af"
-      },
-      "disposition": "observation_verified",
-      "designs": [
-        {
-          "design_sha256": "553c2ce13669d2603992f02ed6718fd0de31550ad7896d3349316883b48df3ef",
-          "protocol_sha256": "d81c50dc87b4cde9c4adfceb09fbe27e42f58cb49f058b816715603683bd6ad7",
-          "reads": 18,
-          "commands": 41,
-          "operations": 10,
-          "diagnostic": null
-        }
-      ]
-    },
-    {
-      "case": "nba_dynamic_array::test_out_of_range_dynamic_ff_access_four_state",
-      "expectation": "Simulation",
-      "category": "Arrays",
-      "source": {
-        "file": "src/veryl/cases/nba_dynamic_array.vtest",
-        "line": 664,
-        "script_sha256": "fff801cb4e8f980d6bd8ff482f5f311c9deafbcf4c492e8f9b477d49d86ca34f"
-      },
-      "disposition": "observation_verified",
-      "designs": [
-        {
-          "design_sha256": "bd7295306ecc340f7abc477dff0ebea847268e9d6cb99d60f45d875f62bc4461",
-          "protocol_sha256": "d3b21b783269331065274ca97c10a5ad400a88efcfcddc385a740a28e0521315",
-          "reads": 11,
-          "commands": 68,
-          "operations": 29,
-          "diagnostic": null
-        }
-      ]
-    },
-    {
-      "case": "nba_dynamic_array::test_out_of_range_dynamic_ff_stores_are_ignored",
-      "expectation": "Simulation",
-      "category": "Arrays",
-      "source": {
-        "file": "src/veryl/cases/nba_dynamic_array.vtest",
-        "line": 536,
-        "script_sha256": "bf6722535f858176e40abd6cd3020a945e1d0b1d35ca8d55d1a3b5afc060e1b7"
-      },
-      "disposition": "observation_verified",
-      "designs": [
-        {
-          "design_sha256": "c1b58861159762ce988096a522f4d1dbc26ed3a9d0a9d544b2406e44a4fa3de1",
-          "protocol_sha256": "a2ff887b391ad188459258b9cef4dea06df7b8a12fc55fa5bb8b4238b6e49824",
-          "reads": 18,
-          "commands": 46,
-          "operations": 12,
           "diagnostic": null
         }
       ]
@@ -9402,27 +9339,6 @@
           "reads": 4,
           "commands": 19,
           "operations": 8,
-          "diagnostic": null
-        }
-      ]
-    },
-    {
-      "case": "nba_dynamic_array::test_partly_out_of_range_dynamic_ff_part_select",
-      "expectation": "Simulation",
-      "category": "Arrays",
-      "source": {
-        "file": "src/veryl/cases/nba_dynamic_array.vtest",
-        "line": 620,
-        "script_sha256": "d209ecbae539e1e32509ded3dbd71c692bdb4aea4f9bb678f1e2351f5e5fb7bf"
-      },
-      "disposition": "observation_verified",
-      "designs": [
-        {
-          "design_sha256": "21474fa477c9b86a2688abf6418b8f456b70bfb6af0245ee477042a42f86ea28",
-          "protocol_sha256": "be58dfe383113cf10230a1693b17fd1a78da2f9ca45962b78e87bfde17d315c4",
-          "reads": 20,
-          "commands": 86,
-          "operations": 40,
           "diagnostic": null
         }
       ]
