@@ -227,6 +227,12 @@ fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 1]> {
 
 pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
     match inst {
+        // The call area lies outside the modelled state. An unknown effect
+        // keeps the extern call pseudos in order with each other and with
+        // every state access.
+        MInst::ExternArg { .. } | MInst::CallExtern { .. } | MInst::ExternResult { .. } => {
+            MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
+        }
         MInst::X86Simd(X86SimdInst::Scratch128 { .. })
         | MInst::X86Simd(X86SimdInst::Zero128 { .. })
         | MInst::X86Simd(X86SimdInst::Pack128 { .. })
@@ -315,6 +321,12 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
 
 pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
     match inst {
+        // The call area lies outside the modelled state. An unknown effect
+        // keeps the extern call pseudos in order with each other and with
+        // every state access.
+        MInst::ExternArg { .. } | MInst::CallExtern { .. } | MInst::ExternResult { .. } => {
+            MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
+        }
         MInst::X86Simd(X86SimdInst::Scratch128 { .. })
         | MInst::X86Simd(X86SimdInst::Zero128 { .. })
         | MInst::X86Simd(X86SimdInst::Pack128 { .. })

@@ -589,8 +589,31 @@ fn verify_instruction_types<A>(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
+        SIRInstruction::ExternCall { dst, args, .. } => {
+            for &reg in args.iter().chain(dst) {
+                if !is_c_integer(ty(reg)?) {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.EXTERN_CALL_C_INTEGER",
+                        block,
+                        index,
+                        format!(
+                            "r{} is neither a Bit of 1, 8, 16, 32 or 64 bits nor a one-bit Logic",
+                            reg.0
+                        ),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// Whether a register has a C integer type an extern call can pass.
+fn is_c_integer(ty: &RegisterType) -> bool {
+    match ty {
+        RegisterType::Bit { width, .. } => matches!(width, 1 | 8 | 16 | 32 | 64),
+        RegisterType::Logic { width } => *width == 1,
+    }
 }
 
 fn verify_offset<A>(

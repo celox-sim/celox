@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventSite, TriggerSet, VariableMetadata,
+    ExternFunction, InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VariableMetadata,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -65,6 +65,8 @@ pub struct SimModule {
     pub comb_observers: Vec<CombObserver<SourceVarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Extern functions the module calls; its `ExternCall`s index this list.
+    pub extern_functions: Vec<ExternFunction>,
     pub initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,

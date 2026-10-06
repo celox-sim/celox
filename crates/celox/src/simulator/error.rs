@@ -110,6 +110,8 @@ pub enum SimulatorErrorKind {
     Frontend(Vec<celox_frontend_veryl::FrontendDiagnostic>),
     Runtime(crate::RuntimeErrorCode),
     Codegen(CodegenError),
+    /// The C functions of DPI-C imports could not be linked.
+    Dpi(crate::DpiError),
 }
 
 /// Structured failure while preparing executable simulator code.
@@ -264,6 +266,7 @@ impl fmt::Display for SimulatorError {
             }
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,
             SimulatorErrorKind::Codegen(error) => write!(f, "JIT Code generation error: {error}")?,
+            SimulatorErrorKind::Dpi(error) => write!(f, "{error}")?,
         }
         if !self.warnings.is_empty() {
             f.write_str("\n\n--- warnings ---\n\n")?;
@@ -286,6 +289,7 @@ impl std::error::Error for SimulatorError {
             SimulatorErrorKind::Syntax(e) => Some(e),
             SimulatorErrorKind::Runtime(e) => Some(e),
             SimulatorErrorKind::Codegen(error) => Some(error),
+            SimulatorErrorKind::Dpi(error) => Some(error),
             _ => None,
         }
     }
@@ -306,6 +310,12 @@ impl From<crate::RuntimeErrorCode> for SimulatorError {
 impl From<crate::ParserError> for SimulatorError {
     fn from(e: crate::ParserError) -> Self {
         SimulatorError::new(SimulatorErrorKind::SIRParser(e))
+    }
+}
+
+impl From<crate::DpiError> for SimulatorError {
+    fn from(error: crate::DpiError) -> Self {
+        SimulatorError::new(SimulatorErrorKind::Dpi(error))
     }
 }
 

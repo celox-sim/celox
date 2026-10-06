@@ -42,6 +42,7 @@ pub struct Module {
     initial_processes: Vec<InitialProcess>,
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
+    dpi_imports: Vec<DpiImport>,
 }
 
 impl Module {
@@ -73,7 +74,18 @@ impl Module {
             initial_processes,
             locals,
             subroutines,
+            dpi_imports: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_dpi_imports(mut self, dpi_imports: Vec<DpiImport>) -> Self {
+        self.dpi_imports = dpi_imports;
+        self
+    }
+
+    /// Functions imported from C through DPI-C.
+    pub fn dpi_imports(&self) -> &[DpiImport] {
+        &self.dpi_imports
     }
 
     /// `initial` processes, which run once at the start of simulation.
@@ -1177,5 +1189,108 @@ impl From<BinaryOp> for ast::BinaryOp {
             BinaryOp::Gt => ast::BinaryOp::Gt,
             BinaryOp::Ge => ast::BinaryOp::Ge,
         }
+    }
+}
+
+/// The C type a DPI-C import passes or returns by value (IEEE 1800-2023
+/// 35.5.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiType {
+    /// `bit`, passed as `svBit`.
+    Bit,
+    /// `logic` or `reg`, passed as `svLogic`.
+    Logic,
+    /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
+    /// that width.
+    Integer { width: usize, signed: bool },
+}
+
+impl DpiType {
+    pub fn width(&self) -> usize {
+        match self {
+            DpiType::Bit | DpiType::Logic => 1,
+            DpiType::Integer { width, .. } => *width,
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        matches!(self, DpiType::Integer { signed: true, .. })
+    }
+
+    pub fn is_4state(&self) -> bool {
+        matches!(self, DpiType::Logic)
+    }
+}
+
+/// An argument of a DPI-C import. Only `input` arguments are supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpiArgument {
+    name: String,
+    r#type: DpiType,
+}
+
+impl DpiArgument {
+    pub(crate) fn new(name: String, r#type: DpiType) -> Self {
+        Self { name, r#type }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn r#type(&self) -> DpiType {
+        self.r#type
+    }
+}
+
+/// A function imported from C through DPI-C (IEEE 1800-2023 35.5.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpiImport {
+    name: String,
+    c_name: String,
+    pure: bool,
+    return_type: Option<DpiType>,
+    arguments: Vec<DpiArgument>,
+}
+
+impl DpiImport {
+    pub(crate) fn new(
+        name: String,
+        c_name: String,
+        pure: bool,
+        return_type: Option<DpiType>,
+        arguments: Vec<DpiArgument>,
+    ) -> Self {
+        Self {
+            name,
+            c_name,
+            pure,
+            return_type,
+            arguments,
+        }
+    }
+
+    /// The name SystemVerilog calls the function by.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The C symbol the function is linked by.
+    pub fn c_name(&self) -> &str {
+        &self.c_name
+    }
+
+    /// Whether the import is declared `pure`.
+    pub fn is_pure(&self) -> bool {
+        self.pure
+    }
+
+    /// The result type, or `None` for a `void` function.
+    pub fn return_type(&self) -> Option<DpiType> {
+        self.return_type
+    }
+
+    pub fn arguments(&self) -> &[DpiArgument] {
+        &self.arguments
     }
 }

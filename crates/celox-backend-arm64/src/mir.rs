@@ -449,6 +449,14 @@ pub(crate) enum MInst {
         active_bits_offset: i32,
         active_capacity: usize,
     },
+    /// Call extern function `func` through AAPCS64 with integer arguments,
+    /// defining `dst` as its integer result. The emitter preserves every
+    /// caller-saved register except `dst`.
+    CallExtern {
+        dst: Option<VReg>,
+        func: u32,
+        args: Vec<VReg>,
+    },
     Add {
         dst: VReg,
         lhs: VReg,
@@ -730,6 +738,7 @@ impl MInst {
             | Self::CmpSelect { dst, .. }
             | Self::CmpImmSelect { dst, .. }
             | Self::GuardedCmpSelect { dst, .. } => Some(*dst),
+            Self::CallExtern { dst, .. } => *dst,
             Self::Store { .. }
             | Self::KeepAlive { .. }
             | Self::StorePtr { .. }
@@ -752,8 +761,16 @@ impl MInst {
         }
     }
 
+    /// Whether the instruction does more than define its register: it writes
+    /// memory, transfers control, or calls an extern function. Such an
+    /// instruction is kept even when its result is unused.
+    pub(crate) fn has_side_effects(&self) -> bool {
+        self.def().is_none() || matches!(self, Self::CallExtern { .. })
+    }
+
     pub(crate) fn def_mut(&mut self) -> Option<&mut VReg> {
         match self {
+            Self::CallExtern { dst, .. } => dst.as_mut(),
             Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
@@ -830,6 +847,7 @@ impl MInst {
 
     pub(crate) fn uses(&self) -> Vec<VReg> {
         match self {
+            Self::CallExtern { args, .. } => args.clone(),
             Self::Mov { src, .. } | Self::Mov32 { src, .. } | Self::KeepAlive { src } => vec![*src],
             Self::LoadImm { .. }
             | Self::LoadConstantTableAddr { .. }
@@ -954,6 +972,11 @@ impl MInst {
             }
         };
         match self {
+            Self::CallExtern { args, .. } => {
+                for arg in args {
+                    rewrite(arg);
+                }
+            }
             Self::Mov { src, .. }
             | Self::Mov32 { src, .. }
             | Self::KeepAlive { src }

@@ -30,6 +30,7 @@ mod constant_folding;
 mod constants;
 mod declarations;
 mod dimensions;
+mod dpi;
 mod expressions;
 mod ff_process;
 mod functions;
@@ -316,6 +317,7 @@ pub struct Module {
     initial_processes: Vec<InitialProcess>,
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
+    dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.
     constant_functions: const_functions::ConstantFunctions,
 }
@@ -628,6 +630,27 @@ impl Module {
                     },
                 )
             }));
+        let dpi_imports = dpi::dpi_imports_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        packed_dimensions
+            .function_return_types
+            .extend(dpi_imports.iter().filter_map(|import| {
+                let r#type = import.return_type()?;
+                Some((
+                    import.name().to_string(),
+                    FunctionReturnMetadata {
+                        width: Some(r#type.width()),
+                        first_packed_dimension_width: (r#type.width() > 1)
+                            .then_some(r#type.width()),
+                        signed: r#type.is_signed(),
+                        is_2state: !r#type.is_4state(),
+                    },
+                ))
+            }));
         packed_dimensions.functions = Arc::new(functions.clone());
         packed_dimensions.expression_signedness = Arc::new(expression_signedness.clone());
         for instance in &mut instances {
@@ -742,6 +765,7 @@ impl Module {
             initial_processes,
             locals,
             subroutines,
+            dpi_imports,
             constant_functions: const_functions::installed(),
         })
     }
@@ -788,6 +812,10 @@ impl Module {
 
     pub fn subroutines(&self) -> &[Subroutine] {
         &self.subroutines
+    }
+
+    pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
+        &self.dpi_imports
     }
 }
 

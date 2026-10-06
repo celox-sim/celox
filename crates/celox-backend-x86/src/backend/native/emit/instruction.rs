@@ -13,6 +13,15 @@ pub(super) fn emit_inst(
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
     match inst {
+        MInst::ExternArg { index, src } => {
+            extern_call::emit_extern_arg(asm, *index, preg_to_reg64(resolve(assignment, *src)))?;
+        }
+        MInst::CallExtern { func, arg_count } => {
+            extern_call::emit_call_extern(asm, *func, *arg_count)?;
+        }
+        MInst::ExternResult { dst } => {
+            extern_call::emit_extern_result(asm, preg_to_reg64(resolve(assignment, *dst)))?;
+        }
         MInst::X86Simd(X86SimdInst::Scratch128 { .. }) => {}
         MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
             match assignment

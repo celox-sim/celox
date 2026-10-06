@@ -1718,7 +1718,8 @@ fn runtime_instruction_cost(
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
         | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => 0,
+        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+        | SIRInstruction::ExternCall { .. } => 0,
     }
 }
 

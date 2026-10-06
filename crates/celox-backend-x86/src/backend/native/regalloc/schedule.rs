@@ -1282,6 +1282,9 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::MemCopy { .. }
         | MInst::SparseCommit { .. }
         | MInst::SparseCommitWorklist { .. }
+        | MInst::ExternArg { .. }
+        | MInst::CallExtern { .. }
+        | MInst::ExternResult { .. }
         | MInst::UMulHi { .. }
         | MInst::UDiv { .. }
         | MInst::URem { .. }

@@ -74,6 +74,15 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+/// A function in the host's C ABI that the design calls, such as a
+/// SystemVerilog DPI-C import. `ExternCall` instructions index the design's
+/// table of these.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternFunction {
+    /// The C symbol the function is linked by.
+    pub name: String,
+}
+
 /// Runtime activation recipe for one combinational event site.
 ///
 /// Expression trees used to emit the event have already been lowered into
@@ -122,6 +131,8 @@ pub struct RuntimeErrorInfo<A> {
 pub struct RuntimeSchema<A> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Extern functions called by `ExternCall`, by index.
+    pub extern_functions: Vec<ExternFunction>,
     pub comb_observers: Vec<RuntimeCombObserver<A>>,
     /// Persistent state read directly by host-side testbench execution. These
     /// are optimization roots even when no SIR instruction loads them.
@@ -140,6 +151,7 @@ impl<A> Default for RuntimeSchema<A> {
         Self {
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            extern_functions: Vec::new(),
             comb_observers: Vec::new(),
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),

@@ -20,5 +20,9 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Accept DPI-C imports. Calls link to C functions when a simulator is built.
+dpi = []
+
 [lints]
 workspace = true

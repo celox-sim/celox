@@ -8,8 +8,8 @@
 //! Block control flow is implemented via `loop` + `block` + `br_table`.
 
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction,
-    MemoryType, Module, TypeSection, ValType,
+    CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
+    Instruction, MemoryType, Module, TypeSection, ValType,
 };
 
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
@@ -140,6 +140,8 @@ fn num_i64_chunks(width: usize) -> usize {
 ///
 /// The generated module:
 /// - Imports memory `("env", "memory")`
+/// - Imports `("env", "celox_extern_<func>")` with signature `(i64, ...) -> i64`
+///   for every extern function `func` the units call; see [`extern_import_name`]
 /// - Exports function `"run"` with signature `() -> i64`
 pub fn compile_units(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
@@ -148,10 +150,16 @@ pub fn compile_units(
     emit_triggers: bool,
 ) -> WasmModule {
     let mut module = Module::new();
+    let externs = ExternImports::collect(units);
 
-    // Type section: one function type () -> i64
+    // Type section: () -> i64 for `run`, then one type per extern import.
     let mut types = TypeSection::new();
     types.ty().function(vec![], vec![ValType::I64]);
+    for &(_, arity) in &externs.functions {
+        types
+            .ty()
+            .function(vec![ValType::I64; arity], vec![ValType::I64]);
+    }
     module.section(&types);
 
     // Import section: memory from "env"
@@ -168,21 +176,29 @@ pub fn compile_units(
             page_size_log2: None,
         },
     );
+    for (index, &(func, _)) in externs.functions.iter().enumerate() {
+        imports.import(
+            "env",
+            &extern_import_name(func),
+            EntityType::Function(index as u32 + 1),
+        );
+    }
     module.section(&imports);
 
-    // Function section: one function with type 0
+    // Function section: `run` has type 0. Imported functions come first in
+    // the function index space.
     let mut functions = FunctionSection::new();
     functions.function(0);
     module.section(&functions);
 
     // Export section: export the function as "run"
     let mut exports = ExportSection::new();
-    exports.export("run", ExportKind::Func, 0);
+    exports.export("run", ExportKind::Func, externs.functions.len() as u32);
     module.section(&exports);
 
     // Code section
     let mut codes = CodeSection::new();
-    let func = compile_function(units, layout, four_state, emit_triggers);
+    let func = compile_function(units, layout, four_state, emit_triggers, &externs);
     codes.function(&func);
     module.section(&codes);
 
@@ -192,11 +208,53 @@ pub fn compile_units(
 }
 
 /// Compile all execution units into a single WASM function body.
+/// The name of the host import that calls extern function `func`.
+pub fn extern_import_name(func: u32) -> String {
+    format!("celox_extern_{func}")
+}
+
+/// Extern functions called by the compiled units, imported in this order.
+struct ExternImports {
+    /// `(func, arity)` in ascending `func` order.
+    functions: Vec<(u32, usize)>,
+}
+
+impl ExternImports {
+    fn collect(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> Self {
+        let mut arities = std::collections::BTreeMap::new();
+        for instruction in units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            if let SIRInstruction::ExternCall { func, args, .. } = instruction {
+                let arity = *arities.entry(*func).or_insert(args.len());
+                assert_eq!(
+                    arity,
+                    args.len(),
+                    "extern function {func} is called with different arities"
+                );
+            }
+        }
+        Self {
+            functions: arities.into_iter().collect(),
+        }
+    }
+
+    /// The Wasm function index of the import for `func`.
+    fn function_index(&self, func: u32) -> u32 {
+        self.functions
+            .binary_search_by_key(&func, |&(func, _)| func)
+            .expect("every called extern function is imported") as u32
+    }
+}
+
 fn compile_function(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
+    externs: &ExternImports,
 ) -> Function {
     let mut locals = LocalAllocator::new();
 
@@ -255,6 +313,7 @@ fn compile_function(
             layout,
             four_state,
             emit_triggers,
+            externs,
             &mut locals,
             &mut instrs,
         );
@@ -300,6 +359,7 @@ fn compile_unit(
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
+    externs: &ExternImports,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -398,6 +458,7 @@ fn compile_unit(
                 layout,
                 four_state,
                 emit_triggers,
+                externs,
                 locals,
                 instrs,
             );
@@ -428,12 +489,14 @@ fn compile_unit(
     instrs.push(Instruction::End);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_instruction(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
+    externs: &ExternImports,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -549,6 +612,88 @@ fn compile_instruction(
         }
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
+        }
+        SIRInstruction::ExternCall { dst, func, args } => {
+            compile_extern_call(
+                *dst,
+                externs.function_index(*func),
+                args,
+                unit,
+                locals,
+                instrs,
+            );
+        }
+    }
+}
+
+/// Call an extern function through its host import.
+///
+/// Every argument and the result is an i64 holding the C integer: a `Bit`
+/// register is sign- or zero-extended, and a one-bit `Logic` register is an
+/// `svLogic` (`value | mask << 1`).
+fn compile_extern_call(
+    dst: Option<RegisterId>,
+    function_index: u32,
+    args: &[RegisterId],
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    for arg in args {
+        let local = &locals.reg_map[arg];
+        instrs.push(Instruction::LocalGet(local.value_idx));
+        match unit.register_map[arg] {
+            RegisterType::Bit {
+                width,
+                signed: true,
+            } => match width {
+                8 => instrs.push(Instruction::I64Extend8S),
+                16 => instrs.push(Instruction::I64Extend16S),
+                32 => instrs.push(Instruction::I64Extend32S),
+                _ => {}
+            },
+            RegisterType::Bit { .. } => {}
+            RegisterType::Logic { .. } => {
+                if let Some(mask) = local.mask_idx {
+                    instrs.push(Instruction::LocalGet(mask));
+                    instrs.push(Instruction::I64Const(1));
+                    instrs.push(Instruction::I64Shl);
+                    instrs.push(Instruction::I64Or);
+                }
+            }
+        }
+    }
+    instrs.push(Instruction::Call(function_index));
+    let Some(dst) = dst else {
+        instrs.push(Instruction::Drop);
+        return;
+    };
+    let local = &locals.reg_map[&dst];
+    match unit.register_map[&dst] {
+        RegisterType::Bit { width, .. } => {
+            if width < 64 {
+                instrs.push(Instruction::I64Const((1i64 << width) - 1));
+                instrs.push(Instruction::I64And);
+            }
+            instrs.push(Instruction::LocalSet(local.value_idx));
+            if let Some(mask) = local.mask_idx {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(mask));
+            }
+        }
+        RegisterType::Logic { .. } => {
+            if let Some(mask) = local.mask_idx {
+                instrs.push(Instruction::LocalTee(local.value_idx));
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::I64ShrU);
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::LocalSet(mask));
+                instrs.push(Instruction::LocalGet(local.value_idx));
+            }
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalSet(local.value_idx));
         }
     }
 }

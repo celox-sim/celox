@@ -226,6 +226,18 @@ pub trait InterpMachine<A> {
         new: &SIRValue,
         sites: &[u32],
     ) -> Result<(), InterpError>;
+
+    /// Call extern function `func` with C integer arguments and return its
+    /// C integer result (zero when it returns nothing).
+    ///
+    /// The default keeps custom interpreter machines source-compatible; the
+    /// production backend calls the resolved function.
+    fn call_extern(&mut self, func: u32, args: &[u64]) -> Result<u64, InterpError> {
+        let _ = args;
+        Err(InterpError::UnsupportedOperation(format!(
+            "call of extern function {func}"
+        )))
+    }
 }
 
 /// Outcome of one interpreted unit invocation.
@@ -608,8 +620,46 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             let new = regs.get(*new)?.clone();
             machine.enable_comb_capture_if_changed(&old, &new, sites)?;
         }
+        SIRInstruction::ExternCall { dst, func, args } => {
+            let args = args
+                .iter()
+                .map(|&arg| extern_argument(regs, arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = machine.call_extern(*func, &args)?;
+            if let Some(dst) = dst {
+                let value = extern_result(regs, *dst, result, four_state);
+                regs.set(*dst, value);
+            }
+        }
     }
     Ok(())
+}
+
+/// The C integer passed for an extern call argument: a `Bit` register's
+/// value, sign-extended when signed, or a one-bit `Logic` register as an
+/// `svLogic` (`value | mask << 1`).
+fn extern_argument(regs: &Registers, arg: RegisterId) -> Result<u64, InterpError> {
+    let value = regs.get(arg)?;
+    let payload = value.payload.to_u64().unwrap_or(0);
+    let width = regs.width(arg);
+    if regs.is_logic(arg) {
+        let mask = value.mask.to_u64().unwrap_or(0);
+        return Ok((payload & 1) | ((mask & 1) << 1));
+    }
+    if regs.is_signed(arg) && width > 1 && width < 64 {
+        let shift = 64 - width;
+        return Ok((((payload << shift) as i64) >> shift) as u64);
+    }
+    Ok(payload)
+}
+
+/// The value of an extern call's destination register for C result `raw`.
+fn extern_result(regs: &Registers, dst: RegisterId, raw: u64, four_state: bool) -> SIRValue {
+    if regs.is_logic(dst) {
+        let mask = if four_state { (raw >> 1) & 1 } else { 0 };
+        return SIRValue::new_four_state(raw & 1, mask);
+    }
+    SIRValue::new(raw & mask_u64(regs.width(dst)))
 }
 
 fn resolve_access<'a>(
@@ -1561,6 +1611,8 @@ struct RegisterSlot {
     value: Option<RegisterValue>,
     width: usize,
     signed: bool,
+    /// The register is a four-state `Logic` register.
+    logic: bool,
     generation: u64,
 }
 
@@ -1617,6 +1669,7 @@ impl Registers {
         for (id, register_type) in register_map {
             self.slots[id.0].width = register_type.width();
             self.slots[id.0].signed = register_type.is_signed();
+            self.slots[id.0].logic = matches!(register_type, RegisterType::Logic { .. });
         }
     }
 
@@ -1697,6 +1750,10 @@ impl Registers {
 
     fn is_signed(&self, id: RegisterId) -> bool {
         self.slots.get(id.0).is_some_and(|slot| slot.signed)
+    }
+
+    fn is_logic(&self, id: RegisterId) -> bool {
+        self.slots.get(id.0).is_some_and(|slot| slot.logic)
     }
 }
 

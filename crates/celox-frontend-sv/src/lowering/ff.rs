@@ -11,7 +11,7 @@
 
 use super::procedural::*;
 use super::*;
-use celox_sir::RegisterId;
+use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
 
@@ -275,7 +275,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<NodeId, sv::AnalyzerError> {
         let expr = expr_for_state_mode(expr, self.m.four_state);
-        let expr = if expr_calls(&expr, &self.m.subroutines) {
+        let expr = if self.m.calls(&expr) {
             self.hoist(&expr)?
         } else {
             expr
@@ -331,7 +331,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
-        if expr_calls(expr, &self.m.subroutines) {
+        if self.m.calls(expr) {
             return Ok(None);
         }
         let expr = self.propagate(&expr_for_state_mode(expr, self.m.four_state));
@@ -359,10 +359,30 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// a hidden variable holding its result.
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
-        if !expr_calls(expr, &self.m.subroutines) {
+        if !self.m.calls(expr) {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call { name, args } if self.m.dpi_imports.contains_key(name) => {
+                let import = self.m.dpi_imports[name].clone();
+                let Some(r#type) = import.return_type() else {
+                    return Err(unsupported(format!(
+                        "void DPI-C function `{name}` used as a value"
+                    )));
+                };
+                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+                let result = self
+                    .dpi_call(&import, &args)?
+                    .expect("a non-void DPI-C import defines a result");
+                let (temp, temp_name) = self.m.temp(
+                    "dpi",
+                    r#type.width(),
+                    r#type.is_signed(),
+                    r#type.is_4state(),
+                );
+                self.store(temp, SIROffset::Static(0), r#type.width(), result);
+                Expr::Ident(temp_name)
+            }
             Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
                 let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
                 let subroutine = self
@@ -389,7 +409,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             Expr::Binary { left, op, right }
                 if matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr)
-                    && expr_calls(right, &self.m.subroutines) =>
+                    && self.m.calls(right) =>
             {
                 let left = self.hoist(left)?;
                 let (truth, _) = self.eval_truth(&left)?;
@@ -419,9 +439,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } if expr_calls(then_expr, &self.m.subroutines)
-                || expr_calls(else_expr, &self.m.subroutines) =>
-            {
+            } if self.m.calls(then_expr) || self.m.calls(else_expr) => {
                 let condition = self.hoist(condition)?;
                 let (truth, _) = self.eval_truth(&condition)?;
                 let then_block = self.b.new_block();
@@ -522,6 +540,71 @@ impl<'p, 'a> Ff<'p, 'a> {
             },
             Expr::Ident(_) | Expr::Literal(_) => expr.clone(),
         })
+    }
+
+    /// Call a DPI-C import, returning the register holding its result.
+    ///
+    /// Each argument is converted to its C type: a two-state integer, whose
+    /// unknown bits read as zero, or a `logic`, which keeps its unknown bit
+    /// in four-state simulation (IEEE 1800-2023 35.5.6).
+    fn dpi_call(
+        &mut self,
+        import: &sv::ir::DpiImport,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
+        let name = import.name();
+        if args.len() != import.arguments().len() {
+            return Err(unsupported(format!(
+                "call of DPI-C function `{name}` with {} arguments; it takes {}",
+                args.len(),
+                import.arguments().len()
+            )));
+        }
+        let mut registers = Vec::with_capacity(args.len());
+        for (arg, argument) in args.iter().zip(import.arguments()) {
+            let Some(arg) = arg else {
+                return Err(unsupported(format!(
+                    "omitted argument of DPI-C function `{name}`"
+                )));
+            };
+            let r#type = argument.r#type();
+            let arg = self.hoist(arg)?;
+            let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
+            registers.push(self.dpi_register(value, r#type));
+        }
+        let func = self.m.extern_function(import.c_name());
+        let dst = import
+            .return_type()
+            .map(|r#type| self.dpi_result_register(r#type));
+        self.b.emit(SIRInstruction::ExternCall {
+            dst,
+            func,
+            args: registers,
+        });
+        self.m.extern_calls += 1;
+        Ok(dst)
+    }
+
+    /// `value`, of the argument's width, in the register type passed as its
+    /// C type.
+    fn dpi_register(&mut self, value: RegisterId, r#type: sv::ir::DpiType) -> RegisterId {
+        let register = self.dpi_result_register(r#type);
+        let op = if matches!(self.b.register(&register), RegisterType::Logic { .. }) {
+            UnaryOp::Ident
+        } else {
+            UnaryOp::ToTwoState
+        };
+        self.b.emit(SIRInstruction::Unary(register, op, value));
+        register
+    }
+
+    /// A register of the type that holds a DPI-C value of type `r#type`.
+    fn dpi_result_register(&mut self, r#type: sv::ir::DpiType) -> RegisterId {
+        if r#type.is_4state() && self.m.four_state {
+            self.b.alloc_logic(1)
+        } else {
+            self.b.alloc_bit(r#type.width(), r#type.is_signed())
+        }
     }
 
     // ---------------------------------------------------------------- stores
@@ -1093,6 +1176,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Ok(false)
             }
             sv::ir::Stmt::Call { name, args } => {
+                if let Some(import) = self.m.dpi_imports.get(name).cloned() {
+                    self.dpi_call(&import, args)?;
+                    return Ok(true);
+                }
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
@@ -1224,7 +1311,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         default: Option<&[sv::ir::Stmt]>,
     ) -> Result<bool, sv::AnalyzerError> {
         // Evaluate the selector once.
-        let selector = if expr_calls(selector, &self.m.subroutines) {
+        let selector = if self.m.calls(selector) {
             self.hoist(selector)?
         } else {
             selector.clone()

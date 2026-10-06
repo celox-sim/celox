@@ -26,6 +26,7 @@ const STATE_REG: u8 = 0;
 mod tests;
 
 mod blocks;
+mod extern_call;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
 // x28 is reserved as the base of the target-owned spill frame.  Keeping the
@@ -629,6 +630,9 @@ fn emit_instruction(
 ) -> Result<(), EmitError> {
     let is_next = |target| next_block.is_some_and(|next| labels[&next] == labels[&target]);
     match instruction {
+        MInst::CallExtern { dst, func, args } => {
+            extern_call::emit_call_extern(ops, assignment, *dst, *func, args)?;
+        }
         MInst::Mov { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             if dst != src {

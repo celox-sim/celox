@@ -181,6 +181,10 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // Return.  Model the clobber at the allocation boundary instead so
         // only genuinely live-through values are moved to their homes.
         MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
+        // A C function may clobber any caller-saved register, and the call
+        // sequence itself needs the callee-saved ones for the state base;
+        // every value lives in its home across the call.
+        MInst::CallExtern { .. } => ALLOCATABLE_REGS,
         _ => &[],
     }
 }
