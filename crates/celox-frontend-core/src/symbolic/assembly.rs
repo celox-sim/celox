@@ -638,6 +638,10 @@ pub fn schedule_symbolic_rtl(
             });
         }
     };
+    let object_sizes = super::parallel::ObjectSizes {
+        widths: &var_widths,
+        element_widths: &unpacked_element_widths,
+    };
     let parallel_comb = match parallel_comb_blocks {
         Some(paths) => {
             let first_code = runtime_errors
@@ -654,8 +658,11 @@ pub fn schedule_symbolic_rtl(
                 minimum_speedup_percent: parallel.minimum_speedup_percent,
                 hierarchy: Some({
                     let parents = instance_parents(&expanded);
-                    let extra_costs =
-                        super::parallel::instance_ff_costs(&parallel_ff_units, parents.len());
+                    let extra_costs = super::parallel::instance_ff_costs(
+                        &parallel_ff_units,
+                        parents.len(),
+                        object_sizes,
+                    );
                     scheduler::InstanceHierarchy {
                         instance_of: |address: &AbsoluteAddr| address.instance_id.0,
                         parents,
@@ -860,6 +867,7 @@ pub fn schedule_symbolic_rtl(
                 .as_ref()
                 .expect("parallel scheduling computes lane-0 objects"),
             &parallel_eval_comb,
+            object_sizes,
             parallel,
         );
         for (event, kernel) in &eval_apply_ffs {
