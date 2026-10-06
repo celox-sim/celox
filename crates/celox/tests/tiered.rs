@@ -262,3 +262,93 @@ module Top (
         assert_eq!(*observed_value, index as u8);
     }
 }
+
+const LANES: &str = r#"
+module Lane (
+    clk: input clock,
+    rst: input reset,
+    seed: input logic<32>,
+    out: output logic<32>,
+) {
+    var s0: logic<32>;
+    var s1: logic<32>;
+    let m0: logic<32> = (s0 * 32'h9e3779b9) ^ (s1 >> 3);
+    always_ff (clk, rst) {
+        if_reset {
+            s0 = 0;
+            s1 = 1;
+        } else {
+            s0 = m0 ^ seed;
+            s1 = m0 + s1;
+        }
+    }
+    assign out = s0 ^ s1;
+}
+
+module Top (
+    clk: input clock,
+    rst: input reset,
+    seed: input logic<32>,
+    out: output logic<32>[16],
+) {
+    for i in 0..16: g {
+        inst l: Lane (clk, rst, seed: seed + i, out: out[i]);
+    }
+}
+"#;
+
+macro_rules! lanes_reset {
+    ($sim:expr) => {{
+        let clk = $sim.event("clk");
+        let rst = $sim.signal("rst");
+        let seed = $sim.signal("seed");
+        $sim.modify(|io| {
+            io.set(rst, 0u8);
+            io.set(seed, 0x1234u32);
+        })
+        .unwrap();
+        $sim.tick(clk).unwrap();
+        $sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    }};
+}
+
+macro_rules! lanes_tick {
+    ($sim:expr) => {{
+        let clk = $sim.event("clk");
+        $sim.tick(clk).unwrap();
+    }};
+}
+
+macro_rules! lanes_out {
+    ($sim:expr) => {{
+        let out = $sim.signal("out");
+        $sim.get(out)
+    }};
+}
+
+/// Lane-partitioned kernels need one arena per lane; promotion must still fit
+/// in the reserved image and the results must match sequential execution.
+#[test]
+fn tiered_promotion_with_lane_partitioned_kernels() {
+    let mut sim = SimulatorBuilder::new(LANES, "Top")
+        .threads(4)
+        .parallel_partition(celox::ParallelPartition::Always)
+        .build_tiered()
+        .unwrap();
+    let mut reference = SimulatorBuilder::new(LANES, "Top").build().unwrap();
+    lanes_reset!(sim);
+    lanes_reset!(reference);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !sim.is_compiled() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        lanes_tick!(sim);
+        lanes_tick!(reference);
+    }
+    assert!(sim.is_compiled(), "tiered simulation was not promoted");
+    assert!(sim.promotion_error().is_none());
+    for _ in 0..64 {
+        lanes_tick!(sim);
+        lanes_tick!(reference);
+        assert_eq!(lanes_out!(sim), lanes_out!(reference));
+    }
+}

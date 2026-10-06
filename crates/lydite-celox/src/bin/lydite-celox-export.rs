@@ -86,6 +86,7 @@ fn compile(design: &Value) -> Result<Compiled, String> {
         &[],
         &[],
         design["four_state"].as_bool().unwrap_or(false),
+        &celox_frontend_core::ParallelScheduleOptions::SEQUENTIAL,
         &Default::default(),
         None,
     )

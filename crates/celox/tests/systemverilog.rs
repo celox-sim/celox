@@ -23,6 +23,17 @@ macro_rules! sv_backends {
                 crate::suite::run_case($case, "cranelift");
             }
 
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            fn native_parallel() {
+                crate::suite::run_case($case, "native-parallel");
+            }
+
+            #[test]
+            fn cranelift_parallel() {
+                crate::suite::run_case($case, "cranelift-parallel");
+            }
+
             #[test]
             fn wasm() {
                 crate::suite::run_case($case, "wasm");
@@ -54,6 +65,19 @@ macro_rules! sv_backends {
             fn cranelift() {
                 $($setup)*
                 let mut $sim = { $builder }.build_cranelift().unwrap();
+                $($body)*
+            }
+
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            #[allow(unused_mut, unused_variables)]
+            fn native_parallel() {
+                $($setup)*
+                let mut $sim = { $builder }
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap();
                 $($body)*
             }
 

@@ -50,6 +50,10 @@ pub struct X86BackendOptions {
     pub baseline: bool,
     pub slp: bool,
     pub native_tick_loop: bool,
+    /// Physical state offset where the function's private spill, scratch,
+    /// and save arena begins. `None` places it directly after the semantic
+    /// state. Functions that may run concurrently need disjoint arenas.
+    pub arena_base: Option<usize>,
     pub diagnostics: NativeDiagnostics,
 }
 
@@ -59,6 +63,7 @@ impl Default for X86BackendOptions {
             slp: true,
             native_tick_loop: true,
             baseline: false,
+            arena_base: None,
             diagnostics: NativeDiagnostics::default(),
         }
     }

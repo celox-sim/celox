@@ -68,6 +68,20 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     Ok(match backend {
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
         "cranelift" => Box::new(CeloxBackend(builder.build_cranelift().map_err(rejected)?)),
+        "native-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_native()
+                .map_err(rejected)?,
+        )),
+        "cranelift-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_cranelift()
+                .map_err(rejected)?,
+        )),
         "wasm" => Box::new(CeloxBackend(builder.build_wasm().map_err(rejected)?)),
         _ => return Err(format!("unknown backend: {backend}").into()),
     })

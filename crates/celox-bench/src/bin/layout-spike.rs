@@ -358,6 +358,7 @@ mod tests {
             eval_comb_apply_ffs: FxHashMap::default(),
             eval_only_ffs: FxHashMap::default(),
             apply_ffs: FxHashMap::default(),
+            parallel: None,
         }
     }
 

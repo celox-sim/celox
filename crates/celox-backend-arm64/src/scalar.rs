@@ -193,6 +193,32 @@ pub fn emit_prepared_eu(
     four_state: bool,
     label: &str,
     native_tick_loop: bool,
+    trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_prepared_eu_with_arena(
+        sir_eu,
+        layout,
+        four_state,
+        label,
+        native_tick_loop,
+        None,
+        trace,
+        is_cancelled,
+    )
+}
+
+/// Like [`emit_prepared_eu`], placing the function's private spill arena at
+/// `arena_base` (at least the end of the semantic state) when given.
+/// Functions that may run concurrently need disjoint arenas.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_prepared_eu_with_arena(
+    sir_eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    native_tick_loop: bool,
+    arena_base: Option<usize>,
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
@@ -224,10 +250,11 @@ pub fn emit_prepared_eu(
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
     }
-    let state_size = layout
+    let semantic_size = layout
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .ok_or(PrepareError::StateSizeOverflow)?;
+    let state_size = arena_base.map_or(semantic_size, |base| base.max(semantic_size));
     let mut function = crate::isel::lower_execution_unit(sir_eu, layout, four_state);
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);

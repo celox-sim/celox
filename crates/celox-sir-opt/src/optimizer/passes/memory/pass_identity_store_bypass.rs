@@ -139,10 +139,44 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
     for units in program.sir.eval_comb_apply_ffs.values() {
         retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
     }
+    // The lane-partitioned combinational kernel is one more projection of the
+    // same comb logic, lowered and optimized independently.
+    with_parallel_comb_units(program, |units| {
+        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
+    });
     program
         .layout_requirements
         .state_aliases_mut()
         .retain(|alias, _| valid.contains(alias));
+}
+
+/// Run `body` over the partitioned comb units as one contiguous unit list,
+/// preserving every unit's lane and position.
+fn with_parallel_comb_units(
+    program: &mut OptimizationContext,
+    body: impl FnOnce(&mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>),
+) {
+    let Some(parallel) = program.sir.parallel.as_mut() else {
+        return;
+    };
+    if parallel.eval_comb.is_empty() {
+        return;
+    }
+    let lanes = parallel
+        .eval_comb
+        .iter()
+        .map(|unit| unit.lane)
+        .collect::<Vec<_>>();
+    let mut units = std::mem::take(&mut parallel.eval_comb)
+        .into_iter()
+        .map(|unit| unit.unit)
+        .collect::<Vec<_>>();
+    body(&mut units);
+    parallel.eval_comb = lanes
+        .into_iter()
+        .zip(units)
+        .map(|(lane, unit)| celox_sir::LaneUnit::new(lane, unit))
+        .collect();
 }
 
 /// Remove only the exact final-SIR Store sites whose identity recipes were
@@ -165,6 +199,9 @@ pub(crate) fn remove_final_identity_alias_stores(
     for units in program.sir.eval_comb_apply_ffs.values_mut() {
         remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
     }
+    with_parallel_comb_units(program, |units| {
+        remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
+    });
 }
 
 fn retain_aliases_valid_for_units(

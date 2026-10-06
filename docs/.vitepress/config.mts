@@ -119,6 +119,10 @@ export default defineConfig({
                   text: "最適化チューニング",
                   link: "/ja/guide/optimization-tuning",
                 },
+                {
+                  text: "並列シミュレーション",
+                  link: "/ja/guide/parallel-simulation",
+                },
               ],
             },
           ],
@@ -192,6 +196,7 @@ export default defineConfig({
             { text: "Combinational Loops", link: "/guide/combinational-loops" },
             { text: "Dead Store Elimination", link: "/guide/dead-store-elimination" },
             { text: "Optimization Tuning", link: "/guide/optimization-tuning" },
+            { text: "Parallel Simulation", link: "/guide/parallel-simulation" },
           ],
         },
       ],
@@ -220,6 +225,10 @@ export default defineConfig({
             {
               text: "Runtime Semantics",
               link: "/internals/cascade-limitations",
+            },
+            {
+              text: "Parallel Execution",
+              link: "/internals/parallel-simulation",
             },
           ],
         },
