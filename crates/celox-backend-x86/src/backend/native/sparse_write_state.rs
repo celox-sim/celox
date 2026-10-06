@@ -225,46 +225,12 @@ fn seal_zero_fill_group(
     }
 }
 
-fn visit_instruction_uses<A>(instruction: &SIRInstruction<A>, mut visit: impl FnMut(RegisterId)) {
-    let mut visit_offset = |offset: &SIROffset| {
-        for register in offset.dynamic_registers().into_iter().flatten() {
-            visit(register);
-        }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            visit(*lhs);
-            visit(*rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            visit(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => visit_offset(offset),
-        SIRInstruction::Store(_, offset, width, source, _, _) => {
-            if *width != 0 {
-                visit_offset(offset);
-                visit(*source);
-            }
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => visit_offset(offset),
-        SIRInstruction::Concat(_, sources)
-        | SIRInstruction::RuntimeEvent { args: sources, .. }
-        | SIRInstruction::CombCaptureEvent { args: sources, .. } => {
-            for &source in sources {
-                visit(source);
-            }
-        }
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            visit(*condition);
-            visit(*then_value);
-            visit(*else_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            visit(*old);
-            visit(*new);
-        }
+fn visit_instruction_uses<A>(instruction: &SIRInstruction<A>, visit: impl FnMut(RegisterId)) {
+    // A zero-width store moves no bits, so it uses none of its operands.
+    if matches!(instruction, SIRInstruction::Store(_, _, 0, _, _, _)) {
+        return;
     }
+    instruction.for_each_use(visit);
 }
 
 fn visit_terminator_uses(terminator: &SIRTerminator, mut visit: impl FnMut(RegisterId)) {
@@ -976,14 +942,7 @@ fn plan_metadata_batches(
                 continue;
             }
 
-            if matches!(
-                inst,
-                SIRInstruction::Store(..)
-                    | SIRInstruction::Commit(..)
-                    | SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
-            ) {
+            if inst.has_side_effects() {
                 finish_metadata_batch(&mut pending, &mut actions);
             }
         }

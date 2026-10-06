@@ -92,56 +92,8 @@ pub fn reverse_postorder<A>(unit: &ExecutionUnit<A>) -> Vec<BlockId> {
 }
 
 /// Visit every register used by one SIR instruction.
-pub fn visit_instruction_uses<A>(
-    instruction: &SIRInstruction<A>,
-    mut visit: impl FnMut(RegisterId),
-) {
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            visit(*lhs);
-            visit(*rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            visit(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                visit(register);
-            }
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                visit(register);
-            }
-            visit(*source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                visit(register);
-            }
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => {
-            for &argument in arguments {
-                visit(argument);
-            }
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            visit(*condition);
-            visit(*true_value);
-            visit(*false_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            visit(*old);
-            visit(*new);
-        }
-    }
+pub fn visit_instruction_uses<A>(instruction: &SIRInstruction<A>, visit: impl FnMut(RegisterId)) {
+    instruction.for_each_use(visit);
 }
 
 /// Visit every register used by one SIR block terminator.

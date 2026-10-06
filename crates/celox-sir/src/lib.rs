@@ -11,12 +11,14 @@ pub use celox_design::{BinaryOp, DomainKind, TriggerIdWithKind, UnaryOp};
 pub mod analysis;
 pub mod builder;
 pub mod cfg;
+pub mod effects;
 mod serde_helpers;
 pub mod transform;
 pub mod two_state;
 pub mod verify;
 
 pub use builder::SIRBuilder;
+pub use effects::MemoryAccess;
 pub use transform::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs,
     merge_sir_eu_refs_with_provenance, merge_sir_eus,
@@ -729,23 +731,6 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
     }
 }
 impl<A> SIRInstruction<A> {
-    pub fn defined_register(&self) -> Option<RegisterId> {
-        match self {
-            SIRInstruction::Imm(dst, _)
-            | SIRInstruction::Binary(dst, _, _, _)
-            | SIRInstruction::Unary(dst, _, _)
-            | SIRInstruction::Load(dst, _, _, _)
-            | SIRInstruction::Concat(dst, _)
-            | SIRInstruction::Slice(dst, _, _, _)
-            | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-            SIRInstruction::Store(..)
-            | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-        }
-    }
-
     pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B> {
         match self {
             SIRInstruction::Imm(register_id, value) => SIRInstruction::Imm(register_id, value),

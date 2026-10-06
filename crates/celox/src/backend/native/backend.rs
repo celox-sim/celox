@@ -1346,28 +1346,7 @@ fn offset_registers(offset: &SIROffset, registers: &mut Vec<RegisterId>) {
 
 fn instruction_registers<A>(instruction: &SIRInstruction<A>) -> Vec<RegisterId> {
     let mut registers = Vec::new();
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => registers.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            registers.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => offset_registers(offset, &mut registers),
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            registers.push(*source);
-            offset_registers(offset, &mut registers);
-        }
-        SIRInstruction::Commit(..) => {}
-        SIRInstruction::Concat(_, sources) => registers.extend(sources),
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            registers.extend([*condition, *then_value, *else_value]);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => registers.extend(args),
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            registers.extend([*old, *new]);
-        }
-    }
+    instruction.for_each_use(|register| registers.push(register));
     registers
 }
 
@@ -1395,12 +1374,7 @@ fn comb_block_execution_order<A>(unit: &ExecutionUnit<A>) -> Vec<BlockId> {
 }
 
 fn is_comb_runtime_effect(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        instruction,
-        SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    instruction.is_host_interaction()
 }
 
 fn interleave_comb_runtime_effects(
@@ -1577,12 +1551,10 @@ fn split_comb_execution_unit(
                         .filter_map(|(index, instruction)| {
                             let site = (*block_id, index);
                             match instruction {
-                                SIRInstruction::Store(..) | SIRInstruction::Commit(..) => {
+                                _ if instruction.memory_write().is_some() => {
                                     (site == target).then_some(instruction)
                                 }
-                                SIRInstruction::RuntimeEvent { .. }
-                                | SIRInstruction::CombCaptureEvent { .. }
-                                | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+                                _ if instruction.has_side_effects() => None,
                                 _ => {
                                     if let Some(register) = instruction.defined_register()
                                         && let Some((address, offset, bits)) =

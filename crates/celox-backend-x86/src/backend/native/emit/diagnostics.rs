@@ -411,53 +411,14 @@ fn dump_sir_operand_defs(
 fn sir_inst_def(
     inst: &crate::SIRInstruction<crate::RegionedAbsoluteAddr>,
 ) -> Option<crate::RegisterId> {
-    use crate::SIRInstruction;
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-    }
+    inst.defined_register()
 }
 
 fn collect_sir_inst_uses(
     inst: &crate::SIRInstruction<crate::RegionedAbsoluteAddr>,
     out: &mut Vec<crate::RegisterId>,
 ) {
-    use crate::SIRInstruction;
-    match inst {
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            out.push(*lhs);
-            out.push(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src)
-        | SIRInstruction::Store(_, _, _, src, _, _)
-        | SIRInstruction::Slice(_, src, _, _) => out.push(*src),
-        SIRInstruction::Commit(..) | SIRInstruction::Imm(..) | SIRInstruction::Load(..) => {}
-        SIRInstruction::Concat(_, args) | SIRInstruction::RuntimeEvent { args, .. } => {
-            out.extend(args.iter().copied());
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            out.push(*cond);
-            out.push(*then_val);
-            out.push(*else_val);
-        }
-        SIRInstruction::CombCaptureEvent { args, .. } => {
-            out.extend(args.iter().copied());
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            out.push(*old);
-            out.push(*new);
-        }
-    }
+    inst.for_each_use(|register| out.push(register));
 }
 
 pub(super) fn log_sir_width_stats(eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>) {

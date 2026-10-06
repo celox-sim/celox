@@ -361,7 +361,7 @@ pub(crate) fn analyze(
         let effects = block
             .instructions
             .iter()
-            .filter(|instruction| def_reg(instruction).is_none())
+            .filter(|instruction| instruction.has_side_effects())
             .count();
 
         let best = groups
@@ -1767,7 +1767,7 @@ fn specialize_block(
     work.extend(terminator_uses(&block.terminator));
 
     for (index, instruction) in block.instructions.iter().enumerate() {
-        if def_reg(instruction).is_none() {
+        if instruction.has_side_effects() {
             needed[index] = true;
             work.extend(specialized_uses(instruction, &known));
         }
@@ -2078,7 +2078,7 @@ fn build_effect_case_rewrite_plan(
         if sink.1 + 1 != block.instructions.len()
             || block.instructions[..sink.1]
                 .iter()
-                .any(|instruction| def_reg(instruction).is_none())
+                .any(|instruction| instruction.has_side_effects())
         {
             return None;
         }

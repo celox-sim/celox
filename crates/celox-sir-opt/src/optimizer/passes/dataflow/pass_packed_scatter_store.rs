@@ -1276,16 +1276,7 @@ fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 }
 
 fn is_removable_pure(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        instruction,
-        SIRInstruction::Imm(..)
-            | SIRInstruction::Binary(..)
-            | SIRInstruction::Unary(..)
-            | SIRInstruction::Load(..)
-            | SIRInstruction::Concat(..)
-            | SIRInstruction::Slice(..)
-            | SIRInstruction::Mux(..)
-    )
+    !instruction.has_side_effects()
 }
 
 fn definition_sites(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, DefSite> {
@@ -1342,30 +1333,9 @@ fn defining_instruction<'a>(
 }
 
 fn instruction_uses(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
-    match instruction {
-        SIRInstruction::Imm(..) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => vec![*source],
-        SIRInstruction::Load(_, _, offset, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => offset
-            .dynamic_registers()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(*source))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Concat(_, parts)
-        | SIRInstruction::RuntimeEvent { args: parts, .. }
-        | SIRInstruction::CombCaptureEvent { args: parts, .. } => parts.clone(),
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            vec![*condition, *then_value, *else_value]
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
+    let mut uses = Vec::new();
+    instruction.for_each_use(|register| uses.push(register));
+    uses
 }
 
 fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {

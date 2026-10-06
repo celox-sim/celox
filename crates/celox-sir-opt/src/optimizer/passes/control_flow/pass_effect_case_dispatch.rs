@@ -8,7 +8,7 @@ use super::control_region_feasibility::{
 use super::shared::def_reg;
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, RegisterType,
-    SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, SIRValue,
+    SIRInstruction, SIRSwitchCase, SIRTerminator, SIRValue,
 };
 use crate::{HashMap, HashSet};
 
@@ -269,69 +269,26 @@ fn remap_instruction(
     destination: RegisterId,
     resolve: &mut impl FnMut(RegisterId) -> Option<RegisterId>,
 ) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
-    let offset = |offset: &SIROffset, resolve: &mut dyn FnMut(RegisterId) -> Option<RegisterId>| {
-        Some(match offset {
-            SIROffset::Static(offset) => SIROffset::Static(*offset),
-            SIROffset::Dynamic(register) => SIROffset::Dynamic(resolve(*register)?),
-            SIROffset::Element {
-                index,
-                element_width,
-                bit_offset,
-                dynamic_bit_offset,
-            } => SIROffset::Element {
-                index: resolve(*index)?,
-                element_width: *element_width,
-                bit_offset: *bit_offset,
-                dynamic_bit_offset: match dynamic_bit_offset {
-                    Some(register) => Some(resolve(*register)?),
-                    None => None,
-                },
-            },
-            SIROffset::PackedElements {
-                bit_offset,
-                element_width,
-            } => SIROffset::PackedElements {
-                bit_offset: *bit_offset,
-                element_width: *element_width,
-            },
-        })
-    };
-    Some(match instruction {
-        SIRInstruction::Imm(_, value) => SIRInstruction::Imm(destination, value.clone()),
-        SIRInstruction::Load(_, address, source_offset, width) => SIRInstruction::Load(
-            destination,
-            *address,
-            offset(source_offset, resolve)?,
-            *width,
-        ),
-        SIRInstruction::Binary(_, lhs, operation, rhs) => {
-            SIRInstruction::Binary(destination, resolve(*lhs)?, *operation, resolve(*rhs)?)
+    if instruction.has_side_effects() {
+        return None;
+    }
+    let mut remapped = instruction.clone();
+    let mut resolved = true;
+    remapped.for_each_use_mut(|register| {
+        // Stop at the first operand that cannot be resolved, like `?` would.
+        if !resolved {
+            return;
         }
-        SIRInstruction::Unary(_, operation, source) => {
-            SIRInstruction::Unary(destination, *operation, resolve(*source)?)
+        match resolve(*register) {
+            Some(replacement) => *register = replacement,
+            None => resolved = false,
         }
-        SIRInstruction::Concat(_, arguments) => SIRInstruction::Concat(
-            destination,
-            arguments
-                .iter()
-                .map(|&argument| resolve(argument))
-                .collect::<Option<Vec<_>>>()?,
-        ),
-        SIRInstruction::Slice(_, source, source_offset, width) => {
-            SIRInstruction::Slice(destination, resolve(*source)?, *source_offset, *width)
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => SIRInstruction::Mux(
-            destination,
-            resolve(*condition)?,
-            resolve(*true_value)?,
-            resolve(*false_value)?,
-        ),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => return None,
-    })
+    });
+    if !resolved {
+        return None;
+    }
+    *remapped.defined_register_mut()? = destination;
+    Some(remapped)
 }
 
 fn allocate_block(next: &mut usize) -> Option<BlockId> {
@@ -355,7 +312,7 @@ fn allocate_register_like(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AbsoluteAddr, InstanceId, STABLE_REGION};
+    use crate::ir::{AbsoluteAddr, InstanceId, SIROffset, STABLE_REGION};
     use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
