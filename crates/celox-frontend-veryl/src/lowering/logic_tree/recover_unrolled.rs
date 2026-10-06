@@ -1993,6 +1993,12 @@ fn prove_group(
         }
     }
 
+    // The recovered loop runs exactly the proven iterations, so its variable
+    // stays within their values. Indices proven in range then need no check.
+    let _loop_range = super::LoopRangeScope::with_max(
+        first_iteration.loop_var,
+        iterations.iter().map(|iteration| iteration.value).max()?,
+    );
     let mut dynamic = first_template;
     if !rewrite_statements(&mut dynamic, first_iteration.loop_var, RewriteMode::Dynamic) {
         return None;
