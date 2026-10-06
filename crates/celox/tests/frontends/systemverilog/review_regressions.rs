@@ -1095,7 +1095,7 @@ fn rejects_out_of_range_packed_array_element_indices() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("index 2 of `a` outside its declared range"),
         "unexpected error: {error}"
     );
 }
@@ -1110,7 +1110,7 @@ fn rejects_out_of_range_packed_array_part_select_bounds() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("part-select of `a` outside its declared range"),
         "unexpected error: {error}"
     );
 }
@@ -5187,7 +5187,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 logic [7:0] values [0:1][0:2];
@@ -5196,7 +5196,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 localparam J = 3;
@@ -5212,7 +5212,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "named port connection expression",
+            "streaming concatenation",
             r#"
             module Child(input logic a); endmodule
             module Top(input logic [3:0] x);
@@ -5238,7 +5238,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural condition",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
                 always_ff @(posedge clk) begin
@@ -5249,7 +5249,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural expression",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, output logic [3:0] q);
                 always_ff @(posedge clk) begin
@@ -5262,7 +5262,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
                 always_ff @(posedge clk) q <= {<<{a}};
@@ -5365,7 +5365,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
@@ -5373,7 +5373,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural condition",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
@@ -5385,7 +5385,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic [3:0] y);
                 function automatic logic [3:0] square(input logic [3:0] value);
@@ -5398,7 +5398,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
@@ -5412,7 +5412,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, b, output logic y);
                 function automatic logic choose(
@@ -5547,7 +5547,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural expression",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, a, b, output logic q);
                 always_ff @(posedge clk)
@@ -5568,7 +5568,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 logic [7:0] values [0:1][0:2];
@@ -5594,7 +5594,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, b, output logic [7:0] y);
                 always_comb y = {<<{a}};
@@ -6062,7 +6062,7 @@ fn rejects_unrepresentable_dynamic_selects_instead_of_dropping_them() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("select index `sel ? 1 : 0`"),
         "unexpected error: {error}"
     );
 }

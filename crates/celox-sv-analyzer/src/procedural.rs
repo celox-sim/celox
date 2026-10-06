@@ -52,6 +52,10 @@ pub enum StmtBase<E, L> {
         name: String,
         args: Vec<Option<E>>,
     },
+    /// A system function called as a statement, such as `$countones(a);`:
+    /// the expression is evaluated like any other operand and its value is
+    /// discarded.
+    Eval(E),
     /// A system task call statement such as `$display`.
     SystemTask {
         name: String,
@@ -227,6 +231,7 @@ impl<E, L> StmtBase<E, L> {
                 name,
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
+            StmtBase::Eval(expr) => StmtBase::Eval(fe(expr)),
             StmtBase::SystemTask { name, args } => StmtBase::SystemTask {
                 name,
                 args: args
@@ -333,6 +338,7 @@ impl<E, L> StmtBase<E, L> {
                     fe(arg);
                 }
             }
+            StmtBase::Eval(expr) => fe(expr),
             StmtBase::SystemTask { args, .. } => {
                 for arg in args {
                     if let SystemTaskArg::Expr(expr) = arg {

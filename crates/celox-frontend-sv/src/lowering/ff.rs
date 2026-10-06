@@ -159,9 +159,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         calls.push((name.clone(), args.clone()));
                         exprs.extend(args.iter().flatten().cloned());
                     }
-                    sv::ir::Stmt::Assign { rhs, .. } | sv::ir::Stmt::AssignConcat { rhs, .. } => {
-                        exprs.push(rhs.clone())
-                    }
+                    sv::ir::Stmt::Assign { rhs, .. }
+                    | sv::ir::Stmt::AssignConcat { rhs, .. }
+                    | sv::ir::Stmt::Eval(rhs) => exprs.push(rhs.clone()),
                     sv::ir::Stmt::If { condition, .. } => exprs.push(condition.clone()),
                     sv::ir::Stmt::Case {
                         selector, items, ..
@@ -1097,6 +1097,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
                 self.call(name, args)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Eval(expr) => {
+                self.eval(expr, None)?;
                 Ok(true)
             }
             sv::ir::Stmt::SystemTask { name, args } => self.system_task(name, args),

@@ -79,6 +79,7 @@ const MEM_SHIFT_THRESHOLD: usize = 4;
 mod error;
 mod memory_contract;
 pub mod optimizer;
+pub mod parallel;
 pub use error::{OptimizationError, OptimizationErrorKind};
 pub use memory_contract::verify_memory_offset_contract;
 
@@ -100,4 +101,6 @@ pub fn optimize(
 }
 
 mod policy;
-pub use policy::{OptLevel, OptimizeOptions, PassOptions, SirDiagnostics, SirPass};
+pub use policy::{
+    OptLevel, OptimizeOptions, ParallelPartition, PassOptions, SirDiagnostics, SirPass,
+};

@@ -116,6 +116,7 @@ export interface NapiOptions {
 	extraSource?: string;
 	parameters?: NapiParamOverride[];
 	deadStorePolicy?: string;
+	threads?: number;
 }
 
 export interface NapiSourceFile {
@@ -463,6 +464,10 @@ export function buildNapiOpts(
 		};
 		napiOpts.deadStorePolicy =
 			map[options.deadStorePolicy] ?? options.deadStorePolicy;
+		hasOpt = true;
+	}
+	if (options.threads != null && options.threads !== 1) {
+		napiOpts.threads = options.threads;
 		hasOpt = true;
 	}
 

@@ -161,13 +161,14 @@ pub(super) fn parameters_from_ref_node(
                         &dimensions,
                         parameter_width,
                     )
+                    .ok()
                 } else {
                     const_expr_from_constant_param_with_env(
                         expr,
                         syntax_tree,
                         &const_env,
                         type_aliases,
-                    )
+                    )?
                 }
             } else {
                 None
@@ -234,6 +235,8 @@ fn parameter_declared_width(
                         &range_env,
                         type_aliases,
                     )
+                    .ok()
+                    .flatten()
                 })
             })
             .and_then(|value| eval_ast_const_expr(&value, &range_env));
@@ -571,7 +574,7 @@ pub(super) fn enum_member_constants_from_module_node(
                     syntax_tree,
                     &eval_env,
                     &resolved_type_aliases,
-                )
+                )?
                 .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?,
                 // An unvalued member follows its predecessor (the first is 0).
                 None => ConstExpr::Literal(format_typed_parameter_literal(

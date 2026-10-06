@@ -204,6 +204,24 @@ pub(super) fn reject_silently_ignored_constructs(
         if generated_nodes.iter().any(|n| n == &child) {
             continue;
         }
+        // A parameter initializer with an indexed select is lowered through
+        // the typed path; report why it cannot be.
+        if let RefNode::ParamAssignment(parameter) = &child
+            && let Some((_, expression)) = parameter.nodes.2.as_ref()
+            && expression.into_iter().any(|child| {
+                matches!(
+                    child,
+                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                )
+            })
+        {
+            selects::indexed_parameter_initializer(
+                expression,
+                syntax_tree,
+                &indexed_dimensions,
+                None,
+            )?;
+        }
         match child {
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
@@ -315,28 +333,29 @@ pub(super) fn reject_silently_ignored_constructs(
                     "variable declaration initializer".to_string(),
                 ));
             }
-            RefNode::ParamAssignment(parameter) if parameter.nodes.2.as_ref().is_some_and(|(_, expression)| {
-                expression.into_iter().any(|child| matches!(child,
-                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)))
-                && selects::indexed_parameter_initializer(expression, syntax_tree, &indexed_dimensions, None).is_none()
-            }) => {
-                return Err(AnalyzerError::Unsupported("indexed parameter initializer".to_string()));
+            RefNode::IndexedRange(range) => {
+                indexed_select_base(
+                    RefNode::Expression(&range.nodes.0),
+                    syntax_tree,
+                    &indexed_dimensions,
+                )?;
+                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
             }
-            RefNode::IndexedRange(range) if
-                indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions).is_none()
-                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
-                return Err(AnalyzerError::Unsupported(
-                    "indexed part-select".to_string(),
-                ));
-            }
-            RefNode::ConstantIndexedRange(range) if
-                !lowered_constant_indexed_ranges.contains(&range)
-                || indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions)
-                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
-                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
-                return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
+            RefNode::ConstantIndexedRange(range) => {
+                if !lowered_constant_indexed_ranges.contains(&range) {
+                    return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
+                }
+                let base = indexed_select_base(
+                    RefNode::ConstantExpression(&range.nodes.0),
+                    syntax_tree,
+                    &indexed_dimensions,
+                )?;
+                if eval_ast_const_expr(&base, const_env).is_none() {
+                    return Err(AnalyzerError::Unsupported(
+                        "indexed part-select start that is not constant".to_string(),
+                    ));
+                }
+                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -352,6 +371,17 @@ pub(super) fn reject_silently_ignored_constructs(
                             .is_some_and(|name| const_functions::is_constant_function(&name))
                 ) =>
             {
+                // A function whose body could not be converted is not a
+                // constant function; report why.
+                if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
+                    && let Some(error) = identifier_text(
+                        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                        syntax_tree,
+                    )
+                    .and_then(|name| const_functions::conversion_error(&name))
+                {
+                    return Err(error);
+                }
                 return Err(AnalyzerError::Unsupported(
                     "user constant function call".to_string(),
                 ));
@@ -416,25 +446,22 @@ pub(super) fn reject_silently_ignored_constructs(
                     "trireg charge storage".to_string(),
                 ));
             }
-            RefNode::PackedDimensionRange(range)
-                if const_expr_from_ref_node_with_env(
-                    RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0),
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )
-                .is_none()
-                    || const_expr_from_ref_node_with_env(
-                        RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.2),
+            RefNode::PackedDimensionRange(range) => {
+                let range = &range.nodes.0.nodes.1;
+                for bound in [&range.nodes.0, &range.nodes.2] {
+                    if const_expr_from_ref_node_with_env(
+                        RefNode::ConstantExpression(bound),
                         syntax_tree,
                         const_env,
                         type_aliases,
-                    )
-                    .is_none() =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "unsupported packed range".to_string(),
-                ));
+                    )?
+                    .is_none()
+                    {
+                        return Err(AnalyzerError::Unsupported(
+                            "unsupported packed range".to_string(),
+                        ));
+                    }
+                }
             }
             RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
                 return Err(AnalyzerError::Unsupported(
@@ -455,7 +482,7 @@ pub(super) fn reject_silently_ignored_constructs(
                                     RefNode::ConstantPrimary(&unary.nodes.2),
                                     syntax_tree,
                                 ),
-                                Some(ConstExpr::Ident(_))
+                                Ok(Some(ConstExpr::Ident(_)))
                             )
                     )
                 }) =>
@@ -545,12 +572,18 @@ fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) ->
     }
 }
 
-fn positive_indexed_width(
+/// Reject an indexed part-select width that is not a positive constant.
+fn check_indexed_width(
     width: &sv_parser::ConstantExpression,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
-) -> bool {
-    indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)
-        .and_then(|width| eval_ast_const_expr(&width, &dimensions.const_env))
-        .is_some_and(|width| width > 0)
+) -> Result<(), AnalyzerError> {
+    let width = indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)?;
+    if eval_ast_const_expr(&width, &dimensions.const_env).is_some_and(|width| width > 0) {
+        Ok(())
+    } else {
+        Err(AnalyzerError::Unsupported(
+            "indexed part-select width that is not a positive constant".to_string(),
+        ))
+    }
 }

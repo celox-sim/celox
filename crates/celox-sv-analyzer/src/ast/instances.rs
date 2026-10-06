@@ -284,10 +284,8 @@ fn port_connections_from_hierarchical_instance(
             let Some(expr) = connection.nodes.1.as_ref() else {
                 continue;
             };
-            let actual_expr = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("ordered port connection expression".to_string())
-                })?;
+            let actual_expr =
+                expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
             let actual = expr_ident_name(&actual_expr).unwrap_or_else(|| formal.clone());
             lowered.push(PortConnection::new(
                 formal.clone(),
@@ -312,14 +310,11 @@ fn port_connections_from_hierarchical_instance(
                     None => Some(Expr::Ident(formal.clone())),
                     Some(paren) => match paren.nodes.1.as_ref() {
                         None => None,
-                        Some(expr) => Some(
-                            expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                                .ok_or_else(|| {
-                                AnalyzerError::Unsupported(
-                                    "named port connection expression".to_string(),
-                                )
-                            })?,
-                        ),
+                        Some(expr) => Some(expr_from_expression_with_types(
+                            expr,
+                            syntax_tree,
+                            packed_dimensions,
+                        )?),
                     },
                 };
                 let actual = actual_expr
@@ -416,7 +411,7 @@ fn parameter_override(
             .ok_or_else(|| AnalyzerError::Unsupported("parameter type override".to_string()))?;
         return Ok(ParameterOverride::type_override(name, text));
     }
-    let value = const_expr_from_param_expression(expr, syntax_tree)
+    let value = const_expr_from_param_expression(expr, syntax_tree)?
         .ok_or_else(|| AnalyzerError::Unsupported("parameter override expression".to_string()))?;
     // A bare name that denotes a type (a typedef, or the instantiating
     // module's own `parameter type`) is passed on as that type.
