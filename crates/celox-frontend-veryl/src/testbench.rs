@@ -226,6 +226,9 @@ pub(crate) fn hierarchical_destination_reference(
         var_path: destination.var_path.clone(),
         index: destination.index.clone(),
         select: destination.select.clone(),
+        // Celox resolves the source shape from the target variable, and a
+        // destination never selects an array range, so its shape is not kept.
+        array: Default::default(),
         comptime: destination.comptime.clone(),
     }
 }
@@ -371,7 +374,7 @@ pub(crate) fn hierarchical_reference_bits(
 
     let mut base = 0usize;
     let mut consumed = 0usize;
-    for (dimension, expression) in reference.index.0.iter().enumerate() {
+    for (dimension, expression) in reference.index.indices.iter().enumerate() {
         let Some(&dimension_stride) = strides.get(dimension) else {
             return Err(invalid("too many unpacked array indices"));
         };
@@ -541,6 +544,8 @@ fn variable_access_width(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Option<usize> {
+    let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let array_total = info
         .array_dims
         .iter()
@@ -548,7 +553,7 @@ fn variable_access_width(
     if array_total == 0 || !info.width.is_multiple_of(array_total) {
         return None;
     }
-    let consumed = index.0.len();
+    let consumed = index.indices.len();
     if consumed > info.array_dims.len() {
         return None;
     }
@@ -719,7 +724,7 @@ fn collect_statement_reads(
                     reads.push(TestbenchRead::Hierarchical(Box::new(
                         hierarchical_destination_reference(destination),
                     )));
-                    for index in &destination.index.0 {
+                    for index in destination.index.expressions() {
                         collect_expression_reads(index, funcs, active_functions, reads);
                     }
                     collect_select_reads(&destination.select, funcs, active_functions, reads);
@@ -818,7 +823,7 @@ fn collect_target_reads(
     active_functions: &mut FxHashSet<VarId>,
     reads: &mut Vec<TestbenchRead>,
 ) {
-    for expr in &target.index.0 {
+    for expr in target.index.expressions() {
         collect_expression_reads(expr, funcs, active_functions, reads);
     }
     collect_select_reads(&target.select, funcs, active_functions, reads);
@@ -826,7 +831,8 @@ fn collect_target_reads(
     // The native selected-target path reads the complete root signal before
     // merging the new slice.  Model that read as a DSE root; a whole-root
     // assignment does not need this extra liveness edge.
-    if !target.index.0.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
+    if !target.index.indices.is_empty() || !target.select.0.is_empty() || target.select.1.is_some()
+    {
         reads.push(TestbenchRead::Root(target.id));
     }
 }
@@ -859,7 +865,7 @@ fn collect_expression_reads(
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
                 reads.push(TestbenchRead::Root(*var_id));
-                for expr in &index.0 {
+                for expr in index.expressions() {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(select, funcs, active_functions, reads);
@@ -872,7 +878,7 @@ fn collect_expression_reads(
             }
             Factor::HierVariable(reference) => {
                 reads.push(TestbenchRead::Hierarchical(reference.clone()));
-                for expr in &reference.index.0 {
+                for expr in reference.index.expressions() {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
                 collect_select_reads(&reference.select, funcs, active_functions, reads);
@@ -984,7 +990,7 @@ fn collect_function_call_reads(
     }
     for destinations in call.outputs.values() {
         for dst in destinations {
-            for expr in &dst.index.0 {
+            for expr in dst.index.expressions() {
                 collect_expression_reads(expr, funcs, active_functions, reads);
             }
             collect_select_reads(&dst.select, funcs, active_functions, reads);
@@ -1505,7 +1511,7 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
         // No index or select → whole variable
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             self.emit_load_at(address, 0, info.width, ops);
             return;
         }
@@ -1528,7 +1534,7 @@ impl ExprCompiler<'_> {
         let mut static_bit_offset: usize = 0;
         let mut dynamic_terms = 0usize;
 
-        for (i, idx_expr) in index.0.iter().enumerate() {
+        for (i, idx_expr) in index.indices.iter().enumerate() {
             if i >= info.array_dims.len() {
                 break;
             }
@@ -1547,12 +1553,12 @@ impl ExprCompiler<'_> {
             }
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            strides_bits[index.0.len() - 1]
+            strides_bits[index.indices.len() - 1]
         };
 
         let (select_offset, selected_width) =
@@ -1873,7 +1879,9 @@ impl ExprCompiler<'_> {
         select: &VarSelect,
     ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
     {
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Some(TestbenchTarget {
                 signal,
                 selection: None,
@@ -1893,7 +1901,7 @@ impl ExprCompiler<'_> {
         }
 
         let mut offset_ops = vec![TbOpcode::ConstU64(0)];
-        for (i, index) in index.0.iter().enumerate() {
+        for (i, index) in index.indices.iter().enumerate() {
             let stride = *strides_bits.get(i)?;
             Self::append_offset_term(&mut offset_ops, |ops| {
                 if let Some(index) = Self::try_const_usize(index) {
@@ -1906,12 +1914,12 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let accessed_width = if index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.indices.len() >= info.array_dims.len() {
             element_width
-        } else if index.0.is_empty() {
+        } else if index.indices.is_empty() {
             info.width
         } else {
-            *strides_bits.get(index.0.len() - 1)?
+            *strides_bits.get(index.indices.len() - 1)?
         };
         let (select_ops, select_width) = if select.is_empty() {
             (vec![TbOpcode::ConstU64(0)], accessed_width)
@@ -1970,7 +1978,9 @@ impl ExprCompiler<'_> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Result<(), ParserError> {
-        for (dimension, index) in index.0.iter().enumerate() {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
+        for (dimension, index) in index.indices.iter().enumerate() {
             let Some(&size) = info.array_dims.get(dimension) else {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
@@ -3035,7 +3045,7 @@ fn extract_source_location(
 }
 
 fn has_selected_testbench_destination(destination: &veryl_analyzer::ir::AssignDestination) -> bool {
-    !destination.index.0.is_empty()
+    !destination.index.indices.is_empty()
         || !destination.select.0.is_empty()
         || destination.select.1.is_some()
 }
@@ -3048,7 +3058,7 @@ fn reject_selected_destinations_in_expression_statements(
             Statement::Assign(statement) => {
                 if statement.dst.iter().any(has_selected_testbench_destination)
                     || statement.hier_dst.as_ref().is_some_and(|destination| {
-                        !destination.index.0.is_empty()
+                        !destination.index.indices.is_empty()
                             || !destination.select.0.is_empty()
                             || destination.select.1.is_some()
                     })
@@ -3150,7 +3160,11 @@ fn validate_testbench_expression(
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
-                for expression in reference.index.0.iter().chain(reference.select.0.iter()) {
+                for expression in reference
+                    .index
+                    .expressions()
+                    .chain(reference.select.0.iter())
+                {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &reference.select.1 {
@@ -3159,7 +3173,7 @@ fn validate_testbench_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
@@ -3497,8 +3511,7 @@ fn validate_testbench_hierarchical_destination(
 ) -> Result<(), ParserError> {
     for expression in destination
         .index
-        .0
-        .iter()
+        .expressions()
         .chain(destination.select.0.iter())
     {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -3532,7 +3545,7 @@ fn validate_testbench_destination(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
-    for expression in &destination.index.0 {
+    for expression in destination.index.expressions() {
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     for expression in &destination.select.0 {
@@ -3629,6 +3642,7 @@ mod tests {
             var_path,
             index: VarIndex::default(),
             select: VarSelect::default(),
+            array: Default::default(),
             comptime: Comptime::default(),
         }
     }

@@ -700,8 +700,7 @@ fn apply_readmem_writes(
     };
     let image = crate::module::readmem_image(module, filename, destinations, 16, |dst| {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
             .collect()
     })?;
@@ -981,7 +980,7 @@ fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> Result<NodeId, SLT
 fn function_assigns_whole_var(assign: &AssignStatement, var_id: VarId) -> bool {
     assign.dst.len() == 1
         && assign.dst[0].id == var_id
-        && assign.dst[0].index.0.is_empty()
+        && assign.dst[0].index.indices.is_empty()
         && assign.dst[0].select.0.is_empty()
         && assign.dst[0].select.1.is_none()
 }
@@ -1876,7 +1875,7 @@ pub(crate) fn collect_written_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     collect_written_expression(module, expression, out)?;
                 }
                 Ok(())
@@ -2001,7 +2000,7 @@ fn collect_written_destination(
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
-    for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
+    for expression in dst.index.expressions().chain(dst.select.0.iter()) {
         collect_written_expression(module, expression, out)?;
     }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
@@ -2995,6 +2994,8 @@ fn eval_dynamic_select_offset(
     arena: &mut SLTNodeArena<VarId>,
     token: Option<&TokenRange>,
 ) -> Result<DynamicSelectOffset, ParserError> {
+    let folded = crate::bitaccess::fold_array_range(index, select)?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let geometry = select_geometry(module, var_id, index, select)?;
     let array_dimension_count = module.variables[&var_id].r#type.array.iter().count();
     let array_element_width = if array_dimension_count == 0 {
@@ -3014,8 +3015,7 @@ fn eval_dynamic_select_offset(
     let mut boundaries = BoundaryMap::default();
 
     for (dimension, expression) in index
-        .0
-        .iter()
+        .expressions()
         .chain(&select.0)
         .take(geometry.dimension_count)
         .enumerate()

@@ -258,6 +258,50 @@ pub struct SelectGeometry {
     pub selected_width: usize,
 }
 
+/// Veryl keeps an unpacked-array slice (`a[i+:2]`) as a range on the final
+/// index of a reference. Celox addresses unpacked and packed dimensions as one
+/// list, so the slice becomes a part select on that dimension. Unlike a packed
+/// `[msb:lsb]`, an array `[first:last]` names its low element first.
+pub fn fold_array_range(
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Result<Option<(VarIndex, VarSelect)>, ParserError> {
+    let Some((op, bound)) = index.range.as_deref() else {
+        return Ok(None);
+    };
+    if !select.0.is_empty() || select.1.is_some() {
+        return Err(ParserError::illegal_context(
+            "array slice",
+            "a select after an unpacked-array slice is unsupported",
+            Some(&bound.token_range()),
+        ));
+    }
+    // A runtime slice spans several elements from a runtime start, which SIR
+    // can only address one element at a time.
+    if let Some(dynamic) = index.expressions().find(|e| eval_constexpr(e).is_none()) {
+        return Err(ParserError::illegal_context(
+            "array slice",
+            "an unpacked-array slice with a runtime index is unsupported",
+            Some(&dynamic.token_range()),
+        ));
+    }
+    let mut indices = index.indices.clone();
+    let part = if matches!(op, VarSelectOp::Colon) {
+        let first = indices.pop().ok_or_else(|| {
+            ParserError::illegal_context(
+                "array slice",
+                "array slice is missing its first element",
+                Some(&bound.token_range()),
+            )
+        })?;
+        indices.push(bound.clone());
+        (VarSelectOp::Colon, first)
+    } else {
+        (op.clone(), bound.clone())
+    };
+    Ok(Some((VarIndex::default(), VarSelect(indices, Some(part)))))
+}
+
 /// Validate and normalize a variable select before any consumer constructs IR.
 ///
 /// In particular, a part-select anchor never consumes another aggregate
@@ -270,12 +314,18 @@ pub fn select_geometry(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Result<SelectGeometry, ParserError> {
+    let folded = fold_array_range(index, select)?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let mut strides = collect_dims(module, var_id)?;
     let dimensions_len = strides.len();
     let total_width = dimensions_to_strides(&mut strides)?;
-    let total_indices = index.0.len().checked_add(select.0.len()).ok_or_else(|| {
-        ParserError::illegal_context("variable select", "index count overflows usize", None)
-    })?;
+    let total_indices = index
+        .indices
+        .len()
+        .checked_add(select.0.len())
+        .ok_or_else(|| {
+            ParserError::illegal_context("variable select", "index count overflows usize", None)
+        })?;
 
     let Some((op, range_expr)) = &select.1 else {
         if total_indices > dimensions_len {
@@ -470,6 +520,8 @@ pub(crate) fn eval_var_select_with_geometry(
     select: &VarSelect,
     geometry: &SelectGeometry,
 ) -> Result<BitAccess, ParserError> {
+    let folded = fold_array_range(index, select)?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let strides = &geometry.strides;
     let total_width = geometry.total_width;
 
@@ -505,8 +557,7 @@ pub(crate) fn eval_var_select_with_geometry(
     let mut processed_count = 0;
 
     for (i, index_val) in index
-        .0
-        .iter()
+        .expressions()
         .chain(&select.0)
         .take(geometry.dimension_count)
         .enumerate()
@@ -665,7 +716,7 @@ pub(crate) fn eval_var_select_with_geometry(
     }
 }
 pub fn is_static_access(index: &VarIndex, select: &VarSelect) -> bool {
-    for expr in &index.0 {
+    for expr in index.expressions() {
         if eval_constexpr(expr).is_none() {
             return false;
         }
@@ -808,8 +859,10 @@ pub fn select_offset_expr(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Result<(Expression, SelectGeometry), ParserError> {
+    let folded = fold_array_range(index, select)?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let geometry = select_geometry(module, var_id, index, select)?;
-    let mut indices = index.0.clone();
+    let mut indices = index.indices.clone();
     indices.extend(select.0.iter().cloned());
     let token = TokenRange::default();
     let ct = || Box::new(Comptime::create_unknown(token));

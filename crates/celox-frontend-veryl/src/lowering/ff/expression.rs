@@ -33,7 +33,7 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
     match expr {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => {
-                index.0.iter().any(expression_has_side_effect)
+                index.expressions().any(expression_has_side_effect)
                     || select.0.iter().any(expression_has_side_effect)
                     || select
                         .1
@@ -187,6 +187,8 @@ impl<'a> FfParser<'a> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Option<BitAccess> {
+        let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let width = typ.width();
         let mut dims = Vec::with_capacity(typ.array.as_slice().len() + width.as_slice().len() + 1);
         for dimension in typ.array.as_slice() {
@@ -227,11 +229,10 @@ impl<'a> FfParser<'a> {
         let mut base_offset = 0usize;
         let mut processed_count = 0usize;
         let index_count =
-            (index.0.len() + select.0.len()).saturating_sub(usize::from(select.1.is_some()));
+            (index.indices.len() + select.0.len()).saturating_sub(usize::from(select.1.is_some()));
 
         for (i, index_val) in index
-            .0
-            .iter()
+            .expressions()
             .chain(&select.0)
             .take(index_count)
             .enumerate()
@@ -373,6 +374,8 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let formal_width = resolve_total_width(self.module, &self.module.variables[&var_id])?;
         self.materialize_bound_function_access(
             var_id,
@@ -715,7 +718,7 @@ impl<'a> FfParser<'a> {
                 let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
                     return None;
                 };
-                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                if !index.indices.is_empty() || !select.0.is_empty() || select.1.is_some() {
                     return None;
                 }
                 let source_frame = (0..frame).rev().find(|&source_frame| {
@@ -987,6 +990,11 @@ impl<'a> FfParser<'a> {
     }
 
     fn array_access_needs_view(&self, var_id: VarId, index: &VarIndex, select: &VarSelect) -> bool {
+        let folded = match crate::bitaccess::fold_array_range(index, select) {
+            Ok(folded) => folded,
+            Err(_) => return false,
+        };
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let Some(formal) = self.module.variables.get(&var_id) else {
             return false;
         };
@@ -1005,7 +1013,7 @@ impl<'a> FfParser<'a> {
         else {
             return true;
         };
-        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        let all_indices = index.expressions().chain(&select.0).collect::<Vec<_>>();
         all_indices.len() != array_dims.len()
             || all_indices.iter().zip(array_dims).any(|(expr, dim)| {
                 self.get_constant_value(expr)
@@ -1070,7 +1078,7 @@ impl<'a> FfParser<'a> {
                     if self.array_access_needs_view(*var_id, index, select) {
                         usage.array_views.insert(*var_id);
                     }
-                    for expr in &index.0 {
+                    for expr in index.expressions() {
                         self.collect_function_input_usage(expr, usage, active_calls)?;
                     }
                     for expr in &select.0 {
@@ -1103,7 +1111,7 @@ impl<'a> FfParser<'a> {
                         }
                     }
                     for dst in call.outputs.values().flatten() {
-                        for expr in &dst.index.0 {
+                        for expr in dst.index.expressions() {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
                         }
                         for expr in &dst.select.0 {
@@ -1220,7 +1228,7 @@ impl<'a> FfParser<'a> {
                             );
                         }
                     }
-                    for expr in &index.0 {
+                    for expr in index.expressions() {
                         collect(expr, candidates, candidate_indices);
                     }
                     for expr in &select.0 {
@@ -1262,7 +1270,7 @@ impl<'a> FfParser<'a> {
                         }
                     }
                     for dst in call.outputs.values().flatten() {
-                        for expr in &dst.index.0 {
+                        for expr in dst.index.expressions() {
                             collect(expr, candidates, candidate_indices);
                         }
                         for expr in &dst.select.0 {
@@ -1339,12 +1347,13 @@ impl<'a> FfParser<'a> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Option<Vec<usize>> {
+        let folded = crate::bitaccess::fold_array_range(index, select).ok()?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         if self.array_access_needs_view(var_id, index, select) {
             return None;
         }
         index
-            .0
-            .iter()
+            .expressions()
             .chain(&select.0)
             .map(|expr| self.get_constant_value(expr).map(|value| value as usize))
             .collect()
@@ -1399,7 +1408,7 @@ impl<'a> FfParser<'a> {
     ) {
         if let Expression::Term(factor) = expr
             && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
-            && index.0.is_empty()
+            && index.indices.is_empty()
             && select.0.is_empty()
             && select.1.is_none()
             && let Some(source_frame) = (0..frame).rev().find(|&source_frame| {
@@ -1470,7 +1479,7 @@ impl<'a> FfParser<'a> {
                 let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
                     return Ok(None);
                 };
-                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                if !index.indices.is_empty() || !select.0.is_empty() || select.1.is_some() {
                     return Ok(None);
                 }
                 let Some(source_frame) = (0..frame).rev().find(|&i| {
@@ -1945,6 +1954,8 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<bool, ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         if self.array_access_needs_view(var_id, index, select) {
             return Ok(false);
         }
@@ -1956,7 +1967,7 @@ impl<'a> FfParser<'a> {
             .copied()
             .flatten()
             .collect::<Vec<_>>();
-        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        let all_indices = index.expressions().chain(&select.0).collect::<Vec<_>>();
         let resolved_indices = all_indices
             .iter()
             .map(|expr| self.get_constant_value(expr).unwrap() as usize)
@@ -2329,6 +2340,8 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let width = get_access_width(self.module, var_id, index, select)?;
         let formal = &self.module.variables[&var_id];
         let dest = if formal.r#type.is_2state() {
@@ -2338,7 +2351,7 @@ impl<'a> FfParser<'a> {
         };
         let mut offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             let element_count = formal
                 .r#type
                 .array
@@ -2385,6 +2398,8 @@ impl<'a> FfParser<'a> {
 
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         // Keep unpacked-array indexing separate from packed bit selection.
         // Backends may give array elements a physical stride different from
         // their logical packed width, so combining both here loses essential
@@ -2404,7 +2419,7 @@ impl<'a> FfParser<'a> {
         let mut dynamic_bit_offset = None;
         let mut dummy_targets: Vec<VarAtomBase<A>> = Vec::new();
 
-        for (i, expr) in index.0.iter().enumerate() {
+        for (i, expr) in index.indices.iter().enumerate() {
             let stride = strides[i];
             let is_unpacked = i < array_dimension_count;
             let scale = if is_unpacked {
@@ -2436,7 +2451,7 @@ impl<'a> FfParser<'a> {
             }
         }
 
-        let stride_offset = index.0.len();
+        let stride_offset = index.indices.len();
         let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
         let select_dim_limit = if is_colon_select {
             select.0.len().saturating_sub(1)
@@ -2604,7 +2619,9 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
-        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
+        if index.indices.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Ok(value);
         }
         let width = get_access_width(self.module, var_id, index, select)?;
@@ -2655,6 +2672,8 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let is_local_let = {
             let variable = &self.module.variables[&var_id];
             variable.affiliation == Affiliation::AlwaysFf && variable.kind == VarKind::Let
@@ -2681,7 +2700,7 @@ impl<'a> FfParser<'a> {
         let mut offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
         if !source_type.array.is_empty()
-            && index.0.is_empty()
+            && index.indices.is_empty()
             && select.0.is_empty()
             && select.1.is_none()
         {
@@ -2750,7 +2769,7 @@ impl<'a> FfParser<'a> {
             let variable = &self.module.variables[&dst.id];
             variable.affiliation == Affiliation::AlwaysFf
                 && variable.kind == VarKind::Let
-                && dst.index.0.is_empty()
+                && dst.index.indices.is_empty()
                 && dst.select.0.is_empty()
                 && dst.select.1.is_none()
         };
@@ -2786,7 +2805,7 @@ impl<'a> FfParser<'a> {
             ir_builder,
         )?;
         if !target_type.array.is_empty()
-            && dst.index.0.is_empty()
+            && dst.index.indices.is_empty()
             && dst.select.0.is_empty()
             && dst.select.1.is_none()
         {
@@ -3408,8 +3427,9 @@ impl<'a> FfParser<'a> {
                 // Compile-time constant parameter: emit as constant instead of loading
                 // from memory (parameters are not stored in simulation memory).
                 if comptime.is_const {
-                    let is_bare =
-                        var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none();
+                    let is_bare = var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none();
                     if is_bare {
                         if let Some((celox_value, mask_xz, width, _)) =
                             celox_value_from_comptime_in_context(comptime, context_width)
@@ -3477,7 +3497,10 @@ impl<'a> FfParser<'a> {
                 }
                 if let Some(bound_reg) = self.get_bound_function_arg_value(*var_id) {
                     let bound_reg = *bound_reg;
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         self.stack.push_back(bound_reg);
                         if let Some(context) = context {
                             let adjusted = self.cast_reg_width_ext(
@@ -3576,7 +3599,10 @@ impl<'a> FfParser<'a> {
 
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
-                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                    if var_index.indices.is_empty()
+                        && var_select.0.is_empty()
+                        && var_select.1.is_none()
+                    {
                         let formal_width =
                             resolve_total_width(self.module, &self.module.variables[var_id])?;
                         self.materialize_bound_function_access(

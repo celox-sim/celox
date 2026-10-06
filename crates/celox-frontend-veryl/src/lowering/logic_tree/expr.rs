@@ -404,7 +404,7 @@ pub(super) fn eval_function_body_return(
     fn is_whole_var_assign_to(assign: &AssignStatement, var_id: VarId) -> bool {
         assign.dst.len() == 1
             && assign.dst[0].id == var_id
-            && assign.dst[0].index.0.is_empty()
+            && assign.dst[0].index.indices.is_empty()
             && assign.dst[0].select.0.is_empty()
             && assign.dst[0].select.1.is_none()
     }
@@ -556,7 +556,7 @@ pub(super) fn eval_function_body_return(
             Statement::Assign(assign) => {
                 validate_function_body_expression(module, &assign.expr)?;
                 for dst in &assign.dst {
-                    for index_expr in &dst.index.0 {
+                    for index_expr in dst.index.expressions() {
                         validate_function_body_expression(module, index_expr)?;
                     }
                     for select_expr in &dst.select.0 {
@@ -633,7 +633,7 @@ pub(super) fn eval_function_body_return(
                 }
                 for dsts in call.outputs.values() {
                     for dst in dsts {
-                        for index_expr in &dst.index.0 {
+                        for index_expr in dst.index.expressions() {
                             validate_function_body_expression(module, index_expr)?;
                         }
                         for select_expr in &dst.select.0 {
@@ -2421,8 +2421,7 @@ fn case_target_can_be_recomputed(expression: &Expression) -> bool {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => index
-                .0
-                .iter()
+                .expressions()
                 .chain(select.0.iter())
                 .chain(select.1.iter().map(|(_, end)| end))
                 .all(case_target_can_be_recomputed),
@@ -3245,7 +3244,7 @@ fn eval_factor(
             // constant node directly instead of loading from memory.
             // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
             if comptime.is_const {
-                let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+                let is_bare = index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
                 let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
 
                 let constant = if is_bare {

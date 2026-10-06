@@ -249,8 +249,7 @@ fn collect_statement_variables(statement: &Statement, out: &mut Vec<VarId>) -> b
 
 fn collect_index_variables(index: &VarIndex, out: &mut Vec<VarId>) -> bool {
     index
-        .0
-        .iter()
+        .expressions()
         .all(|expression| collect_expression_variables(expression, out))
 }
 
@@ -452,20 +451,30 @@ fn parameterize_index(
     variants: &[&VarIndex],
     candidate: &UnrolledLoopCandidate,
 ) -> Option<bool> {
-    if variants
-        .iter()
-        .any(|variant| variant.0.len() != template.0.len())
-    {
+    if variants.iter().any(|variant| {
+        variant.indices.len() != template.indices.len()
+            || variant
+                .range
+                .as_ref()
+                .map(|range| std::mem::discriminant(&range.0))
+                != template
+                    .range
+                    .as_ref()
+                    .map(|range| std::mem::discriminant(&range.0))
+    }) {
         return None;
     }
+    let mut variant_expressions = variants
+        .iter()
+        .map(|variant| variant.expressions())
+        .collect::<Vec<_>>();
     let mut depends = false;
-    for position in 0..template.0.len() {
-        let expressions = variants
-            .iter()
-            .map(|variant| &variant.0[position])
-            .collect::<Vec<_>>();
-        depends |=
-            parameterize_expression(module, &mut template.0[position], &expressions, candidate)?;
+    for expression in template.expressions_mut() {
+        let expressions = variant_expressions
+            .iter_mut()
+            .map(|variant| variant.next())
+            .collect::<Option<Vec<_>>>()?;
+        depends |= parameterize_expression(module, expression, &expressions, candidate)?;
     }
     Some(depends)
 }
@@ -832,7 +841,7 @@ fn guard_loop_dependent_accesses(
     match expression {
         Expression::Term(factor) => match factor.as_mut() {
             Factor::Variable(_, index, select, _) => {
-                for expression in &mut index.0 {
+                for expression in index.expressions_mut() {
                     guard_access(expression, loop_var, exceptional_condition);
                 }
                 for expression in &mut select.0 {
@@ -904,7 +913,7 @@ fn remap_expression_variable(expression: &mut Expression, from: VarId, to: VarId
                 if *variable == from {
                     *variable = to;
                 }
-                for expression in &mut index.0 {
+                for expression in index.expressions_mut() {
                     remap_expression_variable(expression, from, to);
                 }
                 for expression in &mut select.0 {
@@ -3932,7 +3941,7 @@ fn rewrite_statement(statement: &mut Statement, loop_var: VarId, mode: &RewriteM
 
 fn rewrite_index(index: &mut VarIndex, loop_var: VarId, mode: &RewriteMode) -> Option<bool> {
     let mut depends = false;
-    for expression in &mut index.0 {
+    for expression in index.expressions_mut() {
         depends |= rewrite_expression(expression, loop_var, mode)?;
     }
     Some(depends)
