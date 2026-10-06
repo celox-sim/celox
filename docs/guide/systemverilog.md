@@ -106,8 +106,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `Child u[3:2](...)`, and `InstanceHierarchy::index` holds the index. Arrays
   with a negative bound are rejected.
 - **Out-of-range selects.** A run-time select that reaches past either end of a
-  vector reads zero for the missing bits and writes only the bits that exist.
-  Four-state simulation does not yet turn a fully out-of-range read into `X`.
+  vector reads `X` for the missing bits (zero in two-state simulation) and
+  writes only the bits that exist.
 - **Wildcard comparisons.** `casez`, `casex`, `inside` and `==?` honor the
   `?`, `x` and `z` bits of a constant pattern in both two-state and four-state
   simulation.

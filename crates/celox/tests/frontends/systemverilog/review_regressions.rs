@@ -1375,7 +1375,7 @@ fn returns_unknown_for_invalid_runtime_array_read_indices() {
         io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
     })
     .unwrap();
-    let all_x = (BigUint::default(), BigUint::from(0xffu16));
+    let all_x = (BigUint::from(0xffu16), BigUint::from(0xffu16));
     assert_eq!(sim.get_four_state(combinational), all_x);
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get_four_state(registered), all_x);
@@ -1452,7 +1452,7 @@ fn returns_unknown_for_invalid_inner_runtime_array_indices() {
     .unwrap();
     assert_eq!(
         sim.get_four_state(selected),
-        (BigUint::default(), BigUint::from(0xffu16))
+        (BigUint::from(0xffu16), BigUint::from(0xffu16))
     );
 }
 
@@ -7401,96 +7401,19 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
 
 sv_backends! {
     fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter N = 2)(
-                    output logic [7:0] p, l, filled,
-                    output logic [15:0] signed_y, sized_y);
-                    typedef logic [3:0] nibble_t;
-                    typedef logic signed [3:0] signed_nibble_t;
-                    parameter nibble_t [1:0] P = 8'hab;
-                    localparam nibble_t [2:1] L = P;
-                    localparam nibble_t [1:0] F = '1;
-                    localparam signed_nibble_t [1:0] S = 8'hab;
-                    parameter nibble_t [N-1:0] R = 16'hcdef;
-                    always_comb begin
-                        p = P;
-                        l = L;
-                        filled = F;
-                        signed_y = S;
-                        sized_y = R;
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("parameter_alias_use_site_dimensions.sv"))], "Top"
-        ).param("P", 0xcd).param("N", 4);
-        for (name, expected) in [("p", 0xcdu16), ("l", 0xcd), ("filled", 0xff), ("signed_y", 0xffab), ("sized_y", 0xcdef)] {
-            assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
-        }
+        @case "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types";
+    }
+
+    fn body_parameters_are_local_with_a_parameter_port_list(sim) {
+        @case "review_regressions::body_parameters_are_local_with_a_parameter_port_list";
     }
 
     fn preserves_four_state_arithmetic_case_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (1'bx + 1'b0) 1'bx: y0 = a; endcase
-                        case (2'b1z - 4'b0001) 4'bxxxx: y1 = a; endcase
-                        case (4'b0000 * 2'b1x) 4'bxxxx: y2 = a; endcase
-                        case (2'b1z / 2'b01) 2'bxx: y3 = a; endcase
-                        case (2'b1x % 2'b01) 2'bxx: y4 = a; endcase
-                        case (-(2'b1z)) 2'bxx: y5 = a; endcase
-                        case ((2'b11 + 2'b01) + 2'b0x) 2'bxx: y6 = a; endcase
-                        case ((2'b1x + 2'b01) & 2'b00) 2'b00: y7 = a; endcase
-                        case (1'bx) (1'bx + 1'b0): y8 = a; endcase
-                        case (2'b01 / 2'b1x) 2'bxx: y9 = a; endcase
-                        case (2'b01 % 2'b1z) 2'bxx: y10 = a; endcase
-                        case (+(2'b1z)) 2'bxx: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_arithmetic_case_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_arithmetic_case_constants";
     }
 
     fn preserves_four_state_shift_and_bit_select_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
-                    always_comb begin
-                        case (2'bx0 >> 1) 2'b0x: y0 = a; endcase
-                        case (4'sbz101 >>> 2) 4'bzzz1: y1 = a; endcase
-                        case (4'b10xz << 1) 4'b0xz0: y2 = a; endcase
-                        case ({2'bx0}[1]) 1'bx: y3 = a; endcase
-                        case (1'bz) ({2'bz0}[1]): y4 = a; endcase
-                        case (4'bxxxx) (4'b0000 << 1'bz): y5 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("shift_and_select_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..6).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_shift_and_bit_select_constants";
     }
 
     fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
@@ -7498,37 +7421,7 @@ sv_backends! {
     }
 
     fn preserves_four_state_reduction_case_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (&1'bx) 1'bx: y0 = a; endcase
-                        case (|1'bz) 1'bx: y1 = a; endcase
-                        case (^2'b1x) 1'bx: y2 = a; endcase
-                        case (&3'b1z0) 1'b0: y3 = a; endcase
-                        case (|3'b0z1) 1'b1: y4 = a; endcase
-                        case (~&2'b1z) 1'bx: y5 = a; endcase
-                        case (~|2'b0x) 1'bx: y6 = a; endcase
-                        case (~^2'b1z) 1'bx: y7 = a; endcase
-                        case (^~2'b1x) 1'bx: y8 = a; endcase
-                        case (1'bx) (&1'bx): y9 = a; endcase
-                        case (^'1) 1'b1: y10 = a; endcase
-                        case (&'z) 1'bx: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_reduction_case_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_reduction_case_constants";
     }
 
     fn preserves_use_site_dimensions_in_function_alias_types(sim) {
@@ -7536,142 +7429,19 @@ sv_backends! {
     }
 
     fn preserves_four_state_relational_case_selectors(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3);
-                    always_comb begin
-                        case (1'bx < 1'b1) 1'bx: y0 = a; endcase
-                        case (1'bz <= 1'b0) 1'bx: y1 = a; endcase
-                        case (2'b1x > 2'b00) 1'bx: y2 = a; endcase
-                        case (2'b0z >= 2'b10) 1'bx: y3 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_relational_case_selectors.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = ["y0", "y1", "y2", "y3"].map(|name| sim.signal(name));
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_relational_case_selectors";
     }
 
     fn folds_compound_four_state_case_labels(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic s, a, b,
-                    output logic constant_y, concat_y, function_y, dynamic_y);
-                    function automatic logic label(); return 1'bx | 1'b0; endfunction
-                    always_comb begin
-                        case (1'bx) (1'bx | 1'b0): constant_y = a; endcase
-                        case (2'bxz) {1'bx, 1'bz}: concat_y = a; endcase
-                        case (1'bx) label(): function_y = a; endcase
-                        case (s)
-                            (1'b0 & 1'b1): dynamic_y = a;
-                            (1'b1 | 1'b0): dynamic_y = b;
-                            (1'bx | 1'b0): dynamic_y = a ^ b;
-                            (1'bx ? 1'bz : 1'bz): dynamic_y = ~a;
-                        endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("compound_four_state_case_labels.sv"))], "Top"
-        ).four_state(true);
-        let s = sim.signal("s");
-        let a = sim.signal("a");
-        let b = sim.signal("b");
-        let constant_outputs = ["constant_y", "concat_y", "function_y"].map(|name| sim.signal(name));
-        let dynamic_y = sim.signal("dynamic_y");
-        for inputs in 0u8..4 {
-            let a_value = inputs & 1 != 0;
-            let b_value = inputs & 2 != 0;
-            for (value, mask, expected) in [
-                (0u8, 0u8, a_value),
-                (1, 0, b_value),
-                (1, 1, a_value ^ b_value),
-                (0, 1, !a_value),
-            ] {
-                sim.modify(|io| {
-                    io.set(a, a_value);
-                    io.set(b, b_value);
-                    io.set_four_state(s, BigUint::from(value), BigUint::from(mask));
-                }).unwrap();
-                for output in constant_outputs {
-                    assert_eq!(sim.get(output), a_value.into());
-                }
-                assert_eq!(sim.get(dynamic_y), expected.into());
-            }
-        }
+        @case "review_regressions::folds_compound_four_state_case_labels";
     }
 
     fn preserves_four_state_equality_case_selectors(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a,
-                    output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (1'bx == 1'bx) 1'bx: y0 = a; endcase
-                        case (1'bz != 1'b0) 1'bx: y1 = a; endcase
-                        case (2'b0x == 2'b1x) 1'b0: y2 = a; endcase
-                        case (2'b0z != 2'b1x) 1'b1: y3 = a; endcase
-                        case (!(1'bx == 1'b0)) 1'bx: y4 = a; endcase
-                        case ((1'bx != 1'bz) && 1'b1) 1'bx: y5 = a; endcase
-                        case ((1'bx && 1'b1) == 1'bx) 1'bx: y6 = a; endcase
-                        case ((1'bx == 1'bx) ? 1'b0 : 1'b1) 1'bx: y7 = a; endcase
-                        case ((1'bx == 1'bx) ? 1'bz : 1'bz) 1'bz: y8 = a; endcase
-                        case (1'sbx == 2'b1x) 1'b0: y9 = a; endcase
-                        case (1'sbx != 2'sb1x) 1'bx: y10 = a; endcase
-                        case (8'hff == '1) 1'b1: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_equality_case_selectors.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in &outputs {
-                assert_eq!(sim.get(*output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_equality_case_selectors";
     }
 
     fn preserves_constant_case_selector_context(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
-                    always_comb begin
-                        case (1'bx && 1'b1) 1'bx: y0 = a; endcase
-                        case (1'b0 || 1'bz) 1'bx: y1 = a; endcase
-                        case (1'b1 ? 1'sb1 : 2'sb00) 2'b11: y2 = a; endcase
-                        case (1'b0 ? 2'sb00 : 1'sb1) 2'b11: y3 = a; endcase
-                        case (1'b1 ? 1'sb1 : 2'b00) 2'b01: y4 = a; endcase
-                        case (1'b1 ? 1'sbx : 2'sb00) 2'bxx: y5 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("constant_case_context.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = ["y0", "y1", "y2", "y3", "y4", "y5"].map(|name| sim.signal(name));
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_constant_case_selector_context";
     }
 
     fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
@@ -8218,4 +7988,35 @@ fn function_predicates_prove_complementary_else_if() {
         };
         assert_eq!(sim.get(y), expected.into());
     }
+}
+
+#[test]
+fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
+    let source = r#"
+        module Top (
+            input logic [2:0] b,
+            input bit [7:0] v,
+            output logic [3:0] y
+        );
+            assign y = v[b +: 4];
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("two_state_select.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    let b = sim.signal("b");
+    let v = sim.signal("v");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(b, 6u8);
+        io.set(v, 0xffu8);
+    })
+    .unwrap();
+    // Bits 6 and 7 exist; bits 8 and 9 of a two-state vector read 0.
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0b0011u8), BigUint::default())
+    );
 }

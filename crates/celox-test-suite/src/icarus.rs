@@ -151,7 +151,12 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     && error.ends_with("' has already been declared in this scope."))
                 // IEEE 1800-2023 23.3.3.5: an instance array connection width.
                 || (error.starts_with("Port expression width ")
-                    && error.contains(" does not match expected width "));
+                    && error.contains(" does not match expected width "))
+                // IEEE 1800-2023 6.20.1: an override of a localparam.
+                || (error.starts_with("Cannot override parameter `")
+                    && error.ends_with(
+                        "Parameter cannot be overridden in the scope it has been declared in.",
+                    ));
             if invalid_source {
                 rejected = true;
             } else if !(error.starts_with("Function ") && error.ends_with(" is not an input port."))

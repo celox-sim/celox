@@ -460,10 +460,23 @@ pub(super) fn type_with_fallback_ranges_with_env(
     let direct_ranges =
         packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases);
     if type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases).is_some() {
-        // Use-site dimensions enclose the aliased packed type.
+        // Use-site dimensions enclose the aliased packed type. The packed
+        // array they form is unsigned, whatever its elements (IEEE 1800-2023
+        // 7.4.1); a type name takes no signing of its own.
+        if !direct_ranges.is_empty() {
+            r#type.signed_element_depth = if r#type.is_signed {
+                Some(direct_ranges.len())
+            } else {
+                r#type
+                    .signed_element_depth
+                    .map(|depth| depth + direct_ranges.len())
+            };
+            r#type.is_signed = false;
+        }
         let mut ranges = direct_ranges;
         ranges.extend(r#type.packed_ranges);
         r#type.packed_ranges = ranges;
+        return r#type;
     } else if r#type.packed_ranges.is_empty() {
         r#type.packed_ranges = direct_ranges;
     }
@@ -471,6 +484,25 @@ pub(super) fn type_with_fallback_ranges_with_env(
         r#type.is_signed = is_signed_from_ref_node(node).unwrap_or(false);
     }
     r#type
+}
+
+/// The signed element depth of a declaration whose type is `node`: use-site
+/// packed dimensions of a type name enclose that type's elements.
+pub(super) fn signed_element_depth_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<usize> {
+    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases)?;
+    let use_site = node
+        .into_iter()
+        .filter(|child| matches!(child, RefNode::PackedDimension(_)))
+        .count();
+    if use_site > 0 && alias.is_signed {
+        Some(use_site)
+    } else {
+        alias.signed_element_depth.map(|depth| depth + use_site)
+    }
 }
 
 pub(super) fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRange>) -> Type {

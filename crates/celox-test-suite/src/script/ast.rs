@@ -14,7 +14,8 @@
 //! ```
 //!
 //! Case clauses come first: `(source PATH TEXT)` (one or more), `(top NAME)`,
-//! and optionally `(expect reject)`, `(four_state)`, `(tags TAG...)` and
+//! and optionally `(expect reject)`, `(four_state)`, `(tags TAG...)`,
+//! `(parameter NAME VALUE)` (the top module's parameter values) and
 //! `(category NAME)`. The statements that follow drive the design.
 //!
 //! Script values are integers of unbounded width; a value read from a signal
@@ -226,6 +227,8 @@ pub struct ScriptCase {
     /// Each source file is its parts joined by newlines.
     pub sources: Vec<(PathBuf, Vec<SourcePart>)>,
     pub top: String,
+    /// `(parameter NAME VALUE)`: values of the top module's parameters.
+    pub parameters: Vec<(String, u64)>,
     pub body: Vec<Stmt>,
     pub pos: Pos,
 }
@@ -684,6 +687,7 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
             four_state: false,
             sources: Vec::new(),
             top: String::new(),
+            parameters: Vec::new(),
             body: Vec::new(),
             pos,
         };
@@ -723,6 +727,18 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
                 Some("four_state") => {
                     arity(clause_items, clause_pos, 0, Some(0))?;
                     case.four_state = true;
+                }
+                Some("parameter") => {
+                    arity(clause_items, clause_pos, 2, Some(2))?;
+                    let name = identifier(&clause_items[1], "parameter")?;
+                    let value = atom(&clause_items[2], "parameter value")?;
+                    let Some(value) = literal(&value)
+                        .filter(Value::is_known)
+                        .and_then(|value| u64::try_from(value.payload).ok())
+                    else {
+                        return error(clause_pos, "a parameter value is a known 64-bit literal");
+                    };
+                    case.parameters.push((name, value));
                 }
                 Some("tags") => {
                     for item in &clause_items[1..] {
@@ -799,6 +815,26 @@ mod tests {
         assert_eq!(path.name, "f_out");
         assert_eq!(value, &Value::known(2));
         assert_eq!(message, "f output");
+    }
+
+    #[test]
+    fn parameter_clauses_set_top_parameters() {
+        let header = "(group g (category operators))";
+        let (_, cases) = group(&format!(
+            r#"{header} (case t (source "top.sv" "") (top Top) (parameter N 4) (parameter P 0xcd) (eval))"#
+        ))
+        .unwrap();
+        assert_eq!(
+            cases[0].parameters,
+            [("N".to_string(), 4), ("P".to_string(), 0xcd)]
+        );
+        // A value with unknown bits cannot set a parameter.
+        assert!(
+            group(&format!(
+                r#"{header} (case t (source "top.sv" "") (top Top) (parameter N 4'bx))"#
+            ))
+            .is_err()
+        );
     }
 
     #[test]

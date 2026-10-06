@@ -2,8 +2,6 @@
 #[macro_use]
 mod test_utils;
 
-// Run the remaining Celox-only failures explicitly with:
-// cargo test -p celox --test veryl_context_regressions -- --include-ignored --skip ::sv
 all_backends! {
     fn part_select_of_signed_is_unsigned(sim) {
         @case "veryl_context_regressions::part_select_of_signed_is_unsigned";
@@ -40,8 +38,6 @@ all_backends! {
         @case "veryl_context_regressions::folded_constant_wider_than_its_operand";
     }
     fn folded_const_select_keeps_its_sign(sim) {
-        // Celox still returns 0 rather than 0xfffb for runtime-selected y5.
-        @ignore_on(native, cranelift, wasm, interp);
         @case "veryl_context_regressions::folded_const_select_keeps_its_sign";
     }
     fn runtime_for_bound_keeps_its_type(sim) {
@@ -49,8 +45,6 @@ all_backends! {
         @case "veryl_context_regressions::runtime_for_bound_keeps_its_type";
     }
     fn case_compares_each_label_as_an_if_does(sim) {
-        // Celox still returns 0 rather than 2 for the mixed-sign y7 case.
-        @ignore_on(native, cranelift, wasm, interp);
         @case "veryl_context_regressions::case_compares_each_label_as_an_if_does";
     }
     fn runtime_case_target_uses_comparison_context(sim) {
@@ -59,6 +53,17 @@ all_backends! {
     fn runtime_for_bound_arithmetic_uses_int_context(sim) {
         @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
+    }
+    fn dynamic_param_array_read_uses_its_elements(sim) {
+        // SV frontend rejects the emitted unpacked array parameter as unsupported_simulator_parser.
+        @ignore_on(sv);
+        @case "veryl_context_regressions::dynamic_param_array_read_uses_its_elements";
+    }
+    fn constant_case_target_uses_comparison_context(sim) {
+        @case "veryl_context_regressions::constant_case_target_uses_comparison_context";
+    }
+    fn unfolded_constant_struct_member_reads_its_value(sim) {
+        @case "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value";
     }
 }
 

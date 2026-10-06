@@ -967,7 +967,10 @@ pub fn schedule_symbolic_rtl(
         var_id: source_to_state[&source.absolute_addr()].var_id,
     };
 
-    let sir = source_sir.into_map_addr(project, project_regioned);
+    let mut sir = source_sir.into_map_addr(project, project_regioned);
+    if !four_state {
+        celox_sir::two_state::canonicalize_program(&mut sir);
+    }
     let state_objects: HashMap<StateAddr, VariableMetadata> = state_objects
         .into_iter()
         .map(|(address, metadata)| (project(address), metadata))

@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 3,
+    "mismatch": 6,
     "emission_error": 0,
-    "compile_error": 21,
+    "compile_error": 24,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -228,6 +228,54 @@
       "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in continuous assignment\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:5: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::inside_matches_values_ranges_and_wildcards",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 158; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: Syntax in assignment statement l-value.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: Syntax in assignment statement l-value.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: Syntax in assignment statement l-value.\n<case>/source_0.sv:9: syntax error\n<case>/testbench.sv:3: error: Malformed statement\n<case>/testbench.sv:4: syntax error\n<case>/testbench.sv:4: error: Malformed statement\n<case>/testbench.sv:5: syntax error\n<case>/testbench.sv:5: error: Malformed statement\n<case>/testbench.sv:6: syntax error\n<case>/testbench.sv:6: error: Malformed statement\n<case>/testbench.sv:7: syntax error\n<case>/testbench.sv:7: error: Malformed statement\n<case>/testbench.sv:8: syntax error\n<case>/testbench.sv:8: error: Malformed statement\n<case>/testbench.sv:10: syntax error\n<case>/testbench.sv:10: error: Malformed statement\n<case>/testbench.sv:13: syntax error\n<case>/testbench.sv:15: error: Malformed statement\n<case>/testbench.sv:17: syntax error\n<case>/testbench.sv:19: error: Invalid module item.\n/tmp/nix-shell.S1fXMv/claude-1000",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_bounds_and_type_queries at 232:5: assert_eq widths: expected 0x22, got 0x20",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_bounds_and_type_queries",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "packed_structs::packed_struct_mixed_state_members at 178:7: assert_eq compound_result: expected 0xx1, got 0xxx",
+      "expectation": "Simulation",
+      "name": "packed_structs::packed_struct_mixed_state_members",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Regression",
+      "detail": "review_regressions::preserves_four_state_arithmetic_case_constants at 306:7: assert_eq y11: expected 0x1, got 0xX (y11)",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_arithmetic_case_constants",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: sorry: packed array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
       "phase": "compile",
       "status": "compile_error"
     }

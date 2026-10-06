@@ -55,6 +55,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         signed: r#type.is_signed(),
         is_2state: r#type.kind() == TypeKind::Bit,
         members: r#type.members.clone(),
+        signed_element_depth: r#type.signed_element_depth,
     }
 }
 
@@ -87,6 +88,7 @@ fn int_type() -> Type {
         )],
         unpacked_ranges: Vec::new(),
         members: Vec::new(),
+        signed_element_depth: None,
     }
 }
 

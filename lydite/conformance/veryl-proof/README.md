@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**684 actual passes / 705** and 21 recorded exceptions. The raw test executable
+**693 actual passes / 712** and 19 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 684 passes comprise 673 observation-checked cases, three smoke-only cases and
+The 693 passes comprise 682 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.
@@ -107,7 +107,7 @@ and exact failure message:
   unsynthesizable (veryl-lang/veryl#2604).
 - `unsupported_by_proof_backend`: twelve cases drive their design from a native
   Veryl testbench (`Backend::run_testbench`), which this backend does not run.
-- `known_celox_failure`: three cases that the Celox frontend gets wrong today and
+- `known_celox_failure`: one case that the Celox frontend gets wrong today and
   that Celox's own tests also ignore on every backend.
 
 A different failure, a legal-source mutation, or an unexpected success fails the

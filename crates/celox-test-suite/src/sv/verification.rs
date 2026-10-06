@@ -59,8 +59,18 @@ fn design_info(design: &Design) -> Option<DesignInfo> {
         .flatten()
         .unwrap_or_else(|| source.text.clone());
         // Another source only widens the value width estimate; the top's
-        // source must be analyzable.
-        if let Ok(ir) = celox_sv_analyzer::analyze_source(&text, &source.path) {
+        // source must be analyzable, with the case's parameter values.
+        let overrides = design
+            .parameters
+            .iter()
+            .map(|(name, value)| (name.clone(), i128::from(*value)))
+            .collect();
+        if let Ok(ir) = celox_sv_analyzer::analyze_source_with_module_parameter_overrides(
+            &text,
+            &source.path,
+            &design.top,
+            &overrides,
+        ) {
             modules.extend(ir.modules().iter().cloned());
         }
     }
@@ -126,6 +136,7 @@ fn design_info(design: &Design) -> Option<DesignInfo> {
         outputs,
         edges,
         max_width,
+        parameters: design.parameters.clone(),
         arrays,
     })
 }

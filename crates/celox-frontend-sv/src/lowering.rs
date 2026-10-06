@@ -1578,10 +1578,26 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 else {
                     unreachable!()
                 };
+                let else_expr = expr_for_state_mode(else_expr, four_state);
+                // The unknown result has the width and signedness of the
+                // division: an X operand makes the whole sum X (IEEE 1800-2023
+                // 11.4.3), and `'x` alone would make the result unsigned.
+                let unknown = match &else_expr {
+                    sv::ir::Expr::Binary { left, right, .. } => sv::ir::Expr::Binary {
+                        left: Box::new(sv::ir::Expr::Binary {
+                            left: left.clone(),
+                            op: sv::ir::BinaryOp::Add,
+                            right: right.clone(),
+                        }),
+                        op: sv::ir::BinaryOp::Add,
+                        right: Box::new(sv::ir::Expr::Literal("1'sbx".to_string())),
+                    },
+                    _ => sv::ir::Expr::Literal("'x".to_string()),
+                };
                 sv::ir::Expr::Mux {
                     condition: Box::new(expr_for_state_mode(condition, four_state)),
-                    then_expr: Box::new(sv::ir::Expr::Literal("'x".to_string())),
-                    else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+                    then_expr: Box::new(unknown),
+                    else_expr: Box::new(else_expr),
                 }
             } else {
                 expr_for_state_mode(else_expr, four_state)
@@ -3556,15 +3572,6 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let left_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
-            let operands_signed = left_signed
-                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
-            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                left_signed
-            } else {
-                operands_signed
-            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -3584,6 +3591,19 @@ fn lower_expr_with_context(
             );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            // An unsigned context makes the operands of a context-determined
+            // operator unsigned, and `>>>` a logical shift (IEEE 1800-2023
+            // 11.8.2).
+            let unsigned_context = context_determined && context_signed == Some(false);
+            let left_signed = !unsigned_context
+                && sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                left_signed
+            } else {
+                operands_signed
+            };
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
                     sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
@@ -4097,6 +4117,7 @@ fn runtime_select_width(
 /// brings the selected bits back to bit 0 with `(value << down) >> up`.
 struct RuntimePosition {
     width: usize,
+    vector_width: usize,
     up: sv::ir::Expr,
     down: sv::ir::Expr,
 }
@@ -4177,6 +4198,7 @@ fn runtime_select_position(
     };
     Some(RuntimePosition {
         width,
+        vector_width: usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
         up: select(hangs_over.clone(), zero(), above),
         down: select(hangs_over, below, zero()),
     })
@@ -4184,7 +4206,8 @@ fn runtime_select_position(
 
 /// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
 /// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
-/// `lsb` index. Positions past the top of the vector read as zero.
+/// `lsb` index. Positions outside a four-state vector read as X (IEEE
+/// 1800-2023 11.5.1); a two-state vector, or simulation, reads zero.
 fn runtime_select_as_shift(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -4214,13 +4237,57 @@ fn runtime_select_as_shift(
     };
     // Bring the selection down to bit 0: right by `up`, or left by `down`
     // when it hangs over the bottom.
-    let moved = shift(
-        shift(expr.clone(), sv::ir::BinaryOp::Shl, position.down),
-        sv::ir::BinaryOp::Shr,
-        position.up,
+    let move_down = |value: sv::ir::Expr| sv::ir::Expr::Select {
+        expr: Box::new(shift(
+            shift(value, sv::ir::BinaryOp::Shl, position.down.clone()),
+            sv::ir::BinaryOp::Shr,
+            position.up.clone(),
+        )),
+        msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+        lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+        signed: false,
+    };
+    let moved = move_down(expr.clone());
+    // Shifting fills the missing bits with 0, which is what a two-state
+    // vector (or a parameter) reads.
+    let four_state = name_to_id
+        .get(name)
+        .and_then(|id| variables.get(id))
+        .is_some_and(|variable| variable.is_4state);
+    if !four_state {
+        return Some(sv::ir::Expr::Select {
+            expr: Box::new(moved),
+            msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+            lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+            signed,
+        });
+    }
+    // Moving an all-ones vector the same way marks the selected bits that
+    // exist; the others read X.
+    let literal = |digit: &str, width: usize| {
+        sv::ir::Expr::Literal(format!("{width}'b{}", digit.repeat(width)))
+    };
+    let in_vector = move_down(literal("1", position.vector_width));
+    let binary = |left, op, right| sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let outside = sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::BitNot,
+        expr: Box::new(in_vector.clone()),
+    };
+    let selected = binary(
+        binary(moved, sv::ir::BinaryOp::BitAnd, in_vector),
+        sv::ir::BinaryOp::BitOr,
+        binary(
+            literal("x", position.width),
+            sv::ir::BinaryOp::BitAnd,
+            outside,
+        ),
     );
     Some(sv::ir::Expr::Select {
-        expr: Box::new(moved),
+        expr: Box::new(selected),
         msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed,
@@ -4510,9 +4577,11 @@ fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
     } else {
         BigUint::default()
     };
+    // An invalid index reads X: both the value and the mask bit are set
+    // (IEEE 1800-2023 7.4.6).
     let unknown = arena
         .alloc(SLTNode::Constant(
-            BigUint::default(),
+            unknown_mask.clone(),
             unknown_mask,
             value_width,
             false,
@@ -4915,6 +4984,19 @@ fn sv_expr_is_signed_with_parameters(
             }
             _ => false,
         },
+        // The division-by-zero guard takes the type of the division it
+        // guards; its unknown arm is internal.
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(
+            &**then_expr,
+            sv::ir::Expr::Literal(literal) if literal == sv::DIV_ZERO_UNKNOWN_LITERAL
+        ) =>
+        {
+            sv_expr_is_signed_with_parameters(else_expr, variables, name_to_id, parameter_types)
+        }
         sv::ir::Expr::Mux {
             then_expr,
             else_expr,
