@@ -59,10 +59,12 @@ interface Series {
     | "verilator"
     | "heliodor-native-x86_64-jit"
     | "heliodor-native-x86_64"
+    | "heliodor-native-parallel-x86_64"
     | "heliodor-tiered-x86_64"
     | "heliodor-veryl-tiered-x86_64"
     | "heliodor-veryl-x86_64"
     | "heliodor-native-aarch64"
+    | "heliodor-native-parallel-aarch64"
     | "heliodor-tiered-aarch64"
     | "heliodor-veryl-tiered-aarch64"
     | "heliodor-veryl-aarch64";
@@ -147,6 +149,7 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
         // JIT-only samples omit the host testbench. Keep them in the raw
         // history for Celox regressions, outside cross-simulator comparisons.
         "heliodor-native-x86_64",
+        "heliodor-native-parallel-x86_64",
         "heliodor-tiered-x86_64",
         "heliodor-veryl-tiered-x86_64",
         "heliodor-veryl-x86_64",
@@ -156,6 +159,7 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
       label: "AArch64 host",
       runtimes: new Set<Series["runtime"]>([
         "heliodor-native-aarch64",
+        "heliodor-native-parallel-aarch64",
         "heliodor-tiered-aarch64",
         "heliodor-veryl-tiered-aarch64",
         "heliodor-veryl-aarch64",
@@ -256,10 +260,12 @@ const RUNTIME_COLORS: Record<string, string> = {
   verilator: "#f97316",
   "heliodor-native-x86_64-jit": "#06b6d4",
   "heliodor-native-x86_64": "#2563eb",
+  "heliodor-native-parallel-x86_64": "#0f766e",
   "heliodor-tiered-x86_64": "#8b5cf6",
   "heliodor-veryl-tiered-x86_64": "#f97316",
   "heliodor-veryl-x86_64": "#f97316",
   "heliodor-native-aarch64": "#16a34a",
+  "heliodor-native-parallel-aarch64": "#0f766e",
   "heliodor-tiered-aarch64": "#8b5cf6",
   "heliodor-veryl-tiered-aarch64": "#f97316",
   "heliodor-veryl-aarch64": "#f97316",
@@ -273,10 +279,12 @@ const RUNTIME_LABELS: Record<string, string> = {
   verilator: "Verilator",
   "heliodor-native-x86_64-jit": "Native x86-64 (JIT code only)",
   "heliodor-native-x86_64": "Native x86-64",
+  "heliodor-native-parallel-x86_64": "Native x86-64, multi-threaded",
   "heliodor-tiered-x86_64": "Celox tiered JIT x86-64",
   "heliodor-veryl-tiered-x86_64": "Veryl-CC tiered x86-64",
   "heliodor-veryl-x86_64": "Veryl-CC synchronous x86-64",
   "heliodor-native-aarch64": "Native AArch64",
+  "heliodor-native-parallel-aarch64": "Native AArch64, multi-threaded",
   "heliodor-tiered-aarch64": "Celox tiered JIT AArch64",
   "heliodor-veryl-tiered-aarch64": "Veryl-CC tiered AArch64",
   "heliodor-veryl-aarch64": "Veryl-CC synchronous AArch64",
@@ -293,7 +301,7 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -336,8 +344,10 @@ function runtime(name: string): Series["runtime"] | null {
   if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
+  if (name.startsWith("heliodor-native-parallel-x86_64/")) return "heliodor-native-parallel-x86_64";
   if (name.startsWith("heliodor-veryl-cc-x86_64/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-aarch64/")) return "heliodor-native-aarch64";
+  if (name.startsWith("heliodor-native-parallel-aarch64/")) return "heliodor-native-parallel-aarch64";
   if (name.startsWith("heliodor-veryl-cc-aarch64/")) return "heliodor-veryl-aarch64";
   if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
