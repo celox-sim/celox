@@ -18,6 +18,7 @@ pub mod ir;
 pub mod procedural;
 pub mod symbol;
 pub mod syntax;
+pub mod system_functions;
 pub mod typecheck;
 
 pub use ast::packages::PackageSource;
@@ -29,7 +30,7 @@ pub use ir::Ir;
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
 /// Errors reported by the SystemVerilog analyzer.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalyzerError {
     #[error("SystemVerilog parse error: {0}")]
     Parse(String),
@@ -52,6 +53,13 @@ pub enum AnalyzerError {
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
     LocalParameterOverride { name: String },
+    /// A `$name` call that is not a system task or function Celox knows.
+    #[error("unknown system task or function `{name}`")]
+    UnknownSystemTf { name: String },
+    /// A call of a system task or function that is not valid where it is,
+    /// such as a task used as a value or a wrong number of arguments.
+    #[error("invalid call of `{name}`: {detail}")]
+    InvalidSystemTfCall { name: String, detail: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -76,6 +84,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("mixed clock-edge polarities for one signal", 443),
     ("delayed continuous assignment", 444),
     ("duplicate internal signal", 445),
+    ("streaming concatenation", 447),
     ("loop-generate unroll limit exceeded", 448),
     ("iff-qualified always_ff event", 452),
     ("nonblocking assignment inside always_comb", 453),

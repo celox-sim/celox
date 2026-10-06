@@ -1743,10 +1743,16 @@ fn merge_single_predecessor_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteA
         }
         claimed.insert(pred_id);
         claimed.insert(*successor);
-        pairs.push((pred_id, *successor, arguments.clone()));
+        pairs.push((pred_id, *successor));
     }
 
-    for (pred_id, successor_id, arguments) in pairs {
+    for (pred_id, successor_id) in pairs {
+        // Read the arguments now: an earlier merge may have replaced a
+        // parameter that this edge passes on.
+        let SIRTerminator::Jump(_, arguments) = &eu.blocks[&pred_id].terminator else {
+            unreachable!("planned predecessor still ends in its jump");
+        };
+        let arguments = arguments.clone();
         let mut successor = eu
             .blocks
             .remove(&successor_id)
@@ -4227,6 +4233,81 @@ mod tests {
                 terminator,
             },
         );
+    }
+
+    #[test]
+    fn single_predecessor_merge_reads_arguments_after_earlier_merges() {
+        // b0 -> b1(r1) passes r0; b2 -> b3(r2) passes b1's parameter r1.
+        // Merging b1 first replaces r1 with r0, so the b2 -> b3 merge must
+        // bind r2 to r0, not to the eliminated r1.
+        let mut register_map = HashMap::default();
+        for reg in 0..=3 {
+            register_map.insert(RegisterId(reg), bit(1));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            Vec::new(),
+            vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+            SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            vec![RegisterId(1)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(2), Vec::new()),
+                false_block: (BlockId(4), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(1)]),
+        );
+        insert_block(
+            &mut blocks,
+            3,
+            vec![RegisterId(2)],
+            vec![SIRInstruction::Store(
+                address(10),
+                SIROffset::Static(0),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Return,
+        );
+        insert_block(
+            &mut blocks,
+            4,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        merge_single_predecessor_jump_blocks(&mut eu);
+        eu.verify_result().unwrap();
+        let stored = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, _, source, _, _) => Some(*source),
+                _ => None,
+            });
+        assert_eq!(stored, Some(RegisterId(0)));
     }
 
     fn shared_dag_unit() -> ExecutionUnit<RegionedAbsoluteAddr> {

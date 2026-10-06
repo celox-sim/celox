@@ -6,6 +6,7 @@ mod builder;
 mod cache;
 mod diagnostics;
 mod late;
+mod parallel;
 pub(in crate::optimizer) mod pass_manager;
 mod runner;
 
@@ -71,6 +72,7 @@ mod tests {
             eval_comb_apply_ffs: crate::HashMap::default(),
             eval_only_ffs: crate::HashMap::default(),
             apply_ffs: crate::HashMap::default(),
+            parallel: None,
         };
         let design = celox_design::ElaboratedDesign::default();
         let runtime_schema = celox_design::RuntimeSchema::default();

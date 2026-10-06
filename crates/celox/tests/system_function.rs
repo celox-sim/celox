@@ -191,3 +191,55 @@ module Top (clk: input clock) {
         vec![celox::RuntimeEvent::Finish]
     );
 }
+
+/// Runtime events of several instances on one edge keep the sequential order
+/// when the FF update runs in partitioned lanes.
+#[test]
+fn test_partitioned_ff_runtime_events_keep_sequential_order() {
+    let code = r#"
+module Child #(param ID: u32 = 0) (clk: input clock, d: input logic<8>) {
+    var r: logic<8>;
+    always_ff (clk) {
+        r = d + ID;
+        $display("child %0d r=%0d", ID, r);
+    }
+}
+module Quiet (clk: input clock, d: input logic<8>) {
+    var r: logic<8>;
+    always_ff (clk) {
+        r = r + d;
+    }
+}
+module Top (clk: input clock, d: input logic<8>) {
+    inst q0: Quiet (clk, d);
+    inst q1: Quiet (clk, d);
+    inst q2: Quiet (clk, d);
+    inst q3: Quiet (clk, d);
+    inst c0: Child #(ID: 0) (clk, d);
+    inst c1: Child #(ID: 1) (clk, d);
+    inst c2: Child #(ID: 2) (clk, d);
+    inst c3: Child #(ID: 3) (clk, d);
+    inst c4: Child #(ID: 4) (clk, d);
+    inst c5: Child #(ID: 5) (clk, d);
+}
+"#;
+    let run = |threads: usize| {
+        let mut sim = Simulator::builder(code, "Top")
+            .threads(threads)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build()
+            .unwrap();
+        let clk = sim.event("clk");
+        let d = sim.signal("d");
+        let mut events = Vec::new();
+        for value in 0..4u8 {
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            events.push(sim.drain_runtime_events());
+        }
+        events
+    };
+    let sequential = run(1);
+    assert_eq!(sequential[1].len(), 6);
+    assert_eq!(run(4), sequential);
+}

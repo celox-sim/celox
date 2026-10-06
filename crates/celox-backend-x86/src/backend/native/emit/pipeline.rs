@@ -329,10 +329,13 @@ fn emit_prepared_eu_inner(
     }
     checkpoint()?;
     let emit_start = timing.then(crate::timing::now);
-    let state_size = layout
+    let semantic_size = layout
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .expect("native simulation-state size overflow");
+    let state_size = options
+        .arena_base
+        .map_or(semantic_size, |base| base.max(semantic_size));
     let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,

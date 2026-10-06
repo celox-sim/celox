@@ -27,6 +27,7 @@ impl LayoutSource<usize> for Fixture {
             ff_referenced_addresses: Default::default(),
             num_events: 0,
             runtime_event_sites: vec![],
+            lane_writers: Default::default(),
         }
     }
 }

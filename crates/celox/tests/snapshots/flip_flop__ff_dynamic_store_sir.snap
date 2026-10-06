@@ -12,7 +12,11 @@ Trigger Group: clk (AbsoluteAddr(inst0, state0))
     b0:
       r0 = Load(addr=val (region=0), offset=0, bits=8)
       r1 = Load(addr=i (region=0), offset=0, bits=2)
+      Jump(b1)
+    b1:
       Store(addr=a (region=2), offset=element(r1, width=8, bit=0), bits=8, src_reg = 0)
+      Jump(b2)
+    b2:
       Commit(src=a (region=2), dst=a (region=0), offset=0, bits=32)
       Return
 

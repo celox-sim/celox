@@ -571,7 +571,7 @@ pub fn prepare_external_hierarchy(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state)?;
+        let lowered = specialize_module(base, &key, four_state, false)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -598,7 +598,7 @@ pub fn prepare_external_hierarchy(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            Ok((module_id, specialize_module(base, key, four_state)?))
+            Ok((module_id, specialize_module(base, key, four_state, false)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
@@ -659,6 +659,7 @@ pub fn schedule_sources(
         usize,
     )],
     four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
@@ -692,7 +693,7 @@ pub fn schedule_sources(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state)?;
+        let lowered = specialize_module(base, &key, four_state, false)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -719,7 +720,8 @@ pub fn schedule_sources(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let lowered = specialize_module(base, key, four_state).map_err(FrontendError::from)?;
+            let lowered = specialize_module(base, key, four_state, parallel.enabled())
+                .map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
@@ -769,6 +771,7 @@ pub fn schedule_sources(
         ignored_loops,
         true_loops,
         four_state,
+        parallel,
         trace_options,
         trace,
     )
@@ -829,6 +832,7 @@ fn specialize_module(
     module: &AnalyzedSvModule,
     key: &LoweredSvModuleKey,
     four_state: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     // A `parameter type` is bound by rewriting its default in the module source.
@@ -863,22 +867,31 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(specialized, four_state, module.implicit_nets_allowed)
+    lower_module(
+        specialized,
+        four_state,
+        module.implicit_nets_allowed,
+        ff_parts,
+    )
 }
 
 fn lower_module(
     module: &sv::ir::Module,
     four_state: bool,
     implicit_nets_allowed: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed)
+    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed, ff_parts)
 }
 
+/// `ff_parts` additionally keeps every `always_ff` process as an
+/// independently evaluated part, for lane-partitioned builds.
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
     implicit_nets_allowed: bool,
+    ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let name = module.name().to_string();
     let mut next_id = SourceVarId::default();
@@ -999,7 +1012,13 @@ fn lower_module_with_overrides(
         &parameter_types,
     )?;
     let (
-        (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map),
+        (
+            eval_only_ff_blocks,
+            apply_ff_blocks,
+            eval_apply_ff_blocks,
+            reset_clock_map,
+            parallel_ff_parts,
+        ),
         runtime_event_sites,
         runtime_errors,
     ) = {
@@ -1011,7 +1030,7 @@ fn lower_module_with_overrides(
             &parameter_types,
             four_state,
         );
-        let blocks = lower_ff_processes(module, &mut pm)?;
+        let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -1104,6 +1123,7 @@ fn lower_module_with_overrides(
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            parallel_ff_parts,
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
             instance_index_bases: HashMap::default(),
@@ -4097,6 +4117,7 @@ fn runtime_select_width(
 /// brings the selected bits back to bit 0 with `(value << down) >> up`.
 struct RuntimePosition {
     width: usize,
+    vector_width: usize,
     up: sv::ir::Expr,
     down: sv::ir::Expr,
 }
@@ -4177,6 +4198,7 @@ fn runtime_select_position(
     };
     Some(RuntimePosition {
         width,
+        vector_width: usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
         up: select(hangs_over.clone(), zero(), above),
         down: select(hangs_over, below, zero()),
     })
@@ -4184,8 +4206,8 @@ fn runtime_select_position(
 
 /// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
 /// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
-/// `lsb` index. Positions outside the vector read as X in a four-state
-/// vector and as zero in a two-state one.
+/// `lsb` index. Positions outside a four-state vector read as X (IEEE
+/// 1800-2023 11.5.1); a two-state vector, or simulation, reads zero.
 fn runtime_select_as_shift(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -4226,44 +4248,46 @@ fn runtime_select_as_shift(
         signed: false,
     };
     let moved = move_down(expr.clone());
-    let variable = name_to_id.get(name).and_then(|id| variables.get(id));
-    let value = match variable.filter(|variable| variable.is_4state) {
-        // Bits outside a four-state vector read as X (IEEE 1800-2023
-        // 11.5.1). The vector's own bits, moved the same way, mark the
-        // positions that lie inside it.
-        Some(variable) => {
-            let inside = move_down(sv::ir::Expr::Literal(format!(
-                "{}'b{}",
-                variable.width,
-                "1".repeat(variable.width)
-            )));
-            let unknown = sv::ir::Expr::Literal(format!(
-                "{}'b{}",
-                position.width,
-                "x".repeat(position.width)
-            ));
-            let binary = |left, op, right| sv::ir::Expr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-            binary(
-                binary(moved, sv::ir::BinaryOp::BitAnd, inside.clone()),
-                sv::ir::BinaryOp::BitOr,
-                binary(
-                    unknown,
-                    sv::ir::BinaryOp::BitAnd,
-                    sv::ir::Expr::Unary {
-                        op: sv::ir::UnaryOp::BitNot,
-                        expr: Box::new(inside),
-                    },
-                ),
-            )
-        }
-        None => moved,
+    // Shifting fills the missing bits with 0, which is what a two-state
+    // vector (or a parameter) reads.
+    let four_state = name_to_id
+        .get(name)
+        .and_then(|id| variables.get(id))
+        .is_some_and(|variable| variable.is_4state);
+    if !four_state {
+        return Some(sv::ir::Expr::Select {
+            expr: Box::new(moved),
+            msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+            lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+            signed,
+        });
+    }
+    // Moving an all-ones vector the same way marks the selected bits that
+    // exist; the others read X.
+    let literal = |digit: &str, width: usize| {
+        sv::ir::Expr::Literal(format!("{width}'b{}", digit.repeat(width)))
     };
+    let in_vector = move_down(literal("1", position.vector_width));
+    let binary = |left, op, right| sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let outside = sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::BitNot,
+        expr: Box::new(in_vector.clone()),
+    };
+    let selected = binary(
+        binary(moved, sv::ir::BinaryOp::BitAnd, in_vector),
+        sv::ir::BinaryOp::BitOr,
+        binary(
+            literal("x", position.width),
+            sv::ir::BinaryOp::BitAnd,
+            outside,
+        ),
+    );
     Some(sv::ir::Expr::Select {
-        expr: Box::new(value),
+        expr: Box::new(selected),
         msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed,
@@ -4553,9 +4577,11 @@ fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
     } else {
         BigUint::default()
     };
+    // An invalid index reads X: both the value and the mask bit are set
+    // (IEEE 1800-2023 7.4.6).
     let unknown = arena
         .alloc(SLTNode::Constant(
-            BigUint::default(),
+            unknown_mask.clone(),
             unknown_mask,
             value_width,
             false,
@@ -4575,12 +4601,18 @@ type SvFfBlocks = (
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<SourceVarId, SourceVarId>,
+    HashMap<
+        TriggerSet<SourceVarId>,
+        Vec<celox_frontend_core::symbolic::artifact::FfPart<RegionedVarAddr>>,
+    >,
 );
 
 fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
+    ff_parts: bool,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
+    let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
@@ -4661,6 +4693,15 @@ fn lower_ff_processes(
         if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
             continue;
         }
+        if ff_parts {
+            parallel_ff_parts
+                .entry(trigger_set.clone())
+                .or_default()
+                .push(celox_frontend_core::symbolic::artifact::FfPart {
+                    evaluate: eval_only.clone(),
+                    apply: apply.clone(),
+                });
+        }
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
         insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set, apply);
     }
@@ -4673,12 +4714,15 @@ fn lower_ff_processes(
         ff::prune_unreachable_blocks(&mut eval_apply);
         eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply);
     }
+    // One process is the whole trigger group.
+    parallel_ff_parts.retain(|_, parts| parts.len() > 1);
 
     Ok((
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
         reset_clock_map,
+        parallel_ff_parts,
     ))
 }
 

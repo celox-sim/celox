@@ -3,6 +3,7 @@
 pub mod backend;
 mod error;
 mod event_buffer;
+pub mod parallel;
 mod reflection;
 pub mod scheduler;
 mod simulation;

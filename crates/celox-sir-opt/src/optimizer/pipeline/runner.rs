@@ -280,7 +280,18 @@ pub(super) fn optimize_with_options(
         tracing::debug!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
 
+    // Lane-partitioned kernels reuse the per-unit pipelines above. Their
+    // program-wide facts (identity aliases) come from the sequential kernel.
+    super::parallel::optimize_parallel_units(
+        program,
+        &comb_passes,
+        &eval_only_passes,
+        &apply_passes,
+        &options,
+    );
+
     super::late::optimize_late_comb(program, opt, &options, &unpacked_element_widths);
+    super::parallel::optimize_late_parallel_comb(program, opt, &options);
     if opt.diagnostics.mux_chain_stats {
         super::diagnostics::dump_mux_chain_stats(&program.sir.eval_comb);
     }

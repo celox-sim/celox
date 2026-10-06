@@ -110,7 +110,9 @@ impl Item<'_> {
         for parameter in &function.params {
             bindings.names.remove(&parameter.name);
         }
-        bindings.expr(&mut function.body);
+        if let Some(body) = &mut function.body {
+            bindings.expr(body);
+        }
     }
 
     fn functions(&self, functions: &HashMap<String, Function>) -> HashMap<String, Function> {
@@ -310,19 +312,29 @@ pub(super) fn items<'a>(
 }
 
 impl<'a> Elaborator<'a, '_> {
-    fn expression(&self, expr: &sv_parser::ConstantExpression, scope: &Scope) -> Option<ConstExpr> {
-        let expr = const_expr_from_ref_node_with_env(
+    /// A constant expression in this scope, or `None` when it has no
+    /// constant value Celox can determine.
+    fn expression(
+        &self,
+        expr: &sv_parser::ConstantExpression,
+        scope: &Scope,
+    ) -> Result<Option<ConstExpr>, AnalyzerError> {
+        let Some(expr) = const_expr_from_ref_node_with_env(
             RefNode::ConstantExpression(expr),
             self.tree,
             &scope.env,
             self.aliases,
-        )?;
-        let mut expr = expr_to_const(substitute_expr_idents(
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(mut expr) = expr_to_const(substitute_expr_idents(
             const_expr_to_expr(expr),
             &scope.literals,
-        ))?;
-        self.expand_constant_calls(&mut expr, scope)?;
-        Some(expr)
+        )) else {
+            return Ok(None);
+        };
+        Ok(self.expand_constant_calls(&mut expr, scope).map(|()| expr))
     }
 
     fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
@@ -383,7 +395,7 @@ impl<'a> Elaborator<'a, '_> {
         scope: &Scope,
         detail: &str,
     ) -> Result<i128, AnalyzerError> {
-        self.expression(expr, scope)
+        self.expression(expr, scope)?
             .and_then(|expr| eval_ast_const_expr(&expr, &scope.env))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
@@ -398,7 +410,7 @@ impl<'a> Elaborator<'a, '_> {
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        self.expression(expr, scope)
+        self.expression(expr, scope)?
             .and_then(|expr| {
                 typecheck::eval_const_integral_literal_with_types(&expr.into(), &scope.env, &types)
             })
@@ -450,7 +462,7 @@ impl<'a> Elaborator<'a, '_> {
                         }
                         sv_parser::ConditionalGenerateConstruct::Case(generate) => {
                             let selector = self
-                                .expression(&generate.nodes.1.nodes.1, scope)
+                                .expression(&generate.nodes.1.nodes.1, scope)?
                                 .ok_or_else(|| {
                                     AnalyzerError::Unsupported(
                                         "unknown case-generate selector".to_string(),
@@ -493,12 +505,13 @@ impl<'a> Elaborator<'a, '_> {
                                 match item {
                                     sv_parser::CaseGenerateItem::Nondefault(item) => {
                                         for label in item.nodes.0.contents() {
-                                            let label =
-                                                self.expression(label, scope).ok_or_else(|| {
+                                            let label = self.expression(label, scope)?.ok_or_else(
+                                                || {
                                                     AnalyzerError::Unsupported(
                                                         "unknown case-generate label".to_string(),
                                                     )
-                                                })?;
+                                                },
+                                            )?;
                                             let value = integral(&label)?;
                                             width = width.max(self_width(&label, value.width));
                                             signed &= value.signed;
@@ -620,7 +633,7 @@ impl<'a> Elaborator<'a, '_> {
                             self.tree,
                             &iteration.env,
                             |expr| self.expression(expr, &iteration),
-                        )
+                        )?
                         .ok_or_else(|| {
                             AnalyzerError::Unsupported("genvar update operator".to_string())
                         })?;
@@ -1118,7 +1131,9 @@ fn module_constant_functions(
             }
             // Close over definition-site constants. Unresolved module signals must
             // not become constants just because a generate local shadows them.
-            function.body = substitute_expr_idents(function.body, &bindings);
+            function.body = function
+                .body
+                .map(|body| substitute_expr_idents(body, &bindings));
             calls.insert(
                 function.name.clone(),
                 RefNode::FunctionDeclaration(declaration)

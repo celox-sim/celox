@@ -1,7 +1,8 @@
 use crate::ir::*;
 use crate::{HashSet, OptimizationContext};
 
-/// Remove stores from `eval_comb` whose target addresses are not live.
+/// Remove stores from `eval_comb` and its lane-partitioned alternative whose
+/// target addresses are not live.
 ///
 /// A store's address is considered live if:
 /// - It is in `externally_live` (user-specified observable signals), OR
@@ -48,6 +49,13 @@ pub(crate) fn eliminate_dead_stores(
                 .apply_ffs
                 .values()
                 .flat_map(|units| units.iter()),
+        )
+        .chain(
+            program
+                .sir
+                .parallel
+                .iter()
+                .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         );
 
     for eu in all_eus {
@@ -92,7 +100,12 @@ pub(crate) fn eliminate_dead_stores(
     }
 
     // 2. Remove dead stores from eval_comb.
-    for eu in program.sir.eval_comb.iter_mut() {
+    let parallel_comb = program
+        .sir
+        .parallel
+        .iter_mut()
+        .flat_map(|parallel| parallel.eval_comb.iter_mut().map(|unit| &mut unit.unit));
+    for eu in program.sir.eval_comb.iter_mut().chain(parallel_comb) {
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {

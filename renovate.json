@@ -205,6 +205,13 @@
         "rust-overlay"
       ],
       "minimumReleaseAge": "0 days"
+    },
+    {
+      "description": "The Veryl conformance analyzer probe matches the Veryl metadata vendored at the pinned upstream revision in lydite/conformance/veryl/run_ci.sh; update it together with that revision.",
+      "matchFileNames": [
+        "lydite/conformance/veryl/analyzer-probe/Cargo.toml"
+      ],
+      "enabled": false
     }
   ],
   "nix": {
