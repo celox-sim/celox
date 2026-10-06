@@ -409,6 +409,11 @@ pub(in crate::optimizer) fn replace_offset_registers(
                 *register = replacement;
             }
         }
+        SIROffset::ElementRun { index, .. } => {
+            if let Some(&replacement) = map.get(index) {
+                *index = replacement;
+            }
+        }
         SIROffset::Element {
             index,
             dynamic_bit_offset,

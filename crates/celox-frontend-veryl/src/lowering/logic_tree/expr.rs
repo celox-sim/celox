@@ -3234,6 +3234,9 @@ fn eval_factor(
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(module, factor)? {
+        return eval_expression_in_context(module, store, &expanded, arena, context);
+    }
     let context_width = context.map(|context| context.width);
     let context_signed = context
         .map(|context| context.signed)

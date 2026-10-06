@@ -2994,6 +2994,7 @@ fn eval_dynamic_select_offset(
     arena: &mut SLTNodeArena<VarId>,
     token: Option<&TokenRange>,
 ) -> Result<DynamicSelectOffset, ParserError> {
+    crate::bitaccess::reject_runtime_array_slice(index)?;
     let folded = crate::bitaccess::fold_array_range(index, select)?;
     let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let geometry = select_geometry(module, var_id, index, select)?;
@@ -3132,10 +3133,18 @@ fn eval_dynamic_select_offset(
                 }
             }
         };
+        // A part select on an unpacked dimension selects whole elements.
+        let kind = if geometry.dimension_count < array_dimension_count {
+            SLTIndexKind::Unpacked {
+                element_width: array_element_width.expect("unpacked array has an element width"),
+            }
+        } else {
+            SLTIndexKind::Packed
+        };
         indices.push(SLTIndex {
             node: start,
             stride,
-            kind: SLTIndexKind::Packed,
+            kind,
         });
         let stride_node = arena.alloc(SLTNode::Constant(
             BigUint::from(stride),

@@ -413,6 +413,7 @@ fn replace_offset_use(offset: &mut SIROffset, old: RegisterId, new: RegisterId) 
     match offset {
         SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => replace(register, old, new),
+        SIROffset::ElementRun { index, .. } => replace(index, old, new),
         SIROffset::Element {
             index,
             dynamic_bit_offset,

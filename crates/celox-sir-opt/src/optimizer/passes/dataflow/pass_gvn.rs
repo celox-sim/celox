@@ -895,6 +895,9 @@ fn apply_alias_to_offset(offset: &mut SIROffset, aliases: &HashMap<RegisterId, R
         SIROffset::Dynamic(register) => {
             *register = resolve_canonical(*register, aliases);
         }
+        SIROffset::ElementRun { index, .. } => {
+            *index = resolve_canonical(*index, aliases);
+        }
         SIROffset::Element {
             index,
             dynamic_bit_offset,

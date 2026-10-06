@@ -273,6 +273,13 @@ fn remap_instruction(
         Some(match offset {
             SIROffset::Static(offset) => SIROffset::Static(*offset),
             SIROffset::Dynamic(register) => SIROffset::Dynamic(resolve(*register)?),
+            SIROffset::ElementRun {
+                index,
+                element_width,
+            } => SIROffset::ElementRun {
+                index: resolve(*index)?,
+                element_width: *element_width,
+            },
             SIROffset::Element {
                 index,
                 element_width,

@@ -274,7 +274,9 @@ pub(super) fn lower_instruction(
                 SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
                     ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => {
                     ctx.reg_addrs.remove(dst);
                 }
             }
@@ -504,7 +506,9 @@ pub(super) fn lower_instruction(
                         }
                     }
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => {
                     let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
                     let direct_byte_off = (*width_bits <= 64)
                         .then(|| {
@@ -737,7 +741,9 @@ pub(super) fn lower_instruction(
                             ctx.set_mask(*dst, mvreg);
                         }
                     }
-                    SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                    SIROffset::Dynamic(_)
+                    | SIROffset::Element { .. }
+                    | SIROffset::ElementRun { .. } => {
                         // Dynamic: load mask similarly with indexed addressing
                         let full_element_size =
                             ctx.full_element_access_size(addr, offset, *width_bits);
@@ -955,7 +961,9 @@ pub(super) fn lower_instruction(
                             });
                             Some((old, containing_byte_off, size))
                         }
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. } => None,
                     }
                 };
                 let old_comb_wide_probe = if comb_capture_sites.is_empty() || *width_bits <= 64 {
@@ -996,7 +1004,9 @@ pub(super) fn lower_instruction(
                             });
                             Some((old, containing_byte_off, size))
                         }
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. } => None,
                     }
                 };
                 let old_comb_wide_mask_probe = if comb_capture_sites.is_empty()
@@ -1202,7 +1212,9 @@ pub(super) fn lower_instruction(
                             }
                         }
                     }
-                    SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                    SIROffset::Dynamic(_)
+                    | SIROffset::Element { .. }
+                    | SIROffset::ElementRun { .. } => {
                         // Dynamic offset store: RMW with register-indexed addressing.
                         let full_element_size =
                             ctx.full_element_access_size(addr, offset, *width_bits);
@@ -1497,7 +1509,9 @@ pub(super) fn lower_instruction(
                                 }
                             }
                         }
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. } => {
                             // Dynamic mask store: same RMW pattern as value store,
                             // but targeting the mask memory region.
                             let full_element_size =
@@ -1810,7 +1824,9 @@ pub(super) fn lower_instruction(
                             );
                         }
                     }
-                    SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                    SIROffset::Dynamic(_)
+                    | SIROffset::Element { .. }
+                    | SIROffset::ElementRun { .. } => {
                         // Dynamic offset commit: copy from src to dst region.
                         // Both use the same dynamic offset.
                         let offset_vreg = memory_offset_vreg(ctx, block, src_addr, offset);
@@ -1923,7 +1939,9 @@ pub(super) fn lower_instruction(
                                 );
                             }
                         }
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. } => {
                             let offset_vreg = memory_offset_vreg(ctx, block, src_addr, offset);
                             let src_mask_base = ctx.mask_byte_offset(src_addr, 0);
                             let dst_mask_base = ctx.mask_byte_offset(dst_addr, 0);

@@ -389,6 +389,18 @@ pub enum SIROffset {
         bit_offset: usize,
         element_width: usize,
     },
+    /// A read of consecutive whole elements of an unpacked array, starting at
+    /// a runtime element.
+    ///
+    /// `index` is the flattened index of the first element; the access width
+    /// is a multiple of `element_width` and its logical bit offset is
+    /// `index * element_width`.  The producer keeps the whole run inside the
+    /// array.  Only loads use this form, and the addressed object uses packed
+    /// storage because the run crosses element boundaries.
+    ElementRun {
+        index: RegisterId,
+        element_width: usize,
+    },
 }
 
 impl fmt::Display for SIROffset {
@@ -420,6 +432,10 @@ impl fmt::Display for SIROffset {
                 "packed_elements(bit={}, element_width={})",
                 bit_offset, element_width
             ),
+            SIROffset::ElementRun {
+                index,
+                element_width,
+            } => write!(f, "element_run(r{}, width={})", index.0, element_width),
         }
     }
 }
@@ -436,7 +452,9 @@ impl SIROffset {
             SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
                 Some(*bit_offset)
             }
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
+                None
+            }
         }
     }
 
@@ -450,11 +468,15 @@ impl SIROffset {
                 ..
             } => [Some(*index), *dynamic_bit_offset],
             SIROffset::PackedElements { .. } => [None, None],
+            SIROffset::ElementRun { index, .. } => [Some(*index), None],
         }
     }
 
     pub fn is_dynamic(&self) -> bool {
-        matches!(self, SIROffset::Dynamic(_) | SIROffset::Element { .. })
+        matches!(
+            self,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. }
+        )
     }
 }
 

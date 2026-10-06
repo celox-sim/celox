@@ -127,7 +127,7 @@ fn partial_forward_block(
             }
             SIRInstruction::Store(
                 addr,
-                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
                 _,
                 _,
                 _,

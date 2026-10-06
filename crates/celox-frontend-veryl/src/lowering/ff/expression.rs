@@ -2398,6 +2398,7 @@ impl<'a> FfParser<'a> {
 
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
+        crate::bitaccess::reject_runtime_array_slice(index)?;
         let folded = crate::bitaccess::fold_array_range(index, select)?;
         let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         // Keep unpacked-array indexing separate from packed bit selection.
@@ -2552,6 +2553,21 @@ impl<'a> FfParser<'a> {
             });
         }
 
+        // A run of whole elements from a runtime first element, such as the
+        // clamped read behind a runtime array slice.
+        if let Some(element_index) = dynamic_element_index
+            && array_dimension_count != 0
+            && dynamic_bit_offset.is_none()
+            && static_bit_offset == 0
+            && selected_width > element_width
+            && selected_width.is_multiple_of(element_width)
+        {
+            return Ok(SIROffset::ElementRun {
+                index: element_index,
+                element_width,
+            });
+        }
+
         if let Some(element_index) = dynamic_element_index {
             let logical_element_offset = scale_offset(element_index, element_width, ir_builder);
             add_offset_term(&mut dynamic_bit_offset, logical_element_offset, ir_builder);
@@ -2639,6 +2655,13 @@ impl<'a> FfParser<'a> {
                 ),
                 SIROffset::Dynamic(offset) => {
                     self.emit_register_dynamic_slice(value, offset, width, ir_builder)
+                }
+                SIROffset::ElementRun {
+                    index,
+                    element_width,
+                } => {
+                    let logical = scale_offset(index, element_width, ir_builder);
+                    self.emit_register_dynamic_slice(value, logical, width, ir_builder)
                 }
                 SIROffset::Element {
                     index,
@@ -3421,6 +3444,11 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
+        if let Some(expanded) = crate::bitaccess::expand_runtime_array_slice(self.module, factor)? {
+            return self.parse_expression_in_context(
+                &expanded, targets, domain, convert, sources, ir_builder, context,
+            );
+        }
         let context_width = context.map(|context| context.width);
         match factor {
             Factor::Variable(var_id, var_index, var_select, comptime) => {
@@ -3529,6 +3557,13 @@ impl<'a> FfParser<'a> {
                         ),
                         SIROffset::Dynamic(offset) => {
                             self.emit_register_dynamic_slice(bound_reg, offset, width, ir_builder)
+                        }
+                        SIROffset::ElementRun {
+                            index,
+                            element_width,
+                        } => {
+                            let logical = scale_offset(index, element_width, ir_builder);
+                            self.emit_register_dynamic_slice(bound_reg, logical, width, ir_builder)
                         }
                         SIROffset::Element {
                             index,

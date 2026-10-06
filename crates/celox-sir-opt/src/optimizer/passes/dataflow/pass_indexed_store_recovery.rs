@@ -917,6 +917,13 @@ fn remap_offset(offset: &SIROffset, mapping: &HashMap<RegisterId, RegisterId>) -
     match offset {
         SIROffset::Static(value) => SIROffset::Static(*value),
         SIROffset::Dynamic(value) => SIROffset::Dynamic(register(*value)),
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => SIROffset::ElementRun {
+            index: register(*index),
+            element_width: *element_width,
+        },
         SIROffset::Element {
             index,
             element_width,

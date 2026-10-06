@@ -224,6 +224,19 @@ fn instruction_range(
             dynamic_bit_offset: Some(_),
             ..
         } => (0, usize::MAX),
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => {
+            let Some(element_count) = register_value_count(register_map, *index) else {
+                return (0, usize::MAX);
+            };
+            let end = element_count
+                .saturating_sub(1)
+                .saturating_mul(*element_width)
+                .saturating_add(bits);
+            (0, end)
+        }
     }
 }
 
@@ -555,7 +568,9 @@ pub(crate) fn inline_commit_forwarding_with_hazards(
                     }
                     SIRInstruction::Store(
                         addr,
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. },
                         _,
                         _,
                         _,
@@ -564,7 +579,9 @@ pub(crate) fn inline_commit_forwarding_with_hazards(
                     | SIRInstruction::Load(
                         _,
                         addr,
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. },
                         _,
                     ) if *addr == src_addr => {
                         safe = false;

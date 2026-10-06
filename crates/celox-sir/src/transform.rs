@@ -309,6 +309,11 @@ fn replace_sir_offset_uses(offset: &mut SIROffset, replacements: &HashMap<Regist
                 *register = replacement;
             }
         }
+        SIROffset::ElementRun { index, .. } => {
+            if let Some(&replacement) = replacements.get(index) {
+                *index = replacement;
+            }
+        }
         SIROffset::Element {
             index,
             dynamic_bit_offset,
@@ -442,6 +447,13 @@ fn renumber_sir_inst<A: Clone>(
             element_width,
         } => SIROffset::PackedElements {
             bit_offset: *bit_offset,
+            element_width: *element_width,
+        },
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => SIROffset::ElementRun {
+            index: r(*index),
             element_width: *element_width,
         },
     };

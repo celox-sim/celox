@@ -235,9 +235,10 @@ pub(super) fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Optio
 fn offset_static(offset: &SIROffset) -> Option<usize> {
     match offset {
         SIROffset::Static(offset) => Some(*offset),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::PackedElements { .. } => {
-            None
-        }
+        SIROffset::Dynamic(_)
+        | SIROffset::Element { .. }
+        | SIROffset::ElementRun { .. }
+        | SIROffset::PackedElements { .. } => None,
     }
 }
 

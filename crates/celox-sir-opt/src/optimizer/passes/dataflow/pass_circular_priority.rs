@@ -3282,6 +3282,7 @@ fn replace_sparse_loop_use(
     let replace_offset = |offset: &mut SIROffset| match offset {
         SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(value) => replace(value),
+        SIROffset::ElementRun { index, .. } => replace(index),
         SIROffset::Element {
             index,
             dynamic_bit_offset,
@@ -4239,6 +4240,10 @@ mod tests {
                                 bit_offset: offset, ..
                             } => *offset,
                             SIROffset::Dynamic(index) => registers[index] as usize,
+                            SIROffset::ElementRun {
+                                index,
+                                element_width,
+                            } => registers[index] as usize * element_width,
                             SIROffset::Element {
                                 index,
                                 element_width,

@@ -1793,6 +1793,7 @@ fn replace_register_uses_in_instruction(
     let replace_offset = |offset: &mut SIROffset| match offset {
         SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => replace(register),
+        SIROffset::ElementRun { index, .. } => replace(index),
         SIROffset::Element {
             index,
             dynamic_bit_offset,
@@ -3567,6 +3568,13 @@ fn clone_pure_instruction(
             match offset {
                 SIROffset::Static(offset) => SIROffset::Static(*offset),
                 SIROffset::Dynamic(offset) => SIROffset::Dynamic(mapped(*offset)),
+                SIROffset::ElementRun {
+                    index,
+                    element_width,
+                } => SIROffset::ElementRun {
+                    index: mapped(*index),
+                    element_width: *element_width,
+                },
                 SIROffset::Element {
                     index,
                     element_width,
@@ -4500,6 +4508,10 @@ mod tests {
                                 bit_offset: offset, ..
                             } => *offset,
                             SIROffset::Dynamic(offset) => registers[offset] as usize,
+                            SIROffset::ElementRun {
+                                index,
+                                element_width,
+                            } => registers[index] as usize * element_width,
                             SIROffset::Element {
                                 index,
                                 element_width,

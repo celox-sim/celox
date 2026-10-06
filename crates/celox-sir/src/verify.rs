@@ -489,6 +489,14 @@ fn verify_instruction_types<A>(
             }
         }
         SIRInstruction::Store(_, offset, bits, src, _, _) => {
+            if matches!(offset, SIROffset::ElementRun { .. }) {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_RUN_IS_LOAD",
+                    block,
+                    index,
+                    "an element run is only a load offset",
+                ));
+            }
             if ty(*src)?.width() < *bits {
                 return Err(SirVerifyError::instruction(
                     "TYPE.STORE_SOURCE_WIDTH",
@@ -504,6 +512,14 @@ fn verify_instruction_types<A>(
             verify_offset(eu, block, index, offset, *bits)?;
         }
         SIRInstruction::Commit(_, _, offset, bits, _) => {
+            if matches!(offset, SIROffset::ElementRun { .. }) {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_RUN_IS_LOAD",
+                    block,
+                    index,
+                    "an element run is only a load offset",
+                ));
+            }
             non_zero_width(block, index, *bits, "TYPE.COMMIT_NON_ZERO")?;
             verify_offset(eu, block, index, offset, *bits)?;
         }
@@ -635,6 +651,22 @@ fn verify_offset<A>(
         }
         SIROffset::Dynamic(reg) => {
             register_type(eu, block, Some(index), *reg)?;
+        }
+        SIROffset::ElementRun {
+            index: element_index,
+            element_width,
+        } => {
+            register_type(eu, block, Some(index), *element_index)?;
+            if *element_width == 0 || !access_width.is_multiple_of(*element_width) {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_RUN_WHOLE_ELEMENTS",
+                    block,
+                    index,
+                    format!(
+                        "element run width {access_width} is not a whole number of {element_width}-bit elements"
+                    ),
+                ));
+            }
         }
         SIROffset::Element {
             index: element_index,
