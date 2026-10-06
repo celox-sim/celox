@@ -527,6 +527,7 @@ pub(super) fn function_from_declaration(
                         signed: param.signed,
                         is_2state: param.is_2state,
                         members: Vec::new(),
+                        signed_element_depth: param.signed_element_depth,
                     },
                 )
             }));
@@ -602,6 +603,7 @@ pub(super) fn function_from_declaration(
                         signed: param.signed,
                         is_2state: param.is_2state,
                         members: Vec::new(),
+                        signed_element_depth: param.signed_element_depth,
                     },
                 )
             }));
@@ -706,6 +708,7 @@ pub(super) fn task_from_declaration(
                 signed: param.signed,
                 is_2state: param.is_2state,
                 members: Vec::new(),
+                signed_element_depth: param.signed_element_depth,
             },
         )
     }));
@@ -812,6 +815,7 @@ pub(super) fn function_local_packed_dimensions_from_block_item_iter<'a>(
                     signed: signal.r#type().is_signed(),
                     is_2state: signal.r#type().kind() == TypeKind::Bit,
                     members: signal.r#type().members.clone(),
+                    signed_element_depth: signal.r#type().signed_element_depth,
                 },
             )
         }));
@@ -954,6 +958,7 @@ pub(super) fn tf_params(
     let mut previous_type = None;
     let mut previous_is_2state = false;
     let mut previous_packed_dimensions = Vec::new();
+    let mut previous_signed_element_depth = None;
     let mut direction = ParamDirection::Input;
     for port in list.nodes.0.contents() {
         // An omitted direction repeats the previous argument's.
@@ -972,12 +977,14 @@ pub(super) fn tf_params(
             .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
         let inferred_packed_dimensions =
             function_param_packed_dimensions(&port.nodes.3, syntax_tree, const_env, type_aliases);
+        let inferred_signed_element_depth =
+            signed_element_depth_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
         let omitted_type = matches!(
             port.nodes.3,
             sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
         ) && is_signed_from_ref_node(type_node.clone()).is_none()
             && inferred_packed_dimensions.is_empty();
-        let (name, r#type, is_2state, packed_dimensions) =
+        let (name, r#type, is_2state, packed_dimensions, signed_element_depth) =
             if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
                 let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
                 else {
@@ -993,12 +1000,22 @@ pub(super) fn tf_params(
                 } else {
                     inferred_is_2state
                 };
-                let packed_dimensions = if port.nodes.1.is_none() && omitted_type {
-                    previous_packed_dimensions.clone()
-                } else {
-                    inferred_packed_dimensions
-                };
-                (name, r#type, is_2state, packed_dimensions)
+                let (packed_dimensions, signed_element_depth) =
+                    if port.nodes.1.is_none() && omitted_type {
+                        (
+                            previous_packed_dimensions.clone(),
+                            previous_signed_element_depth,
+                        )
+                    } else {
+                        (inferred_packed_dimensions, inferred_signed_element_depth)
+                    };
+                (
+                    name,
+                    r#type,
+                    is_2state,
+                    packed_dimensions,
+                    signed_element_depth,
+                )
             } else {
                 // An identifier following a comma is syntactically ambiguous with a
                 // user-defined type. sv-parser represents the shorthand `a, b` as a
@@ -1021,16 +1038,26 @@ pub(super) fn tf_params(
                     })
                 };
                 let is_2state = port.nodes.1.is_none() && previous_is_2state;
-                let packed_dimensions = if port.nodes.1.is_none() {
-                    previous_packed_dimensions.clone()
+                let (packed_dimensions, signed_element_depth) = if port.nodes.1.is_none() {
+                    (
+                        previous_packed_dimensions.clone(),
+                        previous_signed_element_depth,
+                    )
                 } else {
-                    inferred_packed_dimensions
+                    (inferred_packed_dimensions, None)
                 };
-                (name, r#type, is_2state, packed_dimensions)
+                (
+                    name,
+                    r#type,
+                    is_2state,
+                    packed_dimensions,
+                    signed_element_depth,
+                )
             };
         previous_type = r#type;
         previous_is_2state = is_2state;
         previous_packed_dimensions = packed_dimensions.clone();
+        previous_signed_element_depth = signed_element_depth;
         params.push(FunctionParam {
             direction,
             name,
@@ -1038,6 +1065,7 @@ pub(super) fn tf_params(
             signed: r#type.is_some_and(|r#type| r#type.signed),
             is_2state,
             packed_dimensions,
+            signed_element_depth,
         });
     }
     params
@@ -1078,6 +1106,11 @@ pub(super) fn tf_item_params(
             const_env,
             type_aliases,
         );
+        let signed_element_depth = signed_element_depth_from_ref_node(
+            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+            syntax_tree,
+            type_aliases,
+        );
         for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
@@ -1091,6 +1124,7 @@ pub(super) fn tf_item_params(
                 signed: r#type.is_some_and(|r#type| r#type.signed),
                 is_2state,
                 packed_dimensions: packed_dimensions.clone(),
+                signed_element_depth,
             });
         }
     }

@@ -175,6 +175,7 @@ pub(super) fn expr_from_pattern(
             signed: shape.signed,
             is_2state: shape.is_2state,
             members: shape.members.clone(),
+            signed_element_depth: shape.signed_element_depth,
         };
         let (low, high) = (left.min(right), left.max(right));
         let items = positional_items(
@@ -209,12 +210,17 @@ pub(super) fn expr_from_pattern(
         let left = eval(&dimension.left, dims)?;
         let right = eval(&dimension.right, dims)?;
         let count = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+        // An element of a signed named type is signed (IEEE 1800-2023 7.4.1).
         let element_shape = VariableDimensions {
             packed: rest.to_vec(),
             unpacked: Vec::new(),
-            signed: false,
+            signed: shape.signed_element_depth == Some(1),
             is_2state: shape.is_2state,
             members: Vec::new(),
+            signed_element_depth: shape
+                .signed_element_depth
+                .and_then(|depth| depth.checked_sub(1))
+                .filter(|depth| *depth > 0),
         };
         let (low, high) = (left.min(right), left.max(right));
         let items = positional_items(
@@ -243,6 +249,7 @@ pub(super) fn expr_from_pattern(
         signed: false,
         is_2state: shape.is_2state,
         members: Vec::new(),
+        signed_element_depth: None,
     };
     let items = positional_items(
         pattern,

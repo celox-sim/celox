@@ -1011,7 +1011,29 @@ fn const_select_expr(
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
-    if bit_selects.len() != 1 || select.nodes.2.is_some() {
+    if select.nodes.2.is_some() {
+        return None;
+    }
+    // An element of a packed parameter takes its width and signedness from
+    // the parameter's dimensions.
+    if let ConstExpr::Ident(name) = &base
+        && let Some(indices) = bit_selects
+            .iter()
+            .map(|bit_select| {
+                let index = const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(&bit_select.nodes.1),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?;
+                eval_ast_const_expr(&index, const_env)
+            })
+            .collect::<Option<Vec<_>>>()
+        && let Some(literal) = parameter_element_literal(name, &indices, const_env)
+    {
+        return Some(ConstExpr::Literal(literal));
+    }
+    if bit_selects.len() != 1 {
         return None;
     }
     let bit = const_expr_from_ref_node_with_env(
