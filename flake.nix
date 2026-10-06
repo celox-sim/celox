@@ -64,6 +64,7 @@
             python
             pkgs.verilator
             pkgs.iverilog
+            pkgs.z3
             stdenv.cc
             pkgs.mold
             pkgs.gnumake
@@ -126,6 +127,7 @@
           default = (e.pkgs.mkShell.override { stdenv = e.stdenv; }) {
             packages = e.tools;
             CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
+            Z3_BIN = "${e.pkgs.z3}/bin/z3";
             shellHook = ''
               export NPM_CONFIG_PREFIX="''${NPM_CONFIG_PREFIX:-$HOME/.local/share/npm}"
               export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
