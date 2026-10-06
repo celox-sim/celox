@@ -1478,7 +1478,7 @@ fn rejects_conditional_predicate_conjunction_terms() {
     .expect_err("unsupported predicate conjunctions must not be partially lowered")
     .to_string();
     assert!(
-        error.contains("procedural condition"),
+        error.contains("`&&&` in a condition"),
         "unexpected error: {error}"
     );
 }

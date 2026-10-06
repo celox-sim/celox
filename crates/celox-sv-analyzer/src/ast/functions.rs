@@ -102,7 +102,9 @@ pub(super) fn functions_from_module_node(
             for parameter in &function.params {
                 literals.remove(&parameter.name);
             }
-            function.body = substitute_expr_idents(function.body, &literals);
+            function.body = function
+                .body
+                .map(|body| substitute_expr_idents(body, &literals));
             item.qualify_function(&mut function);
             function.name = item.name(&function.name);
             let name = function.name.clone();
@@ -346,7 +348,7 @@ fn validate_function_declaration_statements(
             sv_parser::BlockingAssignment::OperatorAssignment(assignment) => &assignment.nodes.0,
             _ => continue,
         };
-        let Some(LValue::Ident(name)) =
+        let Ok(LValue::Ident(name)) =
             variable_lvalue_from_node(lhs, syntax_tree, packed_dimensions)
         else {
             continue;
@@ -392,9 +394,7 @@ fn validate_function_statement(
             let expr = statement.nodes.1.as_ref().ok_or_else(|| {
                 AnalyzerError::Unsupported("expressionless function return".to_string())
             })?;
-            expr_from_expression_with_types(expr, syntax_tree, packed_dimensions).ok_or_else(
-                || AnalyzerError::Unsupported("unsupported function return expression".to_string()),
-            )?;
+            expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
             Ok(())
         }
         sv_parser::StatementItem::BlockingAssignment(assignment) => {
@@ -409,13 +409,7 @@ fn validate_function_statement(
                     ));
                 }
             };
-            expr_from_expression_with_types(rhs, syntax_tree, packed_dimensions).ok_or_else(
-                || {
-                    AnalyzerError::Unsupported(
-                        "unsupported function assignment expression".to_string(),
-                    )
-                },
-            )?;
+            expr_from_expression_with_types(rhs, syntax_tree, packed_dimensions)?;
             Ok(())
         }
         sv_parser::StatementItem::SeqBlock(block) => {
@@ -425,24 +419,14 @@ fn validate_function_statement(
             Ok(())
         }
         sv_parser::StatementItem::ConditionalStatement(statement) => {
-            expr_from_cond_predicate(&statement.nodes.2.nodes.1, syntax_tree, packed_dimensions)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported(
-                        "unsupported function conditional predicate".to_string(),
-                    )
-                })?;
+            expr_from_cond_predicate(&statement.nodes.2.nodes.1, syntax_tree, packed_dimensions)?;
             validate_function_statement_or_null(
                 &statement.nodes.3,
                 syntax_tree,
                 packed_dimensions,
             )?;
             for (_, _, predicate, branch) in &statement.nodes.4 {
-                expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported(
-                            "unsupported function conditional predicate".to_string(),
-                        )
-                    })?;
+                expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)?;
                 validate_function_statement_or_null(branch, syntax_tree, packed_dimensions)?;
             }
             if let Some((_, branch)) = &statement.nodes.5 {
@@ -460,10 +444,7 @@ fn validate_function_statement(
                 &statement.nodes.2.nodes.1.nodes.0,
                 syntax_tree,
                 packed_dimensions,
-            )
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("unsupported function case selector".to_string())
-            })?;
+            )?;
             for item in std::iter::once(&statement.nodes.3).chain(statement.nodes.4.iter()) {
                 let branch = match item {
                     sv_parser::CaseItem::NonDefault(item) => {
@@ -472,12 +453,7 @@ fn validate_function_statement(
                                 &expr.nodes.0,
                                 syntax_tree,
                                 packed_dimensions,
-                            )
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported(
-                                    "unsupported function case item expression".to_string(),
-                                )
-                            })?;
+                            )?;
                         }
                         &item.nodes.2
                     }
@@ -567,7 +543,7 @@ pub(super) fn function_from_declaration(
             Some(Function {
                 name,
                 params,
-                body: expr,
+                body: Some(expr),
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
@@ -645,7 +621,7 @@ pub(super) fn function_from_declaration(
             Some(Function {
                 name,
                 params,
-                body: expr,
+                body: Some(expr),
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
@@ -737,7 +713,7 @@ pub(super) fn task_from_declaration(
     Some(Function {
         name,
         params,
-        body,
+        body: Some(body),
         outputs,
         return_width: None,
         return_first_packed_dimension_width: None,
@@ -1368,7 +1344,7 @@ fn function_expr_from_sequence(
                 .collect::<Vec<_>>();
             for (predicate, branch) in branches.into_iter().rev() {
                 let condition =
-                    expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions)?;
+                    expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions).ok()?;
                 result = Expr::Mux {
                     condition: Box::new(procedural_truth_condition(substitute_expr_idents(
                         condition, locals,
@@ -1392,7 +1368,8 @@ fn function_expr_from_sequence(
                     &case.nodes.2.nodes.1.nodes.0,
                     syntax_tree,
                     packed_dimensions,
-                )?,
+                )
+                .ok()?,
                 locals,
             );
             let lower_branch = |branch: Option<&sv_parser::StatementOrNull>| {
@@ -1424,7 +1401,8 @@ fn function_expr_from_sequence(
                                     &expr.nodes.0,
                                     syntax_tree,
                                     packed_dimensions,
-                                )?;
+                                )
+                                .ok()?;
                                 Some(case_item_condition(
                                     selector.clone(),
                                     substitute_expr_idents(label, locals),
@@ -1508,34 +1486,39 @@ fn function_expr_from_statement(
             };
             let expr = statement.nodes.1.as_ref()?;
             expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+                .ok()
                 .map(|expr| substitute_expr_idents(expr, locals))
         }
         sv_parser::StatementItem::BlockingAssignment(assignment) => {
             let (lhs, rhs) = match &assignment.0 {
                 sv_parser::BlockingAssignment::Variable(assignment) => (
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions),
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                        .ok(),
                     expr_from_expression_with_types(
                         &assignment.nodes.3,
                         syntax_tree,
                         packed_dimensions,
-                    ),
+                    )
+                    .ok(),
                 ),
                 sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
                     let lhs = variable_lvalue_from_node(
                         &assignment.nodes.0,
                         syntax_tree,
                         packed_dimensions,
-                    );
+                    )
+                    .ok();
                     let rhs = expr_from_expression_with_types(
                         &assignment.nodes.2,
                         syntax_tree,
                         packed_dimensions,
-                    );
+                    )
+                    .ok();
                     let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
                     let rhs = match (&lhs, rhs, op) {
                         (_, Some(rhs), Some("=")) => Some(rhs),
                         (Some(lhs), Some(rhs), Some(op)) => {
-                            assignment_op_expr(lhs, op, rhs, packed_dimensions)
+                            assignment_op_expr(lhs, op, rhs, packed_dimensions).ok()
                         }
                         _ => None,
                     };
@@ -1602,7 +1585,8 @@ fn function_expr_from_conditional_statement(
 ) -> Option<Expr> {
     let mut branches = Vec::new();
     let if_condition =
-        expr_from_cond_predicate(&statement.nodes.2.nodes.1, syntax_tree, packed_dimensions)?;
+        expr_from_cond_predicate(&statement.nodes.2.nodes.1, syntax_tree, packed_dimensions)
+            .ok()?;
     let mut then_locals = locals.clone();
     let then_expr = function_expr_from_statement_or_null_stmt(
         &statement.nodes.3,
@@ -1619,7 +1603,7 @@ fn function_expr_from_conditional_statement(
 
     for (_, _, predicate, branch) in &statement.nodes.4 {
         let condition =
-            expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)?;
+            expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions).ok()?;
         let mut branch_locals = locals.clone();
         let branch_expr = function_expr_from_statement_or_null_stmt(
             branch,
@@ -1743,7 +1727,8 @@ fn function_expr_from_case_statement(
         &statement.nodes.2.nodes.1.nodes.0,
         syntax_tree,
         packed_dimensions,
-    )?;
+    )
+    .ok()?;
     let case_expr = substitute_expr_idents(case_expr, locals);
     let mut default_branch = (None, locals.clone());
     let mut branches = Vec::new();
@@ -1763,22 +1748,22 @@ fn function_expr_from_case_statement(
                     .0
                     .contents()
                     .into_iter()
-                    .filter_map(|expr| {
-                        expr_from_expression_with_types(
+                    .map(|expr| {
+                        // A label without an expression form leaves the whole
+                        // case without one; never drop a label.
+                        let expr = expr_from_expression_with_types(
                             &expr.nodes.0,
                             syntax_tree,
                             packed_dimensions,
                         )
-                    })
-                    .map(|expr| substitute_expr_idents(expr, locals))
-                    .map(|expr| {
-                        case_item_condition(
+                        .ok()?;
+                        Some(case_item_condition(
                             case_expr.clone(),
-                            expr,
+                            substitute_expr_idents(expr, locals),
                             case_keyword_is_wildcard(&statement.nodes.1),
-                        )
+                        ))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Option<Vec<_>>>()?;
                 let condition = conditions.into_iter().reduce(|left, right| Expr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::LogicOr,
@@ -1873,14 +1858,6 @@ pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bo
     }
 }
 
-/// The body placeholder of a subroutine that has no expression form.
-fn statement_body_placeholder() -> Expr {
-    Expr::Call {
-        name: "$unsupported_function_call".to_string(),
-        args: Vec::new(),
-    }
-}
-
 /// The signature of a function whose body has no expression form.
 fn function_signature_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
@@ -1917,7 +1894,7 @@ fn function_signature_from_declaration(
     Some(Function {
         name,
         params,
-        body: statement_body_placeholder(),
+        body: None,
         outputs: Vec::new(),
         return_width: return_type.map(|r#type| r#type.width),
         return_first_packed_dimension_width,
@@ -1952,7 +1929,7 @@ fn task_signature_from_declaration(
     Some(Function {
         name,
         params,
-        body: statement_body_placeholder(),
+        body: None,
         outputs: Vec::new(),
         return_width: None,
         return_first_packed_dimension_width: None,

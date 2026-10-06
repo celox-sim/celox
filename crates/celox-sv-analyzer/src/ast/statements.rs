@@ -99,13 +99,13 @@ pub(super) fn expr_from_cond_predicate(
     predicate: &sv_parser::CondPredicate,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     if cond_predicate_has_conjunction_operator(predicate, syntax_tree) {
-        return None;
+        return Err(unsupported("`&&&` in a condition"));
     }
     let entries = predicate.nodes.0.contents();
     let [sv_parser::ExpressionOrCondPattern::Expression(expr)] = entries.as_slice() else {
-        return None;
+        return Err(unsupported("pattern matching condition"));
     };
     let expression = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
     // Prove this before call expansion, while scoped return metadata can tell
@@ -117,9 +117,9 @@ pub(super) fn expr_from_cond_predicate(
     } = &expression
         && two_state_conditions_are_complements(left, right, packed_dimensions)
     {
-        return Some(Expr::Literal("1'b1".to_string()));
+        return Ok(Expr::Literal("1'b1".to_string()));
     }
-    Some(expression)
+    Ok(expression)
 }
 
 fn cond_predicate_has_conjunction_operator(
@@ -149,8 +149,9 @@ pub(super) fn assignment_op_expr(
     op: &str,
     rhs: Expr,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
-    let op = match op.strip_suffix('=')? {
+) -> Converted<Expr> {
+    let operator = || unsupported(format!("assignment operator `{op}`"));
+    let op = match op.strip_suffix('=').ok_or_else(operator)? {
         "+" => BinaryOp::Add,
         "-" => BinaryOp::Sub,
         "*" => BinaryOp::Mul,
@@ -163,9 +164,9 @@ pub(super) fn assignment_op_expr(
         "&" => BinaryOp::BitAnd,
         "|" => BinaryOp::BitOr,
         "^" => BinaryOp::BitXor,
-        _ => return None,
+        _ => return Err(operator()),
     };
-    Some(guard_zero_divisions(Expr::Binary {
+    Ok(guard_zero_divisions(Expr::Binary {
         left: Box::new(expr_from_lvalue(lhs, packed_dimensions)),
         op,
         right: Box::new(rhs),

@@ -150,8 +150,7 @@ impl ArrayParameter<'_> {
             patterns::typed_pattern(self.pattern, tree, dims)
         } else {
             patterns::expr_from_pattern(&self.pattern.nodes.1, &shape, tree, dims)
-        }
-        .ok_or_else(|| AnalyzerError::Unsupported(format!("value of array parameter `{name}`")))?;
+        }?;
         Ok(InitialProcess {
             condition: None,
             body: vec![Stmt::Assign {

@@ -11,20 +11,20 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::ConstantPrimary::ConstantFunctionCall(call) = primary else {
         return None;
     };
-    size_system_function_call_type(&call.nodes.0, syntax_tree, const_env, type_aliases, None)
+    let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0.nodes.0 else {
+        return None;
+    };
+    size_system_function_call_type(call, syntax_tree, const_env, type_aliases, None)
 }
 
 pub(super) fn size_system_function_call_type(
-    call: &sv_parser::FunctionSubroutineCall,
+    call: &sv_parser::SystemTfCall,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
 ) -> Option<ExprType> {
-    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
-        return None;
-    };
-    let (name, r#type) = match &**system_call {
+    let (name, r#type) = match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
             let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
             let data_type = &call.nodes.1.nodes.1.0;
@@ -54,11 +54,13 @@ pub(super) fn size_system_function_call_type(
             if name == "$size"
                 && let [Some(argument), Some(dimension)] = arguments.as_slice()
             {
-                let identifier = match const_expr_from_expr(argument, syntax_tree)? {
+                let identifier = match const_expr_from_expr(argument, syntax_tree).ok().flatten()? {
                     ConstExpr::Ident(identifier) => identifier,
                     _ => return None,
                 };
                 let dimension = const_expr_from_expr(dimension, syntax_tree)
+                    .ok()
+                    .flatten()
                     .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))?;
                 let variable = dimensions?.get(&identifier)?;
                 let widths: Vec<&ConstExpr> = variable
@@ -98,7 +100,7 @@ pub(super) fn size_system_function_call_type(
                 syntax_tree,
                 const_env,
                 type_aliases,
-            ) && let Some(ConstExpr::Ident(identifier)) =
+            ) && let Ok(Some(ConstExpr::Ident(identifier))) =
                 const_expr_from_expr(argument, syntax_tree)
                 && dimensions.contains_key(&identifier)
             {
@@ -116,7 +118,8 @@ pub(super) fn size_system_function_call_type(
             }
             // Scoped type markers take precedence over a same-named declaration
             // found by the enclosing-module scan used for complex expressions.
-            if let Some(ConstExpr::Ident(identifier)) = const_expr_from_expr(argument, syntax_tree)
+            if let Ok(Some(ConstExpr::Ident(identifier))) =
+                const_expr_from_expr(argument, syntax_tree)
                 && let Some(width) =
                     variable_size_function_width(const_env, &identifier, name == "$size")
             {
@@ -139,7 +142,7 @@ pub(super) fn size_system_function_call_type(
             ) {
                 return Some(r#type);
             }
-            let argument = const_expr_from_expr(argument, syntax_tree)?;
+            let argument = const_expr_from_expr(argument, syntax_tree).ok().flatten()?;
             if let ConstExpr::Ident(alias) = &argument
                 && let Some(r#type) = type_aliases.get(alias)
             {
@@ -254,7 +257,8 @@ fn size_function_expression_type(
             .function_return_types
             .extend(dimensions.function_return_types.clone());
     }
-    let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
+    let expression =
+        expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions).ok()?;
     let width = if first_dimension_only {
         selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)
             .or_else(|| match &expression {
@@ -341,7 +345,8 @@ fn selected_expression_first_dimension_width(
             Some(&name),
             select.nodes.1.nodes.0.len(),
             packed_dimensions,
-        )?;
+        )
+        .ok()?;
         return usize::try_from(
             eval_ast_const_expr(&msb, &packed_dimensions.const_env)?
                 .abs_diff(eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?),
