@@ -93,15 +93,5 @@
   "kind": "veryl_language_restriction",
   "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
   "panic": "compile system_function::test_direct_ff_onehot_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$onehot\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    clk: input clock,\\\\n    d: input logic<8>,\\\\n    q: output logic,\\\\n) {\\\\n    always_ff (clk) {\\\\n        q = $onehot(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(126), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
- },
- "veryl_context_regressions::case_compares_each_label_as_an_if_does": {
-  "kind": "known_celox_failure",
-  "reason": "Celox returns 0 rather than 2 for the mixed-sign y7 case; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
-  "panic": "veryl_context_regressions::case_compares_each_label_as_an_if_does at 521:3: assert_eq y7: expected 0x2, got 0x0 (output y7)"
- },
- "veryl_context_regressions::folded_const_select_keeps_its_sign": {
-  "kind": "known_celox_failure",
-  "reason": "Celox returns 0 rather than 0xfffb for the runtime-selected y5; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
-  "panic": "veryl_context_regressions::folded_const_select_keeps_its_sign at 372:3: assert_eq y5: expected 0xfffb, got 0x0 (output y5)"
  }
 }

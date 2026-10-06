@@ -2519,7 +2519,7 @@ pub(super) fn eval_case_comparison(
             let ((node, _), boundaries) = eval_expression_in_context(
                 module,
                 &mut ExpressionStore::ReadOnly(snapshot),
-                target_expr,
+                &crate::case::unfold_context_determined_constants(target_expr),
                 arena,
                 target_context,
             )?;

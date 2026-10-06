@@ -72,6 +72,8 @@ pub struct DesignInfo {
     pub edges: BTreeMap<String, bool>,
     /// The widest signal anywhere in the design.
     pub max_width: usize,
+    /// Values of the top module's parameters, set on the instance.
+    pub parameters: Vec<(String, u64)>,
     /// Top-level unpacked arrays: element width and bounds. A script reads
     /// one as a packed value with element 0 in the least significant bits.
     pub arrays: BTreeMap<String, (usize, Bounds)>,
@@ -783,7 +785,22 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         .map(|port| format!(".{0}(i_{0})", port.name))
         .chain(design.outputs.iter().map(|name| format!(".{name}()")))
         .collect();
-    let _ = writeln!(out, "  {} dut ({});", design.top, connections.join(", "));
+    let parameters = if design.parameters.is_empty() {
+        String::new()
+    } else {
+        let values: Vec<String> = design
+            .parameters
+            .iter()
+            .map(|(name, value)| format!(".{name}({value})"))
+            .collect();
+        format!(" #({})", values.join(", "))
+    };
+    let _ = writeln!(
+        out,
+        "  {}{parameters} dut ({});",
+        design.top,
+        connections.join(", ")
+    );
     // Two-state runs zero every variable at start-up, so "settled" must
     // mean 1: zero and X both ask for a settle before the first read.
     let _ = writeln!(out, "  logic settled;");
@@ -859,6 +876,7 @@ mod tests {
             outputs: vec!["o".into()],
             edges: BTreeMap::from([("clk".into(), true)]),
             max_width: 8,
+            parameters: Vec::new(),
             arrays: BTreeMap::new(),
         }
     }
@@ -876,6 +894,14 @@ mod tests {
         assert!(text.contains("actual = $signed(128'({dut.o}));"));
         assert!(text.contains("@suite assert g::t at"));
         assert!(text.contains("$finish;"));
+    }
+
+    #[test]
+    fn sets_the_top_parameters_on_the_instance() {
+        let mut info = design();
+        info.parameters = vec![("N".into(), 4), ("P".into(), 205)];
+        let text = testbench(&case("(eval)"), &info).unwrap();
+        assert!(text.contains("Top #(.N(4), .P(205)) dut ("));
     }
 
     #[test]

@@ -140,6 +140,10 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     // IEEE 1800-2023 23.3.3.5: an instance array connection width.
                     || (diagnostic.starts_with("Input port connection '")
                         && diagnostic.contains("' as part of a module instance array requires "))
+                    // IEEE 1800-2023 6.20.1: a body parameter of a module with a
+                    // parameter port list is a localparam.
+                    || (diagnostic.starts_with("Instance attempts to override '")
+                        && diagnostic.ends_with("' as a parameter, but it is a local parameter"))
             });
             if !reviewed {
                 return false;

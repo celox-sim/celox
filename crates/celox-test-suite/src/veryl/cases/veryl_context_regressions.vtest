@@ -580,3 +580,155 @@
     (assert_eq y0 (+ b 1) "output y0")
     (assert_eq y1 (+ b 1) "output y1")
     (assert_eq y2 (+ b 2) "output y2")))
+
+(case dynamic_param_array_read_uses_its_elements
+  ; A dynamic index reads a parameter array's elements, including those
+  ; overridden by an instantiation, in comb and ff processes.
+  (source "test.veryl" #"
+            module Child #(
+                param Q: i8 [2] = '{1, 2},
+            ) (
+                clk: input  clock,
+                i  : input  logic<1>,
+                c  : output logic<16>,
+                f  : output logic<16>,
+            ) {
+                assign c = Q[i];
+                always_ff (clk) {
+                    f = Q[i];
+                }
+            }
+            module Top (
+                clk: input  clock,
+                i  : input  logic<1>,
+                c0 : output logic<16>,
+                f0 : output logic<16>,
+                c1 : output logic<16>,
+                f1 : output logic<16>,
+            ) {
+                inst u0: Child (clk, i, c: c0, f: f0);
+                inst u1: Child #(Q: '{-3, -5}) (clk, i, c: c1, f: f1);
+            }
+            "#)
+  (top Top)
+  (for (i e0 e1) (list (0 1 0xfffd) (1 2 0xfffb))
+    (modify (set i i))
+    (tick clk)
+    (assert_eq c0 e0 "output c0")
+    (assert_eq f0 e0 "output f0")
+    (assert_eq c1 e1 "output c1")
+    (assert_eq f1 e1 "output f1")))
+
+(case constant_case_target_uses_comparison_context
+  ; A constant case target is sized by each label comparison, as a runtime
+  ; target is: `J + 8'h01` is 0x100 against a 16-bit label, 0 against an
+  ; 8-bit one.
+  (source "test.veryl" #"
+            module Top (
+                clk: input  clock,
+                y0 : output logic<8>,
+                y1 : output logic<8>,
+                y2 : output logic<8>,
+                y3 : output logic<8>,
+                y4 : output logic<8>,
+                y5 : output logic<8>,
+                f0 : output logic<8>,
+                f1 : output logic<8>,
+                f2 : output logic<8>,
+                f3 : output logic<8>,
+            ) {
+                const J: u8 = 8'hFF;
+                function g (
+                    n: input logic<8>,
+                ) -> logic<8> {
+                    var r: logic<8>;
+                    case J + n {
+                        16'h0100: r = 2;
+                        default : r = 0;
+                    }
+                    return r;
+                }
+                always_comb {
+                    y5 = g(8'h01);
+                    case J + 8'h01 {
+                        16'h0100: y0 = 2;
+                        default : y0 = 0;
+                    }
+                    case (J + 8'h01) >> 1 {
+                        16'h0080: y1 = 2;
+                        default : y1 = 0;
+                    }
+                    case J + 8'h01 {
+                        16'h0000: y2 = 1;
+                        default : y2 = 3;
+                    }
+                    case J + 8'h01 {
+                        16'h00FF..=16'h0100: y3 = 2;
+                        default            : y3 = 0;
+                    }
+                    case J + 8'h01 {
+                        8'h00  : y4 = 2;
+                        default: y4 = 0;
+                    }
+                }
+                always_ff (clk) {
+                    f3 = g(8'h01);
+                    case J + 8'h01 {
+                        16'h0100: f0 = 2;
+                        default : f0 = 0;
+                    }
+                    case (J + 8'h01) >> 1 {
+                        16'h0080: f1 = 2;
+                        default : f1 = 0;
+                    }
+                    case J + 8'h01 {
+                        16'h0000: f2 = 1;
+                        default : f2 = 3;
+                    }
+                }
+            }
+            "#)
+  (top Top)
+  (tick clk)
+  (assert_eq y0 2 "output y0")
+  (assert_eq y1 2 "output y1")
+  (assert_eq y2 3 "output y2")
+  (assert_eq y3 2 "output y3")
+  (assert_eq y4 2 "output y4")
+  (assert_eq y5 2 "output y5")
+  (assert_eq f0 2 "output f0")
+  (assert_eq f1 2 "output f1")
+  (assert_eq f2 3 "output f2")
+  (assert_eq f3 2 "output f3"))
+
+(case unfolded_constant_struct_member_reads_its_value
+  ; Selects of a local constant struct's members read the member's value.
+  (source "test.veryl" #"
+            package pkg {
+                struct S {
+                    m: signed logic<4>,
+                    k: logic<4>,
+                }
+            }
+            module Top (
+                a : input  logic<8>,
+                y0: output logic<16>,
+                y1: output logic<16>,
+                y2: output logic<16>,
+                y3: output logic<16>,
+            ) {
+                const LS: pkg::S = pkg::S'{ m: -3, k: 5 };
+                always_comb {
+                    y0 = LS.m + a;
+                    y1 = LS.m[3:0] + a;
+                    y2 = LS.k[3:0] + a;
+                    y3 = LS.m[1:0] + a;
+                }
+            }
+            "#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq y0 0xd "output y0")
+  (assert_eq y1 0xd "output y1")
+  (assert_eq y2 5 "output y2")
+  (assert_eq y3 1 "output y3"))

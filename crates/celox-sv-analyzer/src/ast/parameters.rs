@@ -10,18 +10,14 @@ pub(super) fn apply_parameter_overrides(
         .keys()
         .find(|name| !parameters.iter().any(|parameter| parameter.name() == *name))
     {
-        return Err(AnalyzerError::Unsupported(format!(
-            "unknown top-level parameter override `{name}`"
-        )));
+        return Err(AnalyzerError::UnknownParameterOverride { name: name.clone() });
     }
     if let Some(name) = overrides.keys().find(|name| {
         parameters
             .iter()
             .any(|parameter| parameter.name() == *name && parameter.is_local)
     }) {
-        return Err(AnalyzerError::Unsupported(format!(
-            "localparam override `{name}`"
-        )));
+        return Err(AnalyzerError::LocalParameterOverride { name: name.clone() });
     }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
@@ -108,10 +104,17 @@ pub(super) fn parameters_from_ref_node(
                 | RefNode::DataType(_)
         )
     });
+    // IEEE 1800-2023 7.4.1: a packed array is signed only when declared so,
+    // whatever its elements; a type name takes no signing of its own.
+    let alias_has_use_site_dimensions = declared_alias.is_some()
+        && type_node
+            .clone()
+            .into_iter()
+            .any(|child| matches!(child, RefNode::PackedDimension(_)));
     let parameter_signed = parameter_width.map(|_| {
         declared_alias
             .as_ref()
-            .map(Type::is_signed)
+            .map(|alias| alias.is_signed() && !alias_has_use_site_dimensions)
             .unwrap_or_else(|| {
                 integer_atom_expr_type(type_node.clone())
                     .map(|r#type| r#type.signed)

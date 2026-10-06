@@ -1558,10 +1558,26 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 else {
                     unreachable!()
                 };
+                let else_expr = expr_for_state_mode(else_expr, four_state);
+                // The unknown result has the width and signedness of the
+                // division: an X operand makes the whole sum X (IEEE 1800-2023
+                // 11.4.3), and `'x` alone would make the result unsigned.
+                let unknown = match &else_expr {
+                    sv::ir::Expr::Binary { left, right, .. } => sv::ir::Expr::Binary {
+                        left: Box::new(sv::ir::Expr::Binary {
+                            left: left.clone(),
+                            op: sv::ir::BinaryOp::Add,
+                            right: right.clone(),
+                        }),
+                        op: sv::ir::BinaryOp::Add,
+                        right: Box::new(sv::ir::Expr::Literal("1'sbx".to_string())),
+                    },
+                    _ => sv::ir::Expr::Literal("'x".to_string()),
+                };
                 sv::ir::Expr::Mux {
                     condition: Box::new(expr_for_state_mode(condition, four_state)),
-                    then_expr: Box::new(sv::ir::Expr::Literal("'x".to_string())),
-                    else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+                    then_expr: Box::new(unknown),
+                    else_expr: Box::new(else_expr),
                 }
             } else {
                 expr_for_state_mode(else_expr, four_state)
@@ -3536,15 +3552,6 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let left_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
-            let operands_signed = left_signed
-                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
-            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                left_signed
-            } else {
-                operands_signed
-            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -3564,6 +3571,19 @@ fn lower_expr_with_context(
             );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            // An unsigned context makes the operands of a context-determined
+            // operator unsigned, and `>>>` a logical shift (IEEE 1800-2023
+            // 11.8.2).
+            let unsigned_context = context_determined && context_signed == Some(false);
+            let left_signed = !unsigned_context
+                && sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                left_signed
+            } else {
+                operands_signed
+            };
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
                     sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
@@ -4877,6 +4897,19 @@ fn sv_expr_is_signed_with_parameters(
             }
             _ => false,
         },
+        // The division-by-zero guard takes the type of the division it
+        // guards; its unknown arm is internal.
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(
+            &**then_expr,
+            sv::ir::Expr::Literal(literal) if literal == sv::DIV_ZERO_UNKNOWN_LITERAL
+        ) =>
+        {
+            sv_expr_is_signed_with_parameters(else_expr, variables, name_to_id, parameter_types)
+        }
         sv::ir::Expr::Mux {
             then_expr,
             else_expr,

@@ -204,9 +204,9 @@ pub(crate) fn eval_generate_case_operand(
     eval_integral_in_context(&expr, width, signed)
 }
 
-/// A literal-only integral expression evaluated in a context of `width` bits
-/// and the given signedness: the context propagates into arithmetic
-/// operands before they are evaluated (IEEE 1800-2023 11.6.1).
+/// Evaluate a literal operand in an enclosing context of `width` and `signed`.
+/// The context reaches the operands of arithmetic, bitwise and conditional
+/// operators before they are evaluated (IEEE 1800-2023 11.6.1, 11.8.2).
 fn eval_integral_in_context(
     expr: &ConstExpr,
     width: usize,
@@ -380,8 +380,26 @@ fn integral_binary_operands(
     })
 }
 
-fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Option<i128> {
-    let (mut left, mut right) = integral_binary_operands(left, right)?;
+/// Evaluate the operands of a binary operator whose operands share one context
+/// (IEEE 1800-2023 11.6.1), returning them with that context's signedness.
+fn context_binary_operands(
+    left: &ConstExpr,
+    right: &ConstExpr,
+) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
+    let (left_type, right_type) = integral_binary_operands(left, right)?;
+    let width = left_type.width.max(right_type.width);
+    let signed = left_type.signed && right_type.signed;
+    let left = eval_integral_in_context(left, width, signed)?;
+    let right = eval_integral_in_context(right, width, signed)?;
+    Some((left, right, signed))
+}
+
+fn eval_literal_binary(
+    left_expr: &ConstExpr,
+    op: BinaryOp,
+    right_expr: &ConstExpr,
+) -> Option<i128> {
+    let (mut left, mut right) = integral_binary_operands(left_expr, right_expr)?;
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
         let result = eval_integral_shift(left, op, right);
         return integral_literal_as_i128(&result, result.signed);
@@ -413,15 +431,20 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
     ) {
         return None;
     }
-    let width = left.width.max(right.width);
-    let signed = left.signed && right.signed;
-    left = resize_integral_literal(left.clone(), width, signed, signed_extension(&left, signed));
-    right = resize_integral_literal(
-        right.clone(),
-        width,
-        signed,
-        signed_extension(&right, signed),
-    );
+    if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+        let width = left.width.max(right.width);
+        let signed = left.signed && right.signed;
+        left =
+            resize_integral_literal(left.clone(), width, signed, signed_extension(&left, signed));
+        right = resize_integral_literal(
+            right.clone(),
+            width,
+            signed,
+            signed_extension(&right, signed),
+        );
+        return eval_four_state_binary(&left, op, &right, signed);
+    }
+    let (left, right, signed) = context_binary_operands(left_expr, right_expr)?;
     eval_four_state_binary(&left, op, &right, signed)
 }
 
@@ -822,13 +845,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                     | BinaryOp::Ge
             ) =>
         {
-            let (left_literal, right_literal) = integral_binary_operands(left, right)?;
-            let width = left_literal.width.max(right_literal.width);
-            let signed = left_literal.signed && right_literal.signed;
-            // The operands are evaluated at their common width, which
-            // propagates into nested arithmetic.
-            let left = eval_integral_in_context(left, width, signed)?;
-            let right = eval_integral_in_context(right, width, signed)?;
+            let (left, right, signed) = context_binary_operands(left, right)?;
             eval_four_state_binary_literal(&left, *op, &right, signed)
         }
         ConstExpr::Mux {

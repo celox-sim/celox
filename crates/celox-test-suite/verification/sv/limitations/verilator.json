@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 1,
+    "mismatch": 2,
     "emission_error": 0,
     "compile_error": 3,
     "runtime_error": 1,
@@ -54,6 +54,14 @@
       "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang at 642:5: assert_eq minus_write: expected 0xa5, got 0x25 (minus_write)",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

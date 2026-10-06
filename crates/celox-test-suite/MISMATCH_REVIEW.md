@@ -441,3 +441,31 @@ procedural loops, member assignments, or dynamic partial-array writes).
 truncation (`y0 = 0`, expected `2`). These SV frontend variants are explicitly
 excluded; this patch repairs the Veryl frontend, not the separate SV lowering.
 The 128-bit folded-shift case passes through the SV frontend.
+
+Rechecked on 2026-10-05 with the pinned Veryl 0.22.0. The two cases that still
+failed on native, Cranelift, Wasm, and the SIR interpreter were Celox defects,
+not information lost in Veryl AIR:
+
+- `folded_const_select_keeps_its_sign` read `y5 = Q[i]` as `0`: a dynamic read
+  of a parameter array loads its state, and only constant arrays had their
+  elements placed in the initial state. Its `y9` (`LS.m[3:0] + a`) read `0`
+  for the same reason: the analyzer leaves a select of a local constant
+  struct's member unfolded. Constants and parameters now all keep their values
+  in the initial state.
+- `case_compares_each_label_as_an_if_does` stopped at `y7`
+  (`case J + 8'h01 { 16'h0100: .. }`): the analyzer folds a constant case
+  target in its own 8-bit width, before the 16-bit label comparison is known,
+  and Celox extended that folded `0`. Case statements now recompute a target's
+  context-determined operators in each comparison's width, as for a runtime
+  target, in combinational, `always_ff`, and function bodies. Case expressions
+  were already folded per comparison by the analyzer.
+
+Both cases are enabled on all four Celox backends and the SV frontend. Three
+added cases isolate the repaired paths:
+`dynamic_param_array_read_uses_its_elements` (default and overridden parameter
+arrays in comb and ff), `constant_case_target_uses_comparison_context`
+(widening, narrowing, shifted, and range labels in comb, ff, and a function), and
+`unfolded_constant_struct_member_reads_its_value`. All three pass Verilator.
+Icarus cannot compile them: it rejects unpacked array parameters, the emitted
+`case ... inside`, and the package-typed local parameter respectively. The SV
+frontend runs the last two; it rejects the unpacked array parameter.

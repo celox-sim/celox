@@ -9380,6 +9380,17 @@
     },
     {
       "category": "Regression",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:40: Syntax in assignment statement l-value.\n<case>/source_0.sv:40: error: Incomprehensible case expression.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::constant_case_target_uses_comparison_context",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
       "name": "veryl_context_regressions::constant_ternary_keeps_both_arm_types",
@@ -9396,6 +9407,17 @@
       "name": "veryl_context_regressions::dynamic_index_store_is_cut_to_element_width",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::dynamic_param_array_read_uses_its_elements",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -9506,6 +9528,17 @@
       "name": "veryl_context_regressions::signed_struct_member_sign_extends",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -10304,7 +10337,7 @@
     }
   ],
   "counts": {
-    "compile_error": 8,
+    "compile_error": 11,
     "emission_error": 0,
     "ignored": 196,
     "mismatch": 0,
