@@ -4141,10 +4141,10 @@ fn runtime_select_position(
             }
             match variable.packed_ranges.as_slice() {
                 [range] => *range,
-                // Selects of a multi-dimensional packed vector address its
-                // flat bits.
+                // The analyzer flattens the selects of several packed
+                // dimensions into bit offsets from bit 0.
+                [_, _, ..] => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
                 [] => return None,
-                _ => (i128::try_from(variable.width).ok()? - 1, 0),
             }
         }
         None => {
