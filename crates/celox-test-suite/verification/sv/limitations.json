@@ -89,7 +89,8 @@
         "indexed_select::indexed_runtime_replications_preserve_attached_selections",
         "indexed_select::indexed_select_multidimensional_packed_reads",
         "synthesizable::struct_assignment_patterns_follow_the_target_layout",
-        "review_regressions::preserves_four_state_shift_and_bit_select_constants"
+        "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays"
       ]
     }
   },
@@ -267,6 +268,23 @@
     "cases": {
       "icarus": [
         "packed_structs::packed_struct_bounds_and_type_queries"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_type_size_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "review_regressions::size_of_a_type_uses_the_dimension_argument"
       ]
     }
   },

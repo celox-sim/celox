@@ -1674,9 +1674,43 @@
     },
     {
       "category": "Regression",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_syntax",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
       "name": "review_regressions::folds_compound_four_state_case_labels",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1881,6 +1915,40 @@
       "name": "review_regressions::resolves_generate_local_alias_casts_for_all_processes",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::run_time_for_condition_uses_the_relational_operand_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_type_size_queries",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -2393,9 +2461,9 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 35,
+    "ignored": 37,
     "mismatch": 0,
-    "passed": 141,
+    "passed": 143,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,

@@ -41,7 +41,6 @@ all_backends! {
         @case "veryl_context_regressions::folded_const_select_keeps_its_sign";
     }
     fn runtime_for_bound_keeps_its_type(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_keeps_its_type";
     }
     fn case_compares_each_label_as_an_if_does(sim) {
@@ -51,7 +50,6 @@ all_backends! {
         @case "veryl_context_regressions::runtime_case_target_uses_comparison_context";
     }
     fn runtime_for_bound_arithmetic_uses_int_context(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
     }
     fn dynamic_param_array_read_uses_its_elements(sim) {
@@ -69,7 +67,6 @@ all_backends! {
 
 all_backends! {
     fn ff_loop_bound_keeps_its_type(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
             module Top #(
                 param UNSIGNED_END: u32 = 2,
