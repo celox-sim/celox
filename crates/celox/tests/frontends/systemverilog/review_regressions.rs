@@ -4114,11 +4114,14 @@ fn preserves_masked_parameter_guards_before_latch_detection() {
 
 #[test]
 fn coerces_whole_unpacked_array_writes_to_the_flattened_width() {
+    // The element types are equivalent, as an unpacked array assignment
+    // requires (IEEE 1800-2023 6.22.2, 7.6); signed elements must not
+    // extend into the neighboring element.
     let source = r#"
         module Top(
             input logic c,
             input logic signed [7:0] a[2], b[2],
-            output logic [7:0] x[2]
+            output logic signed [7:0] x[2]
         );
             always_comb begin
                 if (c)
@@ -8084,4 +8087,125 @@ fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
         error.contains("loop condition that depends on run-time values"),
         "{error}"
     );
+}
+
+#[test]
+fn reports_incompatible_unpacked_arrays_in_each_assignment_like_context() {
+    // An unpacked array needs an equivalent element type and equal element
+    // counts wherever it is assigned (IEEE 1800-2023 7.6, 10.8); the
+    // diagnostic names the context and both array types.
+    let cases = [
+        (
+            r#"
+            module Top(output logic signed [7:0] q);
+                function automatic logic signed [7:0] pick(input logic signed [7:0] x [2]);
+                    return x[0];
+                endfunction
+                logic signed [3:0] narrow [2];
+                always_comb begin
+                    narrow[0] = 4'sh8;
+                    narrow[1] = 4'sh1;
+                    q = pick(narrow);
+                end
+            endmodule
+            "#,
+            "argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not \
+             assignment compatible with `logic signed [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Top(output logic [3:0] q);
+                task automatic fill(output logic [7:0] x [2]);
+                    x[0] = 8'h12;
+                    x[1] = 8'h34;
+                endtask
+                logic [3:0] narrow [2];
+                always_comb begin
+                    fill(narrow);
+                    q = narrow[0];
+                end
+            endmodule
+            "#,
+            "argument 1 of `fill`: an unpacked array of type `logic [3:0] [2]` is not \
+             assignment compatible with `logic [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Top(input logic a, output logic q);
+                function automatic void first(input logic x [2], output logic y);
+                    y = x[0];
+                endfunction
+                bit two [2];
+                always_comb begin
+                    two[0] = a;
+                    two[1] = a;
+                    first(.y(q), .x(two));
+                end
+            endmodule
+            "#,
+            "argument 1 of `first`: an unpacked array of type `bit [2]` is not assignment \
+             compatible with `logic [2]`",
+        ),
+        (
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] q);
+                logic [7:0] grid [2][3];
+                logic [7:0] rows [2][2];
+                always_comb begin
+                    grid = '{default: a};
+                    rows = grid;
+                    q = rows[0][0];
+                end
+            endmodule
+            "#,
+            "assignment: an unpacked array of type `logic [7:0] [2][3]` is not assignment \
+             compatible with `logic [7:0] [2][2]`",
+        ),
+        (
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] q);
+                logic [7:0] row [3];
+                logic [7:0] grid [2][2];
+                assign row[0] = a;
+                assign row[1] = a;
+                assign row[2] = a;
+                assign grid[1] = row;
+                assign grid[0] = '{a, a};
+                assign q = grid[1][0];
+            endmodule
+            "#,
+            "continuous assignment: an unpacked array of type `logic [7:0] [3]` is not \
+             assignment compatible with `logic [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Child(output logic signed [7:0] y [2]);
+                assign y[0] = 8'sd1;
+                assign y[1] = -8'sd1;
+            endmodule
+            module Top(output logic [7:0] q);
+                logic [7:0] wide [2];
+                Child u(.y(wide));
+                assign q = wide[1];
+            endmodule
+            "#,
+            "connection of port `y`: an unpacked array of type `logic [7:0] [2]` is not \
+             assignment compatible with `logic signed [7:0] [2]`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+            .build_cranelift()
+        {
+            Ok(_) => panic!("incompatible unpacked arrays unexpectedly compiled:\n{source}"),
+            Err(error) => error,
+        };
+        match error.kind() {
+            celox::SimulatorErrorKind::SIRParser(celox::ParserError::IllegalContext {
+                detail,
+                ..
+            }) => assert_eq!(detail, expected),
+            _ => panic!("expected an illegal-context error, got {error:?}"),
+        }
+    }
 }

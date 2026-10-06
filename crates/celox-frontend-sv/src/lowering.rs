@@ -1917,6 +1917,62 @@ type SvGlue = (
     SLTNodeArena<GlueAddr>,
 );
 
+/// The type of `variable` when it is an unpacked array.
+fn unpacked_array_type(variable: &SvVariable) -> Option<sv::typecheck::UnpackedArrayType> {
+    let element_width = unpacked_element_width(variable)?;
+    Some(sv::typecheck::UnpackedArrayType {
+        dims: variable.array_dims.clone(),
+        element_width,
+        signed: variable.signed,
+        four_state: variable.is_4state,
+    })
+}
+
+/// Rejects an unpacked array connected to an unpacked array input or output
+/// port of an incompatible type: such a connection is an assignment-like
+/// context (IEEE 1800-2023 10.8, 23.3.3), which requires equivalent element
+/// types and equal element counts (7.6).
+fn check_unpacked_port_connection(
+    connection: &LoweredSvPortConnection,
+    child: &LoweredSvModule,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+) -> Result<(), ParserError> {
+    let Some(sv::ir::Expr::Ident(actual)) = connection.actual_expr.as_ref() else {
+        return Ok(());
+    };
+    let Some(port) = child
+        .signal_names
+        .get(&connection.formal)
+        .and_then(|id| child.variables.get(id))
+        .filter(|port| matches!(port.kind, VariableKind::Input | VariableKind::Output))
+    else {
+        return Ok(());
+    };
+    let (Some(target), Some(actual_type)) = (
+        unpacked_array_type(port),
+        parent_signal_names
+            .get(actual)
+            .and_then(|id| parent_variables.get(id))
+            .and_then(unpacked_array_type),
+    ) else {
+        return Ok(());
+    };
+    if actual_type.is_assignment_compatible_with(&target) {
+        return Ok(());
+    }
+    let error = sv::AnalyzerError::IncompatibleUnpackedArray {
+        context: format!("connection of port `{}`", connection.formal),
+        actual: actual_type,
+        target,
+    };
+    Err(ParserError::illegal_context(
+        "systemverilog port connection",
+        error.to_string(),
+        None,
+    ))
+}
+
 fn build_instance_glue(
     parent_variables: &HashMap<SourceVarId, SvVariable>,
     parent_signal_names: &HashMap<String, SourceVarId>,
@@ -1946,6 +2002,7 @@ fn build_instance_glue(
                 None,
             ));
         }
+        check_unpacked_port_connection(connection, child, parent_variables, parent_signal_names)?;
     }
 
     for child_port_id in &child.port_order {

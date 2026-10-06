@@ -1926,6 +1926,70 @@ fn rejects_nonpositive_implicit_unpacked_array_dimensions() {
 }
 
 #[test]
+fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
+    // IEEE 1800-2023 6.22.2 and 7.6: an unpacked array assignment needs
+    // equivalent element types (same width, state count and signedness) and
+    // equal element counts.
+    let source = r#"
+        module Top(output logic [7:0] q);
+            function automatic logic [7:0] first(input logic [7:0] x [2][2]);
+                return x[0][0];
+            endfunction
+            logic signed [7:0] row [2];
+            always_comb begin
+                row[0] = 8'sd1;
+                row[1] = 8'sd2;
+                q = first('{row, '{8'd3, 8'd4}});
+            end
+        endmodule
+    "#;
+    let error = analyze_source(source, Path::new("nonequivalent_unpacked.sv"))
+        .expect_err("a signed row is not equivalent to an unsigned one");
+    let row = |signed| typecheck::UnpackedArrayType {
+        dims: vec![2],
+        element_width: 8,
+        signed,
+        four_state: true,
+    };
+    assert_eq!(
+        error,
+        AnalyzerError::IncompatibleUnpackedArray {
+            context: "assignment pattern item".to_string(),
+            actual: row(true),
+            target: row(false),
+        }
+    );
+}
+
+#[test]
+fn accepts_unpacked_arrays_of_equivalent_element_types() {
+    // Bounds, the packed range direction and a packed structure of the same
+    // width, state count and signedness do not matter (IEEE 1800-2023
+    // 6.22.2, 7.6).
+    let source = r#"
+        module Top(output logic [7:0] q, output logic [7:0] r);
+            typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+            function automatic logic [7:0] first(input logic [7:0] x [1:0][2]);
+                return x[1][0];
+            endfunction
+            logic [0:7] row [5:6];
+            pair_t pairs [2];
+            logic [7:0] grid [2][2];
+            always_comb begin
+                row[5] = 8'd1;
+                row[6] = 8'd2;
+                pairs = row;
+                grid = '{row, '{8'd0, 8'd0}};
+                q = first('{pairs, row});
+                r = grid[0][0];
+            end
+        endmodule
+    "#;
+    analyze_source(source, Path::new("equivalent_unpacked.sv"))
+        .expect("equivalent unpacked array types are assignment compatible");
+}
+
+#[test]
 fn flattens_partial_unpacked_array_selections() {
     let ir = analyze_source(
         r#"

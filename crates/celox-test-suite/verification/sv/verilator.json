@@ -800,6 +800,17 @@
       "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
+      "name": "indexed_select::runtime_index_reads_single_bit_unpacked_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "indexed_select::runtime_indexed_base_may_select_a_parameter_bit",
       "phase": "execute",
       "status": "passed",
@@ -2054,11 +2065,112 @@
     },
     {
       "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arguments_of_equivalent_element_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arrays_of_equivalent_element_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "types::preserves_integer_atom_state_kinds",
       "phase": "compile",
       "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through \"EXTEND unexpected in assignment to unpacked array\" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8).",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unpacked_array_extension",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through \"EXTEND unexpected in assignment to unpacked array\" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8).",
+        "upstream": []
+      },
+      "name": "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through \"EXTEND unexpected in assignment to unpacked array\" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8).",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unpacked_array_extension",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through \"EXTEND unexpected in assignment to unpacked array\" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8).",
+        "upstream": []
+      },
+      "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:8:32: Illegal assignment: Unmatched array sizes in dimension 0 (2 vs 3)\n                                                                                                                                                                                                                                  : ... note: In instance 'Top'\n    8 |                     assign two = three;\n      |                                ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_element_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:7:33: Assignment between 2-state and 4-state types requires equivalent element types (IEEE 1800-2023 6.22.2, 7.6)\n                                                                                                                                                                                                                                : ... note: In instance 'Top'\n                                                                                                                                                                                                                                : ... Left-hand type: 'logic[7:0]$[0:1]'(4-state)\n                                                                                                                                                                                                                                : ... Right-hand type: 'bit[7:0]$[0:1]'(2-state)\n    7 |                     assign four = two;\n      |                                 ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:7:33: Illegal assignment: Array element types are not equivalent (IEEE 1800-2023 6.22.2)\n                                                                                                                                                                                                                                : ... note: In instance 'Top'\n                                                                                                                                                                                                                                : ... Left-hand data type: 'logic[7:0]$[0:1]' (4-state)\n                                                                                                                                                                                                                                : ... Right-hand data type: 'bit[7:0]$[0:1]' (2-state)\n    7 |                     assign four = two;\n      |                                 ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_state_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:9:30: Illegal assignment: Array element types are not equivalent (IEEE 1800-2023 6.22.2)\n                                                                                                                                                                                                                                     : ... note: In instance 'Top'\n                                                                                                                                                                                                                                     : ... Pin data type: 'logic[7:0]$[0:1]' (4-state)\n                                                                                                                                                                                                                                     : ... Expression data type: 'logic[3:0]$[0:1]' (4-state)\n    9 |                     Child u(.x(narrow), .y(q));\n      |                              ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:9:30: Input port connection 'x' expects 8 bits on the pin connection, but pin connection's VARREF 'narrow' generates 4 bits.\n                                                                                                                                                                                                                                                   : ... note: In instance 'Top'\n    9 |                     Child u(.x(narrow), .y(q));\n      |                              ^\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_port_connection_of_a_narrower_element_type",
+      "phase": "compile",
+      "status": "rejected",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -2089,10 +2201,10 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 6,
+    "ignored": 8,
     "mismatch": 0,
-    "passed": 138,
-    "rejected": 3,
+    "passed": 141,
+    "rejected": 6,
     "runtime_error": 0,
     "unexpected_accept": 0,
     "unsupported": 36

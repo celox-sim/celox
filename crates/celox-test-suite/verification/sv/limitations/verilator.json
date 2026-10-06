@@ -9,7 +9,7 @@
     "unexpected_accept": 0,
     "mismatch": 2,
     "emission_error": 0,
-    "compile_error": 3,
+    "compile_error": 5,
     "runtime_error": 1,
     "unsupported": 0,
     "ignored": 0
@@ -62,6 +62,22 @@
       "name": "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHEXPAND: <case>/source_0.sv:7:37: Operator PATMEMBER expects 8 bits on the Pattern value, but Pattern value's VARREF 'row' generates 4 bits.\n                                                                                                                                                                                                                                : ... note: In instance 'Top'\n    7 |                     assign grid = '{row, row};\n      |                                     ^~~\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:7:42: Operator PATMEMBER expects 8 bits on the Pattern value, but Pattern value's VARREF 'row' generates 4 bits.\n                                                                                                                                                                                                                                : ... note: In instance 'Top'\n    7 |                     assign grid = '{row, row};\n      |                                          ^~~\n%Error: <case>/source_0.sv:7:37: EXTEND unexpected in assignment to unpacked array\n    7 |                     assign grid = '{row, row};\n      |                                     ^~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:7:42: EXTEND unexpected in assignment to unpacked array\n    7 |                     assign grid = '{row, row};\n      |                                          ^~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHEXPAND: <case>/source_0.sv:10:29: Operator FUNCREF 'pick' expects 8 bits on the Function Argument, but Function Argument's VARREF 'narrow' generates 4 bits.\n                                                                                                                                                                                                                          : ... note: In instance 'Top'\n   10 |                         q = pick(narrow);\n      |                             ^~~~\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: <case>/source_0.sv:10:34: EXTENDS unexpected in assignment to unpacked array\n   10 |                         q = pick(narrow);\n      |                                  ^~~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

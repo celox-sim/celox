@@ -19,6 +19,7 @@ use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
 use crate::{AnalyzerError, system_functions, typecheck};
 
+mod array_compatibility;
 mod array_parameters;
 mod assignment_analysis;
 mod case;
@@ -47,6 +48,9 @@ mod statements;
 mod types;
 mod validation;
 
+use array_compatibility::{
+    check_unpacked_array_assignment, net_lvalue_unpacked_shape, variable_lvalue_unpacked_shape,
+};
 use assignment_analysis::two_state_conditions_are_complements;
 use case::expr_is_two_state;
 use casts::{
