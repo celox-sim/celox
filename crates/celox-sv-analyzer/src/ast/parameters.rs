@@ -121,6 +121,8 @@ pub(super) fn parameters_from_ref_node(
                     .unwrap_or_else(|| is_signed_from_ref_node(type_node.clone()).unwrap_or(false))
             })
     });
+    let parameter_signed_element_depth =
+        signed_element_depth_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
     let parameter_ranges =
         function_type_from_ref_node(type_node.clone(), syntax_tree, base_const_env, type_aliases)
             .map(|ty| ty.packed_ranges().to_vec())
@@ -189,6 +191,7 @@ pub(super) fn parameters_from_ref_node(
                 is_local,
             );
             parameter.packed_ranges = parameter_ranges.clone();
+            parameter.signed_element_depth = parameter_signed_element_depth;
             parameters.push(parameter);
         }
     }
@@ -334,7 +337,101 @@ pub(super) fn extend_const_env_with_parameters(
         if parameter.is_local {
             env.insert(local_parameter_marker(parameter.name()), value);
         }
+        insert_parameter_dimension_markers(env, parameter);
     }
+}
+
+/// Record the packed dimensions of a parameter whose selects need them: an
+/// array of several dimensions, or of a signed named type.
+fn insert_parameter_dimension_markers(env: &mut HashMap<String, i128>, parameter: &Parameter) {
+    let name = parameter.name();
+    if parameter.packed_ranges.len() < 2 && parameter.signed_element_depth.is_none() {
+        return;
+    }
+    let Some(bounds) = parameter
+        .packed_ranges
+        .iter()
+        .map(|range| {
+            Some((
+                eval_ast_const_expr(range.left(), env)?,
+                eval_ast_const_expr(range.right(), env)?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    let Ok(count) = i128::try_from(bounds.len()) else {
+        return;
+    };
+    env.insert(parameter_dimensions_marker(name), count);
+    for (index, (left, right)) in bounds.into_iter().enumerate() {
+        env.insert(parameter_dimension_marker(name, index, "left"), left);
+        env.insert(parameter_dimension_marker(name, index, "right"), right);
+    }
+    if let Some(depth) = parameter
+        .signed_element_depth
+        .and_then(|depth| i128::try_from(depth).ok())
+    {
+        env.insert(parameter_signed_element_marker(name), depth);
+    }
+}
+
+/// The element of a packed parameter selected by constant `indices`, as a
+/// sized literal: the remaining dimensions, signed when the element is of a
+/// signed named type (IEEE 1800-2023 7.4.1). An index out of range gives X
+/// bits (11.5.1).
+pub(super) fn parameter_element_literal(
+    name: &str,
+    indices: &[i128],
+    env: &HashMap<String, i128>,
+) -> Option<String> {
+    let count = usize::try_from(*env.get(&parameter_dimensions_marker(name))?).ok()?;
+    if indices.is_empty() || indices.len() > count {
+        return None;
+    }
+    let bounds = (0..count)
+        .map(|index| {
+            Some((
+                *env.get(&parameter_dimension_marker(name, index, "left"))?,
+                *env.get(&parameter_dimension_marker(name, index, "right"))?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let size =
+        |(left, right): (i128, i128)| usize::try_from(left.abs_diff(right)).ok()?.checked_add(1);
+    let width_from = |start: usize| {
+        bounds[start..]
+            .iter()
+            .try_fold(1usize, |acc, bound| acc.checked_mul(size(*bound)?))
+    };
+    let element_width = width_from(indices.len())?;
+    let total_width = width_from(0)?;
+    if total_width > 127 {
+        return None;
+    }
+    let signed = env
+        .get(&parameter_signed_element_marker(name))
+        .is_some_and(|depth| usize::try_from(*depth).ok() == Some(indices.len()));
+    let signing = if signed { "s" } else { "" };
+    let mut offset = 0usize;
+    for (position, index) in indices.iter().enumerate() {
+        let (left, right) = bounds[position];
+        if *index < left.min(right) || *index > left.max(right) {
+            return Some(format!(
+                "{element_width}'{signing}b{}",
+                "x".repeat(element_width)
+            ));
+        }
+        // The right bound is the least significant element.
+        let from_right = usize::try_from(index.abs_diff(right)).ok()?;
+        offset = offset.checked_add(from_right.checked_mul(width_from(position + 1)?)?)?;
+    }
+    let value = *env.get(name)? as u128 & ((1u128 << total_width) - 1);
+    let element = (value >> offset) & ((1u128 << element_width) - 1);
+    Some(format!(
+        "{element_width}'{signing}b{element:0element_width$b}"
+    ))
 }
 
 pub(super) fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128 {

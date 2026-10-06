@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 6,
     "emission_error": 0,
-    "compile_error": 23,
+    "compile_error": 24,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -270,6 +270,14 @@
       "name": "review_regressions::preserves_four_state_arithmetic_case_constants",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: sorry: packed array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "types::packed_parameters_of_signed_named_types_have_signed_elements",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }
