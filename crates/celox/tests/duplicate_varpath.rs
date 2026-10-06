@@ -20,6 +20,8 @@ all_backends! {
 // The Veryl analyzer assigns different VarIds but identical VarPaths to these scoped
 // variables. Without the fix this panics during JIT compilation.
 fn test_duplicate_scoped_var_in_always_comb(sim) {
+    // SV frontend rejects same-named block-local variables in two processes:
+    // "duplicate internal signal `tmp`" (#445).
     @ignore_on(sv);
     @case "duplicate_varpath::test_duplicate_scoped_var_in_always_comb";
 }
@@ -29,6 +31,8 @@ fn test_duplicate_scoped_var_in_always_comb(sim) {
 // internal vars, and always_comb inside uses `var flag: logic;` in multiple
 // for-loop scopes.
 fn test_duplicate_scoped_var_with_generate_for(sim) {
+    // SV frontend rejects same-named block-local variables in two processes:
+    // "duplicate internal signal `flag`" (#445).
     @ignore_on(sv);
     @case "duplicate_varpath::test_duplicate_scoped_var_with_generate_for";
 }

@@ -10,6 +10,8 @@ all_backends! {
     // and child_signal access works.
 fn test_for_loop_instance_hierarchy(sim) {
     @omit_veryl;
+    // On the SV path `named_hierarchy()` names generate-block instances `g[0].u_sub` and
+    // `g[1].u_sub`, giving two child groups instead of one `u_sub` group.
     @ignore_on(sv);
         @setup { let code = r#"
 module Sub (
@@ -76,16 +78,25 @@ o_data: top_out[i],
     }
 
     fn test_instance_input_function_output_writeback(sim) {
+        // Veryl emits a call with an output argument in an input port connection, which IEEE
+        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+        // ("systemverilog input port connection", #88).
         @ignore_on(sv);
         @case "hierarchy::test_instance_input_function_output_writeback";
     }
 
     fn test_instance_input_function_output_concat_dynamic_writeback(sim) {
+        // SV arm: Veryl emits a call with an output argument in an input port connection, which
+        // IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+        // ("systemverilog input port connection", #88).
         @ignore_on(veryl, sv);
         @case "hierarchy::test_instance_input_function_output_concat_dynamic_writeback";
     }
 
 fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
+    // Veryl emits a call with an output argument in an input port connection, which IEEE 1800
+    // 13.4 forbids outside procedural code; the SV frontend rejects it
+    // ("systemverilog input port connection", #88).
     @ignore_on(sv);
     @case "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver";
 }
@@ -94,6 +105,9 @@ fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
         // veryl-simulator does not write the connection's function output
         // actual back.
         @omit_veryl;
+        // Veryl emits a call with an output argument in an input port connection, which IEEE
+        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+        // ("systemverilog input port connection", #88).
         @ignore_on(sv);
         @setup { let code = r#"
 module Child (
@@ -142,6 +156,8 @@ assign seen_o = seen;
     }
 
     fn test_instance_output_dynamic_index_function_output_writeback(sim) {
+        // SV arm: the case expects a language rejection, but the SV frontend reports
+        // Unsupported "select index `choose_index(sel, tmp)`" (#88) instead.
         @ignore_on(veryl, sv);
         @case "hierarchy::test_instance_output_dynamic_index_function_output_writeback";
     }
@@ -151,6 +167,8 @@ assign seen_o = seen;
 
 
     fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
+        // SV arm: the case expects a language rejection, but the SV frontend reports
+        // Unsupported "select index `choose_index(sel, mem[0])`" (#88) instead.
         @ignore_on(veryl, sv);
         @case "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback";
     }

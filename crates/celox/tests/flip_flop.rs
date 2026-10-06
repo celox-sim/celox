@@ -70,6 +70,8 @@ fn test_ff_assert_message_output_argument_is_eager(sim) {
 
 fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     @omit_veryl;
+    // SV frontend evaluates `$assert_continue` message arguments only when the check fails, so
+    // the `$display` in `message_value` is missing; Veryl evaluates them eagerly.
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
@@ -327,6 +329,8 @@ fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
 
 fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
     @omit_veryl;
+    // SV frontend evaluates `$assert_continue` message arguments only when the check fails, so
+    // the `$display` in the case pattern is missing; Veryl evaluates them eagerly.
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
@@ -3693,6 +3697,8 @@ fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
 }
 
 fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
+    // SV arm: in the emitted `for (int i = start; ...; i *= 2)` the `int` wraps and the loop
+    // ends, so no non-progressing-loop error is reported.
     @ignore_on(veryl, sv);
     @setup { let code = r#"
         module Top (
@@ -4056,6 +4062,8 @@ fn test_ff_function_call_array_literal_element_uses_formal_context_width(sim) {
 }
 
 fn test_ff_function_call_array_literal_supports_dynamic_multidim_indexing(sim) {
+    // Veryl emits `'{1{'{...}}, default: '{...}}`, mixing positional items with `default:`,
+    // which is not legal SV; the SV parser rejects it.
     @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_array_literal_supports_dynamic_multidim_indexing";
 }
@@ -4096,6 +4104,8 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim)
 
 fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
     @omit_veryl;
+    // Veryl emits `case (target) inside [8'd5:(observed_upper())-1]`, which evaluates both
+    // bounds, so `upper` is displayed even when the lower bound fails.
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (

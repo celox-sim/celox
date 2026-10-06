@@ -7,6 +7,8 @@ mod test_utils;
 // instantiation [tracking issue #88]` for the emitted interface instance).
 all_backends! {
     fn test_interface_connection(sim) {
+        // SV frontend does not support interfaces: module instantiation of interface `Bus`
+        // (#88).
         @ignore_on(sv);
         @case "interface::test_interface_connection";
     }

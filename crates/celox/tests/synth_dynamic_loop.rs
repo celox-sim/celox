@@ -298,6 +298,8 @@ fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
 }
 
 fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
+    // SV frontend rejects the loop-carried `x[i + 1] = x[i]` in a run-time-bounded loop:
+    // "combinational expression assigned to `x`" (#88).
     @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads";
 }

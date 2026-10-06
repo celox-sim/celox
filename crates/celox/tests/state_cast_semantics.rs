@@ -12,6 +12,8 @@ all_backends! {
 
     fn constant_type_cast_clears_unknown_bits(sim) {
         @omit_veryl;
+        // SV frontend rejects a cast of an X/Z-valued constant in a localparam initializer:
+        // "constant cast expression" (#88).
         @ignore_on(sv);
         @case "state_cast_semantics::constant_type_cast_clears_unknown_bits";
     }
