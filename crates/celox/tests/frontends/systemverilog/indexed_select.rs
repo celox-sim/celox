@@ -7,6 +7,18 @@ sv_backends! {
         @case "indexed_select::indexed_select_reads_and_writes_both_declaration_directions";
     }
 
+    fn runtime_indices_select_multidimensional_packed_elements(sim) {
+        @case "indexed_select::runtime_indices_select_multidimensional_packed_elements";
+    }
+
+    fn runtime_indices_select_within_multidimensional_packed_elements(sim) {
+        @case "indexed_select::runtime_indices_select_within_multidimensional_packed_elements";
+    }
+
+    fn out_of_range_inner_indices_stay_in_their_element(sim) {
+        @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
+    }
+
     fn indexed_select_parameterized_generate_and_ff(sim) {
         @case "indexed_select::indexed_select_parameterized_generate_and_ff";
     }
