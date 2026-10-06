@@ -73,32 +73,9 @@ pub(in crate::optimizer) fn predicate_facts(
 pub(in crate::optimizer) fn instruction_uses(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
 ) -> Vec<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(..) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            vec![*source]
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => offset
-            .dynamic_registers()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(*source))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => args.clone(),
-        SIRInstruction::Mux(_, cond, true_value, false_value) => {
-            vec![*cond, *true_value, *false_value]
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
+    let mut uses = Vec::new();
+    inst.for_each_use(|register| uses.push(register));
+    uses
 }
 
 pub(in crate::optimizer) fn collect_uses(

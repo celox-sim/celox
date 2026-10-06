@@ -1381,29 +1381,9 @@ fn decrement_use(counts: &mut HashMap<RegisterId, usize>, reg: RegisterId) {
 }
 
 fn inst_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(_, _) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, src) => vec![*src],
-        SIRInstruction::Load(_, _, offset, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => offset
-            .dynamic_registers()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(*src))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Concat(_, args) => args.clone(),
-        SIRInstruction::Slice(_, src, _, _) => vec![*src],
-        SIRInstruction::Mux(_, cond, true_val, false_val) => vec![*cond, *true_val, *false_val],
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => args.clone(),
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
+    let mut uses = Vec::new();
+    inst.for_each_use(|register| uses.push(register));
+    uses
 }
 
 fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {

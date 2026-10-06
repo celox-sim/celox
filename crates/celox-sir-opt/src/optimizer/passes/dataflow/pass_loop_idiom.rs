@@ -674,32 +674,7 @@ fn imm_u64(
 }
 
 fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>, out: &mut Vec<RegisterId>) {
-    match inst {
-        SIRInstruction::Imm(..) | SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => out.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            out.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-            out.push(*source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
-        SIRInstruction::Mux(_, cond, then_value, else_value) => {
-            out.extend([*cond, *then_value, *else_value]);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            out.extend([*old, *new]);
-        }
-    }
+    inst.for_each_use(|register| out.push(register));
 }
 
 fn terminator_uses(terminator: &SIRTerminator, out: &mut Vec<RegisterId>) {
@@ -720,14 +695,7 @@ fn terminator_uses(terminator: &SIRTerminator, out: &mut Vec<RegisterId>) {
 }
 
 fn instruction_has_side_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::Store(..)
-            | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    inst.has_side_effects()
 }
 
 fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {

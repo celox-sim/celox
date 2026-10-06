@@ -1652,61 +1652,11 @@ fn replace_register_uses_in_instruction(
     old: RegisterId,
     new: RegisterId,
 ) {
-    let replace = |register: &mut RegisterId| {
+    instruction.for_each_use_mut(|register| {
         if *register == old {
             *register = new;
         }
-    };
-    let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => replace(register),
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            replace(index);
-            if let Some(offset) = dynamic_bit_offset {
-                replace(offset);
-            }
-        }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-            replace(source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => replace_offset(offset),
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_offset(offset);
-            replace(source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => replace_offset(offset),
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => {
-            for argument in arguments {
-                replace(argument);
-            }
-        }
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            replace(condition);
-            replace(then_value);
-            replace(else_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            replace(old);
-            replace(new);
-        }
-    }
+    });
 }
 
 fn replace_register_uses_in_block(
@@ -2206,12 +2156,6 @@ fn evaluate_instruction(
                 _ => LatticeValue::Overdefined,
             }
         }
-        SIRInstruction::Load(..) => LatticeValue::Overdefined,
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => LatticeValue::Overdefined,
         SIRInstruction::Concat(dst, arguments) => {
             let mut payload = BigUint::zero();
             let mut width = 0usize;
@@ -2277,6 +2221,8 @@ fn evaluate_instruction(
                 }
             }
         }
+        // State reads and effects are never constant.
+        _ => LatticeValue::Overdefined,
     }
 }
 
@@ -2289,36 +2235,9 @@ fn width_mask(width: usize) -> BigUint {
 }
 
 fn instruction_uses(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
-    match instruction {
-        SIRInstruction::Imm(..) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            vec![*source]
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => offset
-            .dynamic_registers()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(*source))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => arguments.clone(),
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            vec![*condition, *then_value, *else_value]
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
+    let mut uses = Vec::new();
+    instruction.for_each_use(|register| uses.push(register));
+    uses
 }
 
 fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {

@@ -2,7 +2,7 @@
 //! wider operations, reducing ISel's shl+or expansion.
 
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::{collect_all_used_registers, def_reg};
+use super::shared::{collect_all_used_registers, is_unused_definition};
 use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
@@ -235,14 +235,9 @@ impl ExecutionUnitPass for ConcatFoldingPass {
 
         let used = collect_all_used_registers(eu);
         for block in eu.blocks.values_mut() {
-            block.instructions.retain(|inst| {
-                if let Some(d) = def_reg(inst) {
-                    used.contains(&d)
-                        || matches!(inst, SIRInstruction::Store(..) | SIRInstruction::Commit(..))
-                } else {
-                    true
-                }
-            });
+            block
+                .instructions
+                .retain(|inst| !is_unused_definition(inst, &used));
         }
     }
 }

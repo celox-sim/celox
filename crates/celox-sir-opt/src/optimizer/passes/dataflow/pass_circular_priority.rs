@@ -1356,14 +1356,7 @@ fn collect_bit_dependencies(
             return None;
         };
         let instruction = &eu.blocks[&header].instructions[index];
-        if matches!(
-            instruction,
-            SIRInstruction::Store(..)
-                | SIRInstruction::Commit(..)
-                | SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. }
-        ) {
+        if instruction.has_side_effects() {
             return None;
         }
         let mut operands = Vec::new();
@@ -1406,16 +1399,11 @@ fn recognize_bit_map_loop(
     {
         return None;
     }
-    if block.instructions.iter().any(|instruction| {
-        matches!(
-            instruction,
-            SIRInstruction::Store(..)
-                | SIRInstruction::Commit(..)
-                | SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. }
-        )
-    }) {
+    if block
+        .instructions
+        .iter()
+        .any(|instruction| instruction.has_side_effects())
+    {
         return None;
     }
     let header_index = cfg.block_index(header)?;
@@ -2089,16 +2077,10 @@ fn strip_boolean_identity(
 
 fn loop_is_pure(eu: &ExecutionUnit<RegionedAbsoluteAddr>, loop_blocks: &HashSet<BlockId>) -> bool {
     loop_blocks.iter().all(|block| {
-        eu.blocks[block].instructions.iter().all(|instruction| {
-            !matches!(
-                instruction,
-                SIRInstruction::Store(..)
-                    | SIRInstruction::Commit(..)
-                    | SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
-            )
-        })
+        eu.blocks[block]
+            .instructions
+            .iter()
+            .all(|instruction| !instruction.has_side_effects())
     })
 }
 
@@ -2251,36 +2233,7 @@ fn instruction_uses(
     instruction: &SIRInstruction<RegionedAbsoluteAddr>,
     uses: &mut Vec<RegisterId>,
 ) {
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-            uses.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            uses.push(*source);
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => uses.extend(arguments.iter().copied()),
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            uses.extend([*condition, *true_value, *false_value]);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            uses.extend([*old, *new]);
-        }
-    }
+    instruction.for_each_use(|register| uses.push(register));
 }
 
 fn terminator_uses(terminator: &SIRTerminator, uses: &mut Vec<RegisterId>) {
@@ -3292,82 +3245,20 @@ fn replace_sparse_loop_use(
     old: RegisterId,
     new: RegisterId,
 ) {
-    let replace = |value: &mut RegisterId| {
-        if *value == old {
-            *value = new;
+    instruction.for_each_use_mut(|register| {
+        if *register == old {
+            *register = new;
         }
-    };
-    let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(value) => replace(value),
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            replace(index);
-            if let Some(value) = dynamic_bit_offset {
-                replace(value);
-            }
-        }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            replace(source);
-        }
-        SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
-            replace_offset(offset);
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_offset(offset);
-            replace(source);
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => arguments.iter_mut().for_each(replace),
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            replace(condition);
-            replace(true_value);
-            replace(false_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged {
-            old: lhs, new: rhs, ..
-        } => {
-            replace(lhs);
-            replace(rhs);
-        }
-    }
+    });
 }
 
 fn replace_instruction_definition(
     instruction: &mut SIRInstruction<RegionedAbsoluteAddr>,
     definition: RegisterId,
 ) {
-    match instruction {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, ..)
-        | SIRInstruction::Unary(dst, ..)
-        | SIRInstruction::Slice(dst, ..)
-        | SIRInstruction::Load(dst, ..)
-        | SIRInstruction::Concat(dst, ..)
-        | SIRInstruction::Mux(dst, ..) => *dst = definition,
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-            unreachable!("bit-map expressions contain only value definitions")
-        }
-    }
+    *instruction
+        .defined_register_mut()
+        .expect("only an instruction that defines a register is renamed") = definition;
 }
 
 fn is_lane_comparison(op: BinaryOp) -> bool {

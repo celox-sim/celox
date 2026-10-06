@@ -348,55 +348,7 @@ fn record_uses(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     use_count: &mut HashMap<RegisterId, usize>,
 ) {
-    match inst {
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            *use_count.entry(*lhs).or_default() += 1;
-            *use_count.entry(*rhs).or_default() += 1;
-        }
-        SIRInstruction::Unary(_, _, src) => {
-            *use_count.entry(*src).or_default() += 1;
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                *use_count.entry(register).or_default() += 1;
-            }
-            *use_count.entry(*src).or_default() += 1;
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                *use_count.entry(register).or_default() += 1;
-            }
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                *use_count.entry(register).or_default() += 1;
-            }
-        }
-        SIRInstruction::Concat(_, args) => {
-            for arg in args {
-                *use_count.entry(*arg).or_default() += 1;
-            }
-        }
-        SIRInstruction::Slice(_, src, _, _) => {
-            *use_count.entry(*src).or_default() += 1;
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            *use_count.entry(*cond).or_default() += 1;
-            *use_count.entry(*then_val).or_default() += 1;
-            *use_count.entry(*else_val).or_default() += 1;
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                *use_count.entry(*arg).or_default() += 1;
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            *use_count.entry(*old).or_default() += 1;
-            *use_count.entry(*new).or_default() += 1;
-        }
-        _ => {}
-    }
+    inst.for_each_use(|register| *use_count.entry(register).or_default() += 1);
 }
 
 #[cfg(test)]
