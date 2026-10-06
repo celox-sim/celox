@@ -75,7 +75,7 @@ pub fn canonicalize_unit<A>(unit: &mut ExecutionUnit<A>) {
     }
 }
 
-/// Registers whose value can flow into an operand of a wildcard comparison.
+/// Registers whose value can flow into the pattern of a wildcard comparison.
 fn wildcard_pattern_registers<A>(unit: &ExecutionUnit<A>) -> HashSet<RegisterId> {
     let mut definitions = HashMap::default();
     let mut worklist = Vec::new();
@@ -84,14 +84,12 @@ fn wildcard_pattern_registers<A>(unit: &ExecutionUnit<A>) -> HashSet<RegisterId>
             if let Some(destination) = instruction.defined_register() {
                 definitions.insert(destination, instruction);
             }
-            if let SIRInstruction::Binary(
-                _,
-                lhs,
-                BinaryOp::EqWildcard | BinaryOp::NeWildcard,
-                rhs,
-            ) = instruction
+            // Only the right-hand pattern uses its mask as "don't care" bits;
+            // the left-hand data is canonicalized like any other value.
+            if let SIRInstruction::Binary(_, _, BinaryOp::EqWildcard | BinaryOp::NeWildcard, rhs) =
+                instruction
             {
-                worklist.extend([*lhs, *rhs]);
+                worklist.push(*rhs);
             }
         }
     }
@@ -223,6 +221,42 @@ mod tests {
         assert_eq!(
             instructions(&unit)[0],
             SIRInstruction::Imm(RegisterId(0), pattern)
+        );
+    }
+
+    #[test]
+    fn unknown_wildcard_data_is_canonicalized() {
+        let pattern = SIRValue::new_four_state(0x0u32, 0x3u32);
+        let mut unit = unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new_four_state(0xfu32, 0xfu32)),
+                SIRInstruction::Imm(RegisterId(1), pattern.clone()),
+                SIRInstruction::Binary(
+                    RegisterId(2),
+                    RegisterId(0),
+                    BinaryOp::EqWildcard,
+                    RegisterId(1),
+                ),
+            ],
+            &[
+                (0, RegisterType::Logic { width: 4 }),
+                (1, RegisterType::Logic { width: 4 }),
+                (
+                    2,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+            ],
+        );
+        canonicalize_unit(&mut unit);
+        assert_eq!(
+            instructions(&unit)[..2],
+            [
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u32)),
+                SIRInstruction::Imm(RegisterId(1), pattern),
+            ]
         );
     }
 

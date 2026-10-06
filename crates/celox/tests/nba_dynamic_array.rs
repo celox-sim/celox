@@ -489,3 +489,34 @@ fn test_negative_signed_index_reads_and_writes_nothing(sim) {
     assert_eq!(sim.get(mem_q), 0xab00u32.into());
 }
 }
+
+all_backends! {
+// An out-of-range read is X, which a two-state simulation reads as 0 also
+// when it is the data side of a wildcard comparison.
+fn test_out_of_range_read_compares_as_zero_in_two_state_wildcard(sim) {
+    @ignore_on(veryl);
+    @setup {
+        let source = r#"
+            module Top (
+                idx: input  logic<2>,
+                hit: output logic,
+            ) {
+                var arr: logic<4> [3];
+                always_comb {
+                    for i in 0..3 {
+                        arr[i] = 4'b0000;
+                    }
+                }
+                assign hit = arr[idx] ==? 4'b1x1x;
+            }
+        "#;
+    }
+    @build celox::SimulatorBuilder::new(source, "Top");
+    let idx = sim.signal("idx");
+    let hit = sim.signal("hit");
+    for i in 0u8..4 {
+        sim.modify(|io| io.set(idx, i)).unwrap();
+        assert_eq!(sim.get(hit), 0u8.into(), "idx={i}");
+    }
+}
+}
