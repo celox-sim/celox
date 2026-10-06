@@ -56,11 +56,47 @@ impl Default for ParallelScheduleOptions {
     }
 }
 
+/// Measured cost of one sparse summary word in a commit, including the dirty
+/// words it leads to, in operations.
+const SPARSE_SUMMARY_WORD_COST: u64 = 16;
+
+/// Largest 64-bit word count charged for copying one value; wider copies
+/// are memories, whose stores touch single elements.
+const MAX_COPY_WORDS: u64 = 64;
+
+/// Estimated work of one FF instruction. Most instructions cost one
+/// operation and copies cost their words. A sparse commit scans one summary
+/// word for every 4096 of its object's 64-bit words, whatever it changed; on
+/// a large memory that scan dominates the event.
+fn instruction_cost(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> u64 {
+    match instruction {
+        SIRInstruction::Commit(source, _, _, width, _)
+            if source.region == celox_design::SPARSE_WORKING_REGION =>
+        {
+            (*width as u64)
+                .div_ceil(64)
+                .div_ceil(4096)
+                .saturating_mul(SPARSE_SUMMARY_WORD_COST)
+                .max(1)
+        }
+        SIRInstruction::Commit(_, _, _, width, _) | SIRInstruction::Store(_, _, width, ..) => {
+            (*width as u64).div_ceil(64).clamp(1, MAX_COPY_WORDS)
+        }
+        _ => 1,
+    }
+}
+
 fn unit_cost(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> u64 {
     unit.blocks
         .values()
-        .map(|block| block.instructions.len() as u64 + 1)
-        .sum::<u64>()
+        .map(|block| {
+            block
+                .instructions
+                .iter()
+                .map(instruction_cost)
+                .fold(1u64, u64::saturating_add)
+        })
+        .fold(0u64, u64::saturating_add)
         .max(1)
 }
 
@@ -370,4 +406,45 @@ pub(crate) fn plan_parallel_ff_kernels(
         );
     }
     kernels
+}
+
+#[cfg(test)]
+mod tests {
+    use celox_design::{AbsoluteAddrBase, SPARSE_WORKING_REGION, STABLE_REGION};
+    use celox_sir::SIROffset;
+
+    use super::*;
+
+    fn address(region: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr::from_absolute_addr(
+            region,
+            AbsoluteAddrBase {
+                instance_id: InstanceId(1),
+                var_id: SourceVarId::default(),
+            },
+        )
+    }
+
+    fn commit(source_region: u32, width: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Commit(
+            address(source_region),
+            address(STABLE_REGION),
+            SIROffset::Static(0),
+            width,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn ff_costs_follow_the_data_an_instruction_moves() {
+        assert_eq!(instruction_cost(&commit(1, 32)), 1);
+        assert_eq!(instruction_cost(&commit(1, 512)), 8);
+        // A memory copy is charged as element accesses, not its full width.
+        assert_eq!(instruction_cost(&commit(1, 1 << 20)), MAX_COPY_WORDS);
+        // A 32 MiB sparse memory scans 1024 summary words per commit.
+        assert_eq!(
+            instruction_cost(&commit(SPARSE_WORKING_REGION, 1 << 28)),
+            1024 * SPARSE_SUMMARY_WORD_COST
+        );
+    }
 }
