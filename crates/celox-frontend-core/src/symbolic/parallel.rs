@@ -60,14 +60,15 @@ impl Default for ParallelScheduleOptions {
 /// words it leads to, in operations.
 const SPARSE_SUMMARY_WORD_COST: u64 = 16;
 
-/// Largest 64-bit word count charged for copying one value; wider copies
-/// are memories, whose stores touch single elements.
-const MAX_COPY_WORDS: u64 = 64;
+/// Largest 64-bit word count charged for one store; wider stores target
+/// memories, whose lowering touches single elements.
+const MAX_STORE_WORDS: u64 = 64;
 
 /// Estimated work of one FF instruction. Most instructions cost one
-/// operation and copies cost their words. A sparse commit scans one summary
-/// word for every 4096 of its object's 64-bit words, whatever it changed; on
-/// a large memory that scan dominates the event.
+/// operation. A commit copies its whole range and costs its words; a store
+/// costs its words up to [`MAX_STORE_WORDS`]. A sparse commit scans one
+/// summary word for every 4096 of its object's 64-bit words, whatever it
+/// changed; on a large memory that scan dominates the event.
 fn instruction_cost(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> u64 {
     match instruction {
         SIRInstruction::Commit(source, _, _, width, _)
@@ -79,8 +80,9 @@ fn instruction_cost(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> u64 {
                 .saturating_mul(SPARSE_SUMMARY_WORD_COST)
                 .max(1)
         }
-        SIRInstruction::Commit(_, _, _, width, _) | SIRInstruction::Store(_, _, width, ..) => {
-            (*width as u64).div_ceil(64).clamp(1, MAX_COPY_WORDS)
+        SIRInstruction::Commit(_, _, _, width, _) => (*width as u64).div_ceil(64).max(1),
+        SIRInstruction::Store(_, _, width, ..) => {
+            (*width as u64).div_ceil(64).clamp(1, MAX_STORE_WORDS)
         }
         _ => 1,
     }
@@ -439,8 +441,18 @@ mod tests {
     fn ff_costs_follow_the_data_an_instruction_moves() {
         assert_eq!(instruction_cost(&commit(1, 32)), 1);
         assert_eq!(instruction_cost(&commit(1, 512)), 8);
-        // A memory copy is charged as element accesses, not its full width.
-        assert_eq!(instruction_cost(&commit(1, 1 << 20)), MAX_COPY_WORDS);
+        // A commit copies its whole range.
+        assert_eq!(instruction_cost(&commit(1, 1 << 20)), 1 << 14);
+        // A store into a memory is charged as element accesses.
+        let store = SIRInstruction::Store(
+            address(1),
+            SIROffset::Static(0),
+            1 << 20,
+            celox_sir::RegisterId(0),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(instruction_cost(&store), MAX_STORE_WORDS);
         // A 32 MiB sparse memory scans 1024 summary words per commit.
         assert_eq!(
             instruction_cost(&commit(SPARSE_WORKING_REGION, 1 << 28)),
