@@ -51,8 +51,8 @@ let mut sim = Simulator::from_sv_sources(
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` |
-| システムタスク | `always_comb` と `always_ff` の `$display`、`$write`、`$error`、`$warning`、`$info`、`$fatal`、`$finish`。Veryl の `$assert` と `$assert_continue` |
+| システム関数 | `$bits`、`$size`、`$clog2`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -87,6 +87,11 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 式：ストリーミング連結（[#447](https://github.com/celox-sim/celox/issues/447)）、パラメータ式での
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）、X/Z を含む値や 128 ビットを超える値など、単純な整数で
   ないパラメータ上書き（[#461](https://github.com/celox-sim/celox/issues/461)）。
+- システムタスクとシステム関数：Celox は IEEE 1800-2023 第 20・21 章のすべての名前を
+  知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen`、`initial`
+  ブロック内の `$display` など）は、使われていないパラメータや関数本体の中を含め、書かれた
+  場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
+  引数の数が誤っている呼び出しや関数の引数の省略、値として使ったタスクはエラーです。
 - DPI、トライステートバスと複数ドライバ、階層参照。
 
 ## 知っておくべき挙動
@@ -104,6 +109,9 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の
   ループとして実行します。進まなくなったループは、ループ変数を示す実行時エラーを報告します。
+- **文として呼び出したシステム関数**（`$countones(f(a));` など）は、式の中の同じ呼び出しと
+  同様に検査・評価し、値を捨てます。`$bits` と `$size` は被演算子を評価しません。
+- **定数関数**は、呼び出す表示タスクと重大度タスクを無視します。
 - **`$readmemh` / `$readmemb`** は、デザインのコンパイル時にファイルを読みます。ファイルが
   ないか不正な場合は `MemoryFile` エラーです。`always_ff` では起動のたびにファイルの各ワードを
   書き込み、`initial` では初期状態の一部になります。

@@ -22,6 +22,7 @@ pub fn schedule_symbolic_rtl(
         usize,
     )],
     four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<VerylScheduledRtlOutput, ParserError> {
@@ -67,6 +68,7 @@ pub fn schedule_symbolic_rtl(
         ignored_loops,
         true_loops,
         four_state,
+        parallel,
         trace_options,
         trace,
     )?;

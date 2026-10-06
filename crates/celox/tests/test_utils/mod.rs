@@ -191,6 +191,26 @@ macro_rules! all_backends {
                 }
             });
 
+            all_backends!(@with_ignore native; $ignore_list; {
+                #[test]
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    target_arch = "aarch64"
+                ))]
+                $(#[$meta])*
+                #[allow(unused_mut, unused_variables)]
+                fn native_parallel() {
+                    $($setup)*
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .threads(4)
+                        .parallel_partition(celox::ParallelPartition::Always)
+                        .build_native()
+                        .unwrap();
+                    $($body)*
+                }
+            });
+
             all_backends!(@with_ignore cranelift; $ignore_list; {
                 #[test]
                 $(#[$meta])*
@@ -199,6 +219,22 @@ macro_rules! all_backends {
                     $($setup)*
                     let mut $sim = { $builder }
                         .allow_always_ff_function_effects(true)
+                        .build_cranelift()
+                        .unwrap();
+                    $($body)*
+                }
+            });
+
+            all_backends!(@with_ignore cranelift; $ignore_list; {
+                #[test]
+                $(#[$meta])*
+                #[allow(unused_mut, unused_variables)]
+                fn cranelift_parallel() {
+                    $($setup)*
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .threads(4)
+                        .parallel_partition(celox::ParallelPartition::Always)
                         .build_cranelift()
                         .unwrap();
                     $($body)*
@@ -319,12 +355,28 @@ macro_rules! all_backends {
                     test_utils::suite::run_case($case, "native");
                 }
             });
+            all_backends!(@with_ignore native; $ignore_list; {
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                #[test]
+                $(#[$meta])*
+                fn native_parallel() {
+                    test_utils::suite::run_case($case, "native-parallel");
+                }
+            });
             all_backends!(@with_ignore cranelift; $ignore_list; {
 
                 #[test]
                 $(#[$meta])*
                 fn cranelift() {
                     test_utils::suite::run_case($case, "cranelift");
+                }
+            });
+            all_backends!(@with_ignore cranelift; $ignore_list; {
+
+                #[test]
+                $(#[$meta])*
+                fn cranelift_parallel() {
+                    test_utils::suite::run_case($case, "cranelift-parallel");
                 }
             });
             all_backends!(@with_ignore wasm; $ignore_list; {

@@ -302,12 +302,14 @@ impl BuildCache {
         field(
             &mut hash,
             format!(
-                "{}:{}:{}:{}:{:?}",
+                "{}:{}:{}:{}:{:?}:{}:{}",
                 opts.opt_level.as_str(),
                 opts.four_state,
                 opts.native_memory_width,
                 opts.x86_slp,
-                opts.pass_overrides
+                opts.pass_overrides,
+                opts.threads,
+                opts.always_partition
             )
             .as_bytes(),
         );

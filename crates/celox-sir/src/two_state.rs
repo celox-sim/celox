@@ -26,6 +26,7 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
         eval_comb_apply_ffs,
         eval_only_ffs,
         apply_ffs,
+        parallel,
     } = program;
     let units = eval_comb.iter_mut().chain(
         [
@@ -39,6 +40,23 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
     );
     for unit in units {
         canonicalize_unit(unit);
+    }
+    // Lane-partitioned kernels are alternatives of the units above and must
+    // compute the same values.
+    if let Some(parallel) = parallel {
+        let lane_units =
+            parallel
+                .eval_comb
+                .iter_mut()
+                .chain(parallel.eval_apply_ffs.values_mut().flat_map(|kernel| {
+                    kernel
+                        .evaluations
+                        .iter_mut()
+                        .chain(&mut kernel.applications)
+                }));
+        for lane_unit in lane_units {
+            canonicalize_unit(&mut lane_unit.unit);
+        }
     }
 }
 

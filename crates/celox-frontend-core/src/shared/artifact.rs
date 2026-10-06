@@ -56,6 +56,12 @@ impl ScheduledRtl {
             .chain(self.sir.eval_only_ffs.values_mut().flatten())
             .chain(self.sir.apply_ffs.values_mut().flatten())
             .chain(self.sir.eval_comb.iter_mut())
+            .chain(
+                self.sir
+                    .parallel
+                    .iter_mut()
+                    .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
+            )
         {
             for block in unit.blocks.values_mut() {
                 for instruction in &mut block.instructions {

@@ -16,6 +16,9 @@ use std::fmt::Display;
 use std::hash::Hash;
 use thiserror::Error;
 
+mod lanes;
+pub use lanes::{InstanceHierarchy, LanePartitionOptions, LaneScheduleResult, sort_lanes};
+
 /// Sparse scheduler-facing memory effects for one same-trigger FF group.
 #[derive(Debug, Clone, Default)]
 pub struct FfAccessSummary<A> {
@@ -1059,7 +1062,11 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                     false_block: (done_block, vec![]),
                 });
                 builder.switch_to_block(event_block);
+                // Values first lowered inside the guarded block do not
+                // dominate the join; later paths must not reuse them.
+                let dominating_cache = lower_cache.clone();
                 emit(builder, lower_cache);
+                *lower_cache = dominating_cache;
                 builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
                 builder.switch_to_block(done_block);
             } else {
@@ -3264,29 +3271,30 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     Some(result)
 }
 
-/// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
-///
-/// This process performs:
-/// 1. Dependency analysis to detect multiple drivers and combinational loops.
-/// 2. SCC detection via Tarjan's algorithm.
-/// 3. Scheduling based on two primary strategies:
-///    - **Strategy A (Static Unrolling)**: For DAG parts or loops with small, predictable convergence bounds.
-///    - **Strategy B (Dynamic Convergence)**: For complex SCCs or potential "True Loops", implementing
-///      runtime oscillation detection and convergence-based repetition.
-fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
+/// Dependency analysis and region scheduling shared by every lowering of one
+/// LogicPath set.
+struct PreparedSchedule<Addr: Clone + Eq + Hash> {
+    input: Vec<LogicPath<Addr>>,
+    /// Semantic dependency users, indexed by path and then FF action.
+    adj: Vec<Vec<usize>>,
+    component_by_path: Vec<usize>,
+    scheduled_work: Vec<ScheduledWork>,
+    fold_group_schedule_index: FoldGroupScheduleIndex<Addr>,
+    direct_ff_writes_by_action: Vec<Vec<VarAtomBase<Addr>>>,
+}
+
+/// Build the MemorySSA dependency graph, condense its SCCs, and order the
+/// resulting work for lowering.
+fn prepare_schedule<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     input: Vec<LogicPath<Addr>>,
     arena: &SLTNodeArena<Addr>,
-    ignored_loops: &HashSet<(Addr, Addr)>,
-    true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
-    first_runtime_error_code: i64,
-    mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
-) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
-    let (input, ff_plan) = if let Some(ff_lowering) = ff.as_deref() {
-        let mut plan = plan_ff_comb_schedule(&input, ff_lowering.summaries())
-            .map_err(ClockSortError::Scheduler)?;
+    ff_summaries: Option<&[FfAccessSummary<Addr>]>,
+) -> Result<PreparedSchedule<Addr>, SchedulerError<Addr>> {
+    let (input, ff_plan) = if let Some(summaries) = ff_summaries {
+        let mut plan = plan_ff_comb_schedule(&input, summaries)?;
         let mut old_to_new = vec![usize::MAX; input.len()];
         let mut filtered = Vec::with_capacity(
             plan.required_comb
@@ -3330,14 +3338,12 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let LogicPathMemorySsa {
         mut dependencies,
         mut values,
-    } = build_logic_path_memory_ssa(&input).map_err(ClockSortError::Scheduler)?;
+    } = build_logic_path_memory_ssa(&input)?;
 
     // FF actions are ordinary sinks in the existing comb dependency graph.
     // The added nodes go through the same SCC, topological, and ready-queue
     // scheduling as LogicPaths; there is no second clock-specific scheduler.
-    let ff_count = ff
-        .as_deref()
-        .map_or(0, |lowering| lowering.summaries().len());
+    let ff_count = ff_summaries.map_or(0, <[FfAccessSummary<Addr>]>::len);
     let mut direct_ff_writes_by_action = vec![Vec::new(); ff_count];
     if let Some(plan) = &ff_plan {
         dependencies.resize(n + ff_count);
@@ -3378,9 +3384,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         }
         direct_ff_writes_by_action = direct_ff_write_ranges(
             &input,
-            ff.as_deref()
-                .expect("an FF schedule plan requires an FF lowering callback")
-                .summaries(),
+            ff_summaries.expect("an FF schedule plan requires FF access summaries"),
             plan,
             &retained,
             n,
@@ -3390,11 +3394,6 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         dependencies.canonicalize();
         values.canonicalize();
     }
-    let direct_ff_writes = direct_ff_writes_by_action
-        .iter()
-        .flatten()
-        .copied()
-        .collect();
 
     // 2. SCC extraction identifies the synchronization boundaries at which
     // the dataflow equations must be iterated rather than freely reordered.
@@ -3415,9 +3414,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let mut path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
     path_domains.resize(n + ff_count, None);
     let (topological_sccs, component_by_path) =
-        stable_topological_sccs(ctx.sccs, &dependencies.users, &path_domains).ok_or(
-            ClockSortError::Scheduler(SchedulerError::InvalidDependencyGraph),
-        )?;
+        stable_topological_sccs(ctx.sccs, &dependencies.users, &path_domains)
+            .ok_or(SchedulerError::InvalidDependencyGraph)?;
     let scheduled_work = schedule_logic_path_regions(
         topological_sccs,
         &dependencies,
@@ -3426,130 +3424,170 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         &token_weights,
         &input,
     )
-    .ok_or(ClockSortError::Scheduler(
-        SchedulerError::InvalidDependencyGraph,
-    ))?;
+    .ok_or(SchedulerError::InvalidDependencyGraph)?;
     let adj = dependencies.users;
     drop(dependencies.predecessors);
     drop(values);
     let scheduled_work = form_scheduled_guard_regions(scheduled_work, &input, arena, four_state);
 
-    let mut builder = SIRBuilder::new();
-    if let Some(ff_lowering) = ff.as_deref_mut() {
-        ff_lowering
-            .begin(&mut builder, &direct_ff_writes_by_action)
-            .map_err(ClockSortError::Lowering)?;
+    Ok(PreparedSchedule {
+        input,
+        adj,
+        component_by_path,
+        scheduled_work,
+        fold_group_schedule_index,
+        direct_ff_writes_by_action,
+    })
+}
+
+/// Read-only facts shared by every lowering of one prepared schedule.
+struct WorkLoweringContext<'a, Addr: Clone + Eq + Hash> {
+    input: &'a [LogicPath<Addr>],
+    arena: &'a SLTNodeArena<Addr>,
+    adj: &'a [Vec<usize>],
+    component_by_path: &'a [usize],
+    ignored_loops: &'a HashSet<(Addr, Addr)>,
+    true_loops: &'a HashMap<(Addr, Addr), usize>,
+    fold_group_schedule_index: &'a FoldGroupScheduleIndex<Addr>,
+    unpacked_element_widths: &'a HashMap<Addr, usize>,
+    direct_ff_writes_by_action: &'a [Vec<VarAtomBase<Addr>>],
+    lowerer: &'a crate::SLTToSIRLowerer,
+    four_state: bool,
+    /// Start a new execution unit when one grows past [`EU_BLOCK_LIMIT`].
+    /// Shared comb/FF lowering keeps one unit because its staged FF state
+    /// publishes at the end of the same function.
+    split_large_units: bool,
+}
+
+/// Maximum blocks in a single EU before flushing to a new one.
+/// This prevents Cranelift from choking on massive functions.
+const EU_BLOCK_LIMIT: usize = 20_000;
+const UNROLL_THRESHOLD: usize = 32;
+/// Pairwise joint-fold profitability is intentionally local. Keep all
+/// projections of one packed root together, but never build an unbounded
+/// compatibility matrix for a long run of independent roots.
+const MAX_JOINT_FOLD_ROOTS: usize = 16;
+
+/// Lowering state for one sequence of scheduled work emitted through one SIR
+/// builder. Register numbers and the expression cache are local to it.
+struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
+    context: &'a WorkLoweringContext<'a, Addr>,
+    builder: SIRBuilder<Addr>,
+    lower_cache: HashMap<NodeId, RegisterId>,
+    dep_memo: HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: HashMap<Addr, HashSet<NodeId>>,
+    execution_units: Vec<ExecutionUnit<Addr>>,
+    pending_fold_indices: Vec<usize>,
+    pending_fold_roots: HashSet<NodeId>,
+}
+
+impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
+    fn new(context: &'a WorkLoweringContext<'a, Addr>) -> Self {
+        Self {
+            context,
+            builder: SIRBuilder::new(),
+            lower_cache: HashMap::default(),
+            dep_memo: HashMap::default(),
+            inverse_dep_memo: HashMap::default(),
+            execution_units: Vec::new(),
+            pending_fold_indices: Vec::new(),
+            pending_fold_roots: HashSet::default(),
+        }
     }
-    let lowerer = crate::SLTToSIRLowerer::new(four_state)
-        .with_unpacked_input_types(arena, unpacked_element_widths);
 
-    let mut lower_cache = HashMap::default();
-    let mut dep_memo = HashMap::default();
-    let mut inverse_dep_memo = HashMap::default();
-
-    const UNROLL_THRESHOLD: usize = 32;
-
-    // Helper: Emits SIR for a logic path and manages the lowering cache.
-    // lowerer.lower allocates registers and emits instructions for sub-expressions.
-    let emit_node = |builder: &mut SIRBuilder<Addr>,
-                     idx: usize,
-                     lower_cache: &mut HashMap<NodeId, RegisterId>,
-                     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
-                     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>| {
-        let path = &input[idx];
-
-        collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-        emit_logic_path_store(
-            &lowerer,
-            builder,
-            path,
-            arena,
-            lower_cache,
-            unpacked_element_widths,
+    /// Lower the buffered run of exact grouped-fold paths.
+    fn flush_pending_folds(&mut self) {
+        let context = self.context;
+        flush_pending_fold_paths(
+            &mut self.pending_fold_indices,
+            context.input,
+            context.fold_group_schedule_index,
+            context.lowerer,
+            &mut self.builder,
+            context.arena,
+            &mut self.lower_cache,
+            &mut self.dep_memo,
+            &mut self.inverse_dep_memo,
+            context.unpacked_element_widths,
+            context.four_state,
         );
-        invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
-    };
-    // Maximum blocks in a single EU before flushing to a new one.
-    // This prevents Cranelift from choking on massive functions.
-    const EU_BLOCK_LIMIT: usize = 20_000;
+        self.pending_fold_roots.clear();
+    }
 
-    let mut result_eus: Vec<ExecutionUnit<Addr>> = Vec::new();
-    let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
-    let mut next_runtime_error_code = first_runtime_error_code;
+    /// Emit SIR for one logic path and keep the lowering cache coherent.
+    fn emit_node(&mut self, idx: usize) {
+        let context = self.context;
+        let path = &context.input[idx];
+        collect_logic_path_input_deps(
+            path,
+            context.arena,
+            &mut self.dep_memo,
+            &mut self.inverse_dep_memo,
+        );
+        emit_logic_path_store(
+            context.lowerer,
+            &mut self.builder,
+            path,
+            context.arena,
+            &mut self.lower_cache,
+            context.unpacked_element_widths,
+        );
+        invalidate_logic_path_target(path, &self.inverse_dep_memo, &mut self.lower_cache);
+    }
 
-    // Pairwise joint-fold profitability is intentionally local. Keep all
-    // projections of one packed root together, but never build an unbounded
-    // compatibility matrix for a long run of independent roots.
-    const MAX_JOINT_FOLD_ROOTS: usize = 16;
-    let mut pending_fold_indices: Vec<usize> = Vec::new();
-    let mut pending_fold_roots = HashSet::default();
-
-    // 4. Lower each scheduled component, selecting static unrolling or
-    // dynamic convergence for cyclic SCCs.
-    for work in scheduled_work {
+    /// Lower one scheduled component, selecting static unrolling or dynamic
+    /// convergence for cyclic SCCs.
+    fn lower<E>(
+        &mut self,
+        work: &ScheduledWork,
+        ff: Option<&mut (dyn ClockFfLowering<Addr, Error = E> + '_)>,
+        runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<Addr>>,
+        next_runtime_error_code: &mut i64,
+    ) -> Result<(), ClockSortError<Addr, E>> {
+        let context = self.context;
+        let input = context.input;
+        let adj = context.adj;
+        let component_by_path = context.component_by_path;
         let singleton;
-        let scc = match &work {
+        let scc = match work {
             ScheduledWork::CombPath(path) => {
                 singleton = [*path];
                 singleton.as_slice()
             }
             ScheduledWork::CombScc(scc) => scc.as_slice(),
             ScheduledWork::GuardedComb { condition, paths } => {
-                flush_pending_fold_paths(
-                    &mut pending_fold_indices,
-                    &input,
-                    &fold_group_schedule_index,
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut lower_cache,
-                    &mut dep_memo,
-                    &mut inverse_dep_memo,
-                    unpacked_element_widths,
-                    four_state,
-                );
-                pending_fold_roots.clear();
+                self.flush_pending_folds();
                 emit_scheduled_guard_region(
-                    &lowerer,
-                    &mut builder,
+                    context.lowerer,
+                    &mut self.builder,
                     *condition,
                     paths,
-                    &input,
-                    arena,
-                    &mut lower_cache,
-                    &mut dep_memo,
-                    &mut inverse_dep_memo,
-                    unpacked_element_widths,
+                    input,
+                    context.arena,
+                    &mut self.lower_cache,
+                    &mut self.dep_memo,
+                    &mut self.inverse_dep_memo,
+                    context.unpacked_element_widths,
                 );
-                continue;
+                return Ok(());
             }
             ScheduledWork::Ff(index) => {
-                flush_pending_fold_paths(
-                    &mut pending_fold_indices,
-                    &input,
-                    &fold_group_schedule_index,
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut lower_cache,
-                    &mut dep_memo,
-                    &mut inverse_dep_memo,
-                    unpacked_element_widths,
-                    four_state,
-                );
-                pending_fold_roots.clear();
-                ff.as_deref_mut()
-                    .ok_or(ClockSortError::Scheduler(
-                        SchedulerError::InvalidDependencyGraph,
-                    ))?
-                    .lower(*index, &direct_ff_writes_by_action[*index], &mut builder)
-                    .map_err(ClockSortError::Lowering)?;
+                self.flush_pending_folds();
+                ff.ok_or(ClockSortError::Scheduler(
+                    SchedulerError::InvalidDependencyGraph,
+                ))?
+                .lower(
+                    *index,
+                    &context.direct_ff_writes_by_action[*index],
+                    &mut self.builder,
+                )
+                .map_err(ClockSortError::Lowering)?;
                 // Any directly published range is ordered after all of its
                 // old-state readers. Other FF state stays invisible in
                 // WORKING/SPARSE_WORKING until the final publish, so values
                 // computed before the FF CFG keep the ordinary lowering cache
                 // valid.
-                continue;
+                return Ok(());
             }
         };
         let component = component_by_path[scc[0]];
@@ -3561,7 +3599,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                         (input[v_idx].target.var(), input[u_idx].target.var())
                     {
                         let edge = (v_target.id, u_target.id);
-                        if let Some(&limit) = true_loops.get(&edge) {
+                        if let Some(&limit) = context.true_loops.get(&edge) {
                             user_safety_limit =
                                 Some(user_safety_limit.map_or(limit, |l: usize| l.max(limit)));
                         }
@@ -3573,20 +3611,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
 
         if is_loop {
             // Exact grouped folds are atomic with respect to a loop SCC.
-            flush_pending_fold_paths(
-                &mut pending_fold_indices,
-                &input,
-                &fold_group_schedule_index,
-                &lowerer,
-                &mut builder,
-                arena,
-                &mut lower_cache,
-                &mut dep_memo,
-                &mut inverse_dep_memo,
-                unpacked_element_widths,
-                four_state,
-            );
-            pending_fold_roots.clear();
+            self.flush_pending_folds();
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in scc {
                 for &u_idx in &adj[v_idx] {
@@ -3595,7 +3620,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                             .target
                             .var()
                             .zip(input[u_idx].target.var())
-                            .is_some_and(|(v, u)| ignored_loops.contains(&(v.id, u.id)))
+                            .is_some_and(|(v, u)| context.ignored_loops.contains(&(v.id, u.id)))
                     {
                         // Some loops are explicitly allowed by the user (e.g., false loops).
                         authorized = true;
@@ -3613,27 +3638,21 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             }
 
             // FAS Sort
-            let optimized_scc_order = greedy_fas_sort(scc, &adj);
+            let optimized_scc_order = greedy_fas_sort(scc, adj);
             let force_strategy_b = user_safety_limit.is_some();
-            let iterations = calculate_required_iterations(&adj, &optimized_scc_order);
+            let iterations = calculate_required_iterations(adj, &optimized_scc_order);
             let total_ops_estimate = optimized_scc_order.len().saturating_mul(iterations);
             if !force_strategy_b && total_ops_estimate <= UNROLL_THRESHOLD {
                 // Strategy A: Static Unrolling
                 // The loop is unrolled a fixed number of times based on structural dependency depth (iterations).
                 for _ in 0..iterations {
                     for &idx in &optimized_scc_order {
-                        emit_node(
-                            &mut builder,
-                            idx,
-                            &mut lower_cache,
-                            &mut dep_memo,
-                            &mut inverse_dep_memo,
-                        );
+                        self.emit_node(idx);
                     }
                 }
             } else {
-                let runtime_error_code = next_runtime_error_code;
-                next_runtime_error_code += 1;
+                let runtime_error_code = *next_runtime_error_code;
+                *next_runtime_error_code += 1;
                 let mut seen = HashSet::default();
                 let sources = scc
                     .iter()
@@ -3658,31 +3677,33 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 let safety_limit = user_safety_limit.unwrap_or(iterations + 1);
 
                 // 2. Prepare Constants and Counters
-                let zero_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(zero_reg, SIRValue::new(0u64)));
+                let zero_reg = self.builder.alloc_bit(64, false);
+                self.builder
+                    .emit(SIRInstruction::Imm(zero_reg, SIRValue::new(0u64)));
 
-                let limit_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(
+                let limit_reg = self.builder.alloc_bit(64, false);
+                self.builder.emit(SIRInstruction::Imm(
                     limit_reg,
                     SIRValue::new(safety_limit as u64),
                 ));
 
                 // 3. Blocks
-                let current_counter = builder.alloc_bit(64, false);
-                let header_block = builder.new_block_with(vec![current_counter]); // [counter]
-                let body_block = builder.new_block();
-                let exit_block = builder.new_block();
-                let error_block = builder.new_block(); // For True Loop detection
+                let current_counter = self.builder.alloc_bit(64, false);
+                let header_block = self.builder.new_block_with(vec![current_counter]); // [counter]
+                let body_block = self.builder.new_block();
+                let exit_block = self.builder.new_block();
+                let error_block = self.builder.new_block(); // For True Loop detection
 
                 // Start: Jump to header with counter = 0
-                builder.seal_block(SIRTerminator::Jump(header_block, vec![zero_reg]));
+                self.builder
+                    .seal_block(SIRTerminator::Jump(header_block, vec![zero_reg]));
 
                 // --- Header Block ---
-                builder.switch_to_block(header_block);
+                self.builder.switch_to_block(header_block);
 
                 // Check: counter < safety_limit
-                let can_continue_reg = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
+                let can_continue_reg = self.builder.alloc_bit(1, false);
+                self.builder.emit(SIRInstruction::Binary(
                     can_continue_reg,
                     current_counter,
                     BinaryOp::LtU,
@@ -3690,38 +3711,42 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 ));
 
                 // If counter exceeded limit, we might have an oscillating True Loop
-                builder.seal_block(SIRTerminator::Branch {
+                self.builder.seal_block(SIRTerminator::Branch {
                     cond: can_continue_reg,
                     true_block: (body_block, vec![]),
                     false_block: (error_block, vec![]),
                 });
-                builder.switch_to_block(body_block);
-                let mut current_dirty_reg = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Imm(current_dirty_reg, SIRValue::new(0u32)));
+                self.builder.switch_to_block(body_block);
+                let mut current_dirty_reg = self.builder.alloc_bit(1, false);
+                self.builder
+                    .emit(SIRInstruction::Imm(current_dirty_reg, SIRValue::new(0u32)));
                 for &idx in &optimized_scc_order {
                     let path = &input[idx];
                     let Some(target) = path.target.var() else {
                         emit_logic_path_store(
-                            &lowerer,
-                            &mut builder,
+                            context.lowerer,
+                            &mut self.builder,
                             path,
-                            arena,
-                            &mut lower_cache,
-                            unpacked_element_widths,
+                            context.arena,
+                            &mut self.lower_cache,
+                            context.unpacked_element_widths,
                         );
                         continue;
                     };
                     let width = 1 + target.access.msb - target.access.lsb;
                     let addr = target.id;
-                    let offset =
-                        static_access_offset(&target.id, target.access, unpacked_element_widths);
+                    let offset = static_access_offset(
+                        &target.id,
+                        target.access,
+                        context.unpacked_element_widths,
+                    );
 
                     // --- Dynamic Convergence Check Logic ---
                     // For each node in the SCC, we verify if its value changed after this iteration.
                     //
                     // a. Load the current value (pre-update benchmark)
-                    let old_val_reg = builder.alloc_bit(width, false);
-                    builder.emit(SIRInstruction::Load(
+                    let old_val_reg = self.builder.alloc_bit(width, false);
+                    self.builder.emit(SIRInstruction::Load(
                         old_val_reg,
                         addr,
                         offset.clone(),
@@ -3729,32 +3754,32 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     ));
                     collect_logic_path_input_deps(
                         path,
-                        arena,
-                        &mut dep_memo,
-                        &mut inverse_dep_memo,
+                        context.arena,
+                        &mut self.dep_memo,
+                        &mut self.inverse_dep_memo,
                     );
                     // b. Compute the new value
                     let new_val_reg = lower_logic_path_expr(
-                        &lowerer,
-                        &mut builder,
+                        context.lowerer,
+                        &mut self.builder,
                         path,
-                        arena,
-                        &mut lower_cache,
+                        context.arena,
+                        &mut self.lower_cache,
                     );
 
                     // c. Compare: changed = (old != new)
-                    let is_changed_reg = builder.alloc_bit(1, false);
-                    builder.emit(SIRInstruction::Binary(
+                    let is_changed_reg = self.builder.alloc_bit(1, false);
+                    self.builder.emit(SIRInstruction::Binary(
                         is_changed_reg,
                         old_val_reg,
                         BinaryOp::Ne, // Not Equal
                         new_val_reg,
                     ));
-                    let new_dirty_reg = builder.alloc_bit(1, false);
+                    let new_dirty_reg = self.builder.alloc_bit(1, false);
 
                     // d. Accumulate dirty flag: dirty = dirty | is_changed
                     // If any signal in the SCC changes, the entire SCC requires another iteration.
-                    builder.emit(SIRInstruction::Binary(
+                    self.builder.emit(SIRInstruction::Binary(
                         new_dirty_reg,
                         current_dirty_reg,
                         BinaryOp::Or,
@@ -3762,7 +3787,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     ));
                     current_dirty_reg = new_dirty_reg;
                     // e. Store the new value
-                    builder.emit(SIRInstruction::Store(
+                    self.builder.emit(SIRInstruction::Store(
                         addr,
                         offset,
                         width,
@@ -3772,33 +3797,37 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     ));
                     if !path.comb_capture_enable_sites.is_empty() {
                         let (old, new) = if path.comb_capture_enable_always {
-                            let old = builder.alloc_bit(1, false);
-                            let new = builder.alloc_bit(1, false);
-                            builder.emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
-                            builder.emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
+                            let old = self.builder.alloc_bit(1, false);
+                            let new = self.builder.alloc_bit(1, false);
+                            self.builder
+                                .emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
+                            self.builder
+                                .emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
                             (old, new)
                         } else {
                             (old_val_reg, new_val_reg)
                         };
-                        builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
-                            old,
-                            new,
-                            sites: path.comb_capture_enable_sites.clone(),
-                        });
+                        self.builder
+                            .emit(SIRInstruction::CombCaptureEnableIfChanged {
+                                old,
+                                new,
+                                sites: path.comb_capture_enable_sites.clone(),
+                            });
                     }
-                    if let Some(to_remove) = inverse_dep_memo.get(&addr) {
+                    if let Some(to_remove) = self.inverse_dep_memo.get(&addr) {
                         for node in to_remove {
-                            lower_cache.remove(node);
+                            self.lower_cache.remove(node);
                         }
                     }
                     // -------------------------------
                 }
 
                 // 4. Branch: Loop if dirty
-                let one_reg = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Imm(one_reg, SIRValue::new(1u64)));
-                let next_counter = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Binary(
+                let one_reg = self.builder.alloc_bit(64, false);
+                self.builder
+                    .emit(SIRInstruction::Imm(one_reg, SIRValue::new(1u64)));
+                let next_counter = self.builder.alloc_bit(64, false);
+                self.builder.emit(SIRInstruction::Binary(
                     next_counter,
                     current_counter,
                     BinaryOp::Add,
@@ -3807,119 +3836,151 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
 
                 // Increment the iteration counter and branch.
                 // If 'dirty' is true, return to the header block; otherwise, exit the loop.
-                builder.seal_block(SIRTerminator::Branch {
+                self.builder.seal_block(SIRTerminator::Branch {
                     cond: current_dirty_reg,
                     true_block: (header_block, vec![next_counter]),
                     false_block: (exit_block, vec![]),
                 });
 
                 // --- Error/Exit Blocks ---
-                builder.switch_to_block(error_block);
+                self.builder.switch_to_block(error_block);
                 // Emit a trap or special instruction to indicate "Combinational Loop Oscillation"
-                // builder.emit(SIRInstruction::Trap(1));
-                builder.seal_block(SIRTerminator::Error(runtime_error_code));
+                // self.builder.emit(SIRInstruction::Trap(1));
+                self.builder
+                    .seal_block(SIRTerminator::Error(runtime_error_code));
 
                 // 5. Exit Block
-                builder.switch_to_block(exit_block);
+                self.builder.switch_to_block(exit_block);
             }
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
-            if ff.is_none() && builder.block_count() >= EU_BLOCK_LIMIT {
-                flush_pending_fold_paths(
-                    &mut pending_fold_indices,
-                    &input,
-                    &fold_group_schedule_index,
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut lower_cache,
-                    &mut dep_memo,
-                    &mut inverse_dep_memo,
-                    unpacked_element_widths,
-                    four_state,
-                );
-                pending_fold_roots.clear();
-                if let Some(eu) = builder.flush_eu() {
-                    result_eus.push(eu);
+            if context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
+                self.flush_pending_folds();
+                if let Some(eu) = self.builder.flush_eu() {
+                    self.execution_units.push(eu);
                     // Clear the lowering cache — register IDs are EU-scoped
-                    lower_cache.clear();
+                    self.lower_cache.clear();
                 }
             }
 
             let idx = scc[0];
-            let exact_fold = is_exact_fold_path(idx, &fold_group_schedule_index);
+            let exact_fold = is_exact_fold_path(idx, context.fold_group_schedule_index);
             let fold_root = exact_fold
-                .then_some(fold_group_schedule_index.direct_group_by_path[idx])
+                .then_some(context.fold_group_schedule_index.direct_group_by_path[idx])
                 .flatten();
-            let depends_on_pending = pending_fold_indices
+            let depends_on_pending = self
+                .pending_fold_indices
                 .iter()
                 .any(|pending| adj[*pending].binary_search(&idx).is_ok());
-            let starts_new_root = fold_root.is_some_and(|root| !pending_fold_roots.contains(&root));
-            let window_full = starts_new_root && pending_fold_roots.len() >= MAX_JOINT_FOLD_ROOTS;
+            let starts_new_root =
+                fold_root.is_some_and(|root| !self.pending_fold_roots.contains(&root));
+            let window_full =
+                starts_new_root && self.pending_fold_roots.len() >= MAX_JOINT_FOLD_ROOTS;
             if exact_fold && !depends_on_pending && !window_full {
-                pending_fold_indices.push(idx);
-                pending_fold_roots.extend(fold_root);
+                self.pending_fold_indices.push(idx);
+                self.pending_fold_roots.extend(fold_root);
             } else {
-                flush_pending_fold_paths(
-                    &mut pending_fold_indices,
-                    &input,
-                    &fold_group_schedule_index,
-                    &lowerer,
-                    &mut builder,
-                    arena,
-                    &mut lower_cache,
-                    &mut dep_memo,
-                    &mut inverse_dep_memo,
-                    unpacked_element_widths,
-                    four_state,
-                );
-                pending_fold_roots.clear();
+                self.flush_pending_folds();
                 if exact_fold {
-                    pending_fold_indices.push(idx);
-                    pending_fold_roots.extend(fold_root);
+                    self.pending_fold_indices.push(idx);
+                    self.pending_fold_roots.extend(fold_root);
                 } else {
-                    emit_node(
-                        &mut builder,
-                        idx,
-                        &mut lower_cache,
-                        &mut dep_memo,
-                        &mut inverse_dep_memo,
-                    );
+                    self.emit_node(idx);
                 }
             }
         }
+        Ok(())
     }
 
-    // Flush the final exact grouped-fold run after the SCC loop.
-    flush_pending_fold_paths(
-        &mut pending_fold_indices,
-        &input,
-        &fold_group_schedule_index,
-        &lowerer,
-        &mut builder,
-        arena,
-        &mut lower_cache,
-        &mut dep_memo,
-        &mut inverse_dep_memo,
-        unpacked_element_widths,
-        four_state,
-    );
-    pending_fold_roots.clear();
+    /// Terminate the current unit and return every unit emitted so far.
+    fn finish(mut self) -> Vec<ExecutionUnit<Addr>> {
+        self.builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = self.builder.drain();
+        self.execution_units.push(ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        });
+        self.execution_units
+    }
+}
 
-    if let Some(ff_lowering) = ff {
+/// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
+///
+/// This process performs:
+/// 1. Dependency analysis to detect multiple drivers and combinational loops.
+/// 2. SCC detection via Tarjan's algorithm.
+/// 3. Scheduling based on two primary strategies:
+///    - **Strategy A (Static Unrolling)**: For DAG parts or loops with small, predictable convergence bounds.
+///    - **Strategy B (Dynamic Convergence)**: For complex SCCs or potential "True Loops", implementing
+///      runtime oscillation detection and convergence-based repetition.
+fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+    mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
+) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
+    let prepared = prepare_schedule(
+        input,
+        arena,
+        four_state,
+        var_widths,
+        unpacked_element_widths,
+        ff.as_deref().map(|lowering| lowering.summaries()),
+    )
+    .map_err(ClockSortError::Scheduler)?;
+    let direct_ff_writes = prepared
+        .direct_ff_writes_by_action
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    let lowerer = crate::SLTToSIRLowerer::new(four_state)
+        .with_unpacked_input_types(arena, unpacked_element_widths);
+    let context = WorkLoweringContext {
+        input: &prepared.input,
+        arena,
+        adj: &prepared.adj,
+        component_by_path: &prepared.component_by_path,
+        ignored_loops,
+        true_loops,
+        fold_group_schedule_index: &prepared.fold_group_schedule_index,
+        unpacked_element_widths,
+        direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
+        lowerer: &lowerer,
+        four_state,
+        split_large_units: ff.is_none(),
+    };
+    let mut lowering = WorkLowering::new(&context);
+    if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
-            .finish(&mut builder, &direct_ff_writes_by_action)
+            .begin(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
             .map_err(ClockSortError::Lowering)?;
     }
-    builder.seal_block(SIRTerminator::Return);
-    let (blocks, reg_map, _) = builder.drain();
-    result_eus.push(ExecutionUnit {
-        entry_block_id: BlockId(0),
-        blocks,
-        register_map: reg_map,
-    });
+    let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
+    let mut next_runtime_error_code = first_runtime_error_code;
+    for work in &prepared.scheduled_work {
+        lowering.lower(
+            work,
+            ff.as_deref_mut(),
+            &mut runtime_errors,
+            &mut next_runtime_error_code,
+        )?;
+    }
+    // Flush the final exact grouped-fold run after the SCC loop.
+    lowering.flush_pending_folds();
+    if let Some(ff_lowering) = ff {
+        ff_lowering
+            .finish(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
+            .map_err(ClockSortError::Lowering)?;
+    }
     Ok(ScheduleResult {
-        execution_units: result_eus,
+        execution_units: lowering.finish(),
         runtime_errors,
         direct_ff_writes,
     })
