@@ -558,9 +558,10 @@ pub(super) fn register_locals(
 /// The value of a constant SLT tree, when every bit is known.
 pub(super) fn slt_const<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
+    consts: &mut ConstCache,
     node: NodeId,
 ) -> Option<(BigUint, usize)> {
-    let (value, mask, width) = slt_const4(arena, node)?;
+    let (value, mask, width) = slt_const4(arena, consts, node)?;
     mask.is_zero().then_some((value, width))
 }
 
@@ -572,11 +573,60 @@ fn mask_of(width: usize) -> BigUint {
     (BigUint::from(1u8) << width) - BigUint::from(1u8)
 }
 
+/// The [`slt_const4`] values of the nodes of one arena. Interned nodes never
+/// change, so a value stays valid while the arena grows; a cache must not be
+/// shared between arenas.
+#[derive(Default)]
+pub(super) struct ConstCache(HashMap<NodeId, Option<Const4>>);
+
 /// The four-state value of a constant SLT tree (IEEE 1800-2023 11.4 for the
 /// treatment of unknown bits).
+///
+/// Symbolic execution builds deep DAGs (one level per unrolled loop
+/// iteration, for example), so the tree is evaluated with an explicit stack,
+/// and each node is evaluated once per `consts`.
 pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
+    consts: &mut ConstCache,
     node: NodeId,
+) -> Option<Const4> {
+    let values = &mut consts.0;
+    let mut stack = vec![node];
+    while let Some(&top) = stack.last() {
+        if values.contains_key(&top) {
+            stack.pop();
+            continue;
+        }
+        // Evaluate `top` from the operand values known so far. The first
+        // operand it needs that is not yet evaluated is pushed, and `top` is
+        // evaluated again once that operand is known.
+        let missing = std::cell::Cell::new(None);
+        let child = |id: NodeId| match values.get(&id) {
+            Some(value) => value.clone(),
+            None => {
+                if missing.get().is_none() {
+                    missing.set(Some(id));
+                }
+                None
+            }
+        };
+        let value = slt_const4_node(arena, top, &child);
+        match missing.get() {
+            Some(operand) => stack.push(operand),
+            None => {
+                values.insert(top, value);
+                stack.pop();
+            }
+        }
+    }
+    values[&node].clone()
+}
+
+/// The four-state value of `node`, given the values of its operands.
+fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
+    arena: &SLTNodeArena<A>,
+    node: NodeId,
+    child: &dyn Fn(NodeId) -> Option<Const4>,
 ) -> Option<Const4> {
     let width = celox_slt::get_width(node, arena);
     let all = mask_of(width);
@@ -611,7 +661,7 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
             (value & mask_of(*width), mask & mask_of(*width), *width)
         }
         SLTNode::Unary(op, inner) => {
-            let (value, mask, inner_width) = slt_const4(arena, *inner)?;
+            let (value, mask, inner_width) = child(*inner)?;
             let inner_all = mask_of(inner_width);
             match op {
                 UnaryOp::Ident => (value, mask, width),
@@ -673,8 +723,8 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
             }
         }
         SLTNode::Binary(left, op, right) => {
-            let (lv, lm, lw) = slt_const4(arena, *left)?;
-            let (rv, rm, rw) = slt_const4(arena, *right)?;
+            let (lv, lm, lw) = child(*left)?;
+            let (rv, rm, rw) = child(*right)?;
             let both_signed = node_is_signed(arena, *left) && node_is_signed(arena, *right);
             let compare_width = lw.max(rw);
             let extend = |value: &BigUint,
@@ -917,8 +967,8 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
             else_expr,
         } => {
             let merge_arms = || -> Option<Const4> {
-                let (tv, tm, _) = slt_const4(arena, *then_expr)?;
-                let (ev, em, _) = slt_const4(arena, *else_expr)?;
+                let (tv, tm, _) = child(*then_expr)?;
+                let (ev, em, _) = child(*else_expr)?;
                 // Bits equal in both arms (an unknown bit too) keep their
                 // value; the others become X.
                 let differ = ((&tv ^ &ev) | (&tm ^ &em)) & &all;
@@ -929,16 +979,16 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
                     width,
                 ))
             };
-            match slt_const4(arena, *cond) {
+            match child(*cond) {
                 Some(condition) => match truth(&condition) {
-                    Some(true) => slt_const4(arena, *then_expr)?,
-                    Some(false) => slt_const4(arena, *else_expr)?,
+                    Some(true) => child(*then_expr)?,
+                    Some(false) => child(*else_expr)?,
                     None => merge_arms()?,
                 },
                 // A run-time condition selecting between equal constants.
                 None => {
-                    let (tv, tm, _) = slt_const4(arena, *then_expr)?;
-                    let (ev, em, _) = slt_const4(arena, *else_expr)?;
+                    let (tv, tm, _) = child(*then_expr)?;
+                    let (ev, em, _) = child(*else_expr)?;
                     if tv != ev || tm != em {
                         return None;
                     }
@@ -950,14 +1000,14 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
             let mut value = BigUint::zero();
             let mut mask = BigUint::zero();
             for (part, part_width) in parts {
-                let (part_value, part_mask, _) = slt_const4(arena, *part)?;
+                let (part_value, part_mask, _) = child(*part)?;
                 value = (value << *part_width) | (part_value & mask_of(*part_width));
                 mask = (mask << *part_width) | (part_mask & mask_of(*part_width));
             }
             (value, mask, width)
         }
         SLTNode::Slice { expr, access } => {
-            let (value, mask, _) = slt_const4(arena, *expr)?;
+            let (value, mask, _) = child(*expr)?;
             let slice = mask_of(access.msb - access.lsb + 1);
             (
                 (value >> access.lsb) & &slice,
@@ -965,56 +1015,84 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
                 width,
             )
         }
-        SLTNode::Capture { expr, .. } => slt_const4(arena, *expr)?,
+        SLTNode::Capture { expr, .. } => child(*expr)?,
         _ => return None,
     };
     Some((result.0 & mask_of(width), result.1 & mask_of(width), width))
 }
 
 /// Whether the lowering treats the value of `node` as signed when it extends it.
+///
+/// A node is signed when every operand that determines its signedness is;
+/// the operands are visited with an explicit stack because symbolic
+/// execution builds deep DAGs.
 pub(super) fn node_is_signed<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
     node: NodeId,
 ) -> bool {
-    match arena.get(node) {
-        SLTNode::Input { signed, .. } => *signed,
-        SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(left, op, right) => match op {
-            BinaryOp::DivS | BinaryOp::RemS => true,
-            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => node_is_signed(arena, *left),
-            BinaryOp::Add
-            | BinaryOp::Sub
-            | BinaryOp::Mul
-            | BinaryOp::And
-            | BinaryOp::Or
-            | BinaryOp::Xor => node_is_signed(arena, *left) && node_is_signed(arena, *right),
+    let mut visited = HashSet::default();
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let signed = match arena.get(node) {
+            SLTNode::Input { signed, .. } => *signed,
+            SLTNode::Constant(_, _, _, signed) => *signed,
+            SLTNode::Binary(left, op, right) => match op {
+                BinaryOp::DivS | BinaryOp::RemS => true,
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
+                    stack.push(*left);
+                    true
+                }
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    stack.extend([*right, *left]);
+                    true
+                }
+                _ => false,
+            },
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            )
+            | SLTNode::Capture { expr: inner, .. } => {
+                stack.push(*inner);
+                true
+            }
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                stack.extend([*else_expr, *then_expr]);
+                true
+            }
+            SLTNode::ForFold {
+                loop_signed,
+                result: celox_slt::SLTForFoldResult::State(_),
+                ..
+            } => *loop_signed,
             _ => false,
-        },
-        SLTNode::Unary(
-            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-            inner,
-        )
-        | SLTNode::Capture { expr: inner, .. } => node_is_signed(arena, *inner),
-        SLTNode::Mux {
-            then_expr,
-            else_expr,
-            ..
-        } => node_is_signed(arena, *then_expr) && node_is_signed(arena, *else_expr),
-        SLTNode::ForFold {
-            loop_signed,
-            result: celox_slt::SLTForFoldResult::State(_),
-            ..
-        } => *loop_signed,
-        _ => false,
+        };
+        if !signed {
+            return false;
+        }
     }
+    true
 }
 
 /// The boolean constant `node` holds, if it is one.
 pub(super) fn slt_bool<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
+    consts: &mut ConstCache,
     node: NodeId,
 ) -> Option<bool> {
-    slt_const(arena, node).map(|(value, _)| !value.is_zero())
+    slt_const(arena, consts, node).map(|(value, _)| !value.is_zero())
 }
 
 pub(super) fn slt_constant<A: std::hash::Hash + Eq + Clone>(
@@ -1067,11 +1145,26 @@ pub(super) fn slt_truth<A: std::hash::Hash + Eq + Clone>(
         .map_err(slt_error)
 }
 
+/// Whether a value is not logically false: some bit is one or unknown. The
+/// second operand of `&&` is skipped only when the first is false
+/// (IEEE 1800-2023 11.4.7); an ambiguous first operand still evaluates it.
+pub(super) fn slt_not_false<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    value: NodeId,
+) -> Result<NodeId, sv::AnalyzerError> {
+    let width = celox_slt::get_width(value, arena);
+    let zero = slt_constant(arena, BigUint::zero(), width, false)?;
+    arena
+        .alloc(SLTNode::Binary(value, BinaryOp::NeCase, zero))
+        .map_err(slt_error)
+}
+
 pub(super) fn slt_not<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
+    consts: &mut ConstCache,
     condition: NodeId,
 ) -> Result<NodeId, sv::AnalyzerError> {
-    if let Some(value) = slt_bool(arena, condition) {
+    if let Some(value) = slt_bool(arena, consts, condition) {
         return slt_constant(arena, BigUint::from(u8::from(!value)), 1, false);
     }
     arena
@@ -1081,10 +1174,14 @@ pub(super) fn slt_not<A: std::hash::Hash + Eq + Clone>(
 
 pub(super) fn slt_and<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
+    consts: &mut ConstCache,
     left: NodeId,
     right: NodeId,
 ) -> Result<NodeId, sv::AnalyzerError> {
-    match (slt_bool(arena, left), slt_bool(arena, right)) {
+    match (
+        slt_bool(arena, consts, left),
+        slt_bool(arena, consts, right),
+    ) {
         (Some(false), _) | (_, Some(false)) => slt_constant(arena, BigUint::zero(), 1, false),
         (Some(true), _) => Ok(right),
         (_, Some(true)) => Ok(left),
@@ -1096,10 +1193,14 @@ pub(super) fn slt_and<A: std::hash::Hash + Eq + Clone>(
 
 pub(super) fn slt_or<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
+    consts: &mut ConstCache,
     left: NodeId,
     right: NodeId,
 ) -> Result<NodeId, sv::AnalyzerError> {
-    match (slt_bool(arena, left), slt_bool(arena, right)) {
+    match (
+        slt_bool(arena, consts, left),
+        slt_bool(arena, consts, right),
+    ) {
         (Some(true), _) | (_, Some(true)) => slt_constant(arena, BigUint::from(1u8), 1, false),
         (Some(false), _) => Ok(right),
         (_, Some(false)) => Ok(left),

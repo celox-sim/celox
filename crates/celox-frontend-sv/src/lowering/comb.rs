@@ -32,6 +32,8 @@ enum Frame {
 pub(super) struct Comb<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
     pub arena: &'p mut SLTNodeArena<SourceVarId>,
+    /// Constant values of `arena` nodes.
+    consts: ConstCache,
     active_calls: Vec<String>,
     unrolled: usize,
     /// Whether nonblocking assignments are allowed (they are not in
@@ -68,6 +70,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         Self {
             m,
             arena,
+            consts: ConstCache::default(),
             active_calls: Vec::new(),
             unrolled: 0,
             allow_nonblocking: false,
@@ -215,7 +218,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         then_store: &Store,
         else_store: &Store,
     ) -> Result<Store, sv::AnalyzerError> {
-        if let Some(value) = slt_bool(self.arena, condition.0) {
+        if let Some(value) = slt_bool(self.arena, &mut self.consts, condition.0) {
             return Ok(if value {
                 then_store.fork()
             } else {
@@ -436,7 +439,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             if relative.lsb != 0 || relative.msb + 1 != width || self.width(*node) != width {
                 continue;
             }
-            let Some((value, _)) = slt_const(self.arena, *node) else {
+            let Some((value, _)) = slt_const(self.arena, &mut self.consts, *node) else {
                 continue;
             };
             let numeric = if signed && width > 0 && value.bit(width as u64 - 1) {
@@ -790,11 +793,14 @@ impl<'p, 'a> Comb<'p, 'a> {
             {
                 let left = self.hoist(store, frames, left)?;
                 let left_value = self.eval(store, frames, &left, None)?;
-                let truth = slt_truth(self.arena, left_value.0)?;
+                // The right operand is skipped only when the left one is
+                // known false (`&&`) or known true (`||`) (IEEE 1800-2023
+                // 11.4.7), so an unknown left operand evaluates it.
                 let guard = if *op == sv::ir::BinaryOp::LogicAnd {
-                    truth
+                    slt_not_false(self.arena, left_value.0)?
                 } else {
-                    slt_not(self.arena, truth)?
+                    let truth = slt_truth(self.arena, left_value.0)?;
+                    slt_not(self.arena, &mut self.consts, truth)?
                 };
                 let guard = (guard, left_value.1);
                 let mut taken = store.fork();
@@ -825,17 +831,17 @@ impl<'p, 'a> Comb<'p, 'a> {
                         self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, condition_value.0))?;
                     let is_known =
                         self.alloc(SLTNode::Binary(condition_value.0, BinaryOp::EqCase, known))?;
-                    Some(slt_not(self.arena, is_known)?)
+                    Some(slt_not(self.arena, &mut self.consts, is_known)?)
                 } else {
                     None
                 };
                 let then_guard = match unknown {
-                    Some(unknown) => slt_or(self.arena, truth, unknown)?,
+                    Some(unknown) => slt_or(self.arena, &mut self.consts, truth, unknown)?,
                     None => truth,
                 };
-                let not_truth = slt_not(self.arena, truth)?;
+                let not_truth = slt_not(self.arena, &mut self.consts, truth)?;
                 let else_guard = match unknown {
-                    Some(unknown) => slt_or(self.arena, not_truth, unknown)?,
+                    Some(unknown) => slt_or(self.arena, &mut self.consts, not_truth, unknown)?,
                     None => not_truth,
                 };
                 let mut then_store = store.fork();
@@ -1180,11 +1186,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                             self.alloc(SLTNode::Binary(position, BinaryOp::EqCase, two_state))?;
                         known = Some(match known {
                             None => same,
-                            Some(other) => slt_and(self.arena, other, same)?,
+                            Some(other) => slt_and(self.arena, &mut self.consts, other, same)?,
                         });
                     }
                     if let Some(known) = known
-                        && slt_bool(self.arena, known) != Some(true)
+                        && slt_bool(self.arena, &mut self.consts, known) != Some(true)
                     {
                         updated = self.alloc(SLTNode::Mux {
                             cond: known,
@@ -1293,20 +1299,26 @@ impl<'p, 'a> Comb<'p, 'a> {
                 continue;
             }
             let (node, sources) = self.read(store, flag, full(1))?;
-            if slt_bool(self.arena, node) == Some(false) {
+            if slt_bool(self.arena, &mut self.consts, node) == Some(false) {
                 continue;
             }
             any = Some(match any {
                 None => (node, sources),
                 Some((other, mut other_sources)) => {
                     other_sources.extend(sources);
-                    (slt_or(self.arena, other, node)?, other_sources)
+                    (
+                        slt_or(self.arena, &mut self.consts, other, node)?,
+                        other_sources,
+                    )
                 }
             });
         }
         match any {
             None => Ok(None),
-            Some((node, sources)) => Ok(Some((slt_not(self.arena, node)?, sources))),
+            Some((node, sources)) => Ok(Some((
+                slt_not(self.arena, &mut self.consts, node)?,
+                sources,
+            ))),
         }
     }
 
@@ -1320,7 +1332,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             store = self.exec(store, frames, stmt)?;
             if index + 1 < stmts.len() && stmt_may_jump(stmt, false) {
                 if let Some(active) = self.active(&store, frames)? {
-                    return match slt_bool(self.arena, active.0) {
+                    return match slt_bool(self.arena, &mut self.consts, active.0) {
                         Some(false) => Ok(store),
                         Some(true) => self.exec_block(store, frames, &stmts[index + 1..]),
                         None => {
@@ -1394,7 +1406,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             } => {
                 let (node, sources) = self.eval(&mut store, frames, condition, None)?;
                 let truth = slt_truth(self.arena, node)?;
-                match slt_bool(self.arena, truth).or_else(|| self.known(truth)) {
+                match slt_bool(self.arena, &mut self.consts, truth).or_else(|| self.known(truth)) {
                     Some(true) => self.exec_block(store, frames, then_body),
                     Some(false) => self.exec_block(store, frames, else_body),
                     None => {
@@ -1610,7 +1622,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                     None => (matched, sources),
                     Some((other, mut other_sources)) => {
                         other_sources.extend(sources);
-                        (slt_or(self.arena, other, matched)?, other_sources)
+                        (
+                            slt_or(self.arena, &mut self.consts, other, matched)?,
+                            other_sources,
+                        )
                     }
                 });
             }
@@ -1643,7 +1658,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         let (covered, rest_coverage) = coverage
             .split_first()
             .map_or((false, &[][..]), |(covered, rest)| (*covered, rest));
-        match slt_bool(self.arena, condition.0).or_else(|| self.known(condition.0)) {
+        match slt_bool(self.arena, &mut self.consts, condition.0)
+            .or_else(|| self.known(condition.0))
+        {
             Some(true) => self.exec_block(store, frames, &item.body),
             Some(false) => self.exec_case_chain(
                 store,
@@ -1810,7 +1827,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 > {
                     let signed = this.expr_signed(expr);
                     let (node, _) = this.eval(&mut probe, frames, expr, None)?;
-                    Ok(slt_const4(this.arena, node)
+                    Ok(slt_const4(this.arena, &mut this.consts, node)
                         .map(|(value, mask, width)| (value, mask, width, signed)))
                 };
                 match label {
@@ -1956,7 +1973,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         let mut remaining_repeat = match kind {
             sv::ir::LoopKind::Repeat(count) => {
                 let (node, _) = self.eval(&mut store, frames, count, None)?;
-                let (value, _) = slt_const(self.arena, node)
+                let (value, _) = slt_const(self.arena, &mut self.consts, node)
                     .ok_or_else(|| unsupported("repeat count that depends on run-time values"))?;
                 Some(
                     value
@@ -1996,7 +2013,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 (_, Some(condition)) => {
                     let (node, sources) = self.eval(&mut store, frames, condition, None)?;
                     let truth = slt_truth(self.arena, node)?;
-                    match slt_bool(self.arena, truth) {
+                    match slt_bool(self.arena, &mut self.consts, truth) {
                         Some(false) => break,
                         Some(true) => None,
                         None => Some((truth, sources)),
@@ -2012,18 +2029,21 @@ impl<'p, 'a> Comb<'p, 'a> {
             // A run-time condition, or a `break` taken on some path, guards
             // the iteration.
             let broken = self.read(&store, break_flag, full(1))?;
-            let broken_value = slt_bool(self.arena, broken.0);
+            let broken_value = slt_bool(self.arena, &mut self.consts, broken.0);
             if broken_value == Some(true) {
                 break;
             }
             let mut guard = proceed;
             if broken_value.is_none() {
-                let active = (slt_not(self.arena, broken.0)?, broken.1);
+                let active = (slt_not(self.arena, &mut self.consts, broken.0)?, broken.1);
                 guard = Some(match guard {
                     None => active,
                     Some((node, mut sources)) => {
                         sources.extend(active.1);
-                        (slt_and(self.arena, node, active.0)?, sources)
+                        (
+                            slt_and(self.arena, &mut self.consts, node, active.0)?,
+                            sources,
+                        )
                     }
                 });
             }
@@ -2059,13 +2079,19 @@ impl<'p, 'a> Comb<'p, 'a> {
                 store = self.exec_block(store, frames, step)?;
             } else {
                 let broken_after = self.read(&store, break_flag, full(1))?;
-                let mut step_guard = (slt_not(self.arena, broken_after.0)?, broken_after.1);
+                let mut step_guard = (
+                    slt_not(self.arena, &mut self.consts, broken_after.0)?,
+                    broken_after.1,
+                );
                 if let Some(guard) = &guard {
                     let mut sources = step_guard.1;
                     sources.extend(guard.1.iter().copied());
-                    step_guard = (slt_and(self.arena, step_guard.0, guard.0)?, sources);
+                    step_guard = (
+                        slt_and(self.arena, &mut self.consts, step_guard.0, guard.0)?,
+                        sources,
+                    );
                 }
-                store = match slt_bool(self.arena, step_guard.0) {
+                store = match slt_bool(self.arena, &mut self.consts, step_guard.0) {
                     Some(true) => self.exec_block(store, frames, step)?,
                     Some(false) => store,
                     None => {
@@ -2076,14 +2102,14 @@ impl<'p, 'a> Comb<'p, 'a> {
             }
             // A `return` inside the loop ends it as well.
             if let Some(active) = self.active_return(&store, frames)? {
-                match slt_bool(self.arena, active.0) {
+                match slt_bool(self.arena, &mut self.consts, active.0) {
                     Some(false) => break,
                     Some(true) => {}
                     None => {
                         // Later iterations run only while no return was taken.
                         let (node, sources) = self.read(&store, break_flag, full(1))?;
-                        let returned = slt_not(self.arena, active.0)?;
-                        let node = slt_or(self.arena, node, returned)?;
+                        let returned = slt_not(self.arena, &mut self.consts, active.0)?;
+                        let node = slt_or(self.arena, &mut self.consts, node, returned)?;
                         let mut sources = sources;
                         sources.extend(active.1);
                         self.write(&mut store, break_flag, full(1), (node, sources))?;
@@ -2110,10 +2136,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             return Ok(None);
         }
         let (node, sources) = self.read(store, return_flag, full(1))?;
-        if slt_bool(self.arena, node) == Some(false) {
+        if slt_bool(self.arena, &mut self.consts, node) == Some(false) {
             return Ok(None);
         }
-        Ok(Some((slt_not(self.arena, node)?, sources)))
+        Ok(Some((
+            slt_not(self.arena, &mut self.consts, node)?,
+            sources,
+        )))
     }
 
     /// Whether a counted loop must be folded: its bounds depend on run-time
@@ -2133,9 +2162,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         let mut probe = store.fork();
         let (start, _) = self.eval(&mut probe, frames, &canonical.start, None)?;
         let (end, _) = self.eval(&mut probe, frames, &canonical.end, None)?;
-        let (Some((start, _)), Some((end, _))) =
-            (slt_const(self.arena, start), slt_const(self.arena, end))
-        else {
+        let (Some((start, _)), Some((end, _))) = (
+            slt_const(self.arena, &mut self.consts, start),
+            slt_const(self.arena, &mut self.consts, end),
+        ) else {
             return Ok(true);
         };
         // Constant bounds: estimate the trip count of an additive loop.
@@ -2293,11 +2323,11 @@ impl<'p, 'a> Comb<'p, 'a> {
         {
             if after.get(return_flag).is_some() {
                 let (returned, sources) = self.read(&after, *return_flag, full(1))?;
-                stop = slt_or(self.arena, stop, returned)?;
+                stop = slt_or(self.arena, &mut self.consts, stop, returned)?;
                 stop_sources.extend(sources);
             }
         }
-        let continue_cond = slt_not(self.arena, stop)?;
+        let continue_cond = slt_not(self.arena, &mut self.consts, stop)?;
 
         let bound: HashSet<SourceVarId> = carried.iter().copied().chain([loop_var]).collect();
         let mut sources: Sources = start_sources;
@@ -2478,7 +2508,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             };
             let (node, _) = self.eval(store, frames, expr, None)?;
             let signed = self.expr_signed(expr);
-            let (value, width) = slt_const(self.arena, node)
+            let (value, width) = slt_const(self.arena, &mut self.consts, node)
                 .ok_or_else(|| unsupported(format!("`{name}` address that is not constant")))?;
             let value = num_bigint::BigInt::from(value);
             let value = if signed && width > 0 && value.bit(width as u64 - 1) {
@@ -2512,21 +2542,24 @@ impl<'p, 'a> Comb<'p, 'a> {
             let node = if value {
                 truth
             } else {
-                slt_not(self.arena, truth)?
+                slt_not(self.arena, &mut self.consts, truth)?
             };
             terms.push((node, sources));
         }
         terms.extend(self.guards.iter().cloned());
         let mut result: Option<Value> = None;
         for (node, sources) in terms {
-            if slt_bool(self.arena, node) == Some(true) {
+            if slt_bool(self.arena, &mut self.consts, node) == Some(true) {
                 continue;
             }
             result = Some(match result {
                 None => (node, sources),
                 Some((other, mut other_sources)) => {
                     other_sources.extend(sources);
-                    (slt_and(self.arena, other, node)?, other_sources)
+                    (
+                        slt_and(self.arena, &mut self.consts, other, node)?,
+                        other_sources,
+                    )
                 }
             });
         }
@@ -2606,7 +2639,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => Some(self.constant(0, 1)?),
             (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
                 observed.extend(sources);
-                Some(slt_not(self.arena, node)?)
+                Some(slt_not(self.arena, &mut self.consts, node)?)
             }
         };
         let guard = guard.map(|guard| self.capture(guard)).transpose()?;
@@ -2693,12 +2726,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             let mut runs = Vec::new();
             for (&lsb, (value, width, origin)) in &range.ranges {
                 let Some((node, _)) = value else { continue };
-                let (value, mask, _) = slt_const4(self.arena, *node).ok_or_else(|| {
-                    unsupported(format!(
-                        "initial block value of `{}` that depends on design state",
-                        self.m.var(id).path.join(".")
-                    ))
-                })?;
+                let (value, mask, _) =
+                    slt_const4(self.arena, &mut self.consts, *node).ok_or_else(|| {
+                        unsupported(format!(
+                            "initial block value of `{}` that depends on design state",
+                            self.m.var(id).path.join(".")
+                        ))
+                    })?;
                 let shift = lsb - origin;
                 let keep = (BigUint::from(1u8) << *width) - BigUint::from(1u8);
                 let value = (value >> shift) & &keep;

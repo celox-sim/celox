@@ -1272,6 +1272,17 @@
     },
     {
       "category": "Operators",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "operators::unknown_logical_operand_evaluates_effectful_right_operand",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::zero_extends_mixed_signed_arithmetic_operands",
@@ -2040,7 +2051,7 @@
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 35
+    "unsupported": 36
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
