@@ -204,14 +204,7 @@ fn emits_runtime_events(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
     unit.blocks
         .values()
         .flat_map(|block| &block.instructions)
-        .any(|instruction| {
-            matches!(
-                instruction,
-                SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
-            )
-        })
+        .any(|instruction| instruction.is_host_interaction())
 }
 
 /// The lane performing most accesses of every state object in the

@@ -370,6 +370,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
         opts.four_state,
         opts.compile_only
     );
+    // A separate record keeps the single-thread config line unchanged.
+    if opts.threads > 1 {
+        println!(
+            "CELOX_TEST_THREADS test={} threads={}",
+            opts.test, opts.threads
+        );
+    }
 
     let total_start = Instant::now();
     #[cfg(any(

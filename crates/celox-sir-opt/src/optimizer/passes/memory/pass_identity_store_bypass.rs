@@ -549,36 +549,7 @@ fn instruction_uses(
     instruction: &SIRInstruction<RegionedAbsoluteAddr>,
     uses: &mut Vec<RegisterId>,
 ) {
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            uses.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-            uses.push(*source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => uses.extend(arguments.iter().copied()),
-        SIRInstruction::Mux(_, condition, then_value, else_value) => {
-            uses.extend([*condition, *then_value, *else_value]);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            uses.extend([*old, *new]);
-        }
-    }
+    instruction.for_each_use(|register| uses.push(register));
 }
 
 fn terminator_uses(terminator: &SIRTerminator, uses: &mut Vec<RegisterId>) {
