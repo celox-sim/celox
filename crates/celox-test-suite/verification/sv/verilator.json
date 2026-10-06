@@ -743,6 +743,17 @@
     },
     {
       "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "indexed_select::out_of_range_inner_indices_stay_in_their_element",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
       "name": "indexed_select::runtime_indexed_base_may_select_a_parameter_bit",
@@ -793,6 +804,28 @@
       "name": "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indices_select_multidimensional_packed_elements",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_indices_select_within_multidimensional_packed_elements",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1959,11 +1992,11 @@
     "emission_error": 0,
     "ignored": 6,
     "mismatch": 0,
-    "passed": 129,
+    "passed": 130,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 33
+    "unsupported": 35
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
