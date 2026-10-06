@@ -520,3 +520,76 @@ fn test_out_of_range_read_compares_as_zero_in_two_state_wildcard(sim) {
     }
 }
 }
+
+all_backends! {
+// Every read path agrees in a four-state simulation: an invalid index into a
+// two-state variable reads 0, into a four-state value X, also when the value
+// is an always_ff local or a function argument held in a register
+// (IEEE 1800-2023 7.4.6).
+fn test_invalid_reads_agree_across_paths_in_four_state(sim) {
+    @ignore_on(veryl, sv);
+    @setup {
+        let source = r#"
+            module Top (
+                clk   : input  clock,
+                i     : input  logic<2>,
+                j     : input  logic<4>,
+                v     : input  logic<32>,
+                bit_q : output logic<8>,
+                fn_q  : output logic,
+                let_q : output logic,
+            ) {
+                var arr: bit<8> [3];
+                var fnv: logic;
+                var lev: logic;
+                always_comb {
+                    for k in 0..3 {
+                        arr[k] = 8'h11;
+                    }
+                }
+                function pick (x: input logic<8>, b: input logic<4>) -> logic {
+                    return x[b];
+                }
+                always_ff (clk) {
+                    let t: logic<8> = v[7:0];
+                    fnv = pick(v[7:0], j);
+                    lev = t[j];
+                }
+                assign bit_q = arr[i];
+                assign fn_q  = fnv;
+                assign let_q = lev;
+            }
+        "#;
+    }
+    @build celox::SimulatorBuilder::new(source, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let i = sim.signal("i");
+    let j = sim.signal("j");
+    let v = sim.signal("v");
+    let bit_q = sim.signal("bit_q");
+    let fn_q = sim.signal("fn_q");
+    let let_q = sim.signal("let_q");
+    let zero = (celox::BigUint::from(0u8), celox::BigUint::from(0u8));
+    let x = (celox::BigUint::from(1u8), celox::BigUint::from(1u8));
+    sim.modify(|io| {
+        io.set(i, 3u8);
+        io.set(j, 0u8);
+        io.set(v, 0x0000_ff7fu32);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_four_state(bit_q), zero, "two-state array read");
+    sim.modify(|io| {
+        io.set(i, 0u8);
+        io.set(j, 8u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_four_state(fn_q), x, "function argument out of range");
+    assert_eq!(sim.get_four_state(let_q), x, "always_ff let out of range");
+    sim.modify(|io| io.set(j, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get_four_state(fn_q), zero, "function argument in range");
+    assert_eq!(sim.get_four_state(let_q), zero, "always_ff let in range");
+}
+}

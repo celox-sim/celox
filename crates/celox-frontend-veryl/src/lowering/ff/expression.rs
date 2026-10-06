@@ -347,6 +347,22 @@ fn emit_when<A>(
     builder.switch_to_block(merge_block);
 }
 
+/// The value of an invalid read into a register like `like`: X for a
+/// four-state register, 0 for a two-state one. A two-state simulation reads X
+/// as 0 (`celox_sir::two_state`).
+fn unknown_like<A>(builder: &mut SIRBuilder<A>, like: RegisterId, width: usize) -> RegisterId {
+    let register = alloc_like(builder, like, width);
+    let value = if matches!(builder.register(&register), RegisterType::Logic { .. }) {
+        // X sets both the value and the mask bit.
+        let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        SIRValue::new_four_state(mask.clone(), mask)
+    } else {
+        SIRValue::new(0u8)
+    };
+    builder.emit(SIRInstruction::Imm(register, value));
+    register
+}
+
 /// `Load` into a fresh register like `like`, or `default` when `condition`
 /// is false. The memory is not accessed when `condition` is false.
 fn emit_load_when<A>(
@@ -448,19 +464,7 @@ fn emit_guarded_load<A>(
         builder.emit(SIRInstruction::Load(dest, address(), offset, width));
         return dest;
     };
-    let unknown = |builder: &mut SIRBuilder<A>, width: usize| {
-        let register = alloc_like(builder, dest, width);
-        let value = if matches!(builder.register(&register), RegisterType::Logic { .. }) {
-            // X sets both the value and the mask bit. A two-state simulation
-            // reads it as 0 (`celox_sir::two_state`).
-            let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-            SIRValue::new_four_state(mask.clone(), mask)
-        } else {
-            SIRValue::new(0u8)
-        };
-        builder.emit(SIRInstruction::Imm(register, value));
-        register
-    };
+    let unknown = |builder: &mut SIRBuilder<A>, width: usize| unknown_like(builder, dest, width);
     let Some(part) = &guard.part else {
         // Branch-free: load through an address that is redirected to the
         // first element when an index can leave the variable, then select X.
@@ -2813,23 +2817,7 @@ impl<'a> FfParser<'a> {
         self.eval_type_select(formal_type, index, select)
     }
 
-    pub(super) fn emit_offset_calc<A>(
-        &mut self,
-        var_id: VarId,
-        index: &VarIndex,
-        select: &VarSelect,
-        domain: &Domain,
-        convert: &impl Fn(VarId, u32) -> A,
-        sources: &mut Vec<VarAtomBase<A>>,
-
-        ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<SIROffset, ParserError> {
-        self.emit_guarded_offset_calc(
-            var_id, index, select, domain, convert, sources, None, ir_builder,
-        )
-    }
-
-    /// Like `emit_offset_calc`, and also records in `guard` when every
+    /// Compute the offset of a select, and record in `guard` when every
     /// runtime index addresses an existing element or bit.
     ///
     /// The offset alone does not bound the access: an out-of-range index
@@ -3153,41 +3141,61 @@ impl<'a> FfParser<'a> {
             return Ok(value);
         }
         let width = get_access_width(self.module, var_id, index, select)?;
-        Ok(
-            match self
-                .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
-            {
-                SIROffset::Static(lsb)
-                | SIROffset::PackedElements {
-                    bit_offset: lsb, ..
-                } => self.emit_register_slice(
+        let mut guard = AccessGuard::default();
+        let offset = self.emit_guarded_offset_calc(
+            var_id,
+            index,
+            select,
+            domain,
+            convert,
+            sources,
+            Some(&mut guard),
+            ir_builder,
+        )?;
+        let selected = match offset {
+            SIROffset::Static(lsb)
+            | SIROffset::PackedElements {
+                bit_offset: lsb, ..
+            } => self.emit_register_slice(value, BitAccess::new(lsb, lsb + width - 1), ir_builder),
+            SIROffset::Dynamic(offset) => {
+                self.emit_register_dynamic_slice(value, offset, width, ir_builder)
+            }
+            SIROffset::Element {
+                index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset,
+            } => {
+                let mut logical = Some(scale_offset(index, element_width, ir_builder));
+                add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
+                if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                    add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
+                }
+                self.emit_register_dynamic_slice(
                     value,
-                    BitAccess::new(lsb, lsb + width - 1),
+                    logical.expect("scaled element index is present"),
+                    width,
                     ir_builder,
-                ),
-                SIROffset::Dynamic(offset) => {
-                    self.emit_register_dynamic_slice(value, offset, width, ir_builder)
-                }
-                SIROffset::Element {
-                    index,
-                    element_width,
-                    bit_offset,
-                    dynamic_bit_offset,
-                } => {
-                    let mut logical = Some(scale_offset(index, element_width, ir_builder));
-                    add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
-                    if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                        add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
-                    }
-                    self.emit_register_dynamic_slice(
-                        value,
-                        logical.expect("scaled element index is present"),
-                        width,
-                        ir_builder,
-                    )
-                }
-            },
-        )
+                )
+            }
+        };
+        // Slicing a register never leaves it, but an invalid index reads X
+        // (or 0), not a neighbouring element (IEEE 1800-2023 7.4.6). Bits of
+        // a part select past the register read 0.
+        let condition = if guard.part.is_some() {
+            guard.indices
+        } else {
+            guard.whole(ir_builder)
+        };
+        Ok(match condition {
+            Some(condition) => {
+                let unknown = unknown_like(ir_builder, selected, width);
+                let guarded = alloc_like(ir_builder, selected, width);
+                ir_builder.emit(SIRInstruction::Mux(guarded, condition, selected, unknown));
+                guarded
+            }
+            None => selected,
+        })
     }
 
     pub(super) fn op_load<A>(
@@ -4050,40 +4058,10 @@ impl<'a> FfParser<'a> {
                         return Ok(());
                     }
 
-                    let width = get_access_width(self.module, *var_id, var_index, var_select)?;
-                    let selected = match self.emit_offset_calc(
-                        *var_id, var_index, var_select, domain, convert, sources, ir_builder,
-                    )? {
-                        SIROffset::Static(lsb)
-                        | SIROffset::PackedElements {
-                            bit_offset: lsb, ..
-                        } => self.emit_register_slice(
-                            bound_reg,
-                            BitAccess::new(lsb, lsb + width - 1),
-                            ir_builder,
-                        ),
-                        SIROffset::Dynamic(offset) => {
-                            self.emit_register_dynamic_slice(bound_reg, offset, width, ir_builder)
-                        }
-                        SIROffset::Element {
-                            index,
-                            element_width,
-                            bit_offset,
-                            dynamic_bit_offset,
-                        } => {
-                            let mut logical = Some(scale_offset(index, element_width, ir_builder));
-                            add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
-                            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                                add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
-                            }
-                            self.emit_register_dynamic_slice(
-                                bound_reg,
-                                logical.expect("scaled element index is present"),
-                                width,
-                                ir_builder,
-                            )
-                        }
-                    };
+                    let selected = self.emit_register_select(
+                        bound_reg, *var_id, var_index, var_select, domain, convert, sources,
+                        ir_builder,
+                    )?;
                     self.stack.push_back(selected);
                     if let Some(context) = context {
                         let adjusted = self.cast_reg_width_ext(

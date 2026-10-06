@@ -7989,3 +7989,34 @@ fn function_predicates_prove_complementary_else_if() {
         assert_eq!(sim.get(y), expected.into());
     }
 }
+
+#[test]
+fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
+    let source = r#"
+        module Top (
+            input logic [2:0] b,
+            input bit [7:0] v,
+            output logic [3:0] y
+        );
+            assign y = v[b +: 4];
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("two_state_select.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    let b = sim.signal("b");
+    let v = sim.signal("v");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(b, 6u8);
+        io.set(v, 0xffu8);
+    })
+    .unwrap();
+    // Bits 6 and 7 exist; bits 8 and 9 of a two-state vector read 0.
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0b0011u8), BigUint::default())
+    );
+}

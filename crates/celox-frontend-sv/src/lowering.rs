@@ -4186,8 +4186,8 @@ fn runtime_select_position(
 
 /// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
 /// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
-/// `lsb` index. Positions outside the vector read as X (IEEE 1800-2023
-/// 11.5.1), which a two-state simulation reads as zero.
+/// `lsb` index. Positions outside a four-state vector read as X (IEEE
+/// 1800-2023 11.5.1); a two-state vector, or simulation, reads zero.
 fn runtime_select_as_shift(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -4228,6 +4228,20 @@ fn runtime_select_as_shift(
         signed: false,
     };
     let moved = move_down(expr.clone());
+    // Shifting fills the missing bits with 0, which is what a two-state
+    // vector (or a parameter) reads.
+    let four_state = name_to_id
+        .get(name)
+        .and_then(|id| variables.get(id))
+        .is_some_and(|variable| variable.is_4state);
+    if !four_state {
+        return Some(sv::ir::Expr::Select {
+            expr: Box::new(moved),
+            msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+            lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+            signed,
+        });
+    }
     // Moving an all-ones vector the same way marks the selected bits that
     // exist; the others read X.
     let literal = |digit: &str, width: usize| {

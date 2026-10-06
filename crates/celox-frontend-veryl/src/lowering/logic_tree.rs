@@ -3243,23 +3243,33 @@ fn slt_index_guard(
     Ok(condition)
 }
 
-/// An all-X constant of `width` bits.
-fn slt_unknown(arena: &mut SLTNodeArena<VarId>, width: usize) -> Result<NodeId, ParserError> {
-    let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+/// The `width`-bit value of an invalid read: X from a four-state variable, 0
+/// from a two-state one (IEEE 1800-2023 7.4.6, Table 7-1).
+fn slt_unknown(
+    arena: &mut SLTNodeArena<VarId>,
+    width: usize,
+    two_state: bool,
+) -> Result<NodeId, ParserError> {
+    let mask = if two_state {
+        BigUint::zero()
+    } else {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    };
     Ok(arena.alloc(SLTNode::Constant(mask.clone(), mask, width, false))?)
 }
 
-/// `value` when `condition` holds, X otherwise.
+/// `value` when `condition` holds, the value of an invalid read otherwise.
 fn slt_or_unknown(
     arena: &mut SLTNodeArena<VarId>,
     condition: Option<NodeId>,
     value: NodeId,
     width: usize,
+    two_state: bool,
 ) -> Result<NodeId, ParserError> {
     let Some(condition) = condition else {
         return Ok(value);
     };
-    let unknown = slt_unknown(arena, width)?;
+    let unknown = slt_unknown(arena, width, two_state)?;
     Ok(arena.alloc(SLTNode::Mux {
         cond: condition,
         then_expr: value,
@@ -3335,14 +3345,15 @@ impl DynamicPartSelect {
         Ok(PartWindow { start, up, down })
     }
 
-    /// Align the selection from the loaded `window`, reading X for its bits
-    /// outside the row.
+    /// Align the selection from the loaded `window`. Its bits outside the
+    /// row read X, or 0 from a two-state variable.
     fn align(
         &self,
         arena: &mut SLTNodeArena<VarId>,
         window: NodeId,
         placement: &PartWindow,
         selected_width: usize,
+        two_state: bool,
     ) -> Result<NodeId, ParserError> {
         let shift = |arena: &mut SLTNodeArena<VarId>, value: NodeId| {
             let raised = arena.alloc(SLTNode::Binary(value, BinaryOp::Shl, placement.down))?;
@@ -3363,7 +3374,7 @@ impl DynamicPartSelect {
         // Bitwise select: in-row bits keep `value`, the rest read X.
         let kept = arena.alloc(SLTNode::Binary(value, BinaryOp::And, in_row))?;
         let outside = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, in_row))?;
-        let unknown = slt_unknown(arena, selected_width)?;
+        let unknown = slt_unknown(arena, selected_width, two_state)?;
         let unknown = arena.alloc(SLTNode::Binary(unknown, BinaryOp::And, outside))?;
         Ok(arena.alloc(SLTNode::Binary(kept, BinaryOp::Or, unknown))?)
     }

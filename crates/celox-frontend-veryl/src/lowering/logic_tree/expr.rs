@@ -3392,9 +3392,10 @@ fn eval_factor(
                     ));
                 }
 
-                // An invalid index reads X (IEEE 1800-2023 7.4.6); a partly
-                // out-of-range part select reads X only for its
-                // out-of-range bits (11.5.1).
+                let two_state = module.variables[var_id].r#type.is_2state();
+                // An invalid index reads X, or 0 from a two-state variable
+                // (IEEE 1800-2023 7.4.6); a partly out-of-range part select
+                // reads so only for its out-of-range bits (11.5.1).
                 let extracted_expr = if let Some(partial) = partial {
                     let placement = partial.window(arena, element_width)?;
                     let window = if is_unmodified {
@@ -3450,8 +3451,9 @@ fn eval_factor(
                             access: BitAccess::new(0, element_width - 1),
                         })?
                     };
-                    let selected = partial.align(arena, window, &placement, element_width)?;
-                    super::slt_or_unknown(arena, indices_valid, selected, element_width)?
+                    let selected =
+                        partial.align(arena, window, &placement, element_width, two_state)?;
+                    super::slt_or_unknown(arena, indices_valid, selected, element_width, two_state)?
                 } else if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
                     // Keep the SLT input footprint conservative for dependency analysis.
@@ -3469,7 +3471,7 @@ fn eval_factor(
                         expr: raw_input,
                         access: BitAccess::new(0, element_width - 1),
                     })?;
-                    super::slt_or_unknown(arena, valid, selected, element_width)?
+                    super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
@@ -3487,7 +3489,7 @@ fn eval_factor(
                         expr: shifted,
                         access: BitAccess::new(0, element_width - 1),
                     })?;
-                    super::slt_or_unknown(arena, valid, selected, element_width)?
+                    super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
                 };
 
                 let extracted_expr =
