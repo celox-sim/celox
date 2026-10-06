@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The module that instantiates the top with a rejection case's parameters.
+const PARAMETERS_TOP: &str = "celox_suite_parameters";
+
 /// A design translated to SystemVerilog for an external simulator.
 pub struct PreparedDesign {
     /// SystemVerilog sources to compile, in order.
@@ -68,7 +71,28 @@ pub(crate) fn stage(
     }
     let mut top = prepared.top;
     let mut testbench = prepared.native_testbench;
-    // A rejection needs only the design.
+    // A rejection needs only the design, instantiated with the case's
+    // parameter values when it has any.
+    if !design.parameters.is_empty()
+        && !testbench
+        && script.is_none_or(|case| case.expectation == Expectation::CompilationError)
+    {
+        let overrides = design
+            .parameters
+            .iter()
+            .map(|(name, value)| format!(".{name}({value})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let path = directory.join("parameters.sv");
+        // The wrapper leaves the ports open; that is not part of the design.
+        let wrapper = format!(
+            "module {PARAMETERS_TOP};\n  /* verilator lint_off PINMISSING */\n  \
+             {top} #({overrides}) dut ();\nendmodule\n"
+        );
+        write_if_changed(&path, wrapper.as_bytes())?;
+        paths.push(path);
+        top = PARAMETERS_TOP.to_string();
+    }
     if let Some(case) = script.filter(|case| case.expectation != Expectation::CompilationError) {
         let info = prepared
             .info

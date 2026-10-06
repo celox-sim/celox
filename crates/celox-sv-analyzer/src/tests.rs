@@ -761,10 +761,8 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
     for (overrides, p_value, r_width, r_value) in [
         (HashMap::default(), 0xab, 8, 0xef),
         (
-            [("P".to_string(), 0xcd), ("N".to_string(), 4)]
-                .into_iter()
-                .collect(),
-            0xcd,
+            [("N".to_string(), 4)].into_iter().collect(),
+            0xab,
             16,
             0xcdef,
         ),
@@ -780,7 +778,7 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
         for (name, width, signed, value) in [
             ("P", Some(8), Some(false), p_value),
             ("L", Some(8), Some(false), p_value),
-            ("S", Some(8), Some(true), -85),
+            ("S", Some(8), Some(false), 0xab),
             ("F", Some(8), Some(false), 255),
             ("B", Some(8), Some(false), 0xab),
             ("BITS", None, None, 8),
@@ -795,6 +793,34 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
             assert_eq!(parameter.resolved_value(), Some(value), "{name}");
         }
     }
+}
+
+#[test]
+fn body_parameters_are_local_with_a_parameter_port_list() {
+    // IEEE 1800-2023 6.20.1: a parameter port list, even an empty one, turns
+    // a `parameter` in the module body into a localparam.
+    for header in ["#(parameter N = 2)", "#()"] {
+        let source = format!("module Top {header} (); parameter P = 1; endmodule");
+        let overrides = [("P".to_string(), 2)].into_iter().collect();
+        let error = analyze_source_with_module_parameter_overrides(
+            &source,
+            Path::new("body_parameter_override.sv"),
+            "Top",
+            &overrides,
+        )
+        .expect_err("a body parameter must not be overridable");
+        assert!(error.to_string().contains("localparam override"), "{error}");
+    }
+    let overrides = [("P".to_string(), 2)].into_iter().collect();
+    let ir = analyze_source_with_module_parameter_overrides(
+        "module Top (); parameter P = 1; endmodule",
+        Path::new("body_parameter_override.sv"),
+        "Top",
+        &overrides,
+    )
+    .expect("without a parameter port list a body parameter is overridable");
+    let parameter = &ir.modules()[0].parameters()[0];
+    assert_eq!(parameter.resolved_value(), Some(2));
 }
 
 #[test]
@@ -919,13 +945,16 @@ fn resolves_alias_casts_in_generate_local_parameters() {
 
 #[test]
 fn preserves_known_conditional_case_selector_types() {
+    // An unsigned label makes the whole comparison unsigned, so a signed arm
+    // of the selector is zero-extended (IEEE 1800-2023 11.8.2, 12.5).
     for (selector, label) in [
-        ("1'b1 ? 1'sb1 : 2'sb00", "2'b11"),
-        ("1'b0 ? 2'sb00 : 1'sb1", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'b01"),
+        ("1'b0 ? 2'sb00 : 1'sb1", "2'b01"),
         ("1'b1 ? 1'sb1 : 2'b00", "2'b01"),
-        ("1'b1 ? 1'sbx : 2'sb00", "2'bxx"),
+        ("1'b1 ? 1'sbx : 2'sb00", "2'b0x"),
         ("1'b1 ? 1'sbz : 2'b00", "2'b0z"),
         ("1'b1 ? '1 : 2'b00", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'sb11"),
     ] {
         let source = format!(
             "module Top(input logic a, output logic y); \

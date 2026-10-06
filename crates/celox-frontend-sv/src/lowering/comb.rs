@@ -1565,8 +1565,10 @@ impl<'p, 'a> Comb<'p, 'a> {
             labels.push(item_labels);
         }
         // The selector and the labels are evaluated at their common width
-        // (IEEE 1800-2023 12.5), like the operands of an equality.
-        let selector_node = if self.width(selector_node) < width {
+        // and signedness (IEEE 1800-2023 12.5), like the operands of an
+        // equality: an unsigned operand also turns the others' operands
+        // unsigned (11.8.2).
+        let selector_node = if self.width(selector_node) < width || selector_signed != all_signed {
             self.eval(store, frames, selector, Some((width, all_signed)))?
                 .0
         } else {
@@ -1579,7 +1581,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             let values = item_values.next().into_iter().flatten();
             for ((node, _), label) in item_labels.iter_mut().zip(values) {
                 if let sv::ir::CaseLabel::Value(value) = label
-                    && self.width(*node) < width
+                    && (self.width(*node) < width || self.expr_signed(value) != all_signed)
                 {
                     *node = self
                         .eval(store, frames, value, Some((width, all_signed)))?

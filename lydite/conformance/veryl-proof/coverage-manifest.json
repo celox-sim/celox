@@ -13067,13 +13067,13 @@
         "line": 449,
         "script_sha256": "0d291883493b2785984bf8146735f06b68e3ac0a677a95703018a5e2b579e06f"
       },
-      "disposition": "known_celox_failure",
+      "disposition": "observation_verified",
       "designs": [
         {
           "design_sha256": "ee44409b85e3decd351edf3049a3daca970719fc941d60ca888cfd7e5dd5c2d2",
-          "protocol_sha256": "5fff08227687a720e791464fe87b9a74652b5f90663b0657aa8884af067d9ba6",
-          "reads": 7,
-          "commands": 12,
+          "protocol_sha256": "75929d9cf3e51aaccc25eca7e0298aa568f7b004de6b77b857e4798021b8a9a6",
+          "reads": 8,
+          "commands": 13,
           "operations": 1,
           "diagnostic": null
         }
@@ -13122,6 +13122,27 @@
       ]
     },
     {
+      "case": "veryl_context_regressions::constant_case_target_uses_comparison_context",
+      "expectation": "Simulation",
+      "category": "Regression",
+      "source": {
+        "file": "src/veryl/cases/veryl_context_regressions.vtest",
+        "line": 622,
+        "script_sha256": "a59c9fe271a82245cfe583fcda0f4106b47b7a1d44b996094a139d58c2e1905e"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "7e9a3bb8e9e75e39cce3e3fac25722f56c2abdd2c62119c6fc506366d6f4c53a",
+          "protocol_sha256": "298b5852d2cc2a5a56d890a34c33b8de67bed2384ba9264d35f4d96564b8b1c1",
+          "reads": 10,
+          "commands": 13,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "veryl_context_regressions::constant_ternary_keeps_both_arm_types",
       "expectation": "Simulation",
       "category": "Regression",
@@ -13164,6 +13185,27 @@
       ]
     },
     {
+      "case": "veryl_context_regressions::dynamic_param_array_read_uses_its_elements",
+      "expectation": "Simulation",
+      "category": "Regression",
+      "source": {
+        "file": "src/veryl/cases/veryl_context_regressions.vtest",
+        "line": 584,
+        "script_sha256": "b4110878b78b85b0f54f90e90773a504a17c3ab08b683a4b11008ca2f285d614"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "c1815b5deec2b5edf5db7ceaae958be92e7c5b9fa52b59837417219591f837d8",
+          "protocol_sha256": "3cc1a5dab963e6ff9f4b9842486e569559c584a0880477549a12bf0ff53502e5",
+          "reads": 8,
+          "commands": 16,
+          "operations": 4,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "veryl_context_regressions::folded_const_select_keeps_its_sign",
       "expectation": "Simulation",
       "category": "Regression",
@@ -13172,13 +13214,13 @@
         "line": 317,
         "script_sha256": "bb84c15ad91a2cf35cd24e308f6adb00ba29945f803d353de34b8c0e82b18aba"
       },
-      "disposition": "known_celox_failure",
+      "disposition": "observation_verified",
       "designs": [
         {
           "design_sha256": "cfbfb0cb4f0662a3fcd3eba2cb9f4c299fa198b2e8036fbf0e5654bdac732850",
-          "protocol_sha256": "6b6e959da0683d7e1c3a3f2bfcf9187869d0262a9fc2ea5753a4f9ad5eeac001",
-          "reads": 6,
-          "commands": 11,
+          "protocol_sha256": "6943186d4c4e554d5d5fcd0527dd2e4b7ecc189c7ea1824c5906b819c0309d21",
+          "reads": 10,
+          "commands": 15,
           "operations": 1,
           "diagnostic": null
         }
@@ -13254,7 +13296,7 @@
       "source": {
         "file": "src/veryl/cases/veryl_context_regressions.vtest",
         "line": 560,
-        "script_sha256": "5857950620fe0d62a8c325745b1d5dbab85a050e8022bf9be6f34d573de92a40"
+        "script_sha256": "003f496122db0afb3dfd24b48fd6dfefbb80832e225109da0f2f1551a9a63f63"
       },
       "disposition": "observation_verified",
       "designs": [
@@ -13366,6 +13408,27 @@
         {
           "design_sha256": "219bc5438152e3e09e999fe409a73126005419b8129b3c9ce053a4e504fcb0cf",
           "protocol_sha256": "4ffced187fd9b689fb5a30a93570aab56f91bec7cef797a794277f1be7f4ed48",
+          "reads": 4,
+          "commands": 8,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value",
+      "expectation": "Simulation",
+      "category": "Regression",
+      "source": {
+        "file": "src/veryl/cases/veryl_context_regressions.vtest",
+        "line": 704,
+        "script_sha256": "25710992649d15928205adda09f4eea2314e86b9bb67b1643eed7bdbe9d5a7da"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "e1cd4623fbc76034c1c915a2b1aa49bc427bb55cf13d4c636955dd6e26f0f228",
+          "protocol_sha256": "eb96feefad171a9305c89daa904f087a2308e3528fa36f47cbc5eaaf2a106b4d",
           "reads": 4,
           "commands": 8,
           "operations": 1,

@@ -129,8 +129,9 @@ fn preserves_packed_dimensions_on_struct_aliases() {
     )
     .unwrap();
     for (name, width, signed) in [
-        ("pair", 16, true),
-        ("triple", 48, true),
+        // A packed array of signed structs is unsigned (IEEE 1800-2023 7.4.1).
+        ("pair", 16, false),
+        ("triple", 48, false),
         ("nested", 17, false),
     ] {
         let ty = ir.modules()[0]

@@ -48,6 +48,10 @@ pub enum AnalyzerError {
     DuplicateInstance { module: String, name: String },
     #[error("Generate block `{name}` in module `{module}` has the name of another declaration")]
     DuplicateGenerateScope { module: String, name: String },
+    #[error("unknown top-level parameter override `{name}`")]
+    UnknownParameterOverride { name: String },
+    #[error("localparam override `{name}`")]
+    LocalParameterOverride { name: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

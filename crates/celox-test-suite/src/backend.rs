@@ -16,6 +16,8 @@ pub struct Design {
     pub sources: Vec<Source>,
     pub top: String,
     pub four_state: bool,
+    /// Values of the top module's parameters, overriding their defaults.
+    pub parameters: Vec<(String, u64)>,
 }
 
 impl Design {
@@ -27,11 +29,18 @@ impl Design {
             }],
             top: top.into(),
             four_state: false,
+            parameters: Vec::new(),
         }
     }
 
     pub fn four_state(mut self, enabled: bool) -> Self {
         self.four_state = enabled;
+        self
+    }
+
+    /// Override the default of the top module's parameter `name`.
+    pub fn parameter(mut self, name: &str, value: u64) -> Self {
+        self.parameters.push((name.into(), value));
         self
     }
 }

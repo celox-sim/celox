@@ -814,12 +814,17 @@ impl<'a> ModuleParser<'a> {
         inst_ids: &'a [ModuleId],
         external_modules: &'a HashMap<ModuleId, ExternalModule>,
     ) -> Result<Self, ParserError> {
-        // Dynamic reads of constant arrays use ordinary state loads. Unlike
-        // static reads, they cannot be folded to an immediate, so retain the
-        // declared elements in the initial state instead of leaving zero/X.
+        // Reads of constants and parameters that the analyzer did not fold
+        // (dynamic array indices, selects of struct members) use ordinary
+        // state loads. Retain the declared values in the initial state instead
+        // of leaving zero/X.
         let mut initial_memory_values = Vec::new();
         for (&id, var) in &module.variables {
-            if var.kind != veryl_analyzer::ir::VarKind::Const || var.r#type.array.dims() == 0 {
+            if !matches!(
+                var.kind,
+                veryl_analyzer::ir::VarKind::Const | veryl_analyzer::ir::VarKind::Param
+            ) || (var.r#type.array.dims() == 0 && var.value.is_empty())
+            {
                 continue;
             }
             let elements = var.r#type.total_array().ok_or_else(|| {
@@ -831,6 +836,9 @@ impl<'a> ModuleParser<'a> {
             })?;
             let width = resolve_total_width(module, var)?;
             let element_width = width / elements.max(1);
+            if element_width == 0 {
+                continue;
+            }
             let mut writes = Vec::new();
             for index in 0..elements {
                 let value = var
@@ -844,19 +852,26 @@ impl<'a> ModuleParser<'a> {
                             Some(&var.token),
                         )
                     })?;
-                let mask = value.mask_xz().into_owned();
-                let payload = value.payload().into_owned() ^ &mask;
+                let element_mask = (BigUint::from(1u8) << element_width) - 1u8;
+                let mask = value.mask_xz().into_owned() & &element_mask;
+                let payload = (value.payload().into_owned() ^ &mask) & &element_mask;
                 let (payload, mask) = if var.r#type.is_2state() {
-                    let defined = ((BigUint::from(1u8) << element_width) - 1u8) ^ &mask;
-                    (payload & defined, BigUint::from(0u8))
+                    (payload & (element_mask ^ &mask), BigUint::from(0u8))
                 } else {
                     (payload, mask)
                 };
+                // Backends copy whole bytes of a run, so give each run its
+                // full width rather than the minimal `to_bytes_le` encoding.
+                let element_bytes = element_width.div_ceil(8);
+                let mut value_bytes = payload.to_bytes_le();
+                value_bytes.resize(element_bytes, 0);
+                let mut mask_bytes = mask.to_bytes_le();
+                mask_bytes.resize(element_bytes, 0);
                 writes.push(InitialMemoryWriteRun {
                     bit_offset: index * element_width,
                     bit_width: element_width,
-                    value_bytes: payload.to_bytes_le(),
-                    mask_bytes: mask.to_bytes_le(),
+                    value_bytes,
+                    mask_bytes,
                 });
             }
             initial_memory_values.push(ModuleInitialMemoryValue {
