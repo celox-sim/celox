@@ -203,11 +203,12 @@ pub(super) fn lvalue_from_select(
             if let Some((msb, lsb)) =
                 flatten_packed_select(&name, &packed_indices, packed_dimensions)
             {
+                let signed = selects_signed_element(&name, packed_indices.len(), packed_dimensions);
                 return Some(LValue::Select {
                     name,
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
-                    signed: false,
+                    signed,
                     array_slice_width: None,
                     array_slice_reversed: false,
                     is_2state: false,
@@ -272,12 +273,13 @@ pub(super) fn lvalue_from_select(
         return None;
     }
     if indices.len() == 1 {
+        let signed = selects_signed_element(&name, 1, packed_dimensions);
         let bit = indices[0].clone();
         return Some(LValue::Select {
             name,
             msb: bit.clone(),
             lsb: bit,
-            signed: false,
+            signed,
             array_slice_width: None,
             array_slice_reversed: false,
             is_2state: false,
@@ -377,11 +379,12 @@ pub(super) fn lvalue_from_constant_select(
             if let Some((msb, lsb)) =
                 flatten_packed_select(&name, &packed_indices, packed_dimensions)
             {
+                let signed = selects_signed_element(&name, packed_indices.len(), packed_dimensions);
                 return Some(LValue::Select {
                     name,
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
-                    signed: false,
+                    signed,
                     array_slice_width: None,
                     array_slice_reversed: false,
                     is_2state: false,
@@ -446,12 +449,13 @@ pub(super) fn lvalue_from_constant_select(
         return None;
     }
     if indices.len() == 1 {
+        let signed = selects_signed_element(&name, 1, packed_dimensions);
         let bit = indices[0].clone();
         return Some(LValue::Select {
             name,
             msb: bit.clone(),
             lsb: bit,
-            signed: false,
+            signed,
             array_slice_width: None,
             array_slice_reversed: false,
             is_2state: false,
@@ -538,11 +542,12 @@ pub(super) fn expr_select_from_select(
                 && let Some((msb, lsb)) =
                     flatten_packed_select(name, &packed_indices, packed_dimensions)
             {
+                let signed = selects_signed_element(name, packed_indices.len(), packed_dimensions);
                 return Some(Expr::Select {
                     expr: Box::new(base),
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
-                    signed: false,
+                    signed,
                 });
             }
             if let Some(dimensions) = packed_dimensions.get(name)
@@ -600,16 +605,26 @@ pub(super) fn expr_select_from_select(
         {
             return None;
         }
+        let signed = matches!(&base, Expr::Ident(name)
+            if selects_signed_element(name, 1, packed_dimensions));
         let bit = indices[0].clone();
         return Some(Expr::Select {
             expr: Box::new(base),
             msb: bit.clone(),
             lsb: bit,
-            signed: false,
+            signed,
         });
     }
 
     None
+}
+
+/// Whether selecting `count` packed dimensions of `name` yields an element of
+/// a signed named type, which keeps its signedness (IEEE 1800-2023 7.4.1).
+fn selects_signed_element(name: &str, count: usize, packed_dimensions: &PackedDimensions) -> bool {
+    packed_dimensions
+        .get(name)
+        .is_some_and(|dimensions| dimensions.signed_element_depth == Some(count))
 }
 
 /// The runtime start index, constant width, `+:` direction and the declared

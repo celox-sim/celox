@@ -80,10 +80,12 @@ use declarations::{
 use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
     function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
-    packed_dimensions_from_ports_and_signals, parameter_marker, parameter_packed_dimensions,
-    parameter_signed_marker, parameter_types_from_const_env, parameter_width_marker,
-    size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
-    variable_signed_marker, variable_size_function_width, variable_size_marker,
+    packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
+    parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
+    parameter_signed_element_marker, parameter_signed_marker, parameter_types_from_const_env,
+    parameter_width_marker, size_system_function_expr_type, unpacked_dimension_widths,
+    variable_bits_marker, variable_signed_marker, variable_size_function_width,
+    variable_size_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -108,8 +110,8 @@ use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
     const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_module_node,
     extend_const_env_with_parameters, format_typed_parameter_literal, infer_const_expr_type,
-    infer_parameter_value_type, parameter_value_env, parameters_from_ref_node,
-    substitute_typed_parameter_literals,
+    infer_parameter_value_type, parameter_element_literal, parameter_value_env,
+    parameters_from_ref_node, substitute_typed_parameter_literals,
 };
 use selects::{
     add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
@@ -121,11 +123,11 @@ use statements::{
 };
 use types::{
     direction_from_port_direction, direction_from_ref_node, is_signed_from_ref_node,
-    packed_ranges_from_ref_node_with_env, type_alias_from_data_type,
-    type_alias_from_data_type_or_implicit, type_aliases_from_module_node,
-    type_aliases_from_module_node_with_env, type_from_net_port_header, type_from_ref_node,
-    type_from_ref_node_with_env, type_from_variable_port_header,
-    type_with_fallback_ranges_with_env, type_with_unpacked_ranges,
+    packed_ranges_from_ref_node_with_env, signed_element_depth_from_ref_node,
+    type_alias_from_data_type, type_alias_from_data_type_or_implicit,
+    type_aliases_from_module_node, type_aliases_from_module_node_with_env,
+    type_from_net_port_header, type_from_ref_node, type_from_ref_node_with_env,
+    type_from_variable_port_header, type_with_fallback_ranges_with_env, type_with_unpacked_ranges,
     unpacked_ranges_from_dimensions_with_env, unpacked_ranges_from_variable_dimensions_with_env,
     validate_unpacked_dimension_sizes,
 };
@@ -792,6 +794,8 @@ pub struct Parameter {
     declared_is_2state: bool,
     has_declared_type: bool,
     is_local: bool,
+    /// See [`Type::signed_element_depth`].
+    signed_element_depth: Option<usize>,
 }
 
 impl Parameter {
@@ -813,6 +817,7 @@ impl Parameter {
             declared_is_2state,
             has_declared_type,
             is_local,
+            signed_element_depth: None,
         }
     }
 
@@ -1101,6 +1106,10 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     members: Vec<packed_structs::PackedMember>,
+    /// How many leading packed dimensions select an element of a signed
+    /// named type, which is signed although the whole array is not (IEEE
+    /// 1800-2023 7.4.1).
+    signed_element_depth: Option<usize>,
 }
 
 impl Type {
@@ -1111,6 +1120,7 @@ impl Type {
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
+            signed_element_depth: None,
         }
     }
 
@@ -1121,6 +1131,7 @@ impl Type {
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
+            signed_element_depth: None,
         }
     }
 
@@ -1520,6 +1531,8 @@ struct FunctionParam {
     signed: bool,
     is_2state: bool,
     packed_dimensions: Vec<PackedDimension>,
+    /// See [`Type::signed_element_depth`].
+    signed_element_depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1644,6 +1657,8 @@ struct VariableDimensions {
     signed: bool,
     is_2state: bool,
     members: Vec<packed_structs::PackedMember>,
+    /// See [`Type::signed_element_depth`].
+    signed_element_depth: Option<usize>,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
