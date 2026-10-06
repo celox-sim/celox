@@ -108,13 +108,17 @@ pub(in crate::ast) fn parse_type(
                 syntax_tree,
                 const_env,
                 aliases,
-            )?,
+            )
+            .ok()
+            .flatten()?,
             const_expr_from_ref_node_with_env(
                 RefNode::ConstantExpression(&range.nodes.2),
                 syntax_tree,
                 const_env,
                 aliases,
-            )?,
+            )
+            .ok()
+            .flatten()?,
         ));
     }
     r#type.packed_ranges.push(PackedRange::new(

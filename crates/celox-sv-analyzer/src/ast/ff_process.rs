@@ -106,7 +106,12 @@ fn ff_process_from_always_construct(
     };
     let mut local_dimensions = packed_dimensions.clone();
     local_dimensions.const_env = const_env.clone();
-    let mut builder = procedural::BodyBuilder::new(syntax_tree, &local_dimensions, state);
+    let mut builder = procedural::BodyBuilder::new(
+        syntax_tree,
+        &local_dimensions,
+        state,
+        system_functions::Body::Always,
+    );
     let mut body = builder.statement_or_null(body)?;
     for stmt in &mut body {
         procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
@@ -151,7 +156,7 @@ fn ff_events_from_event_expression(
                 sv_parser::EdgeIdentifier::Negedge(_) => FfEdge::Neg,
                 sv_parser::EdgeIdentifier::Edge(_) => return None,
             };
-            let signal = expr_ident_name(&expr_from_expression(&expr.nodes.1, syntax_tree)?);
+            let signal = expr_ident_name(&expr_from_expression(&expr.nodes.1, syntax_tree).ok()?);
             signal.map(|signal| vec![FfEvent::new(edge, signal)])
         }
         sv_parser::EventExpression::Or(expr) => {

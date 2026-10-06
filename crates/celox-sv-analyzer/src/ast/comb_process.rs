@@ -181,10 +181,7 @@ fn net_declaration_assignments(
         };
         let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("net declaration assignment".to_string()))?;
-        let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("continuous assignment expression".to_string())
-            })?;
+        let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?;
         assignments.push(Assignment::new(LValue::Ident(name), rhs));
     }
     Ok(assignments)
@@ -204,19 +201,14 @@ fn assignments_from_continuous_assign(
             .contents()
             .into_iter()
             .map(|assignment| {
-                let lhs = net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
-                    })?;
+                let lhs =
+                    net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
                     &lhs,
                     syntax_tree,
                     packed_dimensions,
-                )
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("continuous assignment expression".to_string())
-                })?;
+                )?;
                 let rhs = if matches!(
                     lhs,
                     LValue::Select {
@@ -240,19 +232,13 @@ fn assignments_from_continuous_assign(
             .into_iter()
             .map(|assignment| {
                 let lhs =
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
-                        .ok_or_else(|| {
-                            AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
-                        })?;
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
                     &lhs,
                     syntax_tree,
                     packed_dimensions,
-                )
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("continuous assignment expression".to_string())
-                })?;
+                )?;
                 let rhs = if matches!(
                     lhs,
                     LValue::Select {
@@ -281,7 +267,12 @@ fn comb_process_from_always_construct(
     let Some(body) = always_comb_body(always) else {
         return Ok(None);
     };
-    let mut builder = procedural::BodyBuilder::new(syntax_tree, packed_dimensions, state);
+    let mut builder = procedural::BodyBuilder::new(
+        syntax_tree,
+        packed_dimensions,
+        state,
+        system_functions::Body::Always,
+    );
     let mut body = builder.statement(body)?;
     for stmt in &mut body {
         procedural::substitute_stmt_constants(stmt, &HashMap::default(), parameter_literals);

@@ -55,8 +55,8 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$clog2`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` |
-| System tasks | `$display`, `$write`, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always_comb` and `always_ff`; Veryl's `$assert` and `$assert_continue` |
+| System functions | `$bits`, `$size`, `$clog2`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
+| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop` in `always` processes and subroutines; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -97,6 +97,13 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Expressions: streaming concatenations ([#447](https://github.com/celox-sim/celox/issues/447)), reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)), and parameter overrides that are not plain integers, such as X/Z
   values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
+- System tasks and functions: Celox knows every name of IEEE 1800-2023
+  clauses 20 and 21. One it does not support where it is called, such as
+  `$time` in an expression, `$fopen`, or `$display` in an `initial` block, is
+  reported with its name wherever it is written, including in an unused
+  parameter and in a function body. A `$` name that is not a system task or
+  function, a call with the wrong number of arguments or an omitted argument
+  of a function, and a task used as a value are errors.
 - DPI, tri-state buses and multiple drivers, hierarchical references.
 
 ## Semantics worth knowing
@@ -119,6 +126,10 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.
+- **System functions called as statements**, such as `$countones(f(a));`, are
+  checked and evaluated like the same call in an expression, and their value
+  is discarded. `$bits` and `$size` do not evaluate their operand.
+- **Constant functions** ignore the display and severity tasks they call.
 - **`$readmemh` / `$readmemb`** read their file when the design is compiled. A
   missing or malformed file is a `MemoryFile` error. In `always_ff` the file's
   words are written on every activation; in `initial` they are part of the

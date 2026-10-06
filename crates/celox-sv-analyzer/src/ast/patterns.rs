@@ -40,14 +40,20 @@ pub(super) fn typed_pattern(
     pattern: &sv_parser::AssignmentPatternExpression,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Option<Expr> {
-    let r#type = match pattern.nodes.0.as_ref()? {
+) -> Converted<Expr> {
+    let pattern_type = || unsupported("assignment pattern type");
+    let r#type = match pattern.nodes.0.as_ref().ok_or_else(pattern_type)? {
         sv_parser::AssignmentPatternExpressionType::PsTypeIdentifier(identifier) => {
-            let name = identifier_text(RefNode::PsTypeIdentifier(identifier), tree)?;
-            dims.type_aliases.get(&name)?.clone()
+            let name = identifier_text(RefNode::PsTypeIdentifier(identifier), tree)
+                .ok_or_else(pattern_type)?;
+            dims.type_aliases
+                .get(&name)
+                .ok_or_else(|| unsupported(format!("assignment pattern type `{name}`")))?
+                .clone()
         }
         sv_parser::AssignmentPatternExpressionType::IntegerAtomType(atom) => {
-            let atom = integer_atom_expr_type(RefNode::IntegerAtomType(atom))?;
+            let atom =
+                integer_atom_expr_type(RefNode::IntegerAtomType(atom)).ok_or_else(pattern_type)?;
             let mut r#type = Type::new(TypeKind::Bit);
             r#type.is_signed = atom.signed;
             r#type.packed_ranges = vec![PackedRange::new(
@@ -56,7 +62,7 @@ pub(super) fn typed_pattern(
             )];
             r#type
         }
-        _ => return None,
+        _ => return Err(pattern_type()),
     };
     let shape = procedural::dimensions_from_type(&r#type);
     expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)
@@ -68,7 +74,7 @@ fn element(
     shape: &VariableDimensions,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     if let Some(pattern) = pattern_expression(expr) {
         return if pattern.nodes.0.is_some() {
             typed_pattern(pattern, tree, dims)
@@ -77,10 +83,11 @@ fn element(
         };
     }
     let value = expr_from_expression_with_types(expr, tree, dims)?;
-    let width = shape_width(shape, dims)?;
+    let width =
+        shape_width(shape, dims).ok_or_else(|| unsupported("assignment pattern element width"))?;
     let signed =
         expr_signedness(&value, &dims.expression_signedness, &dims.functions).unwrap_or(false);
-    Some(Expr::Resize {
+    Ok(Expr::Resize {
         expr: Box::new(value),
         width,
         signed,
@@ -95,11 +102,19 @@ fn positional_items<'p>(
     index_offset: impl Fn(i128) -> Option<usize>,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Option<Vec<&'p sv_parser::Expression>> {
+) -> Converted<Vec<&'p sv_parser::Expression>> {
+    let item_count = |items: usize| {
+        unsupported(format!(
+            "assignment pattern with {items} items for {count} elements"
+        ))
+    };
     match pattern {
         sv_parser::AssignmentPattern::List(list) => {
             let items = list.nodes.0.nodes.1.contents();
-            (items.len() == count).then_some(items)
+            if items.len() != count {
+                return Err(item_count(items.len()));
+            }
+            Ok(items)
         }
         sv_parser::AssignmentPattern::Repeat(repeat) => {
             let (times, items) = &repeat.nodes.0.nodes.1;
@@ -108,13 +123,16 @@ fn positional_items<'p>(
                 tree,
                 &dims.const_env,
                 &dims.type_aliases,
-            )
-            .and_then(|times| eval(&times, dims))?;
+            )?
+            .and_then(|times| eval(&times, dims))
+            .and_then(|times| usize::try_from(times).ok())
+            .ok_or_else(|| unsupported("assignment pattern repetition count"))?;
             let items = items.nodes.1.contents();
-            let repeated: Vec<_> = (0..usize::try_from(times).ok()?)
-                .flat_map(|_| items.iter().copied())
-                .collect();
-            (repeated.len() == count).then_some(repeated)
+            let repeated: Vec<_> = (0..times).flat_map(|_| items.iter().copied()).collect();
+            if repeated.len() != count {
+                return Err(item_count(repeated.len()));
+            }
+            Ok(repeated)
         }
         sv_parser::AssignmentPattern::Array(array) => {
             let mut slots: Vec<Option<&sv_parser::Expression>> = vec![None; count];
@@ -127,34 +145,71 @@ fn positional_items<'p>(
                             tree,
                             &dims.const_env,
                             &dims.type_aliases,
-                        )
-                        .and_then(|index| eval(&index, dims))?;
-                        *slots.get_mut(index_offset(index)?)? = Some(value);
+                        )?
+                        .and_then(|index| eval(&index, dims))
+                        .ok_or_else(|| unsupported("assignment pattern index key"))?;
+                        let slot = index_offset(index)
+                            .and_then(|offset| slots.get_mut(offset))
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "assignment pattern index {index} outside the target"
+                                ))
+                            })?;
+                        *slot = Some(value);
                     }
                     sv_parser::ArrayPatternKey::AssignmentPatternKey(key) => match &**key {
                         sv_parser::AssignmentPatternKey::Default(_) => default = Some(value),
-                        sv_parser::AssignmentPatternKey::SimpleType(_) => return None,
+                        sv_parser::AssignmentPatternKey::SimpleType(_) => {
+                            return Err(unsupported("assignment pattern type key"));
+                        }
                     },
                 }
             }
-            slots.into_iter().map(|slot| slot.or(default)).collect()
+            slots
+                .into_iter()
+                .enumerate()
+                .map(|(position, slot)| {
+                    slot.or(default).ok_or_else(|| {
+                        unsupported(format!(
+                            "assignment pattern without a value for element {position}"
+                        ))
+                    })
+                })
+                .collect()
         }
         sv_parser::AssignmentPattern::Structure(structure) => {
             // Only `default:` applies to an array.
             let mut default = None;
             for (key, _, value) in structure.nodes.0.nodes.1.contents() {
                 let sv_parser::StructurePatternKey::AssignmentPatternKey(key) = key else {
-                    return None;
+                    return Err(unsupported("member key in an array assignment pattern"));
                 };
                 let sv_parser::AssignmentPatternKey::Default(_) = &**key else {
-                    return None;
+                    return Err(unsupported("assignment pattern type key"));
                 };
                 default = Some(value);
             }
-            let default = default?;
-            Some(vec![default; count])
+            let default =
+                default.ok_or_else(|| unsupported("array assignment pattern without a default"))?;
+            Ok(vec![default; count])
         }
     }
+}
+
+/// The left and right bounds of a dimension and its element count.
+fn dimension_bounds(
+    left: &ConstExpr,
+    right: &ConstExpr,
+    dims: &PackedDimensions,
+) -> Converted<(i128, i128, usize)> {
+    let bounds = || unsupported("assignment pattern target bounds");
+    let left = eval(left, dims).ok_or_else(bounds)?;
+    let right = eval(right, dims).ok_or_else(bounds)?;
+    let count = usize::try_from(left.abs_diff(right))
+        .ok()
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(bounds)?;
+    Ok((left, right, count))
 }
 
 /// The value of an assignment pattern for a target of `shape`.
@@ -163,12 +218,10 @@ pub(super) fn expr_from_pattern(
     shape: &VariableDimensions,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         // An unpacked array: element 0 is the left bound, in the low bits.
-        let left = eval(&dimension.left, dims)?;
-        let right = eval(&dimension.right, dims)?;
-        let count = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+        let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
         let element_shape = VariableDimensions {
             packed: shape.packed.clone(),
             unpacked: rest.to_vec(),
@@ -193,9 +246,9 @@ pub(super) fn expr_from_pattern(
         let mut parts = items
             .into_iter()
             .map(|item| element(item, &element_shape, tree, dims))
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Converted<Vec<_>>>()?;
         parts.reverse();
-        return Some(match <[Expr; 1]>::try_from(parts) {
+        return Ok(match <[Expr; 1]>::try_from(parts) {
             Ok([part]) => part,
             Err(parts) => Expr::Concat(parts),
         });
@@ -207,9 +260,7 @@ pub(super) fn expr_from_pattern(
         && !rest.is_empty()
     {
         // A packed array: the left bound is the most significant element.
-        let left = eval(&dimension.left, dims)?;
-        let right = eval(&dimension.right, dims)?;
-        let count = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+        let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
         // An element of a signed named type is signed (IEEE 1800-2023 7.4.1).
         let element_shape = VariableDimensions {
             packed: rest.to_vec(),
@@ -238,11 +289,12 @@ pub(super) fn expr_from_pattern(
         let parts = items
             .into_iter()
             .map(|item| element(item, &element_shape, tree, dims))
-            .collect::<Option<Vec<_>>>()?;
-        return Some(Expr::Concat(parts));
+            .collect::<Converted<Vec<_>>>()?;
+        return Ok(Expr::Concat(parts));
     }
     // A vector: `'{default: v}` gives every bit the value `v`.
-    let width = shape_width(shape, dims)?;
+    let width =
+        shape_width(shape, dims).ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = VariableDimensions {
         packed: Vec::new(),
         unpacked: Vec::new(),
@@ -266,8 +318,8 @@ pub(super) fn expr_from_pattern(
     let parts = items
         .into_iter()
         .map(|item| element(item, &bit, tree, dims))
-        .collect::<Option<Vec<_>>>()?;
-    Some(match <[Expr; 1]>::try_from(parts) {
+        .collect::<Converted<Vec<_>>>()?;
+    Ok(match <[Expr; 1]>::try_from(parts) {
         Ok([part]) => part,
         Err(parts) => Expr::Concat(parts),
     })
@@ -280,13 +332,17 @@ fn struct_pattern(
     shape: &VariableDimensions,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     let members = &shape.members;
     let values: Vec<&sv_parser::Expression> = match pattern {
         sv_parser::AssignmentPattern::List(list) => {
             let values = list.nodes.0.nodes.1.contents();
             if values.len() != members.len() {
-                return None;
+                return Err(unsupported(format!(
+                    "assignment pattern with {} items for {} structure members",
+                    values.len(),
+                    members.len()
+                )));
             }
             values
         }
@@ -296,22 +352,25 @@ fn struct_pattern(
             for (key, _, value) in structure.nodes.0.nodes.1.contents() {
                 match key {
                     sv_parser::StructurePatternKey::MemberIdentifier(member) => named.push((
-                        identifier_text(RefNode::MemberIdentifier(member), tree)?,
+                        identifier_text(RefNode::MemberIdentifier(member), tree)
+                            .ok_or_else(|| unsupported("assignment pattern member name"))?,
                         value,
                     )),
                     sv_parser::StructurePatternKey::AssignmentPatternKey(key) => {
                         let sv_parser::AssignmentPatternKey::Default(_) = &**key else {
-                            return None;
+                            return Err(unsupported("assignment pattern type key"));
                         };
                         default = Some(value);
                     }
                 }
             }
-            if named
+            if let Some((name, _)) = named
                 .iter()
-                .any(|(name, _)| !members.iter().any(|member| member.name() == name))
+                .find(|(name, _)| !members.iter().any(|member| member.name() == name))
             {
-                return None;
+                return Err(unsupported(format!(
+                    "assignment pattern key `{name}` that is not a structure member"
+                )));
             }
             members
                 .iter()
@@ -321,10 +380,16 @@ fn struct_pattern(
                         .find(|(name, _)| name == member.name())
                         .map(|(_, value)| *value)
                         .or(default)
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "assignment pattern without a value for member `{}`",
+                                member.name()
+                            ))
+                        })
                 })
-                .collect::<Option<Vec<_>>>()?
+                .collect::<Converted<Vec<_>>>()?
         }
-        _ => return None,
+        _ => return Err(unsupported("structure assignment pattern form")),
     };
     let parts = members
         .iter()
@@ -333,8 +398,8 @@ fn struct_pattern(
             let member_shape = procedural::dimensions_from_type(member.r#type());
             element(value, &member_shape, tree, dims)
         })
-        .collect::<Option<Vec<_>>>()?;
-    Some(match <[Expr; 1]>::try_from(parts) {
+        .collect::<Converted<Vec<_>>>()?;
+    Ok(match <[Expr; 1]>::try_from(parts) {
         Ok([part]) => part,
         Err(parts) => Expr::Concat(parts),
     })

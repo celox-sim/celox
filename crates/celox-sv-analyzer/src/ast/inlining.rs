@@ -275,6 +275,9 @@ pub(super) fn expand_expr_calls(
             let Some(function) = functions.get(&name) else {
                 return Expr::Call { name, args };
             };
+            let Some(function_body) = &function.body else {
+                return Expr::Call { name, args };
+            };
             if function.params.len() != args.len() {
                 return Expr::Call { name, args };
             }
@@ -307,7 +310,7 @@ pub(super) fn expand_expr_calls(
                     (param.name.clone(), arg)
                 })
                 .collect::<HashMap<_, _>>();
-            let body = substitute_expr_idents(function.body.clone(), &env);
+            let body = substitute_expr_idents(function_body.clone(), &env);
             let expanded = expand_expr_calls(
                 body,
                 functions,

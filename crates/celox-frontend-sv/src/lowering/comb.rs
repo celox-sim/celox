@@ -1473,6 +1473,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.call(&mut store, frames, name, args)?;
                 Ok(store)
             }
+            sv::ir::Stmt::Eval(expr) => {
+                self.eval(&mut store, frames, expr, None)?;
+                Ok(store)
+            }
             sv::ir::Stmt::SystemTask { name, args }
                 if name == "$readmemh" || name == "$readmemb" =>
             {

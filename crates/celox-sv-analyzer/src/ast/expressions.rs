@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn expr_from_expression(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     expr_from_expression_with_types(expr, syntax_tree, &PackedDimensions::default())
 }
 
@@ -13,7 +13,7 @@ pub(super) fn expr_from_expression_with_types(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     expr_from_expression_with_types_raw(expr, syntax_tree, packed_dimensions)
         .map(guard_zero_divisions)
 }
@@ -22,7 +22,7 @@ fn expr_from_expression_with_types_raw(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     match expr {
         sv_parser::Expression::Primary(primary) => {
             expr_from_primary_with_types(primary, syntax_tree, packed_dimensions)
@@ -30,7 +30,13 @@ fn expr_from_expression_with_types_raw(
         sv_parser::Expression::Unary(unary) => {
             let expr =
                 expr_from_primary_with_types(&unary.nodes.2, syntax_tree, packed_dimensions)?;
-            unary_expr_from_symbol(&unary.nodes.0.nodes.0.nodes.0, expr, syntax_tree)
+            let symbol = &unary.nodes.0.nodes.0.nodes.0;
+            unary_expr_from_symbol(symbol, expr, syntax_tree).ok_or_else(|| {
+                unsupported(format!(
+                    "unary operator `{}`",
+                    syntax_tree.get_str(symbol).unwrap_or_default()
+                ))
+            })
         }
         sv_parser::Expression::Binary(binary) => {
             let right_is_grouped = expression_is_grouped(&binary.nodes.3);
@@ -39,17 +45,15 @@ fn expr_from_expression_with_types_raw(
                 syntax_tree,
                 packed_dimensions,
             )?;
+            let symbol = &binary.nodes.1.nodes.0.nodes.0;
             // `a ~^ b` is the complement of `a ^ b` (IEEE 1800-2023 11.4.8).
-            if matches!(
-                syntax_tree.get_str(&binary.nodes.1.nodes.0.nodes.0),
-                Some("~^" | "^~")
-            ) {
+            if matches!(syntax_tree.get_str(symbol), Some("~^" | "^~")) {
                 let right = expr_from_expression_with_types_raw(
                     &binary.nodes.3,
                     syntax_tree,
                     packed_dimensions,
                 )?;
-                return Some(Expr::Unary {
+                return Ok(Expr::Unary {
                     op: UnaryOp::BitNot,
                     expr: Box::new(Expr::Binary {
                         left: Box::new(left),
@@ -58,7 +62,12 @@ fn expr_from_expression_with_types_raw(
                     }),
                 });
             }
-            let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
+            let op = binary_op_from_symbol(symbol, syntax_tree).ok_or_else(|| {
+                unsupported(format!(
+                    "binary operator `{}`",
+                    syntax_tree.get_str(symbol).unwrap_or_default()
+                ))
+            })?;
             let right = expr_from_expression_with_types_raw(
                 &binary.nodes.3,
                 syntax_tree,
@@ -69,7 +78,7 @@ fn expr_from_expression_with_types_raw(
                 op,
                 right: Box::new(right),
             };
-            Some(if right_is_grouped {
+            Ok(if right_is_grouped {
                 expr
             } else {
                 left_associate_expr_binary(expr)
@@ -81,7 +90,15 @@ fn expr_from_expression_with_types_raw(
         sv_parser::Expression::InsideExpression(inside) => {
             expr_from_inside_expression(inside, syntax_tree, packed_dimensions)
         }
-        _ => None,
+        sv_parser::Expression::IncOrDecExpression(_) => {
+            Err(unsupported("increment or decrement expression"))
+        }
+        sv_parser::Expression::OperatorAssignment(_) => {
+            Err(unsupported("assignment used as an expression"))
+        }
+        sv_parser::Expression::TaggedUnionExpression(_) => {
+            Err(unsupported("tagged union expression"))
+        }
     }
 }
 
@@ -92,7 +109,7 @@ pub(super) fn expr_from_expression_for_lvalue(
     lhs: &LValue,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     if let sv_parser::Expression::Primary(primary) = expr
         && let sv_parser::Primary::AssignmentPatternExpression(pattern) = &**primary
     {
@@ -101,10 +118,18 @@ pub(super) fn expr_from_expression_for_lvalue(
         }
         if let LValue::Ident(name) = lhs
             && let Some(shape) = packed_dimensions.get(name)
-            && let Some(value) =
-                patterns::expr_from_pattern(&pattern.nodes.1, shape, syntax_tree, packed_dimensions)
         {
-            return Some(value);
+            return patterns::expr_from_pattern(
+                &pattern.nodes.1,
+                shape,
+                syntax_tree,
+                packed_dimensions,
+            )
+            .or_else(|pattern_error| {
+                // A packed structure or a vector `default` fill.
+                expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions)
+                    .map_err(|_| pattern_error)
+            });
         }
         return expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions);
     }
@@ -118,11 +143,12 @@ fn expr_from_assignment_pattern(
     lhs: &LValue,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
+    let target = || unsupported("assignment pattern for this target");
     let LValue::Ident(name) = lhs else {
-        return None;
+        return Err(target());
     };
-    let members = &packed_dimensions.get(name)?.members;
+    let members = &packed_dimensions.get(name).ok_or_else(target)?.members;
     let lower = |expr: &sv_parser::Expression| {
         expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
     };
@@ -131,7 +157,9 @@ fn expr_from_assignment_pattern(
         sv_parser::AssignmentPattern::List(list) => {
             let values = list.nodes.0.nodes.1.contents();
             if members.is_empty() || values.len() != members.len() {
-                return None;
+                return Err(unsupported(
+                    "assignment pattern whose items do not match the structure members",
+                ));
             }
             values
         }
@@ -142,12 +170,13 @@ fn expr_from_assignment_pattern(
             for (key, _, value) in items {
                 match key {
                     sv_parser::StructurePatternKey::MemberIdentifier(member) => named.push((
-                        identifier_text(RefNode::MemberIdentifier(member), syntax_tree)?,
+                        identifier_text(RefNode::MemberIdentifier(member), syntax_tree)
+                            .ok_or_else(|| unsupported("assignment pattern member name"))?,
                         value,
                     )),
                     sv_parser::StructurePatternKey::AssignmentPatternKey(key) => {
                         let sv_parser::AssignmentPatternKey::Default(_) = &**key else {
-                            return None;
+                            return Err(unsupported("assignment pattern type key"));
                         };
                         default = Some(value);
                     }
@@ -157,14 +186,16 @@ fn expr_from_assignment_pattern(
                 // `'{default: v}` fills a vector.
                 return match (named.is_empty(), default) {
                     (true, Some(value)) => lower(value),
-                    _ => None,
+                    _ => Err(target()),
                 };
             }
-            if named
+            if let Some((name, _)) = named
                 .iter()
-                .any(|(name, _)| !members.iter().any(|member| member.name() == name))
+                .find(|(name, _)| !members.iter().any(|member| member.name() == name))
             {
-                return None;
+                return Err(unsupported(format!(
+                    "assignment pattern key `{name}` that is not a structure member"
+                )));
             }
             members
                 .iter()
@@ -174,16 +205,26 @@ fn expr_from_assignment_pattern(
                         .find(|(name, _)| name == member.name())
                         .map(|(_, value)| *value)
                         .or(default)
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "assignment pattern without a value for member `{}`",
+                                member.name()
+                            ))
+                        })
                 })
-                .collect::<Option<Vec<_>>>()?
+                .collect::<Converted<Vec<_>>>()?
         }
-        _ => return None,
+        _ => return Err(unsupported("replicated assignment pattern")),
     };
     let parts = members
         .iter()
         .zip(values)
         .map(|(member, value)| {
-            let width = expr_type_from_type(member.r#type(), &packed_dimensions.const_env)?.width;
+            let width = expr_type_from_type(member.r#type(), &packed_dimensions.const_env)
+                .ok_or_else(|| {
+                    unsupported(format!("type of structure member `{}`", member.name()))
+                })?
+                .width;
             let value = lower(value)?;
             let signed = expr_signedness(
                 &value,
@@ -191,14 +232,14 @@ fn expr_from_assignment_pattern(
                 &packed_dimensions.functions,
             )
             .unwrap_or(false);
-            Some(Expr::Resize {
+            Ok(Expr::Resize {
                 expr: Box::new(value),
                 width,
                 signed,
             })
         })
-        .collect::<Option<Vec<_>>>()?;
-    Some(match <[Expr; 1]>::try_from(parts) {
+        .collect::<Converted<Vec<_>>>()?;
+    Ok(match <[Expr; 1]>::try_from(parts) {
         Ok([part]) => part,
         Err(parts) => Expr::Concat(parts),
     })
@@ -210,7 +251,7 @@ fn expr_from_inside_expression(
     inside: &sv_parser::InsideExpression,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     let operand =
         expr_from_expression_with_types_raw(&inside.nodes.0, syntax_tree, packed_dimensions)?;
     let items = inside
@@ -229,7 +270,7 @@ fn expr_from_inside_expression(
             }
             sv_parser::ValueRange::Binary(range) => {
                 let (low, _, high) = &range.nodes.0.nodes.1;
-                Some(InsideItem::Range {
+                Ok(InsideItem::Range {
                     low: expr_from_expression_with_types_raw(low, syntax_tree, packed_dimensions)?,
                     high: expr_from_expression_with_types_raw(
                         high,
@@ -239,8 +280,11 @@ fn expr_from_inside_expression(
                 })
             }
         })
-        .collect::<Option<Vec<_>>>()?;
-    (!items.is_empty()).then(|| Expr::Inside {
+        .collect::<Converted<Vec<_>>>()?;
+    if items.is_empty() {
+        return Err(unsupported("inside expression without items"));
+    }
+    Ok(Expr::Inside {
         expr: Box::new(operand),
         items,
     })
@@ -329,7 +373,7 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
 pub(super) fn expr_from_primary(
     primary: &sv_parser::Primary,
     syntax_tree: &SyntaxTree,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     expr_from_primary_with_types(primary, syntax_tree, &PackedDimensions::default())
 }
 
@@ -337,10 +381,12 @@ fn expr_from_primary_with_types(
     primary: &sv_parser::Primary,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     match primary {
         sv_parser::Primary::PrimaryLiteral(_) => {
-            primary_literal_text(RefNode::Primary(primary), syntax_tree).map(Expr::Literal)
+            primary_literal_text(RefNode::Primary(primary), syntax_tree)
+                .map(Expr::Literal)
+                .ok_or_else(|| unsupported("literal"))
         }
         sv_parser::Primary::Hierarchical(hierarchical) => {
             let node = RefNode::HierarchicalIdentifier(&hierarchical.nodes.1);
@@ -354,16 +400,17 @@ fn expr_from_primary_with_types(
                     syntax_tree,
                     packed_dimensions,
                 )?;
-                return Some(expr_from_lvalue(&value, packed_dimensions));
+                return Ok(expr_from_lvalue(&value, packed_dimensions));
             }
             let name = identifier_text(
                 RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
                 syntax_tree,
-            )?;
+            )
+            .ok_or_else(|| unsupported("hierarchical identifier"))?;
             let base = Expr::Ident(name);
             let select = &hierarchical.nodes.2;
             if select.nodes.1.nodes.0.is_empty() && select.nodes.2.is_none() {
-                Some(base)
+                Ok(base)
             } else {
                 expr_select_from_select(base, select, syntax_tree, packed_dimensions)
             }
@@ -379,10 +426,12 @@ fn expr_from_primary_with_types(
                 .contents()
                 .into_iter()
                 .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
-                .collect::<Option<Vec<_>>>()?;
-            let base = (!parts.is_empty()).then_some(Expr::Concat(parts))?;
+                .collect::<Converted<Vec<_>>>()?;
+            if parts.is_empty() {
+                return Err(unsupported("empty concatenation"));
+            }
             selected_concatenation(
-                base,
+                Expr::Concat(parts),
                 concat.nodes.1.as_ref().map(|range| &range.nodes.1),
                 syntax_tree,
                 packed_dimensions,
@@ -399,10 +448,12 @@ fn expr_from_primary_with_types(
                 .contents()
                 .into_iter()
                 .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
-                .collect::<Option<Vec<_>>>()?;
-            let base = (!parts.is_empty()).then_some(Expr::RepeatConcat { count, parts })?;
+                .collect::<Converted<Vec<_>>>()?;
+            if parts.is_empty() {
+                return Err(unsupported("empty replication"));
+            }
             selected_concatenation(
-                base,
+                Expr::RepeatConcat { count, parts },
                 concat.nodes.1.as_ref().map(|range| &range.nodes.1),
                 syntax_tree,
                 packed_dimensions,
@@ -416,7 +467,7 @@ fn expr_from_primary_with_types(
                 && let Some(value) =
                     runtime_constant_cast_const_expr(cast, syntax_tree, packed_dimensions)
             {
-                return Some(const_expr_to_expr(value));
+                return Ok(const_expr_to_expr(value));
             }
             let expr = expr_from_expression_with_types(
                 &cast.nodes.2.nodes.1,
@@ -428,13 +479,28 @@ fn expr_from_primary_with_types(
         sv_parser::Primary::AssignmentPatternExpression(pattern) if pattern.nodes.0.is_some() => {
             patterns::typed_pattern(pattern, syntax_tree, packed_dimensions)
         }
+        sv_parser::Primary::AssignmentPatternExpression(_) => {
+            Err(unsupported("assignment pattern without a target type"))
+        }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
             }
-            sv_parser::MintypmaxExpression::Ternary(_) => None,
+            sv_parser::MintypmaxExpression::Ternary(_) => {
+                Err(unsupported("min:typ:max expression"))
+            }
         },
-        _ => None,
+        sv_parser::Primary::EmptyUnpackedArrayConcatenation(_) => {
+            Err(unsupported("empty unpacked array concatenation"))
+        }
+        sv_parser::Primary::StreamingConcatenation(_) => {
+            Err(unsupported("streaming concatenation"))
+        }
+        sv_parser::Primary::SequenceMethodCall(_) => Err(unsupported("sequence method call")),
+        sv_parser::Primary::This(_) => Err(unsupported("`this`")),
+        sv_parser::Primary::Dollar(_) => Err(unsupported("`$` as a value")),
+        sv_parser::Primary::Null(_) => Err(unsupported("`null`")),
+        sv_parser::Primary::LetExpression(_) => Err(unsupported("let expression")),
     }
 }
 
@@ -450,8 +516,8 @@ fn expr_from_conditional_expression(
     expr: &sv_parser::ConditionalExpression,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
-    Some(Expr::Mux {
+) -> Converted<Expr> {
+    Ok(Expr::Mux {
         condition: Box::new(expr_from_cond_predicate(
             &expr.nodes.0,
             syntax_tree,
@@ -474,76 +540,121 @@ pub(super) fn expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
-    // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
-    if let Some(ty) = dimensions::size_system_function_call_type(
-        call,
-        syntax_tree,
-        &packed_dimensions.const_env,
-        &packed_dimensions.type_aliases,
-        Some(packed_dimensions),
-    ) {
-        return Some(Expr::Literal(ty.width.to_string()));
+) -> Converted<Expr> {
+    expr_from_subroutine_call(&call.nodes.0, syntax_tree, packed_dimensions)
+}
+
+/// A subroutine call as an expression. A call statement uses this too, for a
+/// system function whose value it discards.
+pub(super) fn expr_from_subroutine_call(
+    call: &sv_parser::SubroutineCall,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    match call {
+        sv_parser::SubroutineCall::SystemTfCall(call) => {
+            expr_from_system_function_call(call, syntax_tree, packed_dimensions)
+        }
+        sv_parser::SubroutineCall::TfCall(call) => {
+            expr_from_tf_call(call, syntax_tree, packed_dimensions)
+        }
+        sv_parser::SubroutineCall::MethodCall(_) => Err(unsupported("method call")),
+        sv_parser::SubroutineCall::Randomize(_) => Err(unsupported("randomize call")),
     }
-    if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
-        let sv_parser::SystemTfCall::ArgExpression(call) = &**call else {
-            return None;
-        };
-        let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
-        let args = call.nodes.1.nodes.1.0.contents();
-        if matches!(name, "$signed" | "$unsigned")
-            && args.len() == 1
-            && call.nodes.1.nodes.1.1.is_none()
-        {
+}
+
+/// A system function call as an expression operand.
+fn expr_from_system_function_call(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let (name, args) = system_tf_call_parts(call, syntax_tree)
+        .ok_or_else(|| unsupported("system function name"))?;
+    system_functions::check_call(
+        name,
+        args.as_deref(),
+        system_functions::CallSite::Expression,
+    )?;
+    let operand_error = || unsupported(format!("operand of `{name}`"));
+    match name {
+        // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
+        "$bits" | "$size" => dimensions::size_system_function_call_type(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+        .map(|ty| Expr::Literal(ty.width.to_string()))
+        .ok_or_else(operand_error),
+        "$signed" | "$unsigned" => {
             // Reinterpret the operand's signedness without changing its width.
-            let arg =
-                expr_from_expression_with_types(args[0].as_ref()?, syntax_tree, packed_dimensions)?;
-            let width = expr_static_width(&arg, packed_dimensions)?;
-            return Some(Expr::Resize {
+            let arg = expr_from_expression_with_types(
+                single_expression_argument(call).ok_or_else(operand_error)?,
+                syntax_tree,
+                packed_dimensions,
+            )?;
+            let width = expr_static_width(&arg, packed_dimensions).ok_or_else(operand_error)?;
+            Ok(Expr::Resize {
                 expr: Box::new(arg),
                 width,
                 signed: name == "$signed",
-            });
+            })
         }
-        // `$clog2` of a constant is a constant.
-        if name == "$clog2"
-            && args.len() == 1
-            && let Some(argument) = args[0].as_ref()
-            && let Some(argument) =
-                expr_from_expression_with_types(argument, syntax_tree, packed_dimensions)
-                    .and_then(expr_to_const)
-            && let Some(value) = eval_ast_const_expr(
-                &ConstExpr::Function {
-                    name: name.to_string(),
-                    args: vec![argument],
-                },
-                &packed_dimensions.const_env,
-            )
-        {
-            return Some(Expr::Literal(value.to_string()));
+        "$clog2" | "$countones" | "$onehot" | "$onehot0" | "$isunknown" => {
+            let arg = expr_from_expression_with_types(
+                single_expression_argument(call).ok_or_else(operand_error)?,
+                syntax_tree,
+                packed_dimensions,
+            )?;
+            // `$clog2` of a constant is a constant.
+            if name == "$clog2"
+                && let Some(argument) = expr_to_const(arg.clone())
+                && let Some(value) = eval_ast_const_expr(
+                    &ConstExpr::Function {
+                        name: name.to_string(),
+                        args: vec![argument],
+                    },
+                    &packed_dimensions.const_env,
+                )
+            {
+                return Ok(Expr::Literal(value.to_string()));
+            }
+            Ok(Expr::Call {
+                name: name.to_string(),
+                args: vec![arg],
+            })
         }
-        let constant_clog2 =
-            packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
-        if (!constant_clog2
-            && typecheck::bit_vector_function_return_type(name, args.len()).is_none())
-            || call.nodes.1.nodes.1.1.is_some()
-        {
-            return None;
-        }
-        let arg =
-            expr_from_expression_with_types(args[0].as_ref()?, syntax_tree, packed_dimensions)?;
-        return Some(Expr::Call {
-            name: name.to_string(),
-            args: vec![arg],
-        });
+        _ => Err(AnalyzerError::Unsupported(format!(
+            "system function `{name}` in an expression"
+        ))),
     }
-    let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0 else {
+}
+
+/// The one expression argument of a system function call such as `$clog2(x)`.
+fn single_expression_argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
+    let sv_parser::SystemTfCall::ArgExpression(call) = call else {
         return None;
     };
+    let (args, clocking) = &call.nodes.1.nodes.1;
+    match (args.contents().as_slice(), clocking) {
+        ([Some(arg)], None) => Some(arg),
+        _ => None,
+    }
+}
+
+/// A user function call as an expression operand.
+fn expr_from_tf_call(
+    call: &sv_parser::TfCall,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
     let name = identifier_text(
         RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
         syntax_tree,
-    )?;
+    )
+    .ok_or_else(|| unsupported("subroutine name"))?;
     let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
         None => Vec::new(),
         Some(sv_parser::ListOfArguments::Ordered(args)) => {
@@ -554,47 +665,37 @@ pub(super) fn expr_from_function_subroutine_call(
                 let mut lowered = Vec::new();
                 for (position, expr) in contents.into_iter().enumerate() {
                     let Some(expr) = expr.as_ref() else {
-                        return Some(Expr::Call {
-                            name: "$unsupported_function_call".to_string(),
-                            args: Vec::new(),
-                        });
+                        return Err(unsupported(format!(
+                            "omitted argument {} of `{name}`",
+                            position + 1
+                        )));
                     };
                     // An assignment pattern takes its shape from the formal.
-                    let pattern = patterns::pattern_expression(expr)
-                        .filter(|pattern| pattern.nodes.0.is_none())
-                        .and_then(|pattern| {
-                            let shape = packed_dimensions
-                                .subroutine_param_shapes
-                                .get(&name)?
-                                .get(position)?;
+                    let shape = packed_dimensions
+                        .subroutine_param_shapes
+                        .get(&name)
+                        .and_then(|shapes| shapes.get(position));
+                    let lowered_arg = match (patterns::pattern_expression(expr), shape) {
+                        (Some(pattern), Some(shape)) if pattern.nodes.0.is_none() => {
                             patterns::expr_from_pattern(
                                 &pattern.nodes.1,
                                 shape,
                                 syntax_tree,
                                 packed_dimensions,
-                            )
-                        });
-                    let Some(expr) = pattern.or_else(|| {
-                        expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                    }) else {
-                        return Some(Expr::Call {
-                            name: "$unsupported_function_call".to_string(),
-                            args: Vec::new(),
-                        });
+                            )?
+                        }
+                        _ => expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?,
                     };
-                    lowered.push(expr);
+                    lowered.push(lowered_arg);
                 }
                 lowered
             }
         }
         Some(sv_parser::ListOfArguments::Named(_)) => {
-            return Some(Expr::Call {
-                name: "$unsupported_function_call".to_string(),
-                args: Vec::new(),
-            });
+            return Err(unsupported(format!("named arguments of `{name}`")));
         }
     };
-    Some(Expr::Call { name, args })
+    Ok(Expr::Call { name, args })
 }
 
 fn selected_concatenation(
@@ -602,9 +703,9 @@ fn selected_concatenation(
     selection: Option<&sv_parser::RangeExpression>,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     let (msb, lsb) = match selection {
-        None => return Some(base),
+        None => return Ok(base),
         Some(sv_parser::RangeExpression::PartSelectRange(range)) => {
             part_select_bounds(range, syntax_tree, None, 0, dimensions)?
         }
@@ -613,10 +714,70 @@ fn selected_concatenation(
             (bit.clone(), bit)
         }
     };
-    Some(Expr::Select {
+    Ok(Expr::Select {
         expr: Box::new(base),
         msb,
         lsb,
         signed: false,
     })
+}
+
+/// The name of a system task or function call, with its leading `$`, and its
+/// arguments as written (`None` when they are bound by name).
+pub(super) fn system_tf_call_parts<'a>(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &'a SyntaxTree,
+) -> Option<(&'a str, Option<Vec<system_functions::Arg>>)> {
+    use system_functions::Arg;
+    let positional = |contents: Vec<&Option<sv_parser::Expression>>| -> Vec<Arg> {
+        // `$f()` parses as one omitted argument.
+        if contents.len() == 1 && contents[0].is_none() {
+            Vec::new()
+        } else {
+            contents
+                .iter()
+                .map(|arg| {
+                    if arg.is_some() {
+                        Arg::Given
+                    } else {
+                        Arg::Omitted
+                    }
+                })
+                .collect()
+        }
+    };
+    let (identifier, args) = match call {
+        sv_parser::SystemTfCall::ArgOptionl(call) => (
+            &call.nodes.0,
+            match call.nodes.1.as_ref() {
+                None => Some(Vec::new()),
+                Some(paren) => match &paren.nodes.1 {
+                    sv_parser::ListOfArguments::Ordered(args) if args.nodes.1.is_empty() => {
+                        Some(positional(args.nodes.0.contents()))
+                    }
+                    _ => None,
+                },
+            },
+        ),
+        sv_parser::SystemTfCall::ArgDataType(call) => (
+            &call.nodes.0,
+            Some(vec![
+                Arg::Given;
+                1 + usize::from(call.nodes.1.nodes.1.1.is_some())
+            ]),
+        ),
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            let (args, clocking) = &call.nodes.1.nodes.1;
+            let mut args = positional(args.contents());
+            if let Some((_, event)) = clocking {
+                args.push(if event.is_some() {
+                    Arg::Given
+                } else {
+                    Arg::Omitted
+                });
+            }
+            (&call.nodes.0, Some(args))
+        }
+    };
+    Some((syntax_tree.get_str(&identifier.nodes.0)?, args))
 }
