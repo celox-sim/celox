@@ -530,3 +530,250 @@ module Top (
   (for index (range 22 50)
     (modify (set probe_idx (% index 32)))
     (assert_eq probe_valid 0 "partial squash retained a younger ROB slot")))
+
+; An out-of-range index makes a write a no-op (IEEE 1800-2023 7.4.6); it must
+; not reach a neighbouring element or variable.
+(case test_out_of_range_dynamic_ff_stores_are_ignored
+  (source "test.veryl" #"
+module Top (
+    clk  : input  clock,
+    load : input  logic,
+    wen  : input  logic,
+    idx  : input  logic<2>,
+    bidx : input  logic<3>,
+    din  : input  logic<64>,
+    probe: input  logic<2>,
+    q    : output logic<64>,
+    nq   : output logic<8>,
+    tq   : output logic<4>,
+    bq   : output logic<6>,
+    wq   : output logic<64>,
+) {
+    var pre_v : logic<64>;
+    var mem   : logic<64> [3];
+    var post_v: logic<64>;
+    var nb    : logic<8>;
+    var narrow: logic<8>  [3];
+    var na    : logic<8>;
+    var flags : logic<6>;
+    var ba    : logic<40>;
+    var tiny  : logic<4>  [3];
+    var sa    : logic<4>;
+
+    always_ff (clk) {
+        if load {
+            pre_v  = 64'h1111_1111_1111_1111;
+            post_v = 64'h2222_2222_2222_2222;
+            nb     = 8'h33;
+            na     = 8'h44;
+            ba     = 40'h55_5555_5555;
+            sa     = 4'h6;
+            for i in 0..3 {
+                mem[i]    = 64'h0;
+                narrow[i] = 8'h0;
+                tiny[i]   = 4'h0;
+            }
+            flags = 6'h0;
+        } else if wen {
+            mem[idx]    = din;
+            narrow[idx] = din[7:0];
+            tiny[idx]   = din[3:0];
+            flags[bidx] = din[0];
+        }
+    }
+
+    assign q  = mem[probe];
+    assign nq = narrow[probe];
+    assign tq = tiny[probe];
+    assign bq = flags;
+    assign wq = pre_v ^ post_v ^ {nb, na, ba, sa, 4'h0};
+}
+"#)
+  (top Top)
+  (let guard (^ 0x1111111111111111 0x2222222222222222 0x3344555555555560))
+  (modify (set load 1) (set wen 0))
+  (tick clk)
+  (modify (set load 0) (set wen 1) (set din 0xffffffffffffffff) (set idx 3) (set bidx 6))
+  (tick clk)
+  (for slot (range 0 3)
+    (modify (set probe slot))
+    (assert_eq q 0 "out-of-range write changed an array element")
+    (assert_eq nq 0 "out-of-range narrow write changed an array element")
+    (assert_eq tq 0 "out-of-range sub-byte write changed an array element"))
+  (assert_eq wq guard "out-of-range write changed a neighbouring variable")
+  (assert_eq bq 0 "out-of-range bit write")
+  (modify (set bidx 7))
+  (tick clk)
+  (assert_eq bq 0 "out-of-range bit write")
+  (assert_eq wq guard "out-of-range write changed a neighbouring variable")
+  (modify (set idx 1) (set bidx 5))
+  (tick clk)
+  (modify (set probe 1))
+  (assert_eq q 0xffffffffffffffff "in-range write")
+  (assert_eq nq 0xff "in-range narrow write")
+  (assert_eq tq 0xf "in-range sub-byte write")
+  (assert_eq bq 0x20 "in-range bit write")
+  (assert_eq wq guard "in-range write changed a neighbouring variable"))
+
+; Only the in-range bits of a partly out-of-range part select are written or
+; read (IEEE 1800-2023 11.5.1).
+(case test_partly_out_of_range_dynamic_ff_part_select
+  (source "test.veryl" #"
+module Top (
+    clk   : input  clock,
+    load  : input  logic,
+    base  : input  logic<3>,
+    part_q: output logic<6>,
+    rp_q  : output logic<2>,
+) {
+    var part: logic<6>;
+    var rp  : logic<2>;
+
+    always_ff (clk) {
+        if load {
+            part = 6'h0;
+            rp   = 2'b11;
+        } else {
+            part[base+:2] = 2'b11;
+            rp            = part[base+:2];
+        }
+    }
+
+    assign part_q = part;
+    assign rp_q   = rp;
+}
+"#)
+  (top Top)
+  (for b (range 0 8)
+    (modify (set load 1))
+    (tick clk)
+    (modify (set load 0) (set base b))
+    (tick clk)
+    (assert_eq part_q (& (<< 3 b) 0x3f) "part select write")
+    ; Out-of-range bits read as 0 or X depending on the state mode.
+    (if (< b 6)
+      (assert (== (bit (get rp_q) 0) 0) "part select read before the write"))
+    (tick clk)
+    (if (< b 5)
+      (assert_eq rp_q 3 "part select read")
+      (if (== b 5)
+        (assert (== (bit (get rp_q) 0) 1) "in-range bit of a part select read")))))
+
+; An unknown or out-of-range index neither writes nor reads an element; the
+; read value is X (IEEE 1800-2023 7.4.6).
+(case test_out_of_range_dynamic_ff_access_four_state
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk   : input  clock,
+    load  : input  logic,
+    wen   : input  logic,
+    idx   : input  logic<2>,
+    base  : input  logic<3>,
+    mem_q : output logic<24>,
+    rd_q  : output logic<8>,
+    part_q: output logic<2>,
+) {
+    var mem : logic<8> [3];
+    var bits: logic<6>;
+    var rd  : logic<8>;
+    var rp  : logic<2>;
+
+    always_ff (clk) {
+        if load {
+            for i in 0..3 {
+                mem[i] = 8'h0;
+            }
+            bits = 6'b10_1010;
+            rd   = 8'h0;
+            rp   = 2'b0;
+        } else if wen {
+            mem[idx] = 8'hff;
+            rd       = mem[idx];
+            rp       = bits[base+:2];
+        }
+    }
+
+    assign mem_q  = {mem[2], mem[1], mem[0]};
+    assign rd_q   = rd;
+    assign part_q = rp;
+}
+"#)
+  (top Top)
+  (modify (set load 1) (set wen 0))
+  (tick clk)
+  (modify (set load 0) (set wen 1) (set base 0))
+  (for index (list 3 (fourstate 1 1) (fourstate 2 2))
+    (modify (set idx index))
+    (tick clk)
+    (assert_eq mem_q 0 "out-of-range or unknown index changed an element")
+    (assert_eq rd_q (fourstate 0xff 0xff) "out-of-range or unknown index read")
+    (modify (set load 1) (set wen 0))
+    (tick clk)
+    (modify (set load 0) (set wen 1)))
+  (modify (set idx 0))
+  ; Out-of-range bits read as X, in-range bits keep their value.
+  (for (b expected) (list (0 2) (4 2) (5 (fourstate 3 2)) (6 (fourstate 3 3)) (7 (fourstate 3 3)))
+    (modify (set base b))
+    (tick clk)
+    (assert_eq part_q expected "part select read")))
+
+; A combinational read through an invalid index returns X without reading
+; another variable, and a write through it is a no-op; a partly out-of-range
+; part select reads and writes only its in-range bits (IEEE 1800-2023 7.4.6,
+; 11.5.1).
+(case test_out_of_range_dynamic_comb_access
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    idx   : input  logic<2>,
+    base  : input  logic<3>,
+    v     : input  logic<8>,
+    rd_q  : output logic<8>,
+    mem_q : output logic<24>,
+    part_q: output logic<2>,
+    pw_q  : output logic<6>,
+) {
+    var src : logic<8> [3];
+    var next: logic<8>;
+    var dst : logic<8> [3];
+    var bits: logic<6>;
+    var pw  : logic<6>;
+
+    always_comb {
+        for i in 0..3 {
+            src[i] = 8'h11;
+        }
+        next = 8'hee;
+        bits = 6'b10_1010;
+    }
+
+    always_comb {
+        for i in 0..3 {
+            dst[i] = 8'h00;
+        }
+        dst[idx] = v;
+        pw = 6'h00;
+        pw[base+:2] = 2'b11;
+    }
+
+    assign rd_q   = src[idx];
+    assign mem_q  = {dst[2], dst[1], dst[0]};
+    assign part_q = bits[base+:2];
+    assign pw_q   = pw;
+}
+"#)
+  (top Top)
+  (modify (set v 0xab) (set base 0))
+  (for index (list 3 (fourstate 1 1) (fourstate 2 2))
+    (modify (set idx index))
+    (assert_eq rd_q (fourstate 0xff 0xff) "invalid index read")
+    (assert_eq mem_q 0 "invalid index write"))
+  (modify (set idx 1))
+  (assert_eq rd_q 0x11 "in-range read")
+  (assert_eq mem_q 0xab00 "in-range write")
+  (for (b expected) (list (0 2) (4 2) (5 (fourstate 3 2)) (6 (fourstate 3 3)) (7 (fourstate 3 3)))
+    (modify (set base b))
+    (assert_eq part_q expected "part select read")
+    (assert_eq pw_q (& (<< 3 b) 0x3f) "part select write")))
+

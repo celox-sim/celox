@@ -5,9 +5,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 [workspace]
 [dependencies]
-veryl-analyzer = "=0.22.0"
-veryl-parser = { version = "=0.22.0", default-features = false }
-veryl-metadata = { version = "=0.22.0", default-features = false, features = ["git-command"] }
+veryl-analyzer = "=0.21.0"
+veryl-parser = { version = "=0.21.0", default-features = false }
+veryl-metadata = { version = "=0.21.0", default-features = false, features = ["git-command"] }
 serde_json = "1"
 [patch.crates-io]
 veryl-metadata = { path = "../metadata-snapshot" }

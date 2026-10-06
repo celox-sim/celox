@@ -4097,6 +4097,7 @@ fn runtime_select_width(
 /// brings the selected bits back to bit 0 with `(value << down) >> up`.
 struct RuntimePosition {
     width: usize,
+    vector_width: usize,
     up: sv::ir::Expr,
     down: sv::ir::Expr,
 }
@@ -4177,6 +4178,7 @@ fn runtime_select_position(
     };
     Some(RuntimePosition {
         width,
+        vector_width: usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
         up: select(hangs_over.clone(), zero(), above),
         down: select(hangs_over, below, zero()),
     })
@@ -4184,7 +4186,8 @@ fn runtime_select_position(
 
 /// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
 /// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
-/// `lsb` index. Positions past the top of the vector read as zero.
+/// `lsb` index. Positions outside a four-state vector read as X (IEEE
+/// 1800-2023 11.5.1); a two-state vector, or simulation, reads zero.
 fn runtime_select_as_shift(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -4214,13 +4217,57 @@ fn runtime_select_as_shift(
     };
     // Bring the selection down to bit 0: right by `up`, or left by `down`
     // when it hangs over the bottom.
-    let moved = shift(
-        shift(expr.clone(), sv::ir::BinaryOp::Shl, position.down),
-        sv::ir::BinaryOp::Shr,
-        position.up,
+    let move_down = |value: sv::ir::Expr| sv::ir::Expr::Select {
+        expr: Box::new(shift(
+            shift(value, sv::ir::BinaryOp::Shl, position.down.clone()),
+            sv::ir::BinaryOp::Shr,
+            position.up.clone(),
+        )),
+        msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+        lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+        signed: false,
+    };
+    let moved = move_down(expr.clone());
+    // Shifting fills the missing bits with 0, which is what a two-state
+    // vector (or a parameter) reads.
+    let four_state = name_to_id
+        .get(name)
+        .and_then(|id| variables.get(id))
+        .is_some_and(|variable| variable.is_4state);
+    if !four_state {
+        return Some(sv::ir::Expr::Select {
+            expr: Box::new(moved),
+            msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+            lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+            signed,
+        });
+    }
+    // Moving an all-ones vector the same way marks the selected bits that
+    // exist; the others read X.
+    let literal = |digit: &str, width: usize| {
+        sv::ir::Expr::Literal(format!("{width}'b{}", digit.repeat(width)))
+    };
+    let in_vector = move_down(literal("1", position.vector_width));
+    let binary = |left, op, right| sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let outside = sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::BitNot,
+        expr: Box::new(in_vector.clone()),
+    };
+    let selected = binary(
+        binary(moved, sv::ir::BinaryOp::BitAnd, in_vector),
+        sv::ir::BinaryOp::BitOr,
+        binary(
+            literal("x", position.width),
+            sv::ir::BinaryOp::BitAnd,
+            outside,
+        ),
     );
     Some(sv::ir::Expr::Select {
-        expr: Box::new(moved),
+        expr: Box::new(selected),
         msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed,
@@ -4510,9 +4557,11 @@ fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
     } else {
         BigUint::default()
     };
+    // An invalid index reads X: both the value and the mask bit are set
+    // (IEEE 1800-2023 7.4.6).
     let unknown = arena
         .alloc(SLTNode::Constant(
-            BigUint::default(),
+            unknown_mask.clone(),
             unknown_mask,
             value_width,
             false,

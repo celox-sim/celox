@@ -6,8 +6,8 @@ use crate::context_width::{
 use crate::{
     HashMap, HashSet, ParserError,
     bitaccess::{
-        celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
-        get_access_width, is_static_access,
+        PartSelectGeometry, celox_value_from_comptime, celox_value_from_comptime_in_context,
+        eval_var_select, get_access_width, is_static_access,
     },
     function_call_arg, resolve_total_width,
 };
@@ -178,6 +178,438 @@ fn scale_offset<A>(value: RegisterId, scale: usize, builder: &mut SIRBuilder<A>)
         scale_reg,
     ));
     result
+}
+
+/// The runtime conditions under which a dynamic select addresses only bits
+/// of the selected variable.
+#[derive(Default)]
+pub(super) struct AccessGuard {
+    /// Every runtime index, except a part-select anchor, is in range.
+    indices: Option<RegisterId>,
+    /// A runtime part-select anchor, which may be partly in range.
+    part: Option<PartGuard>,
+    /// The raw bits of some index other than a part-select anchor can
+    /// address memory outside its dimension.
+    clamp: bool,
+}
+
+/// A part select whose runtime `lsb` selects `elements` consecutive
+/// `element_bits`-wide elements of a `dimension_width`-element dimension.
+struct PartGuard {
+    lsb: RegisterId,
+    signed: bool,
+    elements: usize,
+    dimension_width: usize,
+    element_bits: usize,
+}
+
+impl AccessGuard {
+    /// The condition that the whole access is in range, or `None` when no
+    /// runtime index can be out of range.
+    fn whole<A>(&self, builder: &mut SIRBuilder<A>) -> Option<RegisterId> {
+        let mut condition = self.indices;
+        if let Some(part) = &self.part {
+            and_index_guard(
+                &mut condition,
+                part.lsb,
+                part.signed,
+                Some(part.dimension_width + 1 - part.elements),
+                builder,
+            );
+        }
+        condition
+    }
+
+    /// The condition that element `element` of the part select is in range.
+    fn part_element<A>(
+        &self,
+        part: &PartGuard,
+        element: usize,
+        builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        let mut condition = self.indices;
+        // Rejects an unknown or negative anchor.
+        and_index_guard(&mut condition, part.lsb, part.signed, None, builder);
+        let position = builder.alloc_bit(64, false);
+        let element_reg = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Imm(
+            element_reg,
+            SIRValue::new(element as u64),
+        ));
+        builder.emit(SIRInstruction::Binary(
+            position,
+            part.lsb,
+            BinaryOp::Add,
+            element_reg,
+        ));
+        let bound = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Imm(
+            bound,
+            SIRValue::new(part.dimension_width as u64),
+        ));
+        let in_range = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            in_range,
+            position,
+            BinaryOp::LtU,
+            bound,
+        ));
+        and_condition(&mut condition, in_range, builder);
+        condition.expect("a part element is always guarded")
+    }
+}
+
+/// `offset` advanced by a constant number of logical bits.
+fn offset_plus_bits<A>(offset: &SIROffset, bits: usize, builder: &mut SIRBuilder<A>) -> SIROffset {
+    match offset {
+        SIROffset::Static(lsb) => SIROffset::Static(lsb + bits),
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => SIROffset::PackedElements {
+            bit_offset: bit_offset + bits,
+            element_width: *element_width,
+        },
+        SIROffset::Dynamic(register) => {
+            let mut sum = Some(*register);
+            add_offset_constant(&mut sum, bits as u64, builder);
+            SIROffset::Dynamic(sum.expect("offset register is present"))
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => SIROffset::Element {
+            index: *index,
+            element_width: *element_width,
+            bit_offset: bit_offset + bits,
+            dynamic_bit_offset: *dynamic_bit_offset,
+        },
+    }
+}
+
+/// `offset` with every runtime component replaced by 0 unless `condition`
+/// holds. The static components of a validated select address the variable.
+fn clamp_offset<A>(
+    builder: &mut SIRBuilder<A>,
+    offset: &SIROffset,
+    condition: RegisterId,
+) -> SIROffset {
+    let clamp = |builder: &mut SIRBuilder<A>, register: RegisterId| {
+        let width = builder.register(&register).width();
+        let zero = alloc_like(builder, register, width);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let clamped = alloc_like(builder, register, width);
+        builder.emit(SIRInstruction::Mux(clamped, condition, register, zero));
+        clamped
+    };
+    match offset {
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => offset.clone(),
+        SIROffset::Dynamic(register) => SIROffset::Dynamic(clamp(builder, *register)),
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => SIROffset::Element {
+            index: clamp(builder, *index),
+            element_width: *element_width,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: dynamic_bit_offset.map(|register| clamp(builder, register)),
+        },
+    }
+}
+
+fn alloc_like<A>(builder: &mut SIRBuilder<A>, register: RegisterId, width: usize) -> RegisterId {
+    match builder.register(&register).clone() {
+        RegisterType::Bit { signed, .. } => builder.alloc_bit(width, signed),
+        RegisterType::Logic { .. } => builder.alloc_logic(width),
+    }
+}
+
+/// Run `body` only when `condition` holds.
+fn emit_when<A>(
+    builder: &mut SIRBuilder<A>,
+    condition: RegisterId,
+    body: impl FnOnce(&mut SIRBuilder<A>),
+) {
+    let then_block = builder.new_block();
+    let merge_block = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: condition,
+        true_block: (then_block, vec![]),
+        false_block: (merge_block, vec![]),
+    });
+    builder.switch_to_block(then_block);
+    body(builder);
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+    builder.switch_to_block(merge_block);
+}
+
+/// The value of an invalid read into a register like `like`: X for a
+/// four-state register, 0 for a two-state one. A two-state simulation reads X
+/// as 0 (`celox_sir::two_state`).
+fn unknown_like<A>(builder: &mut SIRBuilder<A>, like: RegisterId, width: usize) -> RegisterId {
+    let register = alloc_like(builder, like, width);
+    let value = if matches!(builder.register(&register), RegisterType::Logic { .. }) {
+        // X sets both the value and the mask bit.
+        let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        SIRValue::new_four_state(mask.clone(), mask)
+    } else {
+        SIRValue::new(0u8)
+    };
+    builder.emit(SIRInstruction::Imm(register, value));
+    register
+}
+
+/// `Load` into a fresh register like `like`, or `default` when `condition`
+/// is false. The memory is not accessed when `condition` is false.
+fn emit_load_when<A>(
+    builder: &mut SIRBuilder<A>,
+    condition: RegisterId,
+    like: RegisterId,
+    address: &impl Fn() -> A,
+    offset: SIROffset,
+    width: usize,
+    default: RegisterId,
+) -> RegisterId {
+    let load_block = builder.new_block();
+    let result = alloc_like(builder, like, width);
+    let merge_block = builder.new_block_with(vec![result]);
+    builder.seal_block(SIRTerminator::Branch {
+        cond: condition,
+        true_block: (load_block, vec![]),
+        false_block: (merge_block, vec![default]),
+    });
+    builder.switch_to_block(load_block);
+    let loaded = alloc_like(builder, like, width);
+    builder.emit(SIRInstruction::Load(loaded, address(), offset, width));
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![loaded]));
+    builder.switch_to_block(merge_block);
+    result
+}
+
+/// Emit a store through a guarded dynamic select. A write through an
+/// out-of-range index is ignored, and only the in-range bits of a partly
+/// out-of-range part select are written (IEEE 1800-2023 7.4.6, 11.5.1).
+fn emit_guarded_store<A>(
+    builder: &mut SIRBuilder<A>,
+    guard: &AccessGuard,
+    address: impl Fn() -> A,
+    offset: SIROffset,
+    width: usize,
+    value: RegisterId,
+) {
+    let store = |builder: &mut SIRBuilder<A>, offset, width, value| {
+        builder.emit(SIRInstruction::Store(
+            address(),
+            offset,
+            width,
+            value,
+            Vec::new(),
+            Vec::new(),
+        ));
+    };
+    let Some(whole) = guard.whole(builder) else {
+        store(builder, offset, width, value);
+        return;
+    };
+    let Some(part) = &guard.part else {
+        emit_when(builder, whole, |builder| {
+            store(builder, offset, width, value)
+        });
+        return;
+    };
+    let store_block = builder.new_block();
+    let partial_block = builder.new_block();
+    let merge_block = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: whole,
+        true_block: (store_block, vec![]),
+        false_block: (partial_block, vec![]),
+    });
+    builder.switch_to_block(store_block);
+    store(builder, offset.clone(), width, value);
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+
+    builder.switch_to_block(partial_block);
+    for element in 0..part.elements {
+        let condition = guard.part_element(part, element, builder);
+        emit_when(builder, condition, |builder| {
+            let bits = element * part.element_bits;
+            let slice = alloc_like(builder, value, part.element_bits);
+            builder.emit(SIRInstruction::Slice(slice, value, bits, part.element_bits));
+            let offset = offset_plus_bits(&offset, bits, builder);
+            store(builder, offset, part.element_bits, slice);
+        });
+    }
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+    builder.switch_to_block(merge_block);
+}
+
+/// Emit a load through a guarded dynamic select into `dest`'s type. An
+/// out-of-range index reads X from a four-state register and 0 from a
+/// two-state one, per bit for a partly out-of-range part select
+/// (IEEE 1800-2023 7.4.6, 11.5.1). The memory is never read out of range.
+fn emit_guarded_load<A>(
+    builder: &mut SIRBuilder<A>,
+    guard: &AccessGuard,
+    dest: RegisterId,
+    address: impl Fn() -> A,
+    offset: SIROffset,
+    width: usize,
+) -> RegisterId {
+    let Some(whole) = guard.whole(builder) else {
+        builder.emit(SIRInstruction::Load(dest, address(), offset, width));
+        return dest;
+    };
+    let unknown = |builder: &mut SIRBuilder<A>, width: usize| unknown_like(builder, dest, width);
+    let Some(part) = &guard.part else {
+        // Branch-free: load through an address that is redirected to the
+        // first element when an index can leave the variable, then select X.
+        let offset = if guard.clamp {
+            clamp_offset(builder, &offset, whole)
+        } else {
+            offset
+        };
+        let loaded = alloc_like(builder, dest, width);
+        builder.emit(SIRInstruction::Load(loaded, address(), offset, width));
+        let default = unknown(builder, width);
+        let result = alloc_like(builder, dest, width);
+        builder.emit(SIRInstruction::Mux(result, whole, loaded, default));
+        return result;
+    };
+    let load_block = builder.new_block();
+    let partial_block = builder.new_block();
+    let result = alloc_like(builder, dest, width);
+    let merge_block = builder.new_block_with(vec![result]);
+    builder.seal_block(SIRTerminator::Branch {
+        cond: whole,
+        true_block: (load_block, vec![]),
+        false_block: (partial_block, vec![]),
+    });
+    builder.switch_to_block(load_block);
+    let loaded = alloc_like(builder, dest, width);
+    builder.emit(SIRInstruction::Load(
+        loaded,
+        address(),
+        offset.clone(),
+        width,
+    ));
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![loaded]));
+
+    builder.switch_to_block(partial_block);
+    let mut elements = Vec::with_capacity(part.elements);
+    for element in 0..part.elements {
+        let condition = guard.part_element(part, element, builder);
+        let default = unknown(builder, part.element_bits);
+        let offset = offset_plus_bits(&offset, element * part.element_bits, builder);
+        elements.push(emit_load_when(
+            builder,
+            condition,
+            dest,
+            &address,
+            offset,
+            part.element_bits,
+            default,
+        ));
+    }
+    // Concat lists the most significant element first.
+    elements.reverse();
+    let partial = alloc_like(builder, dest, width);
+    builder.emit(SIRInstruction::Concat(partial, elements));
+    builder.seal_block(SIRTerminator::Jump(merge_block, vec![partial]));
+    builder.switch_to_block(merge_block);
+    result
+}
+
+/// The raw bits of a `width`-bit index can address position `limit` or above.
+fn index_bits_exceed(width: usize, limit: usize) -> bool {
+    u32::try_from(width)
+        .ok()
+        .and_then(|bits| 1u64.checked_shl(bits))
+        .is_none_or(|values| values > limit as u64)
+}
+
+fn and_condition<A>(
+    condition: &mut Option<RegisterId>,
+    term: RegisterId,
+    builder: &mut SIRBuilder<A>,
+) {
+    *condition = Some(match *condition {
+        Some(previous) => {
+            let next = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(
+                next,
+                previous,
+                BinaryOp::LogicAnd,
+                term,
+            ));
+            next
+        }
+        None => term,
+    });
+}
+
+/// AND into `guard` the condition that the runtime `index` addresses one of
+/// `limit` positions, or is merely known and non-negative when `limit` is
+/// `None`. An index with X/Z bits or a negative value is out of range
+/// (IEEE 1800-2023 7.4.6).
+fn and_index_guard<A>(
+    guard: &mut Option<RegisterId>,
+    index: RegisterId,
+    signed: bool,
+    limit: Option<usize>,
+    builder: &mut SIRBuilder<A>,
+) {
+    let register = builder.register(&index).clone();
+    let width = register.width();
+    let is_logic = matches!(register, RegisterType::Logic { .. });
+    // Values the index can take once a negative value has been rejected.
+    let magnitude_bits = if signed {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
+    let bound = limit.filter(|&limit| {
+        u32::try_from(magnitude_bits)
+            .ok()
+            .and_then(|bits| 1u64.checked_shl(bits))
+            .is_none_or(|values| values > limit as u64)
+    });
+    if is_logic {
+        let two_state = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, index));
+        let known = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            known,
+            index,
+            BinaryOp::EqCase,
+            two_state,
+        ));
+        and_condition(guard, known, builder);
+    }
+    if signed && width > 0 {
+        let sign = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Slice(sign, index, width - 1, 1));
+        let non_negative = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Unary(non_negative, UnaryOp::LogicNot, sign));
+        and_condition(guard, non_negative, builder);
+    }
+    if let Some(limit) = bound {
+        // A needed bound is less than 2^width, so it fits the index width.
+        let bound = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Imm(bound, SIRValue::new(limit as u64)));
+        let in_range = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            in_range,
+            index,
+            BinaryOp::LtU,
+            bound,
+        ));
+        and_condition(guard, in_range, builder);
+    }
 }
 
 impl<'a> FfParser<'a> {
@@ -2336,8 +2768,17 @@ impl<'a> FfParser<'a> {
         } else {
             ir_builder.alloc_logic(width)
         };
-        let mut offset =
-            self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
+        let mut guard = AccessGuard::default();
+        let mut offset = self.emit_guarded_offset_calc(
+            var_id,
+            index,
+            select,
+            domain,
+            convert,
+            sources,
+            Some(&mut guard),
+            ir_builder,
+        )?;
         if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
             let element_count = formal
                 .r#type
@@ -2354,12 +2795,14 @@ impl<'a> FfParser<'a> {
                 element_width: width / element_count,
             };
         }
-        ir_builder.emit(SIRInstruction::Load(
+        let dest = emit_guarded_load(
+            ir_builder,
+            &guard,
             dest,
-            convert(backing_var_id, WORKING_REGION),
+            || convert(backing_var_id, WORKING_REGION),
             offset,
             width,
-        ));
+        );
         self.stack.push_back(dest);
         Ok(())
     }
@@ -2374,7 +2817,13 @@ impl<'a> FfParser<'a> {
         self.eval_type_select(formal_type, index, select)
     }
 
-    pub(super) fn emit_offset_calc<A>(
+    /// Compute the offset of a select, and record in `guard` when every
+    /// runtime index addresses an existing element or bit.
+    ///
+    /// The offset alone does not bound the access: an out-of-range index
+    /// would address a neighbouring element, or memory outside the variable.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_guarded_offset_calc<A>(
         &mut self,
         var_id: VarId,
         index: &VarIndex,
@@ -2382,7 +2831,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-
+        mut guard: Option<&mut AccessGuard>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
         // Keep unpacked-array indexing separate from packed bit selection.
@@ -2419,15 +2868,30 @@ impl<'a> FfParser<'a> {
                     static_bit_offset += c * scale as u64;
                 }
             } else {
-                let term_reg = self.emit_arith_term(
+                let index_reg = self.emit_index_term(
                     expr,
                     &mut dummy_targets,
-                    scale,
                     domain,
                     convert,
                     sources,
                     ir_builder,
                 )?;
+                if let Some(guard) = guard.as_deref_mut() {
+                    let outer = if i == 0 { total_width } else { strides[i - 1] };
+                    let limit = outer / stride.max(1);
+                    // A negative index is sign-extended when it is scaled, so
+                    // its raw bits do not bound the address.
+                    guard.clamp |= expr.comptime().r#type.signed
+                        || index_bits_exceed(ir_builder.register(&index_reg).width(), limit);
+                    and_index_guard(
+                        &mut guard.indices,
+                        index_reg,
+                        expr.comptime().r#type.signed,
+                        Some(limit),
+                        ir_builder,
+                    );
+                }
+                let term_reg = scale_offset(index_reg, scale, ir_builder);
                 if is_unpacked {
                     add_offset_term(&mut dynamic_element_index, term_reg, ir_builder);
                 } else {
@@ -2472,15 +2936,97 @@ impl<'a> FfParser<'a> {
                     static_bit_offset += c * scale as u64;
                 }
             } else {
-                let term_reg = self.emit_arith_term(
-                    &selected_expr,
-                    &mut dummy_targets,
-                    scale,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                )?;
+                let part_elements = if i == select_len - 1 {
+                    match geometry.part {
+                        Some(
+                            PartSelectGeometry::PlusColon { elements }
+                            | PartSelectGeometry::MinusColon { elements }
+                            | PartSelectGeometry::Step { elements },
+                        ) => Some(elements),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let index_reg = match (guard.as_deref_mut(), &select.1, part_elements) {
+                    (Some(guard), Some((VarSelectOp::MinusColon, _)), Some(elements))
+                        if i == select_len - 1 =>
+                    {
+                        // `anchor - (elements - 1)` is negative for a part
+                        // select that starts below bit 0. Form it with 64-bit
+                        // wrapping arithmetic so the low elements compare as
+                        // out of range and the higher ones as in range.
+                        let anchor = self.emit_index_term(
+                            expr,
+                            &mut dummy_targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                        and_index_guard(
+                            &mut guard.indices,
+                            anchor,
+                            expr.comptime().r#type.signed,
+                            None,
+                            ir_builder,
+                        );
+                        let span = ir_builder.alloc_bit(64, false);
+                        ir_builder.emit(SIRInstruction::Imm(
+                            span,
+                            SIRValue::new(elements as u64 - 1),
+                        ));
+                        let lsb = ir_builder.alloc_bit(64, false);
+                        ir_builder.emit(SIRInstruction::Binary(lsb, anchor, BinaryOp::Sub, span));
+                        lsb
+                    }
+                    _ => self.emit_index_term(
+                        &selected_expr,
+                        &mut dummy_targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?,
+                };
+                if let Some(guard) = guard.as_deref_mut() {
+                    let outer = if dimension == 0 {
+                        total_width
+                    } else {
+                        strides[dimension - 1]
+                    };
+                    let dimension_width = outer / stride.max(1);
+                    // The `-:` lower bound above is unsigned; its anchor
+                    // has already been checked.
+                    let signed = selected_expr.comptime().r#type.signed
+                        && !matches!(select.1, Some((VarSelectOp::MinusColon, _)));
+                    match part_elements {
+                        Some(elements) if elements > 1 => {
+                            guard.part = Some(PartGuard {
+                                lsb: index_reg,
+                                signed,
+                                elements,
+                                dimension_width,
+                                element_bits: scale,
+                            });
+                        }
+                        _ => {
+                            guard.clamp |= signed
+                                || index_bits_exceed(
+                                    ir_builder.register(&index_reg).width(),
+                                    dimension_width,
+                                );
+                            and_index_guard(
+                                &mut guard.indices,
+                                index_reg,
+                                signed,
+                                Some(dimension_width),
+                                ir_builder,
+                            )
+                        }
+                    }
+                }
+                let term_reg = scale_offset(index_reg, scale, ir_builder);
                 if is_unpacked {
                     add_offset_term(&mut dynamic_element_index, term_reg, ir_builder);
                 } else {
@@ -2563,31 +3109,18 @@ impl<'a> FfParser<'a> {
         })
     }
 
-    /// Helper: returns (expr * stride)
-    pub(super) fn emit_arith_term<A>(
+    /// Helper: evaluates a runtime index expression.
+    pub(super) fn emit_index_term<A>(
         &mut self,
         expr: &Expression,
         targets: &mut Vec<VarAtomBase<A>>,
-        stride: usize,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
         self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
-        let idx_reg = self.stack.pop_back().unwrap();
-
-        // Optimization possible by skipping multiplication if stride == 1
-        if stride == 1 {
-            Ok(idx_reg)
-        } else {
-            let s_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(SIRInstruction::Imm(s_reg, SIRValue::new(stride as u64)));
-
-            let m_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(SIRInstruction::Binary(m_reg, idx_reg, BinaryOp::Mul, s_reg));
-            Ok(m_reg)
-        }
+        Ok(self.stack.pop_back().unwrap())
     }
 
     /// Select `index`/`select` of `var_id` from a register holding the
@@ -2608,41 +3141,61 @@ impl<'a> FfParser<'a> {
             return Ok(value);
         }
         let width = get_access_width(self.module, var_id, index, select)?;
-        Ok(
-            match self
-                .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
-            {
-                SIROffset::Static(lsb)
-                | SIROffset::PackedElements {
-                    bit_offset: lsb, ..
-                } => self.emit_register_slice(
+        let mut guard = AccessGuard::default();
+        let offset = self.emit_guarded_offset_calc(
+            var_id,
+            index,
+            select,
+            domain,
+            convert,
+            sources,
+            Some(&mut guard),
+            ir_builder,
+        )?;
+        let selected = match offset {
+            SIROffset::Static(lsb)
+            | SIROffset::PackedElements {
+                bit_offset: lsb, ..
+            } => self.emit_register_slice(value, BitAccess::new(lsb, lsb + width - 1), ir_builder),
+            SIROffset::Dynamic(offset) => {
+                self.emit_register_dynamic_slice(value, offset, width, ir_builder)
+            }
+            SIROffset::Element {
+                index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset,
+            } => {
+                let mut logical = Some(scale_offset(index, element_width, ir_builder));
+                add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
+                if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                    add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
+                }
+                self.emit_register_dynamic_slice(
                     value,
-                    BitAccess::new(lsb, lsb + width - 1),
+                    logical.expect("scaled element index is present"),
+                    width,
                     ir_builder,
-                ),
-                SIROffset::Dynamic(offset) => {
-                    self.emit_register_dynamic_slice(value, offset, width, ir_builder)
-                }
-                SIROffset::Element {
-                    index,
-                    element_width,
-                    bit_offset,
-                    dynamic_bit_offset,
-                } => {
-                    let mut logical = Some(scale_offset(index, element_width, ir_builder));
-                    add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
-                    if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                        add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
-                    }
-                    self.emit_register_dynamic_slice(
-                        value,
-                        logical.expect("scaled element index is present"),
-                        width,
-                        ir_builder,
-                    )
-                }
-            },
-        )
+                )
+            }
+        };
+        // Slicing a register never leaves it, but an invalid index reads X
+        // (or 0), not a neighbouring element (IEEE 1800-2023 7.4.6). Bits of
+        // a part select past the register read 0.
+        let condition = if guard.part.is_some() {
+            guard.indices
+        } else {
+            guard.whole(ir_builder)
+        };
+        Ok(match condition {
+            Some(condition) => {
+                let unknown = unknown_like(ir_builder, selected, width);
+                let guarded = alloc_like(ir_builder, selected, width);
+                ir_builder.emit(SIRInstruction::Mux(guarded, condition, selected, unknown));
+                guarded
+            }
+            None => selected,
+        })
     }
 
     pub(super) fn op_load<A>(
@@ -2678,8 +3231,17 @@ impl<'a> FfParser<'a> {
             ir_builder.alloc_logic(width)
         };
 
-        let mut offset =
-            self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
+        let mut guard = AccessGuard::default();
+        let mut offset = self.emit_guarded_offset_calc(
+            var_id,
+            index,
+            select,
+            domain,
+            convert,
+            sources,
+            Some(&mut guard),
+            ir_builder,
+        )?;
         if !source_type.array.is_empty()
             && index.0.is_empty()
             && select.0.is_empty()
@@ -2708,12 +3270,14 @@ impl<'a> FfParser<'a> {
         } else {
             STABLE_REGION
         };
-        ir_builder.emit(SIRInstruction::Load(
+        let dest_reg = emit_guarded_load(
+            ir_builder,
+            &guard,
             dest_reg,
-            convert(var_id, load_region),
+            || convert(var_id, load_region),
             offset,
             width,
-        ));
+        );
 
         self.stack.push_back(dest_reg);
 
@@ -2776,13 +3340,15 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
 
-        let mut offset = self.emit_offset_calc(
+        let mut guard = AccessGuard::default();
+        let mut offset = self.emit_guarded_offset_calc(
             dst.id,
             &dst.index,
             &dst.select,
             domain,
             convert,
             sources,
+            Some(&mut guard),
             ir_builder,
         )?;
         if !target_type.array.is_empty()
@@ -2812,14 +3378,14 @@ impl<'a> FfParser<'a> {
         if self.inline_function_locals.contains(&dst.id) {
             // Inline function storage is blocking and call-private, so it
             // bypasses the FF target, seed, and commit bookkeeping.
-            ir_builder.emit(SIRInstruction::Store(
-                convert(dst.id, WORKING_REGION),
+            emit_guarded_store(
+                ir_builder,
+                &guard,
+                || convert(dst.id, WORKING_REGION),
                 offset,
                 target_width,
                 src_reg,
-                Vec::new(),
-                Vec::new(),
-            ));
+            );
             return Ok(());
         }
         let store_region = if matches!(domain, Domain::Ff)
@@ -2846,14 +3412,14 @@ impl<'a> FfParser<'a> {
             } else {
                 store_region
             };
-        ir_builder.emit(SIRInstruction::Store(
-            convert(dst.id, store_region),
+        emit_guarded_store(
+            ir_builder,
+            &guard,
+            || convert(dst.id, store_region),
             offset,
             target_width,
             src_reg,
-            Vec::new(),
-            Vec::new(),
-        ));
+        );
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
         if is_static {
@@ -3492,40 +4058,10 @@ impl<'a> FfParser<'a> {
                         return Ok(());
                     }
 
-                    let width = get_access_width(self.module, *var_id, var_index, var_select)?;
-                    let selected = match self.emit_offset_calc(
-                        *var_id, var_index, var_select, domain, convert, sources, ir_builder,
-                    )? {
-                        SIROffset::Static(lsb)
-                        | SIROffset::PackedElements {
-                            bit_offset: lsb, ..
-                        } => self.emit_register_slice(
-                            bound_reg,
-                            BitAccess::new(lsb, lsb + width - 1),
-                            ir_builder,
-                        ),
-                        SIROffset::Dynamic(offset) => {
-                            self.emit_register_dynamic_slice(bound_reg, offset, width, ir_builder)
-                        }
-                        SIROffset::Element {
-                            index,
-                            element_width,
-                            bit_offset,
-                            dynamic_bit_offset,
-                        } => {
-                            let mut logical = Some(scale_offset(index, element_width, ir_builder));
-                            add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
-                            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                                add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
-                            }
-                            self.emit_register_dynamic_slice(
-                                bound_reg,
-                                logical.expect("scaled element index is present"),
-                                width,
-                                ir_builder,
-                            )
-                        }
-                    };
+                    let selected = self.emit_register_select(
+                        bound_reg, *var_id, var_index, var_select, domain, convert, sources,
+                        ir_builder,
+                    )?;
                     self.stack.push_back(selected);
                     if let Some(context) = context {
                         let adjusted = self.cast_reg_width_ext(

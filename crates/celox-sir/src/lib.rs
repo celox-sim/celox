@@ -13,6 +13,7 @@ pub mod builder;
 pub mod cfg;
 mod serde_helpers;
 pub mod transform;
+pub mod two_state;
 pub mod verify;
 
 pub use builder::SIRBuilder;
