@@ -335,12 +335,23 @@ report to the selected cases; omit them when refreshing a complete report.
 Use a separate report for a filtered run to preserve an existing full baseline.
 Omit `--incremental` to force a fresh run. Daily CI does so intentionally.
 
-Normal verification excludes the reviewed limitations. The newly reconstructed
-upstream cases retain three Icarus compilation failures (`inside` expressions and
-unpacked array parameters), so a full Icarus run currently exits nonzero.
-See [the upstream case notes](UPSTREAM_CASES.md) for details. New failures still
+Normal verification excludes the reviewed limitations. The retained Veryl
+reports contain eleven Icarus compilation failures and one Verilator compilation
+failure, including upstream `inside` expressions and unpacked array parameters.
+Fresh runs still exit nonzero when these failures persist.
+See [the verification results](verification/README.md) and
+[upstream case notes](UPSTREAM_CASES.md) for details. New failures still
 produce a nonzero exit. Run the two
 commands independently so a failure in one does not prevent the other running.
+
+Daily CI still executes these cases. Its report gate compares failures against
+the checked-in reports: only an identical retained failure (case, expectation,
+status, phase, diagnostic and tool version) is accepted.
+Diagnostic comparison ignores outer line whitespace and line endings to allow
+checkout-dependent alignment; wording and source locations must match.
+The raw runner exit status and complete fresh catalogue are checked as well.
+New/changed failures remain blocking, and accepted failures remain visible in the report rather
+than becoming passes or additional exclusions.
 
 Both require a C++ compiler and GNU `timeout` on `PATH`. Verilator additionally
 needs GNU make; Icarus needs `iverilog`, `iverilog-vpi`, and `vvp`. The Nix dev

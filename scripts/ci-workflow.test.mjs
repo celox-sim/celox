@@ -125,6 +125,23 @@ test("scheduled and manual validation run all paths and external suites", () => 
     /--report "\$RUNNER_TEMP\/external-suite\/report\.json"/,
   );
   assert.match(external, /if: always\(\)/);
+  assert.match(
+    external,
+    /--bin "\$VERIFY_BIN" -- --list > "\$RUNNER_TEMP\/external-suite\/catalogue\.json"/,
+  );
+  assert.match(
+    external,
+    /if nix develop[\s\S]*task_verify_status=0[\s\S]*task_verify_status=\$\?/,
+  );
+  assert.match(
+    external,
+    /VERIFY_EXIT_STATUS: \$\{\{ steps\.verify\.outputs\.exit_status \}\}/,
+  );
+  assert.match(external, /node scripts\/check-external-suite-report\.mjs/);
+  assert.match(
+    external,
+    /"\$RUNNER_TEMP\/external-suite\/catalogue\.json" "\$VERIFY_EXIT_STATUS" "\$VERIFY_SUITE"/,
+  );
   assert.doesNotMatch(
     external,
     /continue-on-error|--filter|--exclude-stronger-than-sv/,

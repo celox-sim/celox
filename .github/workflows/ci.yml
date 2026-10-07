@@ -227,7 +227,9 @@ jobs:
         tool: [verilator, icarus]
     env:
       VERIFY_TOOL: ${{ matrix.tool }}
+      VERIFY_SUITE: ${{ matrix.suite }}
       VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
+      VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -244,14 +246,41 @@ jobs:
           cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
           --test oracles -- --ignored
 
-      - name: Verify every shared case against the external simulator
+      - name: Catalogue every shared case
         if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/external-suite"
+          nix develop --no-update-lock-file --command \
+            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
+            --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
+
+      - name: Verify every shared case against the external simulator
+        id: verify
+        if: ${{ !cancelled() }}
+        run: |
+          # The runner returns 1 for retained failures as well as regressions.
+          # The next step checks the complete fresh report and the exit status.
+          rm -f "$RUNNER_TEMP/external-suite/report.json"
+          if nix develop --no-update-lock-file --command \
+            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
+            --bin "$VERIFY_BIN" -- --jobs 2 \
+            --output "$RUNNER_TEMP/external-suite/logs" \
+            --report "$RUNNER_TEMP/external-suite/report.json"; then
+            task_verify_status=0
+          else
+            task_verify_status=$?
+          fi
+          echo "exit_status=$task_verify_status" >> "$GITHUB_OUTPUT"
+
+      - name: Reject new or changed external verification failures
+        if: ${{ !cancelled() }}
+        env:
+          VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
         run: >-
           nix develop --no-update-lock-file --command
-          cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL"
-          --bin "$VERIFY_BIN" -- --jobs 2
-          --output "$RUNNER_TEMP/external-suite/logs"
-          --report "$RUNNER_TEMP/external-suite/report.json"
+          node scripts/check-external-suite-report.mjs
+          "$RUNNER_TEMP/external-suite/report.json" "$VERIFY_BASELINE"
+          "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
 
       - name: Retain results and failure diagnostics
         if: always()
@@ -260,6 +289,7 @@ jobs:
           name: external-suite-${{ matrix.suite }}-${{ matrix.tool }}
           # Keep evidence rather than hundreds of generated simulator binaries.
           path: |
+            ${{ runner.temp }}/external-suite/catalogue.json
             ${{ runner.temp }}/external-suite/report.json
             ${{ runner.temp }}/external-suite/logs/**/*.json
             ${{ runner.temp }}/external-suite/logs/**/*.log

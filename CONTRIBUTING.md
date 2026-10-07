@@ -91,7 +91,17 @@ uses the finer behavior-based matrix above.
 
 Full runs have a separate concurrency group so ordinary pushes cannot cancel
 them. They report failures normally; they are not advisory jobs with
-`continue-on-error`. Scheduled workflows begin using this configuration after
+`continue-on-error`. The external comparison gate accepts an existing retained
+failure only when its case ID, expectation, status, phase, retained diagnostic,
+and tool version match the checked-in baseline. These cases still run every
+day and remain failures in the report. New or changed failures, abnormal runner
+exits, cached results, inconsistent counts, and missing catalogue cases fail
+the gate. Diagnostic comparison ignores only outer line whitespace and line
+endings, including checkout-dependent Verilator padding; wording and source
+locations must match. Improvements may pass without updating the baseline.
+Baseline changes require review rather than automatic acceptance of a new run.
+
+Scheduled workflows begin using this configuration after
 it reaches the default branch; the develop dispatch also requires the updated
 `ci.yml` on `develop`.
 
