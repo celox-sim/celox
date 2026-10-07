@@ -799,6 +799,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "serde_json",
+ "sha2 0.11.0",
  "veryl-analyzer",
  "veryl-emitter",
  "veryl-metadata",

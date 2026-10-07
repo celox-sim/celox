@@ -1,0 +1,105 @@
+# Development validation
+
+Use the locked environment described in [docs/development.md](docs/development.md).
+Cargo builds use the workspace's default `target/`, managed by mbx. Do not set an
+ad-hoc `CARGO_TARGET_DIR` or `--target-dir`.
+
+## Select checks from the change
+
+Before running checks, identify the behavior that changed and the code that
+consumes it. Run the affected regression first, then the applicable checks below.
+For mixed changes, take the union of the required checks. A time limit alone is
+not evidence that validation is complete.
+
+| Change | Required local validation |
+| --- | --- |
+| Documentation | Check changed links and examples; build the affected documentation when its rendering, configuration, or generated API content changes. Compile documentation included in Rust sources and run affected doctests. |
+| Repository scripts or CI | Run the relevant script tests; inspect job conditions, artifact dependencies, and required-check failure handling. Validate changed workflow syntax. |
+| Rust implementation | Check formatting and lint the affected crates. Run affected unit and regression tests, plus integration tests in consumers of the changed behavior. |
+| One backend | Run its unit tests and the common language suite through that backend; include relevant width, four-state, and parallel variants. Run other backends when shared code or contracts also change. |
+| Shared frontend, IR, optimizer, layout, or runtime | Run affected unit tests and common behavioral regressions through every affected backend. Broaden to the full common suite when the impact spans language groups or cannot be bounded. Include NAPI/JS integration when the public simulator behavior changes. |
+| Shared language cases | Run the added or changed cases through Celox's backend harness and the available external simulator adapters. Retain existing backend exclusions and unchanged expected behavior. A case-only change does not require rebuilding NAPI. |
+| JS or NAPI | Run affected package tests, lint, and type checks; build NAPI and run boundary integration tests when the change uses it. Include WASI/browser or other host targets when the changed behavior affects them. |
+| lydite | Run affected Rust tests and the applicable proof/conformance gates from `lydite/`; include Celox replay when the bridge or shared design contract changes. Solver tests require `Z3_BIN`. |
+| Dependencies, manifests, toolchain, or an uncertain impact | Use the broader workspace and integration checks. Verify relevant feature and target configurations rather than assuming host tests cover them. |
+
+Tests of portable language behavior belong in `crates/celox-test-suite`; tests of
+Celox APIs, diagnostics, optimization settings, or code generation belong in
+their owning crate. Preserve a regression's purpose when consolidating tests.
+
+For example, to check a changed shared counter case locally:
+
+```sh
+cargo fmt --all -- --check
+cargo test --locked -p celox --features systemverilog --test counter
+cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- --filter counter::
+cargo run --locked -p celox-test-suite --features icarus --bin verify-icarus -- --filter counter::
+```
+
+Use the actual affected case or group as the filter. For SystemVerilog cases,
+use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
+empty selections, compilation failures, and simulator errors are not passes.
+
+For repeated external verification, use `--incremental --report <report.json>`
+to refresh the full selection while running only new/changed cases and prior
+failures. The report records reused evidence separately. Keep filters out of a
+full-report refresh; filtered runs still produce partial reports. See the
+[runner documentation](crates/celox-test-suite/README.md#independent-verification).
+Daily CI omits `--incremental` and runs the complete corpus afresh.
+
+## Finish validation
+
+Validation is complete when the selected required checks pass and relevant
+failures are resolved. Record the commands, their scope, and any required checks
+that could not run in the handoff or PR. If a check fails, investigate it and fix
+failures caused by the change. Report unrelated failures explicitly.
+
+Reuse successful results for unchanged source, dependencies, configuration, and
+tools. Further edits invalidate checks whose inputs or behavior they affect.
+Repeat or broaden checks when those edits, failures, or concrete unresolved
+concerns justify it; otherwise finish the task. The pre-push hook remains a
+minimum safety net, not the definition of validation completeness.
+
+## CI coverage and cadence
+
+Pull requests and pushes use `scripts/ci-changes.mjs` to select jobs:
+
+- Rust tests, benches, the common test suite, benchmark crates, VPI, the separate
+  wasm binding crate, and lydite retain Rust checks without triggering NAPI and
+  JavaScript builds. Crate exclusions are checked against NAPI's transitive
+  runtime/build dependencies, including optional and target-specific edges.
+- Runtime source changes keep binding and JS coverage. Changes under `src/`,
+  including unit tests mixed with implementation, remain conservative.
+- Cargo manifests and lockfiles retain broad coverage. Mixed changes combine
+  their requirements; unknown paths and failed change detection run all jobs.
+- Rust-only changes still pass through the existing `Rust Test & NAPI Build`
+  required check. Only explicitly unneeded producers may be skipped; failures
+  and cancellations fail the check.
+
+The classifier selects CI jobs, not individual Rust tests. Selected Rust CI
+still runs the full workspace suite with CI features, doctests, default-feature
+checks, ARM64 backend checks, and the explicit cocotb test. Local validation
+uses the finer behavior-based matrix above.
+
+| Cadence | Coverage |
+| --- | --- |
+| Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary workspace tests. |
+| Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Existing nightly package and Heliodor coverage continues. |
+| Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
+| Weekly and on relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. Existing Heliodor scheduled runs cover the longer simulator workloads daily. |
+| On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
+
+Full runs have a separate concurrency group so ordinary pushes cannot cancel
+them. They report failures normally; they are not advisory jobs with
+`continue-on-error`. Scheduled workflows begin using this configuration after
+it reaches the default branch; the develop dispatch also requires the updated
+`ci.yml` on `develop`.
+
+Known unsupported backend cases and reviewed external-tool discrepancies remain
+excluded, with their original assertions and reasons. The external reports
+identify excluded cases rather than counting them as passes; see the suite's
+[verification evidence](crates/celox-test-suite/verification/README.md) and
+[tool limitations](crates/celox-test-suite/LIMITATIONS.md). Expected-to-fail
+regressions and manual scaling measurements are not made passing by blindly
+running every `#[ignore]` test. New exclusions need a concrete reason and
+evidence; an unexpected failure must not become a skip.
