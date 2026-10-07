@@ -460,6 +460,77 @@ module test_o2_dse_preserves_signals_read_by_native_testbench {
 }
 
 #[test]
+fn test_dse_keeps_stores_read_through_identity_aliases() {
+    // Each child reads its enable port only combinationally, so the port
+    // shares the parent's wire as an identity alias and the parent never
+    // loads that wire itself. Lane partitioning puts the parent's store and
+    // the child's load into different units: dead-store elimination must
+    // count the load of the alias as a read of the shared home.
+    let code = r#"
+module Counter (
+    clk: input clock,
+    i_en: input logic,
+    i_mask: input logic,
+    o_count: output logic<8>,
+) {
+    var count: logic<8>;
+    let advance: logic = i_en & i_mask;
+    always_ff {
+        if advance {
+            count = count + 8'd1;
+        }
+    }
+    assign o_count = count;
+}
+
+module Top (
+    clk: input clock,
+    a: input logic<4>,
+    b: input logic<4>,
+    mask: input logic,
+    c0: output logic<8>,
+    c1: output logic<8>,
+    c2: output logic<8>,
+    c3: output logic<8>,
+) {
+    let en0: logic = a[0] ^ b[0];
+    let en1: logic = a[1] ^ b[1];
+    let en2: logic = a[2] ^ b[2];
+    let en3: logic = a[3] ^ b[3];
+    inst u0: Counter (clk, i_en: en0, i_mask: mask, o_count: c0);
+    inst u1: Counter (clk, i_en: en1, i_mask: mask, o_count: c1);
+    inst u2: Counter (clk, i_en: en2, i_mask: mask, o_count: c2);
+    inst u3: Counter (clk, i_en: en3, i_mask: mask, o_count: c3);
+}
+"#;
+    for threads in [1, 4] {
+        let mut sim = Simulator::builder(code, "Top")
+            .opt_level(OptLevel::O2)
+            .threads(threads)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build()
+            .unwrap();
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let mask = sim.signal("mask");
+        let counts = ["c0", "c1", "c2", "c3"].map(|name| sim.signal(name));
+
+        sim.modify(|io| {
+            io.set(a, 0b1111u8);
+            io.set(b, 0b0101u8);
+            io.set(mask, 1u8);
+        })
+        .unwrap();
+        for _ in 0..3 {
+            sim.tick(clk).unwrap();
+        }
+        let observed = counts.map(|count| sim.get_as::<u8>(count));
+        assert_eq!(observed, [0, 3, 0, 3], "threads={threads}");
+    }
+}
+
+#[test]
 fn test_dse_preserve_all_ports() {
     // With PreserveAllPorts, both top-level AND sub-instance ports survive DSE.
     let mut sim = Simulator::builder(DSE_HIERARCHY_SOURCE, "Top")
