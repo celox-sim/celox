@@ -322,8 +322,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(expr, None, &mut arena)?;
         let truth = slt_truth(&mut arena, node)?;
-        let constant = slt_bool(&arena, truth);
+        let constant = slt_bool(&arena, &mut ConstCache::default(), truth);
         Ok((self.lower_slt(&arena, truth)?, constant))
+    }
+
+    /// Whether an expression is not logically false, as a one-bit register.
+    fn eval_not_false(&mut self, expr: &sv::ir::Expr) -> Result<RegisterId, sv::AnalyzerError> {
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(expr, None, &mut arena)?;
+        let not_false = slt_not_false(&mut arena, node)?;
+        self.lower_slt(&arena, not_false)
     }
 
     /// The constant value of an expression, if it has one.
@@ -348,7 +356,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         ) else {
             return Ok(None);
         };
-        Ok(slt_const(&arena, node))
+        Ok(slt_const(&arena, &mut ConstCache::default(), node))
     }
 
     fn expr_signed(&self, expr: &sv::ir::Expr) -> bool {
@@ -412,16 +420,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                     && self.m.calls(right) =>
             {
                 let left = self.hoist(left)?;
-                let (truth, _) = self.eval_truth(&left)?;
+                // The right operand is skipped only when the left one is
+                // known false (`&&`) or known true (`||`) (IEEE 1800-2023
+                // 11.4.7), so an unknown left operand evaluates it.
                 let taken = self.b.new_block();
                 let join = self.b.new_block();
-                let (true_block, false_block) = if *op == sv::ir::BinaryOp::LogicAnd {
-                    (taken, join)
+                let (cond, true_block, false_block) = if *op == sv::ir::BinaryOp::LogicAnd {
+                    (self.eval_not_false(&left)?, taken, join)
                 } else {
-                    (join, taken)
+                    (self.eval_truth(&left)?.0, join, taken)
                 };
                 self.b.seal_block(SIRTerminator::Branch {
-                    cond: truth,
+                    cond,
                     true_block: (true_block, Vec::new()),
                     false_block: (false_block, Vec::new()),
                 });
@@ -870,7 +880,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                                 .map_err(slt_error)?;
                             known = Some(match known {
                                 None => same,
-                                Some(other) => slt_and(arena, other, same)?,
+                                Some(other) => {
+                                    slt_and(arena, &mut ConstCache::default(), other, same)?
+                                }
                             });
                         }
                         if let Some(known) = known {
