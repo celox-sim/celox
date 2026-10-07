@@ -1696,7 +1696,8 @@ fn relocate_units(
     let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
-    let mut extern_functions = Vec::new();
+    let mut extern_functions = Vec::<ExternFunction>::new();
+    let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
 
@@ -1801,10 +1802,7 @@ fn relocate_units(
         // every import of one name must declare the same prototype.
         let mut extern_function_map = HashMap::default();
         for (local, function) in sim_module.extern_functions.iter().enumerate() {
-            let global = match extern_functions
-                .iter()
-                .position(|existing: &ExternFunction| existing.name == function.name)
-            {
+            let global = match extern_function_indices.get(&function.name).copied() {
                 Some(global) if extern_functions[global] != *function => {
                     return Err(ParserError::ExternSignatureMismatch {
                         name: function.name.clone(),
@@ -1814,6 +1812,7 @@ fn relocate_units(
                 }
                 Some(global) => global,
                 None => {
+                    extern_function_indices.insert(function.name.clone(), extern_functions.len());
                     extern_functions.push(function.clone());
                     extern_functions.len() - 1
                 }

@@ -2154,6 +2154,12 @@ mod host {
                 }
             }
 
+            // Link DPI-C imports before code generation, so a missing C
+            // function fails the build early; the backends reuse the result.
+            self.options
+                .dpi
+                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+
             Ok((
                 laid_out,
                 warnings,

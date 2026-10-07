@@ -21,6 +21,8 @@ use thiserror::Error;
 pub struct DpiSymbols {
     functions: Vec<(String, usize)>,
     libraries: Vec<PathBuf>,
+    /// The table resolved by [`Self::resolve_ahead`], for these functions.
+    resolved: Option<(Vec<ExternFunction>, ExternFunctionTable)>,
 }
 
 impl fmt::Debug for DpiSymbols {
@@ -57,6 +59,7 @@ pub enum DpiError {
 impl DpiSymbols {
     /// Registers `address` for `name`, replacing an earlier registration.
     pub(crate) fn add_function(&mut self, name: String, address: usize) {
+        self.resolved = None;
         match self.functions.iter_mut().find(|(known, _)| *known == name) {
             Some((_, known)) => *known = address,
             None => self.functions.push((name, address)),
@@ -64,6 +67,7 @@ impl DpiSymbols {
     }
 
     pub(crate) fn add_library(&mut self, path: PathBuf) {
+        self.resolved = None;
         self.libraries.push(path);
     }
 
@@ -72,6 +76,11 @@ impl DpiSymbols {
         &self,
         functions: &[ExternFunction],
     ) -> Result<ExternFunctionTable, DpiError> {
+        if let Some((resolved, table)) = &self.resolved
+            && resolved == functions
+        {
+            return Ok(table.clone());
+        }
         let addresses = functions
             .iter()
             .map(|function| self.address(&function.name))
@@ -79,6 +88,14 @@ impl DpiSymbols {
         Ok(ExternFunctionTable {
             addresses: addresses.into(),
         })
+    }
+
+    /// Resolve `functions` now and keep the table for later [`Self::resolve`]
+    /// calls with the same functions.
+    pub(crate) fn resolve_ahead(&mut self, functions: &[ExternFunction]) -> Result<(), DpiError> {
+        let table = self.resolve(functions)?;
+        self.resolved = Some((functions.to_vec(), table));
+        Ok(())
     }
 
     fn address(&self, name: &str) -> Result<usize, DpiError> {
