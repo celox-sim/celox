@@ -593,7 +593,9 @@ impl TieredBackend {
                             let image = NativeBackend::compile_image_with_cancel(
                                 laid_out, options, cancel,
                             )?;
-                            let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                            let shared = Arc::new(unsafe {
+                                SharedNativeCode::from_image_with_dpi(image, &options.dpi)?
+                            });
                             Ok(CompiledCode::Native(shared))
                         },
                     );
@@ -625,7 +627,9 @@ impl TieredBackend {
                     };
                     // Safety: the image was produced in-process by the Celox
                     // compiler above.
-                    let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                    let shared = Arc::new(unsafe {
+                        SharedNativeCode::from_image_with_dpi(image, &options.dpi)?
+                    });
                     Ok(CompiledCode::Native(shared))
                 })
             }

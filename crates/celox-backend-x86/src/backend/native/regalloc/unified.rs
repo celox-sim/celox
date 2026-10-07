@@ -450,6 +450,9 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         | MInst::Jump { .. }
         | MInst::Return
         | MInst::ReturnError { .. } => "none",
+        MInst::ExternArg { .. } => "extern_arg",
+        MInst::CallExtern { .. } => "call_extern",
+        MInst::ExternResult { .. } => "extern_result",
     }
 }
 

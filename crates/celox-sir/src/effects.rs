@@ -73,6 +73,9 @@ impl<A> SIRInstruction<A> {
             }
             | SIRInstruction::CombCaptureEvent {
                 args: arguments, ..
+            }
+            | SIRInstruction::ExternCall {
+                args: arguments, ..
             } => {
                 for &argument in arguments {
                     visit(argument);
@@ -115,6 +118,9 @@ impl<A> SIRInstruction<A> {
             }
             | SIRInstruction::CombCaptureEvent {
                 args: arguments, ..
+            }
+            | SIRInstruction::ExternCall {
+                args: arguments, ..
             } => {
                 for argument in arguments {
                     visit(argument);
@@ -142,6 +148,7 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Concat(dst, _)
             | SIRInstruction::Slice(dst, _, _, _)
             | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+            SIRInstruction::ExternCall { dst, .. } => *dst,
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
             | SIRInstruction::RuntimeEvent { .. }
@@ -160,6 +167,7 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Concat(dst, _)
             | SIRInstruction::Slice(dst, _, _, _)
             | SIRInstruction::Mux(dst, _, _, _) => Some(dst),
+            SIRInstruction::ExternCall { dst, .. } => dst.as_mut(),
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
             | SIRInstruction::RuntimeEvent { .. }
@@ -190,7 +198,8 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Mux(..)
             | SIRInstruction::RuntimeEvent { .. }
             | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
+            | SIRInstruction::ExternCall { .. } => None,
         }
     }
 
@@ -212,7 +221,8 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Mux(..)
             | SIRInstruction::RuntimeEvent { .. }
             | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
+            | SIRInstruction::ExternCall { .. } => None,
         }
     }
 
@@ -230,13 +240,15 @@ impl<A> SIRInstruction<A> {
     }
 
     /// Whether the instruction hands data or control to the host: it records
-    /// a runtime event or updates comb-capture state outside the simulation
-    /// state. The host sees these in program order.
+    /// a runtime event, updates comb-capture state outside the simulation
+    /// state, or calls an external function. The host sees these in program
+    /// order.
     pub fn is_host_interaction(&self) -> bool {
         match self {
             SIRInstruction::RuntimeEvent { .. }
             | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => true,
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
+            | SIRInstruction::ExternCall { .. } => true,
             SIRInstruction::Imm(..)
             | SIRInstruction::Binary(..)
             | SIRInstruction::Unary(..)

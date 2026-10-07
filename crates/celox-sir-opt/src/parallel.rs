@@ -43,6 +43,9 @@ enum Storage {
     CaptureFlags,
     /// Packed event trigger bytes, updated with byte read-modify-writes.
     Triggers,
+    /// External functions, which need not be thread-safe and are called in
+    /// program order.
+    ExternCalls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -449,6 +452,9 @@ impl<'a> UnitEffects<'a> {
                     }
                     SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                         self.resource(Storage::CaptureFlags);
+                    }
+                    SIRInstruction::ExternCall { .. } => {
+                        self.resource(Storage::ExternCalls);
                     }
                     SIRInstruction::Imm(..)
                     | SIRInstruction::Binary(..)

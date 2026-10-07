@@ -1251,6 +1251,7 @@ fn unsupported(instruction: &SIRInstruction<RegionedStateAddr>) -> String {
         SIRInstruction::RuntimeEvent { .. } => "RuntimeEvent",
         SIRInstruction::CombCaptureEvent { .. } => "CombCaptureEvent",
         SIRInstruction::CombCaptureEnableIfChanged { .. } => "CombCaptureEnableIfChanged",
+        SIRInstruction::ExternCall { .. } => "ExternCall",
     };
     format!("unsupported symbolic SIR instruction {name}")
 }

@@ -35,11 +35,26 @@ pub struct PackageSource {
     uses: Vec<String>,
 }
 
-fn node_span(node: RefNode<'_>) -> Option<(usize, usize)> {
+/// The span of `node` in the original source text. Token offsets refer to
+/// the preprocessed text, which can differ from the source (the preprocessor
+/// widens the space after `"DPI-C"`), so each token is mapped back and text
+/// the preprocessor inserted is skipped.
+fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(usize, usize)> {
+    let origin = |offset| {
+        syntax_tree.get_origin(&sv_parser::Locate {
+            offset,
+            line: 0,
+            len: 1,
+        })
+    };
     let mut range: Option<(usize, usize)> = None;
     for child in node {
-        if let RefNode::Locate(locate) = child {
-            let (start, end) = (locate.offset, locate.offset + locate.len);
+        if let RefNode::Locate(locate) = child
+            && locate.len > 0
+            && let Some((_, start)) = origin(locate.offset)
+            && let Some((_, last)) = origin(locate.offset + locate.len - 1)
+        {
+            let end = last + 1;
             range = Some(match range {
                 None => (start, end),
                 Some((low, high)) => (low.min(start), high.max(end)),
@@ -87,7 +102,7 @@ fn package_edits(
                     }
                 }
                 if let Some((start, end)) =
-                    node_span(RefNode::PackageImportDeclaration(declaration))
+                    node_span(RefNode::PackageImportDeclaration(declaration), syntax_tree)
                 {
                     edits.push(edit(start, end, "", None));
                 }
@@ -97,7 +112,9 @@ fn package_edits(
                     RefNode::PackageIdentifier(&scope.nodes.0),
                     syntax_tree,
                 ));
-                if let Some((start, end)) = node_span(RefNode::PackageScopePackage(scope)) {
+                if let Some((start, end)) =
+                    node_span(RefNode::PackageScopePackage(scope), syntax_tree)
+                {
                     edits.push(edit(start, end, "", None));
                 }
             }
@@ -112,7 +129,7 @@ fn package_edits(
                         RefNode::ClassIdentifier(&class_type.nodes.0.nodes.1),
                         syntax_tree,
                     );
-                    if let Some((start, end)) = node_span(RefNode::ClassScope(scope)) {
+                    if let Some((start, end)) = node_span(RefNode::ClassScope(scope), syntax_tree) {
                         note(&name);
                         edits.push(edit(start, end, "", name));
                     }
@@ -121,7 +138,9 @@ fn package_edits(
             RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(parameter))
                 if localize_parameters =>
             {
-                if let Some((start, end)) = node_span(RefNode::Keyword(&parameter.nodes.0)) {
+                if let Some((start, end)) =
+                    node_span(RefNode::Keyword(&parameter.nodes.0), syntax_tree)
+                {
                     edits.push(edit(start, end, "localparam ", None));
                 }
             }
@@ -167,6 +186,21 @@ pub fn source_packages(
     code: &str,
     syntax_tree: &SyntaxTree,
 ) -> Result<Vec<PackageSource>, AnalyzerError> {
+    // Only modules and packages are analyzed, so an import declared at
+    // compilation-unit scope would never be found.
+    for node in syntax_tree {
+        if let RefNode::DescriptionPackageItem(item) = node
+            && RefNode::DescriptionPackageItem(item)
+                .into_iter()
+                .any(|child| matches!(child, RefNode::DpiImportExport(_)))
+        {
+            return Err(AnalyzerError::Unsupported(
+                "DPI-C import or export at compilation-unit scope (declare it in a module \
+                 or package)"
+                    .to_string(),
+            ));
+        }
+    }
     let mut packages = Vec::new();
     for node in syntax_tree {
         let RefNode::PackageDeclaration(package) = node else {
@@ -175,8 +209,8 @@ pub fn source_packages(
         let name = identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()))?;
         let (Some((_, header_end)), Some((footer_start, _))) = (
-            node_span(RefNode::Symbol(&package.nodes.4)),
-            node_span(RefNode::Keyword(&package.nodes.7)),
+            node_span(RefNode::Symbol(&package.nodes.4), syntax_tree),
+            node_span(RefNode::Keyword(&package.nodes.7), syntax_tree),
         ) else {
             continue;
         };
@@ -252,8 +286,8 @@ pub fn inline_packages(
             visit(name, packages, &mut order, &mut active);
         }
         let (Some((module_start, module_end)), Some((footer_start, _))) = (
-            node_span(RefNode::ModuleDeclarationAnsi(module)),
-            node_span(RefNode::Keyword(&module.nodes.3)),
+            node_span(RefNode::ModuleDeclarationAnsi(module), syntax_tree),
+            node_span(RefNode::Keyword(&module.nodes.3), syntax_tree),
         ) else {
             return Ok(None);
         };
@@ -321,12 +355,13 @@ pub fn apply_type_parameter_overrides(
             };
             match &assignment.nodes.1 {
                 Some((_, default)) => {
-                    if let Some((start, end)) = node_span(RefNode::DataType(default)) {
+                    if let Some((start, end)) = node_span(RefNode::DataType(default), syntax_tree) {
                         edits.push(edit(start, end, bound, None));
                     }
                 }
                 None => {
-                    if let Some((_, end)) = node_span(RefNode::TypeIdentifier(&assignment.nodes.0))
+                    if let Some((_, end)) =
+                        node_span(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
                     {
                         edits.push(edit(end, end, &format!(" = {bound}"), None));
                     }
@@ -336,7 +371,8 @@ pub fn apply_type_parameter_overrides(
         if edits.is_empty() {
             return Ok(None);
         }
-        let Some((start, end)) = node_span(RefNode::ModuleDeclarationAnsi(module)) else {
+        let Some((start, end)) = node_span(RefNode::ModuleDeclarationAnsi(module), syntax_tree)
+        else {
             return Ok(None);
         };
         let module_text = apply_edits(code, (start, end), edits, &HashMap::default());

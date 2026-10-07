@@ -98,7 +98,14 @@ const _: () = {
         celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
             <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
     );
-    assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= celox_state_layout::STATE_HEADER_SIZE);
+    assert!(
+        STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET
+    );
+    assert!(
+        celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_SIZE
+    );
 };
 
 pub mod timing {

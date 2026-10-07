@@ -2424,3 +2424,24 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
         SV_FRONTEND_TRACKING_ISSUE
     );
 }
+
+#[test]
+fn package_inlining_keeps_source_text_after_a_dpi_import() {
+    // The preprocessor widens the space after `"DPI-C"`, so syntax tree
+    // offsets after it no longer match the source text.
+    let code = "package p; import \"DPI-C\" function int twice(input int x); endpackage\n\
+                module Top(input int a, output int y); import p::*; assign y = a; endmodule\n";
+    let path = Path::new("dpi.sv");
+    let packages = source_packages(code, path)
+        .unwrap()
+        .into_iter()
+        .map(|package| (package.name.clone(), package))
+        .collect::<HashMap<_, _>>();
+    let inlined = inline_module_packages(code, path, "Top", &packages)
+        .unwrap()
+        .unwrap();
+    assert!(
+        inlined.contains("\nimport \"DPI-C\" function int twice(input int x); \nendmodule"),
+        "{inlined}"
+    );
+}

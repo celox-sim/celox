@@ -104,7 +104,65 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments or an omitted argument
   of a function, and a task used as a value are errors.
-- DPI, tri-state buses and multiple drivers, hierarchical references.
+- DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
+  exports, tri-state buses and multiple drivers, hierarchical references.
+
+## DPI-C imports
+
+The `sv-dpi` Cargo feature (which implies `systemverilog`) lets a design call C
+functions declared with `import "DPI-C"`. Without it, Celox rejects any DPI-C
+import as unsupported.
+
+```toml
+[dependencies]
+celox = { version = "*", features = ["sv-dpi"] }
+```
+
+```systemverilog
+module Top(input logic clk, input int a, input int b, output int sum);
+    import "DPI-C" function int c_add(input int x, input int y);
+    always_ff @(posedge clk) sum <= c_add(a, b);
+endmodule
+```
+
+Each import is linked by its C name (the name after `=` in
+`import "DPI-C" c_name = function ...`, otherwise the SystemVerilog name) when
+the simulator is built. Functions registered with `dpi_function` are searched
+first, then the shared libraries added with `dpi_library`, in order. A name
+that none of them defines fails the build with a `Dpi` error.
+
+```rust
+extern "C" fn c_add(x: i32, y: i32) -> i32 { x.wrapping_add(y) }
+
+// SAFETY: `c_add` and the functions of libmodel.so have the signatures
+// their imports declare.
+let mut sim = unsafe {
+    Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .dpi_function("c_add", c_add as *const ())
+        .dpi_library("libmodel.so")
+}
+.build()?;
+```
+
+Both methods are `unsafe`: Celox cannot check that a C function matches the
+prototype of its import, and loading a library runs its initializers.
+
+Every backend calls the functions directly through the platform C ABI. The
+first release supports this subset:
+
+- Calls in `always_ff` processes, including in functions they call. Calls are
+  made in statement order, once per execution of the statement. Calls in
+  combinational logic are rejected.
+- `function` imports (`pure` or not) declared in a module or in a package
+  (reached through `import p::*;` or `p::f`), returning `void` or one of the
+  argument types, with up to 16 `input` arguments. Imports linked to one C
+  name must declare the same prototype.
+- Argument and result types `bit`, `logic` (passed as `svBit` / `svLogic`),
+  `byte`, `shortint`, `int` and `longint`, signed or `unsigned`.
+
+Imports at compilation-unit scope, `output` and `inout` arguments, `context`
+imports, task imports, exports, packed vector arguments (`svBitVecVal` /
+`svLogicVecVal`), `integer`, `real`, `chandle` and `string` are rejected.
 
 ## Semantics worth knowing
 

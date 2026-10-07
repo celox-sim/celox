@@ -115,10 +115,11 @@ pub(super) fn runtime_cast_expr(
     }
     let target = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)
         .ok_or_else(|| unsupported("cast target type"))?;
-    let operand_signed = expr_signedness(
+    let operand_signed = expr_signedness_with_return_types(
         &expr,
         &packed_dimensions.expression_signedness,
         &packed_dimensions.functions,
+        &packed_dimensions.function_return_types,
     )
     .or_else(|| {
         // A genvar or an untyped constant is an `int`.

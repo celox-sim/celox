@@ -1184,6 +1184,7 @@ pub fn lower_frontend_artifact(
         comb_observers: Vec::new(),
         runtime_errors: HashMap::default(),
         runtime_event_sites: Vec::new(),
+        extern_functions: Vec::new(),
         initial_memory_values,
         comb_boundaries: HashMap::default(),
         arena,
