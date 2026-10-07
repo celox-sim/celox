@@ -294,6 +294,16 @@ pub enum ParserError {
         source_location: Option<SourceLocation>,
     },
 
+    #[error(
+        "DPI-C imports linked to `{name}` have different prototypes: `{first}` and `{second}` \
+         (IEEE 1800-2023 35.5.4)"
+    )]
+    ExternSignatureMismatch {
+        name: String,
+        first: String,
+        second: String,
+    },
+
     #[error("Top module `{name}` not found in IR")]
     TopNotFound { name: String },
 
@@ -360,6 +370,15 @@ impl From<celox_frontend_core::ParserError> for ParserError {
             } => Self::MemoryFile {
                 detail,
                 source_location: source_location.map(Into::into),
+            },
+            CoreError::ExternSignatureMismatch {
+                name,
+                first,
+                second,
+            } => Self::ExternSignatureMismatch {
+                name,
+                first,
+                second,
             },
             CoreError::TopNotFound { name } => Self::TopNotFound { name },
             CoreError::GenericTop { name } => Self::GenericTop { name },
@@ -477,6 +496,9 @@ impl miette::Diagnostic for ParserError {
             ParserError::UnresolvedWidth { .. } => Some(Box::new("unresolved_width")),
             ParserError::Scheduler(_) | ParserError::SchedulerWithLocation { .. } => {
                 Some(Box::new("scheduler"))
+            }
+            ParserError::ExternSignatureMismatch { .. } => {
+                Some(Box::new("extern_signature_mismatch"))
             }
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),

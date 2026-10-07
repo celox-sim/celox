@@ -11,6 +11,9 @@ pub use component::{
 };
 mod debug;
 mod diagnostics;
+// Without a host runtime nothing builds simulators, so nothing links DPI-C.
+#[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
+mod dpi;
 mod interpreter;
 mod ir;
 mod optimizer;
@@ -41,6 +44,7 @@ pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
+pub use dpi::{DpiError, DpiSymbols};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use interpreter::{

@@ -199,3 +199,19 @@ fn unsupported_constructs_name_their_tracking_issue() {
         );
     }
 }
+
+#[cfg(not(feature = "sv-dpi"))]
+#[test]
+fn dpi_imports_need_the_sv_dpi_feature() {
+    let source = r#"
+        module Top(input logic clk, input int a, output int y);
+            import "DPI-C" function int twice(input int x);
+            always_ff @(posedge clk) y <= twice(a);
+        endmodule
+    "#;
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("dpi.sv"))], "Top")
+        .build_cranelift()
+        .expect_err("DPI-C imports need the `sv-dpi` feature")
+        .to_string();
+    assert!(error.contains("sv-dpi"), "{error}");
+}

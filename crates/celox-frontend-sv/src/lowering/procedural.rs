@@ -26,6 +26,12 @@ pub(super) struct ProcModule<'a> {
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
     pub subroutines: HashMap<String, sv::ir::Subroutine>,
+    /// DPI-C imports of the module, by SystemVerilog name.
+    pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
+    /// Extern functions the module calls, by local index.
+    pub extern_functions: Vec<ExternFunction>,
+    /// Number of extern calls lowered so far.
+    pub extern_calls: usize,
     pub four_state: bool,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
@@ -68,6 +74,11 @@ impl<'a> ProcModule<'a> {
             .subroutines()
             .iter()
             .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
+            .collect();
+        let dpi_imports = module
+            .dpi_imports()
+            .iter()
+            .map(|import| (import.name().to_string(), import.clone()))
             .collect();
         let declarations = module
             .ports()
@@ -119,6 +130,9 @@ impl<'a> ProcModule<'a> {
             constants,
             parameter_types,
             subroutines,
+            dpi_imports,
+            extern_functions: Vec::new(),
+            extern_calls: 0,
             four_state,
             created: Vec::new(),
             temp_counter: 0,
@@ -333,10 +347,49 @@ impl<'a> ProcModule<'a> {
         self.subroutines.get(name)
     }
 
+    /// Whether an expression calls a user subroutine or a DPI-C import.
+    pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
+        expr_calls(expr, &|name| {
+            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+        })
+    }
+
+    /// The local index of the extern function `import` links to. Imports
+    /// of one C name with different prototypes get separate entries, which
+    /// design assembly reports as a conflict.
+    pub fn extern_function(&mut self, import: &sv::ir::DpiImport) -> u32 {
+        let extern_type = |r#type: sv::ir::DpiType| match r#type {
+            sv::ir::DpiType::Bit => ExternType::Bit,
+            sv::ir::DpiType::Logic => ExternType::Logic,
+            sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
+        };
+        let function = ExternFunction {
+            name: import.c_name().to_string(),
+            signature: ExternSignature {
+                pure: import.is_pure(),
+                result: import.return_type().map(extern_type),
+                arguments: import
+                    .arguments()
+                    .iter()
+                    .map(|argument| extern_type(argument.r#type()))
+                    .collect(),
+            },
+        };
+        let index = self
+            .extern_functions
+            .iter()
+            .position(|known| *known == function)
+            .unwrap_or_else(|| {
+                self.extern_functions.push(function);
+                self.extern_functions.len() - 1
+            });
+        u32::try_from(index).expect("extern function count fits u32")
+    }
+
     /// Whether an expression is signed, with each user function call typed
     /// by its declared return type.
     pub fn expr_signed(&self, expr: &sv::ir::Expr) -> bool {
-        let probe = if expr_calls(expr, &self.subroutines) {
+        let probe = if self.calls(expr) {
             self.typed_calls(expr)
         } else {
             expr.clone()
@@ -355,6 +408,12 @@ impl<'a> ProcModule<'a> {
         use sv::ir::Expr;
         let go = |expr: &Expr| self.typed_calls(expr);
         match expr {
+            Expr::Call { name, .. } if self.dpi_imports.contains_key(name) => {
+                let (width, signed) = self.dpi_imports[name]
+                    .return_type()
+                    .map_or((1, false), |r#type| (r#type.width(), r#type.is_signed()));
+                Expr::Literal(typed_literal(&BigUint::zero(), width, signed))
+            }
             Expr::Call { name, .. } if self.subroutines.contains_key(name) => {
                 let (width, signed) = self
                     .subroutines
@@ -1305,39 +1364,36 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
 }
 
 /// Whether an expression calls a user subroutine.
-pub(super) fn expr_calls(
-    expr: &sv::ir::Expr,
-    subroutines: &HashMap<String, sv::ir::Subroutine>,
-) -> bool {
+pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
         sv::ir::Expr::Select { expr, .. }
         | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => expr_calls(expr, subroutines),
+        | sv::ir::Expr::Unary { expr, .. } => expr_calls(expr, is_callee),
         sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().any(|part| expr_calls(part, subroutines))
+            parts.iter().any(|part| expr_calls(part, is_callee))
         }
         sv::ir::Expr::Binary { left, right, .. } => {
-            expr_calls(left, subroutines) || expr_calls(right, subroutines)
+            expr_calls(left, is_callee) || expr_calls(right, is_callee)
         }
         sv::ir::Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_calls(condition, subroutines)
-                || expr_calls(then_expr, subroutines)
-                || expr_calls(else_expr, subroutines)
+            expr_calls(condition, is_callee)
+                || expr_calls(then_expr, is_callee)
+                || expr_calls(else_expr, is_callee)
         }
         sv::ir::Expr::Call { name, args } => {
-            subroutines.contains_key(name) || args.iter().any(|arg| expr_calls(arg, subroutines))
+            is_callee(name) || args.iter().any(|arg| expr_calls(arg, is_callee))
         }
         sv::ir::Expr::Inside { expr, items } => {
-            expr_calls(expr, subroutines)
+            expr_calls(expr, is_callee)
                 || items
                     .iter()
                     .flat_map(sv::ir::InsideItem::exprs)
-                    .any(|operand| expr_calls(operand, subroutines))
+                    .any(|operand| expr_calls(operand, is_callee))
         }
     }
 }

@@ -118,7 +118,7 @@ pub(super) fn resolve(assignment: &AssignmentMap, vreg: VReg) -> PhysReg {
         .unwrap_or_else(|| panic!("VReg {vreg} has no physical register assignment"))
 }
 
-fn state_base_strategy() -> StateBaseStrategy {
+pub(super) fn state_base_strategy() -> StateBaseStrategy {
     ACTIVE_STATE_BASE.with(Cell::get)
 }
 

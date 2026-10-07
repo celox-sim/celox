@@ -6,47 +6,47 @@ expression: output
 === Native function eval_comb ===
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v5 = add.w32 v0, v1
   v2 = and.w32 v5, 0x1
-  store.i32 [sim + 40], v2
+  store.i32 [sim + 48], v2
   v3 = imm 0x2
   v4 = or.w32 v5, v3
-  store.i32 [sim + 44], v4
+  store.i32 [sim + 52], v4
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v5 = add.w32 v0, v1
   v2 = and.w32 v5, 0x1
-  store.i32 [sim + 40], v2
+  store.i32 [sim + 48], v2
   v3 = imm 0x2
   v4 = or.w32 v5, v3
-  store.i32 [sim + 44], v4
+  store.i32 [sim + 52], v4
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v5 = add.w32 v0, v1
   v2 = and.w32 v5, 0x1
-  store.i32 [sim + 40], v2
+  store.i32 [sim + 48], v2
   v3 = imm 0x2
   v4 = or.w32 v5, v3
-  store.i32 [sim + 44], v4
+  store.i32 [sim + 52], v4
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v5 = add.w32 v0, v1
   v2 = and.w32 v5, 0x1
-  store.i32 [sim + 40], v2
+  store.i32 [sim + 48], v2
   v3 = imm 0x2
   v4 = or.w32 v5, v3
-  store.i32 [sim + 44], v4
+  store.i32 [sim + 52], v4
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -61,15 +61,15 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  mov eax,[qword gs:20h]
-  0x00000019  mov edx,[gs:24h]
+  0x0000000f  mov eax,[qword gs:28h]
+  0x00000019  mov edx,[gs:2Ch]
   0x00000021  add eax,edx
   0x00000023  mov edx,eax
   0x00000025  and edx,1
-  0x00000028  mov [gs:28h],edx
+  0x00000028  mov [gs:30h],edx
   0x00000030  mov edx,2
   0x00000035  or eax,edx
-  0x00000037  mov [qword gs:2Ch],eax
+  0x00000037  mov [qword gs:34h],eax
   0x00000041  xor eax,eax
   0x00000043  jmp short 0000000000000045h
   0x00000045  movq r11,xmm15

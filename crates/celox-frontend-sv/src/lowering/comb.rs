@@ -493,7 +493,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         context: Option<(usize, bool)>,
     ) -> Result<Value, sv::AnalyzerError> {
         let expr = expr_for_state_mode(expr, self.m.four_state);
-        let expr = if expr_calls(&expr, &self.m.subroutines) {
+        let expr = if self.m.calls(&expr) {
             self.hoist(store, frames, &expr)?
         } else {
             expr
@@ -750,10 +750,15 @@ impl<'p, 'a> Comb<'p, 'a> {
         expr: &sv::ir::Expr,
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
-        if !expr_calls(expr, &self.m.subroutines) {
+        if !self.m.calls(expr) {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call { name, .. } if self.m.dpi_imports.contains_key(name) => {
+                return Err(unsupported(format!(
+                    "DPI-C function `{name}` called in combinational logic"
+                )));
+            }
             Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
                 let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
                 let result = self.call(store, frames, name, &args)?;
@@ -786,7 +791,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             },
             Expr::Binary { left, op, right }
                 if matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr)
-                    && expr_calls(right, &self.m.subroutines) =>
+                    && self.m.calls(right) =>
             {
                 let left = self.hoist(store, frames, left)?;
                 let left_value = self.eval(store, frames, &left, None)?;
@@ -813,9 +818,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } if expr_calls(then_expr, &self.m.subroutines)
-                || expr_calls(else_expr, &self.m.subroutines) =>
-            {
+            } if self.m.calls(then_expr) || self.m.calls(else_expr) => {
                 let condition = self.hoist(store, frames, condition)?;
                 let condition_value = self.eval(store, frames, &condition, None)?;
                 let truth = slt_truth(self.arena, condition_value.0)?;
@@ -1467,6 +1470,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                 Ok(store)
             }
             sv::ir::Stmt::Call { name, args } => {
+                if self.m.dpi_imports.contains_key(name) {
+                    return Err(unsupported(format!(
+                        "DPI-C function `{name}` called in combinational logic"
+                    )));
+                }
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
@@ -1503,7 +1511,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         default: Option<&[sv::ir::Stmt]>,
     ) -> Result<Store, sv::AnalyzerError> {
         // Evaluate the selector once; items compare against its value.
-        let selector = if expr_calls(selector, &self.m.subroutines) {
+        let selector = if self.m.calls(selector) {
             self.hoist(&mut store, frames, selector)?
         } else {
             selector.clone()

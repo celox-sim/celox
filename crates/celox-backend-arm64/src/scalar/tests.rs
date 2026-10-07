@@ -9,6 +9,7 @@ mod byte_predicates;
 mod circular_scan;
 mod counted_loop;
 mod exclusive_loop;
+mod extern_calls;
 mod if_select;
 mod memory;
 mod sparse;
