@@ -6866,6 +6866,75 @@
       "tags": []
     },
     {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/modport_import_icarus.json",
+          "LIMITATIONS.md#icarus-modport-functions"
+        ],
+        "id": "icarus_modport_functions",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "interface::test_modport_import_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/modport_import_icarus.json",
+          "LIMITATIONS.md#icarus-modport-functions"
+        ],
+        "id": "icarus_modport_functions",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "interface::test_modport_import_function_forwarded_from_instance_array",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/modport_import_icarus.json",
+          "LIMITATIONS.md#icarus-modport-functions"
+        ],
+        "id": "icarus_modport_functions",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "interface::test_modport_import_function_in_always_ff",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
@@ -10383,7 +10452,7 @@
   "counts": {
     "compile_error": 11,
     "emission_error": 0,
-    "ignored": 196,
+    "ignored": 199,
     "mismatch": 0,
     "passed": 497,
     "rejected": 8,

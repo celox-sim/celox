@@ -10,6 +10,7 @@ mod dynamic_for_check;
 mod error;
 mod file_dependencies;
 pub mod hierarchy;
+mod interface_captures;
 pub mod loop_provenance;
 pub(crate) mod lowering;
 pub mod module;
@@ -34,6 +35,7 @@ pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_f
 pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
 pub use file_dependencies::{FileDependency, capture_file_dependencies};
 pub use hierarchy::{parse_ir, parse_ir_with_external_hierarchy, parse_ir_with_loop_provenance};
+pub use interface_captures::lower_interface_captures;
 pub use lowering::types::{resolve_dims, resolve_total_width};
 pub use portability_check::{check_array_literal_side_effects, check_function_output_aliases};
 pub use schedule::schedule_symbolic_rtl;

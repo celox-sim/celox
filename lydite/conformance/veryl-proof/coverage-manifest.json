@@ -8825,7 +8825,7 @@
       "source": {
         "file": "src/veryl/cases/interface.vtest",
         "line": 3,
-        "script_sha256": "05851a96556259fe04832aa0d4b941eb7b297f3731dd4394d82966d7ffca8e54"
+        "script_sha256": "b381f594db13775412db532f066790dd4288299843662fa1cf72f587aec63a98"
       },
       "disposition": "observation_verified",
       "designs": [
@@ -8835,6 +8835,69 @@
           "reads": 1,
           "commands": 3,
           "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 50,
+        "script_sha256": "f63759e50947ed520a9a79293c12b0dc63af8b57410641a33b4333ec9da292bd"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "6fa4ee77370319de61862bb48b0ccbf6ef22c6516e5b714fd5b8826d7bf91f27",
+          "protocol_sha256": "7f564aae5dce13ab446158402bbfffceaecc773057e868d2f04d133128909d9f",
+          "reads": 4,
+          "commands": 12,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function_forwarded_from_instance_array",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 165,
+        "script_sha256": "326565af624d8f72da383696256215c6447765346a962f20fe934eb08faa5e5f"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "765eb5856ff66405907346369effee307df523dc492de35eb9c3f559e86b3732",
+          "protocol_sha256": "98f27a19a30603cb344b4adc96f9f5d0cc45bc9edfcdd5a87eabc83fcb0b3bfc",
+          "reads": 4,
+          "commands": 12,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function_in_always_ff",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 105,
+        "script_sha256": "fa08267a30ef3589befff698bdb60f696ce39c0bfdbc884768f58a066d46040b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "43172e5caad928cc7942dbf03c9e50f662b61d404f95c7d4d4fc67f848999a40",
+          "protocol_sha256": "ef81412e980b77b7ca70cbd81ce2f0e760772a46e2b7c579372881305ce22d22",
+          "reads": 3,
+          "commands": 18,
+          "operations": 9,
           "diagnostic": null
         }
       ]

@@ -46,3 +46,171 @@
   (let out_val (get out))
   ; 0xAA = 170
   (assert (== out_val 170)))
+
+(case test_modport_import_function
+  (source "test.veryl" #"
+interface RegIf {
+    var value: logic<8>;
+    function get_value () -> logic<8> {
+        return value;
+    }
+    function add_offset (
+        k: input logic<8>,
+    ) -> logic<8> {
+        return value + k;
+    }
+    modport writer {
+        value: output,
+    }
+    modport reader {
+        get_value : import,
+        add_offset: import,
+    }
+}
+module Writer (
+    bus: modport RegIf::writer,
+    v  : input logic<8>,
+) {
+    assign bus.value = v;
+}
+module Reader (
+    bus: modport RegIf::reader,
+    k  : input  logic<8>,
+    o1 : output logic<8>,
+    o2 : output logic<8>,
+) {
+    assign o1 = bus.get_value();
+    assign o2 = bus.add_offset(k);
+}
+module Top (
+    v : input  logic<8>,
+    k : input  logic<8>,
+    o1: output logic<8>,
+    o2: output logic<8>,
+) {
+    inst r: RegIf;
+    inst w: Writer (bus: r, v);
+    inst u: Reader (bus: r, k, o1, o2);
+}
+"#)
+  (top Top)
+  ; Imported functions read the interface member they are declared beside.
+  (modify (set v 0x10) (set k 5))
+  (assert_eq o1 0x10)
+  (assert_eq o2 0x15)
+  (modify (set v 0xFF) (set k 2))
+  (assert_eq o1 0xFF)
+  (assert_eq o2 0x01 "0xFF + 2 wraps at 8 bits"))
+
+(case test_modport_import_function_in_always_ff
+  (source "test.veryl" #"
+interface IncIf {
+    var inc: logic<8>;
+    function next (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return x + inc;
+    }
+    modport cfg {
+        inc: output,
+    }
+    modport user {
+        next: import,
+    }
+}
+module Cfg (
+    bus : modport IncIf::cfg,
+    inc: input logic<8>,
+) {
+    assign bus.inc = inc;
+}
+module Acc (
+    bus: modport IncIf::user,
+    clk: input  clock,
+    rst: input  reset,
+    q  : output logic<8>,
+) {
+    var acc: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            acc = 0;
+        } else {
+            acc = bus.next(acc);
+        }
+    }
+    assign q = acc;
+}
+module Top (
+    clk : input  clock,
+    rst : input  reset,
+    inc: input  logic<8>,
+    q   : output logic<8>,
+) {
+    inst s: IncIf;
+    inst c: Cfg (bus: s, inc);
+    inst a: Acc (bus: s, clk, rst, q);
+}
+"#)
+  (top Top)
+  (modify (set rst 0) (set inc 3))
+  (tick clk)
+  (assert_eq q 0)
+  (modify (set rst 1))
+  (tick clk 3)
+  (assert_eq q 9)
+  (modify (set inc 10))
+  (tick clk 2)
+  (assert_eq q 29))
+
+(case test_modport_import_function_forwarded_from_instance_array
+  (source "test.veryl" #"
+interface ScaleIf {
+    var base: logic<8>;
+    function scaled (
+        k: input logic<8>,
+    ) -> logic<8> {
+        return base * k;
+    }
+    modport writer {
+        base: output,
+    }
+    modport reader {
+        scaled: import,
+    }
+}
+module Leaf (
+    bus: modport ScaleIf::reader,
+    k  : input  logic<8>,
+    o  : output logic<8>,
+) {
+    assign o = bus.scaled(k);
+}
+module Mid (
+    bus: modport ScaleIf::reader,
+    k  : input  logic<8>,
+    o  : output logic<8>,
+) {
+    inst u: Leaf (bus, k, o);
+}
+module Top (
+    b0: input  logic<8>,
+    b1: input  logic<8>,
+    k : input  logic<8>,
+    o0: output logic<8>,
+    o1: output logic<8>,
+) {
+    inst s: ScaleIf [2];
+    assign s[0].base = b0;
+    assign s[1].base = b1;
+    inst m0: Mid (bus: s[0], k, o: o0);
+    inst m1: Mid (bus: s[1], k, o: o1);
+}
+"#)
+  (top Top)
+  ; Each forwarded modport reads the member of the array element it was bound to.
+  (modify (set b0 3) (set b1 7) (set k 2))
+  (assert_eq o0 6)
+  (assert_eq o1 14)
+  (modify (set b1 0x80))
+  (assert_eq o0 6)
+  (assert_eq o1 0 "0x80 * 2 wraps at 8 bits"))
