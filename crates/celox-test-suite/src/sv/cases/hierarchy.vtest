@@ -190,3 +190,69 @@
   (modify (set rst 1))
   (tick clk)
   (assert_eq q 1))
+
+(case settles_feedback_through_disjoint_bits_of_child_input
+  (source "disjoint_input_feedback.sv" #"
+        module Child(input logic [1:0] a, output logic lo);
+            assign lo = a[1];
+        endmodule
+
+        module Top(input logic inp, output logic out0, output logic out1);
+            logic [1:0] v;
+            logic lo;
+            Child c(.a(v), .lo(lo));
+            assign v = {inp, lo};
+            assign out0 = v[0];
+            assign out1 = v[1];
+        endmodule
+    "#)
+  (top Top)
+  (for bit (list 0 1 0 1)
+    (modify (set inp bit))
+    (assert_eq out0 bit)
+    (assert_eq out1 bit)))
+
+(case settles_feedback_beside_dynamic_child_reader
+  (source "dynamic_reader_feedback.sv" #"
+        module ChildFb(input logic [2:0] a, output logic lo);
+            assign lo = a[2];
+        endmodule
+
+        module ChildDyn(input logic [2:0] a, input logic idx, output logic o);
+            assign o = a[idx];
+        endmodule
+
+        module Top(
+            input logic i1,
+            input logic i2,
+            input logic sel,
+            output logic out_fb,
+            output logic out_dyn
+        );
+            logic [2:0] v;
+            logic lo;
+            logic d;
+            ChildFb fb(.a(v), .lo(lo));
+            ChildDyn dyn(.a(v), .idx(sel), .o(d));
+            assign v[2:1] = {i2, i1};
+            assign v[0] = lo;
+            assign out_fb = lo;
+            assign out_dyn = d;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set i1 1)
+    (set i2 0)
+    (set sel 0))
+  (assert_eq out_fb 0)
+  (assert_eq out_dyn 0)
+  (modify (set sel 1))
+  (assert_eq out_fb 0)
+  (assert_eq out_dyn 1)
+  (modify
+    (set i1 0)
+    (set i2 1)
+    (set sel 0))
+  (assert_eq out_fb 1)
+  (assert_eq out_dyn 1))
