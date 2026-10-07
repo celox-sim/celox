@@ -215,6 +215,25 @@
     }
   },
   {
+    "id": "icarus_modport_functions",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/modport_import_icarus.json",
+      "LIMITATIONS.md#icarus-modport-functions"
+    ],
+    "cases": {
+      "icarus": [
+        "interface::test_modport_import_function",
+        "interface::test_modport_import_function_forwarded_from_instance_array",
+        "interface::test_modport_import_function_in_always_ff"
+      ]
+    }
+  },
+  {
     "id": "icarus_instance_array_unpacked_port",
     "category": "simulator_compile_limitation",
     "phase": "compile",

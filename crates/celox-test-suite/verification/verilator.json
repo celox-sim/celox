@@ -5756,6 +5756,39 @@
       "tags": []
     },
     {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function_forwarded_from_instance_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function_in_always_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
@@ -9103,7 +9136,7 @@
     "emission_error": 0,
     "ignored": 91,
     "mismatch": 0,
-    "passed": 504,
+    "passed": 507,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,

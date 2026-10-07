@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:15: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:16: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: Errors in port declarations.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:12: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Errors in port declarations.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function_forwarded_from_instance_array",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:12: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Errors in port declarations.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_import_function_in_always_ff",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 3,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite_version": "0.10.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

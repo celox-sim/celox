@@ -4,7 +4,7 @@ These exclusions keep normal external verification usable while preserving the s
 
 The manifest is [`src/veryl/verification/limitations.json`](src/veryl/verification/limitations.json). The runner reports `ignored`, never `passed`, before compiling an excluded fixture. `--include-ignored` reruns the original checks and returns their actual result, including a nonzero exit on failure. Exclusions are not promises about later tool versions; recheck them when upgrading.
 
-The retained pre-exclusion reports contain [73 Verilator-path failures](verification/limitations/verilator.json) and [186 Icarus-path failures](verification/limitations/icarus.json). These include failures in Veryl before any simulator starts. The original [ten conformance exclusions](MISMATCH_REVIEW.md) remain separate. Verilator's 110 four-state cases, including the zero-divisor and missing-return cases, report `unsupported`.
+The retained pre-exclusion reports contain [73 Verilator-path failures](verification/limitations/verilator.json) and [186 Icarus-path failures](verification/limitations/icarus.json); a [focused modport-import recheck](verification/repros/modport_import_icarus.json) retains 3 more Icarus failures. These include failures in Veryl before any simulator starts. The original [ten conformance exclusions](MISMATCH_REVIEW.md) remain separate. Verilator's 110 four-state cases, including the zero-divisor and missing-return cases, report `unsupported`.
 
 ## State modes
 
@@ -38,6 +38,7 @@ Categories describe the observed blocker. A compilation rejection is not automat
 | [icarus_case_break_crash](#icarus-case-break-crash) | execute | 0 | 1 |
 | [icarus_function_outputs](#icarus-function-outputs) | compile | 0 | 48 |
 | [icarus_interfaces](#icarus-interfaces) | compile | 0 | 5 |
+| [icarus_modport_functions](#icarus-modport-functions) | compile | 0 | 3 |
 | [icarus_instance_array_unpacked_port](#icarus-instance-array-unpacked-port) | compile | 0 | 1 |
 | [icarus_package_types](#icarus-package-types) | compile | 0 | 6 |
 | [icarus_sparse_memory_timeout](#icarus-sparse-memory-timeout) | compile | 0 | 1 |
@@ -133,6 +134,14 @@ Icarus 13.0 rejects the interface/modport port declaration syntax in these desig
 Category: `simulator_compile_limitation`. Observed stage: `compile`. Versions: Veryl 0.21.0; Verilator 5.052 / Icarus 13.0.
 
 Affected cases: icarus 5. See the manifest for exact IDs.
+
+## icarus-modport-functions
+
+Icarus 13.0 reports `sorry: modport task/function ports are not yet supported` for the emitted modport `import` declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.
+
+Category: `simulator_unsupported`. Observed stage: `compile`. Versions: Veryl 0.22.0; Verilator 5.052 / Icarus 13.0.
+
+Affected cases: icarus 3. See the manifest and the [focused recheck](verification/repros/modport_import_icarus.json).
 
 ## icarus-instance-array-unpacked-port
 
