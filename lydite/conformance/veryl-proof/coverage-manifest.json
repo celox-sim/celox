@@ -8819,13 +8819,121 @@
       ]
     },
     {
+      "case": "interface::test_generic_interface_port",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 912,
+        "script_sha256": "9697958f80f34aba3ef0c627435367982807777d08f0caab57e06bca99bb14af"
+      },
+      "disposition": "celox_unsupported",
+      "designs": [
+        {
+          "design_sha256": "b85697ebe5797f6ba05fb9a09e00419de284021c859923af531519b03141b113",
+          "protocol_sha256": "87d1ff2b842e47b5badc49e70d54906601b6878e5c3816e1716fc91828eef41c",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": {
+            "stage": "lower",
+            "detail_sha256": "1b1e044437549c948e7a56ea7edab90e1713fef0953f59cf3b1a5cbed79a0b8b"
+          }
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_always_comb_packed_array_member",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 98,
+        "script_sha256": "0b9bb8efcf538616c6866901664a00facddbb474021b655d71c2cdb590b0fa1f"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "6ebf7cf67ec85f47b0d1bd388d6b08500fa34a4840f797524ff294d490ba17d5",
+          "protocol_sha256": "4d2987cb5eda27cd68f6c4184f1ef89418d6d8841aaca2be3732e6b512b04e54",
+          "reads": 1,
+          "commands": 6,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_always_ff_on_member_clock",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 150,
+        "script_sha256": "c0fa21b72f80ad3e29834744096df739288213fd218810167147792fa31a7a4b"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "5d86c37683f99d0125fa01f508b0a167dc3e815723ed1aa0301caf3dd590cf54",
+          "protocol_sha256": "3b8d3ccf0e24166fea6d325cafa0993b4e155cbf3f2ab5377e2881d30e5d3984",
+          "reads": 2,
+          "commands": 14,
+          "operations": 6,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_connect_modport_to_constant",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 628,
+        "script_sha256": "43a73859d6174aefb187fb964d375b5c35774ac567bf96802bbe1f1bf7368a33"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "061ac111cfb1cc103206ca3d8361078c2acdf61a96a059e011d291cd63a62409",
+          "protocol_sha256": "a6cdda2b2731d716eabc29454442bb3445e6badb0a246249974d32dda03edfd6",
+          "reads": 3,
+          "commands": 5,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_connect_operator",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 550,
+        "script_sha256": "78c9926ca9cb202d99491e5a0c22486f64ab343468505bc92def32fa4af34237"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "c6d0f29a5dc2de3bd84ae4d4cdfcf316248bba2c4925425dd4eb34b876577324",
+          "protocol_sha256": "903f8660460c8e069e7edf183e70b82481717f4fbdaaf1e14ce11181c9ba43c5",
+          "reads": 6,
+          "commands": 16,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "interface::test_interface_connection",
       "expectation": "Simulation",
       "category": "Hierarchy",
       "source": {
         "file": "src/veryl/cases/interface.vtest",
         "line": 3,
-        "script_sha256": "05851a96556259fe04832aa0d4b941eb7b297f3731dd4394d82966d7ffca8e54"
+        "script_sha256": "b381f594db13775412db532f066790dd4288299843662fa1cf72f587aec63a98"
       },
       "disposition": "observation_verified",
       "designs": [
@@ -8835,6 +8943,426 @@
           "reads": 1,
           "commands": 3,
           "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_continuous_assign_logic",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 50,
+        "script_sha256": "417c181961f8b885f2e08ba830844ad294b7ac57c6b8e12765d1853552819065"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "acf6b734de778cb157c79f17dc7cf800a9c8282087192a22a23e2e38f3fcc160",
+          "protocol_sha256": "e4da69f785c47fb94a6f3ab7152e1796fe75f3b0c25167c42a9b59e510f81bb6",
+          "reads": 1,
+          "commands": 6,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_four_state_x_propagation",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1269,
+        "script_sha256": "fe89ca1905912c3b0594fa5c5358239cdb6abf5ba8d862aff264a7ad2e11f070"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "8935d158587c21b33bd45fac5ecff2927c65ea0b45c3c4362c85990d0331fb03",
+          "protocol_sha256": "a852d7f109d6c1b2bb4caeffb1c850ad545e4ac72deb13db35ae1e0d86f536bf",
+          "reads": 7,
+          "commands": 17,
+          "operations": 4,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_instance_array_in_generate",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 671,
+        "script_sha256": "1583b51f5144aa052f4f74ace8af7aface3c9ad16e3cef33c9c6cf3181392afc"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "4b3f1781f010e3e071c45d0fccfe6f5c6ae96b8e90f0a058c1d51177dbaf51f6",
+          "protocol_sha256": "732f63f5d5e2ef12456f60f9dd0aeeb689f82ed1beb8604a2ba30a3612c90f77",
+          "reads": 2,
+          "commands": 8,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_instance_inside_generate_for",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 756,
+        "script_sha256": "62fb4e381e70d51802c05e2d090a6ef75066409d6b76ebc6f25013cc2e58485b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "fce10e34bc11b2052575277d27c2f3a5935c4c90c5074360446bebf6b03d323a",
+          "protocol_sha256": "06775d4b2f135ef67b34c10e3c458c64cc34d9cea9fc9b4e352bf3966f467637",
+          "reads": 2,
+          "commands": 8,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_instance_inside_generate_if",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 799,
+        "script_sha256": "d698b2240110707d575fbc725959c1298b35845db6e3e633af876d14950d2720"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "f34104ba3897be94f0560f5d0dfca00ca8e42c6655a77e834f007bddfc539c2b",
+          "protocol_sha256": "b242d31e30725af8d2aa2709da4b5acbdbee3f53168aed177860ac4c0d8cf949",
+          "reads": 4,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_member_access_in_comb_and_ff",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1133,
+        "script_sha256": "b94c7179c9bfb9d72de19f90510d3e0a914c782a194dd6ae4d76dfd6b3605fc3"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "69d43c12ace470b4d54a9ba0cf4a02407cca61c5df426bd34d3aa6a73c5cc7b5",
+          "protocol_sha256": "c2a5abf8912a24aaa2ab29264881f28e75c6ce1128d67a2db253ed18ab3e4250",
+          "reads": 7,
+          "commands": 20,
+          "operations": 7,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_param_and_const",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1078,
+        "script_sha256": "1c4c79578302ab16e9b2258ec453d08838ad2831689e9040ef6ca24102ac957a"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "7087188f338890085429938b8bbcc6cb4d70f2cc9a9199aaa896dbd8cba8018a",
+          "protocol_sha256": "29371c108b08a4e50a0208a94f15a79734b05d605eded9f71c6cfbe7703c4187",
+          "reads": 2,
+          "commands": 7,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_param_sized_members",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1030,
+        "script_sha256": "85d65b17fac4f0f5f694d3972dabd0f13cdd1e97348a2ba2ac6392c81c51b231"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "202677d0118568bc16655f769339c4bea9843cf13e8d3c034efa5c4909f8030a",
+          "protocol_sha256": "659e9d43854bc7a73bce0652e0234de00e2ca7826b73269a81422112de68e244",
+          "reads": 4,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_struct_and_packed_array_members",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 966,
+        "script_sha256": "a0d147d3a240c0e3315fdeb0c58db95e30495a9ca18e178919aac370b89a9ce3"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "5eb2f0fe12e35a1515477b464ddbbae08b375cd4349ff27af3dc37a450593288",
+          "protocol_sha256": "5aa7980bef5d37f188e96f7c84c7bfebdb07c633d0044a16ee2ef718200bce90",
+          "reads": 6,
+          "commands": 18,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_interface_valid_ready_handshake",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1177,
+        "script_sha256": "2eca3d7a535a5ba57885687d899fea11fa75fcf0e69edeb75d4dcf5ea2b29c46"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "3bd29284572226741e374a5e47334254a5ffade5050f7075964074b38ff46a36",
+          "protocol_sha256": "31192045d284d037531002ddcd2068e91f19498752ed758828e343731c62e0b0",
+          "reads": 15,
+          "commands": 36,
+          "operations": 14,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_mixin_interface",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1356,
+        "script_sha256": "977476cbe238aaa88c0e7a41a1068e1dce11d98c11703e6a78cf6da7e8ffc64e"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "06b31d959d400def5b17c6c72656e06a6bdf601dbce672e7274d55dc1e7ee0e4",
+          "protocol_sha256": "cac443e438be1584288e999a87a5fd333b00fb0b7ad2591550ea4406c7c5de15",
+          "reads": 2,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_all_input_and_all_output_defaults",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 504,
+        "script_sha256": "ef9fa45e86ad2ca2295741461ac413982a5cc378c5d3f2bdf482db612e27a3c0"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "064927cddca92e8d6b7e02ba2b74b5972b40007b58a2391d43b5600a12d5385f",
+          "protocol_sha256": "4f3bea6853725419166cfacf94571394d0608e02410e27e75ab2e14e04f085f4",
+          "reads": 4,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_array_port",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 711,
+        "script_sha256": "59d465e8463e6f35fc5354e3667aae1c5a1b3067f08c483b2a88177f2b46ae0b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "0f84fb5355374abcb3a99b982ee6a6f24fca55be833945025e99d869d8e3c9d3",
+          "protocol_sha256": "067bb0fdf2b82547705578e2060d829b05d23956324598a6102ac661114c6197",
+          "reads": 4,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_clock_reset_drive_module_ff",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 211,
+        "script_sha256": "fbdf3860025f9627e3c42c4736dcdfab43d7d6fa61189f602e2007d2c6b65c55"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "89995d47c8e31d6b9d699d28c543e98a09d28eff21c2c5f4a2c67b963bbc5d9c",
+          "protocol_sha256": "d2b878f160d4c745291d8d8a0351007ae7ba68069715464f655038ca6a67d518",
+          "reads": 3,
+          "commands": 17,
+          "operations": 8,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_converse_same_and_partial_defaults",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 441,
+        "script_sha256": "5321f29c4314ead3d5c811722e7735c496223685b123a0f1d4232b63e05e40f6"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "dabd572a5b1b38fb521bf708eb2005a835cbafc812fb7be4aebf13e7a4a3c4c2",
+          "protocol_sha256": "d58cef3fca0be4a58adb8af314e7ffc9d8d5a08e4e97847089e97492226b2e40",
+          "reads": 6,
+          "commands": 14,
+          "operations": 3,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_forwarded_through_hierarchy",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 852,
+        "script_sha256": "de283a5639ee3fd93dc320bf5323b67bab47b6f0eaa804c01076dfbc238e218e"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "f0428fa13b6cec325ab9d762e896a74b252120ffdd9f80ddefa0ef657dea652c",
+          "protocol_sha256": "3ef1790b3c842b795856803b121a4573e4a021c6d02bd28217042012fd8a692e",
+          "reads": 2,
+          "commands": 8,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 273,
+        "script_sha256": "f63759e50947ed520a9a79293c12b0dc63af8b57410641a33b4333ec9da292bd"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "6fa4ee77370319de61862bb48b0ccbf6ef22c6516e5b714fd5b8826d7bf91f27",
+          "protocol_sha256": "7f564aae5dce13ab446158402bbfffceaecc773057e868d2f04d133128909d9f",
+          "reads": 4,
+          "commands": 12,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function_forwarded_from_instance_array",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 388,
+        "script_sha256": "f50d40563f199f1baf98faf351e18a78f1c2be07e53336b9a6a80c64ae66ad69"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "765eb5856ff66405907346369effee307df523dc492de35eb9c3f559e86b3732",
+          "protocol_sha256": "98f27a19a30603cb344b4adc96f9f5d0cc45bc9edfcdd5a87eabc83fcb0b3bfc",
+          "reads": 4,
+          "commands": 12,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_modport_import_function_in_always_ff",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 328,
+        "script_sha256": "fa08267a30ef3589befff698bdb60f696ce39c0bfdbc884768f58a066d46040b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "43172e5caad928cc7942dbf03c9e50f662b61d404f95c7d4d4fc67f848999a40",
+          "protocol_sha256": "ef81412e980b77b7ca70cbd81ce2f0e760772a46e2b7c579372881305ce22d22",
+          "reads": 3,
+          "commands": 18,
+          "operations": 9,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_proto_interface_generic_module",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "line": 1327,
+        "script_sha256": "031e64202f9e5e84527ba78ed25450e633826913d1c6bf0a22be1005c83c5f27"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "a0b8eea0e40faca1a837591c242bf345a7c142fda473f4de1a6245d845d3122e",
+          "protocol_sha256": "cdda239e7ee21f42cddf7e6a975dc1b11841539a30608b82233be82cebb0604a",
+          "reads": 2,
+          "commands": 8,
+          "operations": 2,
           "diagnostic": null
         }
       ]

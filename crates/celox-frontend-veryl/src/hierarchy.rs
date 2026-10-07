@@ -1,6 +1,6 @@
 use celox_design::ModuleId;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use veryl_analyzer::ir::{Component, Declaration, Module, VarKind};
+use veryl_analyzer::ir::{Component, Declaration, Module, TypeKind, VarKind};
 use veryl_analyzer::{symbol::SymbolKind, symbol_table};
 use veryl_parser::{
     resource_table::{self, StrId},
@@ -13,7 +13,7 @@ use super::{
     module::ModuleParser,
 };
 use crate::{
-    BuildConfig, HashMap, HashSet, ParserError,
+    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError,
     symbolic::artifact::{ExternalHierarchy, SymbolicRtl},
 };
 
@@ -139,6 +139,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     while index < worklist.len() {
         let (module_id, ir_module) = worklist[index];
         index += 1;
+        reject_generic_interface_ports(ir_module)?;
 
         let mut inst_ids = Vec::new();
         for declaration in &ir_module.declarations {
@@ -385,4 +386,33 @@ fn validate_external_module_graph(
     active.remove(&module_id);
     complete.insert(module_id);
     Ok(())
+}
+
+/// A generic interface port (`interface` or `interface::modport`) stays an
+/// `AbstractInterface` in the analyzer IR: the module that declares it is not
+/// specialized per instance, so the members behind the port are not variables
+/// of that module and a connection forwarding it is an unknown expression.
+/// Reject the port instead of failing on that expression during lowering.
+fn reject_generic_interface_ports(module: &Module) -> Result<(), ParserError> {
+    let mut ports = module
+        .port_types
+        .iter()
+        .filter(|(_, (r#type, _))| matches!(r#type.kind, TypeKind::AbstractInterface(_)))
+        .map(|(path, _)| path.to_string())
+        .collect::<Vec<_>>();
+    if ports.is_empty() {
+        return Ok(());
+    }
+    ports.sort();
+    Err(ParserError::unsupported(
+        1088,
+        LoweringPhase::SimulatorParser,
+        "generic interface port",
+        format!(
+            "module {} port {}",
+            resource_table::get_str_value(module.name).unwrap_or_default(),
+            ports.join(", ")
+        ),
+        Some(&module.token),
+    ))
 }

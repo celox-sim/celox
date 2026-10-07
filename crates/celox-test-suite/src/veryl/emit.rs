@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
+use veryl_analyzer::{Analyzer, Context, ir::Ir, symbol_table};
 use veryl_emitter::Emitter;
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
@@ -89,14 +89,18 @@ fn blocks_emission(error: &veryl_analyzer::AnalyzerError, testbench: Option<&str
 }
 
 fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSources {
-    symbol_table::clear();
-    attribute_table::clear();
-
     let mut metadata = Metadata::create_default("prj").unwrap();
     // In-memory test designs name their top module without a project prefix.
     metadata.build.omit_project_prefix = true;
     metadata.build.strip_comments = true;
 
+    // The analyzer's tables are thread-local and the external runners emit
+    // several designs on one worker thread. Reset all of them (not only the
+    // symbol and attribute tables): a type DAG left by an earlier design makes
+    // `analyze_post_pass1` panic on a later design reusing the same names.
+    // `Analyzer::new` registers project symbols, so clear before creating the
+    // analyzer that is used.
+    Analyzer::new(&metadata).clear();
     let analyzer = Analyzer::new(&metadata);
     let mut parsed_sources = Vec::with_capacity(sources.len());
 

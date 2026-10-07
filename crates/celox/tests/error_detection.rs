@@ -1179,3 +1179,61 @@ fn test_syntax_error_is_returned_instead_of_panicking() {
         "{err}"
     );
 }
+
+#[test]
+fn test_generic_interface_port_is_unsupported() {
+    let code = r#"
+        interface Link {
+            var req : logic<8>;
+            var resp: logic<8>;
+            modport client {
+                req : output,
+                resp: input,
+            }
+            modport server {
+                ..converse(client)
+            }
+        }
+        module Client (
+            bus : modport Link::client,
+            x   : input  logic<8>,
+            resp: output logic<8>,
+        ) {
+            assign bus.req = x;
+            assign resp    = bus.resp;
+        }
+        module ClientPass (
+            bus : interface::client,
+            x   : input  logic<8>,
+            resp: output logic<8>,
+        ) {
+            inst u: Client (bus, x, resp);
+        }
+        module Server (
+            bus: modport Link::server,
+        ) {
+            assign bus.resp = ~bus.req;
+        }
+        module Top (
+            x   : input  logic<8>,
+            resp: output logic<8>,
+        ) {
+            inst l: Link;
+            inst c: ClientPass (bus: l, x, resp);
+            inst s: Server (bus: l);
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("a generic interface port must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue: 1088,
+            feature: "generic interface port",
+            detail,
+            ..
+        }) => assert_eq!(detail, "module ClientPass port bus"),
+        other => panic!("expected the generic interface port to be unsupported, got: {other:?}"),
+    }
+}

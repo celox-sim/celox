@@ -197,11 +197,12 @@
     "id": "icarus_interfaces",
     "category": "simulator_compile_limitation",
     "phase": "compile",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+    "observed_version": "Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0",
     "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
     "upstream": [],
     "evidence": [
       "verification/limitations/icarus.json",
+      "verification/repros/interface_coverage_icarus.json",
       "LIMITATIONS.md#icarus-interfaces"
     ],
     "cases": {
@@ -210,7 +211,46 @@
         "advanced_interface::test_interface_wide_signal",
         "advanced_interface::test_multiple_interface_instances",
         "advanced_interface::test_transitive_generics",
-        "interface::test_interface_connection"
+        "interface::test_generic_interface_port",
+        "interface::test_interface_always_comb_packed_array_member",
+        "interface::test_interface_always_ff_on_member_clock",
+        "interface::test_interface_connect_modport_to_constant",
+        "interface::test_interface_connect_operator",
+        "interface::test_interface_connection",
+        "interface::test_interface_continuous_assign_logic",
+        "interface::test_interface_four_state_x_propagation",
+        "interface::test_interface_instance_array_in_generate",
+        "interface::test_interface_instance_inside_generate_for",
+        "interface::test_interface_instance_inside_generate_if",
+        "interface::test_interface_param_and_const",
+        "interface::test_interface_param_sized_members",
+        "interface::test_interface_struct_and_packed_array_members",
+        "interface::test_interface_valid_ready_handshake",
+        "interface::test_mixin_interface",
+        "interface::test_modport_all_input_and_all_output_defaults",
+        "interface::test_modport_array_port",
+        "interface::test_modport_clock_reset_drive_module_ff",
+        "interface::test_modport_converse_same_and_partial_defaults",
+        "interface::test_modport_forwarded_through_hierarchy"
+      ]
+    }
+  },
+  {
+    "id": "icarus_modport_functions",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports sorry: modport task/function ports are not yet supported for the emitted modport import declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/modport_import_icarus.json",
+      "LIMITATIONS.md#icarus-modport-functions"
+    ],
+    "cases": {
+      "icarus": [
+        "interface::test_modport_import_function",
+        "interface::test_modport_import_function_forwarded_from_instance_array",
+        "interface::test_modport_import_function_in_always_ff"
       ]
     }
   },
