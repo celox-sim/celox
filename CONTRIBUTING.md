@@ -88,9 +88,13 @@ uses the finer behavior-based matrix above.
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Weekly and on relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. Existing Heliodor scheduled runs cover the longer simulator workloads daily. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
+| Merge groups that cut a release | A merge group whose diff changes `.release-please-manifest.json` (only the release pull request does) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A merge group whose diff cannot be determined is treated the same way. |
 
 Full runs have a separate concurrency group so ordinary pushes cannot cancel
-them. They report failures normally; they are not advisory jobs with
+them. Scheduled and dispatched full runs on `master` and `develop` end with
+`Report full validation`: a failed or cancelled job opens the issue
+"Full CI is failing on <branch>", or comments on it while it stays open, and
+the next passing full run closes it. They report failures normally; they are not advisory jobs with
 `continue-on-error`. The external comparison gate accepts an existing retained
 failure only when its case ID, expectation, status, phase, retained diagnostic,
 and tool version match the checked-in baseline. These cases still run every

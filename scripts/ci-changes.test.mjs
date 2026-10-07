@@ -4,7 +4,11 @@ import { dirname, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { affectsHeliodorArm64, classifyFiles } from "./ci-changes.mjs";
+import {
+  affectsHeliodorArm64,
+  classifyFiles,
+  cutsRelease,
+} from "./ci-changes.mjs";
 
 const none = {
   docs: false,
@@ -109,7 +113,12 @@ test("full validation overrides even an empty valid diff", () => {
     ["scripts/ci-changes.mjs", head, head],
     {
       cwd: root,
-      env: { ...process.env, FULL_VALIDATION: "true", GITHUB_OUTPUT: "" },
+      env: {
+        ...process.env,
+        FULL_VALIDATION: "true",
+        GITHUB_EVENT_NAME: "schedule",
+        GITHUB_OUTPUT: "",
+      },
       encoding: "utf8",
     },
   );
@@ -123,7 +132,95 @@ test("full validation overrides even an empty valid diff", () => {
           return [name, value === "true"];
         }),
     ),
-    { ...all, heliodor_arm64: true },
+    { ...all, heliodor_arm64: true, release: false },
+  );
+});
+
+function runClassifier(base, head, env) {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const output = execFileSync(
+    process.execPath,
+    ["scripts/ci-changes.mjs", base, head],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        FULL_VALIDATION: "",
+        GITHUB_EVENT_NAME: "",
+        GITHUB_OUTPUT: "",
+        ...env,
+      },
+      encoding: "utf8",
+    },
+  );
+  return Object.fromEntries(
+    output
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [name, value] = line.split("=");
+        return [name, value === "true"];
+      }),
+  );
+}
+
+test("only the release manifest marks a release", () => {
+  assert.equal(cutsRelease([".release-please-manifest.json"]), true);
+  assert.equal(
+    cutsRelease(["crates/celox/src/lib.rs", "./.release-please-manifest.json"]),
+    true,
+  );
+  assert.equal(cutsRelease([]), false);
+  assert.equal(
+    cutsRelease(["CHANGELOG.md", "release-please-config.json"]),
+    false,
+  );
+});
+
+test("merge groups with an unknown diff are treated as releases", () => {
+  assert.deepEqual(
+    runClassifier("", "", { GITHUB_EVENT_NAME: "merge_group" }),
+    { ...all, heliodor_arm64: true, release: true },
+  );
+  // Other events still run every path, but without the release gate.
+  assert.deepEqual(
+    runClassifier("", "", { GITHUB_EVENT_NAME: "pull_request" }),
+    { ...all, heliodor_arm64: true, release: false },
+  );
+});
+
+test("a merge group that changes the release manifest is a release", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const release = execFileSync(
+    "git",
+    ["log", "-1", "--format=%H", "--", ".release-please-manifest.json"],
+    { cwd: root, encoding: "utf8" },
+  ).trim();
+  assert.ok(release, "history must contain a release manifest change");
+  const base = `${release}~1`;
+  const baseSha = execFileSync("git", ["rev-parse", base], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  assert.equal(
+    runClassifier(baseSha, release, { GITHUB_EVENT_NAME: "merge_group" }).release,
+    true,
+  );
+  assert.equal(
+    runClassifier(baseSha, release, { GITHUB_EVENT_NAME: "pull_request" }).release,
+    false,
+  );
+});
+
+test("other merge groups are not releases", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  assert.deepEqual(
+    runClassifier(head, head, { GITHUB_EVENT_NAME: "merge_group" }),
+    { ...none, heliodor_arm64: false, release: false },
   );
 });
 

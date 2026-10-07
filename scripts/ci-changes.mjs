@@ -90,6 +90,15 @@ export function affectsHeliodorArm64(files) {
     );
 }
 
+// Only a release pull request changes the release manifest. A merge group that
+// carries one is about to tag a release, so it gets the same full validation
+// as the daily run instead of the change-based subset.
+export function cutsRelease(files) {
+  return files.some(
+    (path) => path.replace(/^\.\//, "") === ".release-please-manifest.json",
+  );
+}
+
 export function classifyFiles(files, { releasePlease = false } = {}) {
   const affected = {
     docs: false,
@@ -230,12 +239,16 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  const files =
-    process.env.FULL_VALIDATION === "true"
-      ? null
-      : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
+  const scheduledFull = process.env.FULL_VALIDATION === "true";
+  const files = scheduledFull
+    ? null
+    : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
+  // An undeterminable merge group diff might cut a release, so it fails open.
+  const release =
+    process.env.GITHUB_EVENT_NAME === "merge_group" &&
+    (files === null || cutsRelease(files));
   const affected =
-    files === null
+    files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
           ...classifyFiles(files, {
@@ -243,5 +256,5 @@ if (
           }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
-  writeOutputs(affected);
+  writeOutputs({ ...affected, release });
 }

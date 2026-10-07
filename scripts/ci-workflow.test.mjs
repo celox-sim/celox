@@ -19,7 +19,10 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   const gate = job("rust");
   assert.match(gate, /name: Rust Test & NAPI Build/);
   assert.match(gate, /if: always\(\)/);
-  assert.match(gate, /needs: \[changes, rust-tests, napi-linux, napi-wasm\]/);
+  assert.match(
+    gate,
+    /needs: \[changes, rust-tests, napi-linux, napi-wasm, external-suites\]/,
+  );
   assert.match(
     gate,
     /if: .*outputs\.rust == 'true' \|\| needs\.changes\.outputs\.napi == 'true'/,
@@ -32,6 +35,8 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     NAPI_REQUIRED: "true",
     NATIVE_RESULT: "success",
     WASM_RESULT: "success",
+    RELEASE_REQUIRED: "false",
+    EXTERNAL_RESULT: "skipped",
   };
   const cases = [
     {
@@ -90,6 +95,21 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
+  // A merge group that cuts a release must pass every external comparison.
+  const release = {
+    ...success,
+    RELEASE_REQUIRED: "true",
+    EXTERNAL_RESULT: "success",
+  };
+  cases.push({ env: release, passes: true });
+  for (const status of ["failure", "cancelled", "skipped", ""]) {
+    cases.push({ env: { ...release, EXTERNAL_RESULT: status }, passes: false });
+  }
+  // Full runs report comparison failures through an issue, not this gate.
+  for (const status of ["success", "failure", "cancelled", ""]) {
+    cases.push({ env: { ...success, EXTERNAL_RESULT: status }, passes: true });
+  }
+  cases.push({ env: { ...success, RELEASE_REQUIRED: "" }, passes: false });
   for (const { env, passes } of cases) {
     const result = spawnSync("bash", ["-e", "-c", script], {
       env: { ...process.env, ...env },
@@ -112,9 +132,14 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(job("changes"), /STABLE_LANE: .*github\.ref_name == 'master'/);
   assert.match(job("lint"), /VERYL_LANE: .*github\.ref_name == 'develop'/);
   const external = job("external-suites");
+  assert.match(external, /needs: changes\n/);
   assert.match(
     external,
-    /if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+    /if: always\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| needs\.changes\.outputs\.release == 'true'\)/,
+  );
+  assert.match(
+    job("changes"),
+    /release: \$\{\{ steps\.classify\.outputs\.release \}\}/,
   );
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
@@ -177,4 +202,24 @@ test("artifact consumers wait for their producer rather than the Rust test gate"
   const browser = job("playground-browser");
   assert.match(browser, /needs: \[changes, napi-wasm\]/);
   assert.match(browser, /name: napi-wasm32-wasi/);
+});
+
+test("full runs on long-lived branches report every job's result", () => {
+  const report = job("report-full-validation");
+  const jobs = [...workflow.split(/^jobs:\n/m)[1].matchAll(/^  ([\w-]+):\n/gm)]
+    .map((match) => match[1])
+    .filter((name) => name !== "report-full-validation");
+  const needs = report
+    .match(/needs:\s*\[([^\]]*)\]/)[1]
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  assert.deepEqual([...needs].sort(), [...jobs].sort());
+  assert.match(
+    report,
+    /if: always\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
+  );
+  assert.match(report, /issues: write/);
+  assert.match(report, /NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
+  assert.match(report, /run: node scripts\/report-full-ci\.mjs/);
 });
