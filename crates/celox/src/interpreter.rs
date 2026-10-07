@@ -621,11 +621,13 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             machine.enable_comb_capture_if_changed(&old, &new, sites)?;
         }
         SIRInstruction::ExternCall { dst, func, args } => {
-            let args = args
-                .iter()
-                .map(|&arg| extern_argument(regs, arg))
-                .collect::<Result<Vec<_>, _>>()?;
-            let result = machine.call_extern(*func, &args)?;
+            // The SIR verifier bounds the argument count.
+            let mut values = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+            let values = &mut values[..args.len()];
+            for (value, &arg) in values.iter_mut().zip(args) {
+                *value = extern_argument(regs, arg)?;
+            }
+            let result = machine.call_extern(*func, values)?;
             if let Some(dst) = dst {
                 let value = extern_result(regs, *dst, result, four_state);
                 regs.set(*dst, value);

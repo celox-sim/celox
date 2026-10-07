@@ -213,7 +213,6 @@ impl SharedNativeCode {
         program_image: NativeProgramImage,
         dpi: &crate::DpiSymbols,
     ) -> Result<Self, SimulatorError> {
-        let extern_functions = dpi.resolve(&program_image.runtime_schema.extern_functions)?;
         program_image.validate().map_err(|message| {
             codegen_message(format!("invalid native program image: {message}"))
         })?;
@@ -224,6 +223,9 @@ impl SharedNativeCode {
                 format_native_feature_bits(unavailable)
             )));
         }
+        // Loading DPI-C libraries runs their initializers and keeps them
+        // loaded, so it waits until the image is known to be usable.
+        let extern_functions = dpi.resolve(&program_image.runtime_schema.extern_functions)?;
         let symbols = program_image
             .symbols
             .iter()

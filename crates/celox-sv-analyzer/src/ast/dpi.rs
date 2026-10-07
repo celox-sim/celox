@@ -7,7 +7,8 @@
 use super::*;
 use crate::ir::{DpiArgument, DpiImport, DpiType};
 
-/// The largest number of arguments an imported function may take.
+/// The largest number of arguments an imported function may take; the
+/// limit of `celox_sir::MAX_EXTERN_CALL_ARGUMENTS`.
 const MAX_DPI_ARGUMENTS: usize = 16;
 
 /// Every DPI-C import of the active generate items.

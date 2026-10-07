@@ -93,7 +93,7 @@ struct NativeArenaLayout {
 
 /// Offset of the result slot in the extern call area, after the argument
 /// slots.
-pub(super) const CALL_AREA_RESULT: i32 = 16 * 8;
+pub(super) const CALL_AREA_RESULT: i32 = celox_sir::MAX_EXTERN_CALL_ARGUMENTS as i32 * 8;
 /// Offset of the XMM0-XMM15 save area in the extern call area.
 pub(super) const CALL_AREA_XMM_SAVE: i32 = CALL_AREA_RESULT + 16;
 const CALL_AREA_SIZE: usize = CALL_AREA_XMM_SAVE as usize + 16 * 16;

@@ -207,7 +207,6 @@ pub fn compile_units(
     }
 }
 
-/// Compile all execution units into a single WASM function body.
 /// The name of the host import that calls extern function `func`.
 pub fn extern_import_name(func: u32) -> String {
     format!("celox_extern_{func}")
@@ -232,7 +231,7 @@ impl ExternImports {
                 assert_eq!(
                     arity,
                     args.len(),
-                    "extern function {func} is called with different arities"
+                    "design assembly gives extern function {func} one prototype"
                 );
             }
         }
@@ -249,6 +248,7 @@ impl ExternImports {
     }
 }
 
+/// Compile all execution units into a single WASM function body.
 fn compile_function(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     layout: &MemoryLayout,

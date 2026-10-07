@@ -19,13 +19,13 @@ pub(super) fn lower_extern_call(
     for (index, &arg) in args.iter().enumerate() {
         let src = extern_argument(ctx, block, arg);
         block.push(MInst::ExternArg {
-            index: u8::try_from(index).expect("an extern call takes at most 16 arguments"),
+            index: u8::try_from(index).expect("the SIR verifier bounds extern call arguments"),
             src,
         });
     }
     block.push(MInst::CallExtern {
         func,
-        arg_count: u8::try_from(args.len()).expect("an extern call takes at most 16 arguments"),
+        arg_count: u8::try_from(args.len()).expect("the SIR verifier bounds extern call arguments"),
     });
     let Some(dst) = dst else {
         return;

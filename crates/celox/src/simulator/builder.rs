@@ -1703,12 +1703,20 @@ mod host {
         /// Libraries are searched in the order they are added, after the
         /// functions registered with [`Self::dpi_function`]. A library stays
         /// loaded for the rest of the process.
-        pub fn dpi_library(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        ///
+        /// # Safety
+        ///
+        /// Loading the library runs its initializers. Every C function a
+        /// DPI-C import is linked to must have the signature that import
+        /// declares (IEEE 1800-2023 35.5.6).
+        pub unsafe fn dpi_library(mut self, path: impl Into<std::path::PathBuf>) -> Self {
             self.options.dpi.add_library(path.into());
             self
         }
 
         /// Link the DPI-C import whose C name is `name` to `function`.
+        ///
+        /// Registering `name` again replaces the earlier function.
         ///
         /// # Safety
         ///

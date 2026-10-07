@@ -590,6 +590,18 @@ fn verify_instruction_types<A>(
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
         SIRInstruction::ExternCall { dst, args, .. } => {
+            if args.len() > crate::MAX_EXTERN_CALL_ARGUMENTS {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.EXTERN_CALL_ARGUMENT_COUNT",
+                    block,
+                    index,
+                    format!(
+                        "{} arguments exceed the limit of {}",
+                        args.len(),
+                        crate::MAX_EXTERN_CALL_ARGUMENTS
+                    ),
+                ));
+            }
             for &reg in args.iter().chain(dst) {
                 if !is_c_integer(ty(reg)?) {
                     return Err(SirVerifyError::instruction(
@@ -1127,6 +1139,52 @@ mod tests {
             eu.verify_result().unwrap_err().invariant,
             "TYPE.EDGE_ARGUMENT"
         );
+    }
+
+    fn extern_call(args: usize, argument_type: RegisterType) -> ExecutionUnit<usize> {
+        let args = (0..args).map(RegisterId).collect::<Vec<_>>();
+        unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: args
+                    .iter()
+                    .map(|&arg| SIRInstruction::Imm(arg, SIRValue::new(1u8)))
+                    .chain([SIRInstruction::ExternCall {
+                        dst: None,
+                        func: 0,
+                        args: args.clone(),
+                    }])
+                    .collect(),
+                terminator: SIRTerminator::Return,
+            }],
+            args.iter().map(|&arg| (arg, argument_type.clone())),
+        )
+    }
+
+    #[test]
+    fn checks_extern_call_argument_count_and_types() {
+        assert_eq!(
+            extern_call(crate::MAX_EXTERN_CALL_ARGUMENTS, signed_bit(32)).verify_result(),
+            Ok(())
+        );
+        assert_eq!(extern_call(1, logic(1)).verify_result(), Ok(()));
+        assert_eq!(
+            extern_call(crate::MAX_EXTERN_CALL_ARGUMENTS + 1, bit(32))
+                .verify_result()
+                .unwrap_err()
+                .invariant,
+            "TYPE.EXTERN_CALL_ARGUMENT_COUNT"
+        );
+        for argument_type in [bit(7), logic(2)] {
+            assert_eq!(
+                extern_call(1, argument_type)
+                    .verify_result()
+                    .unwrap_err()
+                    .invariant,
+                "TYPE.EXTERN_CALL_C_INTEGER"
+            );
+        }
     }
 
     #[test]

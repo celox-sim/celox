@@ -1470,6 +1470,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                 Ok(store)
             }
             sv::ir::Stmt::Call { name, args } => {
+                if self.m.dpi_imports.contains_key(name) {
+                    return Err(unsupported(format!(
+                        "DPI-C function `{name}` called in combinational logic"
+                    )));
+                }
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }

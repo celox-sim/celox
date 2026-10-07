@@ -354,16 +354,33 @@ impl<'a> ProcModule<'a> {
         })
     }
 
-    /// The local index of the extern function linked by `c_name`.
-    pub fn extern_function(&mut self, c_name: &str) -> u32 {
+    /// The local index of the extern function `import` links to. Imports
+    /// of one C name with different prototypes get separate entries, which
+    /// design assembly reports as a conflict.
+    pub fn extern_function(&mut self, import: &sv::ir::DpiImport) -> u32 {
+        let extern_type = |r#type: sv::ir::DpiType| match r#type {
+            sv::ir::DpiType::Bit => ExternType::Bit,
+            sv::ir::DpiType::Logic => ExternType::Logic,
+            sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
+        };
+        let function = ExternFunction {
+            name: import.c_name().to_string(),
+            signature: ExternSignature {
+                pure: import.is_pure(),
+                result: import.return_type().map(extern_type),
+                arguments: import
+                    .arguments()
+                    .iter()
+                    .map(|argument| extern_type(argument.r#type()))
+                    .collect(),
+            },
+        };
         let index = self
             .extern_functions
             .iter()
-            .position(|function| function.name == c_name)
+            .position(|known| *known == function)
             .unwrap_or_else(|| {
-                self.extern_functions.push(ExternFunction {
-                    name: c_name.to_string(),
-                });
+                self.extern_functions.push(function);
                 self.extern_functions.len() - 1
             });
         u32::try_from(index).expect("extern function count fits u32")

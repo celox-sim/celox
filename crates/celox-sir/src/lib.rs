@@ -580,6 +580,9 @@ impl SIROffset {
     }
 }
 
+/// The largest number of arguments an [`SIRInstruction::ExternCall`] passes.
+pub const MAX_EXTERN_CALL_ARGUMENTS: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(serialize = "Addr: Serialize", deserialize = "Addr: Deserialize<'de>"))]
 pub enum SIRInstruction<Addr> {
@@ -630,7 +633,8 @@ pub enum SIRInstruction<Addr> {
     /// the result are C integers whose type follows from the register: a
     /// `Bit { width, signed }` register is an integer of that width and
     /// signedness, and a one-bit `Logic` register is an `svLogic` holding
-    /// `value | mask << 1`.
+    /// `value | mask << 1`. A call takes at most
+    /// [`MAX_EXTERN_CALL_ARGUMENTS`] arguments.
     ExternCall {
         dst: Option<RegisterId>,
         func: u32,

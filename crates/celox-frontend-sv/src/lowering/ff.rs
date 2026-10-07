@@ -572,7 +572,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
             registers.push(self.dpi_register(value, r#type));
         }
-        let func = self.m.extern_function(import.c_name());
+        let func = self.m.extern_function(import);
         let dst = import
             .return_type()
             .map(|r#type| self.dpi_result_register(r#type));

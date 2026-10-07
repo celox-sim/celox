@@ -55,8 +55,12 @@ pub enum DpiError {
 }
 
 impl DpiSymbols {
+    /// Registers `address` for `name`, replacing an earlier registration.
     pub(crate) fn add_function(&mut self, name: String, address: usize) {
-        self.functions.push((name, address));
+        match self.functions.iter_mut().find(|(known, _)| *known == name) {
+            Some((_, known)) => *known = address,
+            None => self.functions.push((name, address)),
+        }
     }
 
     pub(crate) fn add_library(&mut self, path: PathBuf) {
@@ -202,6 +206,6 @@ unsafe fn call_c(address: usize, args: &[u64]) -> u64 {
         16 => call!(
             a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
         ),
-        count => panic!("an extern function takes at most 16 arguments, not {count}"),
+        count => panic!("the SIR verifier bounds extern call arguments, not {count}"),
     }
 }

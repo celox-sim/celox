@@ -407,8 +407,8 @@ fn links_functions_from_a_shared_library() {
             always_ff @(posedge clk) y <= abs(a);
         endmodule
     "#;
-    let mut sim = builder(source)
-        .dpi_library("libc.so.6")
+    // SAFETY: libc's `abs` is `int abs(int)`.
+    let mut sim = unsafe { builder(source).dpi_library("libc.so.6") }
         .build_cranelift()
         .unwrap();
     let clk = sim.event("clk");
@@ -416,6 +416,36 @@ fn links_functions_from_a_shared_library() {
     sim.modify(|io| io.set(a, (-12i32) as u32)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(y), BigUint::from(12u32));
+}
+
+extern "C" fn dpi_sub(x: i32, y: i32) -> i32 {
+    x.wrapping_sub(y)
+}
+
+#[test]
+fn registering_a_name_again_replaces_the_function() {
+    let source = r#"
+        module Top(input logic clk, input int a, input int b, output int y);
+            import "DPI-C" function int combine(input int x, input int y);
+            always_ff @(posedge clk) y <= combine(a, b);
+        endmodule
+    "#;
+    let mut sim = unsafe {
+        builder(source)
+            .dpi_function("combine", dpi_add as *const ())
+            .dpi_function("combine", dpi_sub as *const ())
+    }
+    .build_cranelift()
+    .unwrap();
+    let clk = sim.event("clk");
+    let (a, b, y) = (sim.signal("a"), sim.signal("b"), sim.signal("y"));
+    sim.modify(|io| {
+        io.set(a, 10u32);
+        io.set(b, 3u32);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(7u32));
 }
 
 #[test]
@@ -436,6 +466,80 @@ fn unresolved_function_is_a_build_error() {
     );
     assert!(
         error.to_string().contains("missing_dpi_function"),
+        "{error}"
+    );
+}
+
+extern "C" fn dpi_twice(x: i32) -> i32 {
+    x.wrapping_mul(2)
+}
+
+dpi_backends! {
+    fn imports_declared_in_a_package(sim) {
+        @build unsafe {
+            builder(r#"
+                package p;
+                    import "DPI-C" function int twice(input int x);
+                endpackage
+                module Top(input logic clk, input int a, output int y, output int z);
+                    import p::*;
+                    always_ff @(posedge clk) begin
+                        y <= twice(a);
+                        z <= p::twice(a + 1);
+                    end
+                endmodule
+            "#)
+            .dpi_function("twice", dpi_twice as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, y, z) = (sim.signal("a"), sim.signal("y"), sim.signal("z"));
+        sim.modify(|io| io.set(a, 20u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(40u32));
+        assert_eq!(sim.get(z), BigUint::from(42u32));
+    }
+}
+
+#[test]
+fn casts_of_results_use_the_declared_signedness() {
+    let source = r#"
+        module Top(input logic clk, input logic [7:0] a, output logic [31:0] y);
+            import "DPI-C" function byte negate(input byte x);
+            always_ff @(posedge clk) y <= int'(negate(a));
+        endmodule
+    "#;
+    let mut sim = unsafe { builder(source).dpi_function("negate", dpi_negate_byte as *const ()) }
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let (a, y) = (sim.signal("a"), sim.signal("y"));
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(0xffff_fffbu32));
+}
+
+#[test]
+fn imports_of_one_c_name_must_share_a_prototype() {
+    let source = r#"
+        module Child(input logic clk, input int a, output int y);
+            import "DPI-C" function int dpi_add(input int x, input int y);
+            always_ff @(posedge clk) y <= dpi_add(a, a);
+        endmodule
+        module Top(input logic clk, input int a, output int y, output int z);
+            import "DPI-C" function longint dpi_add(input int x, input int y);
+            Child u(.clk(clk), .a(a), .y(y));
+            always_ff @(posedge clk) z <= int'(dpi_add(a, 1));
+        endmodule
+    "#;
+    let error = match unsafe { builder(source).dpi_function("dpi_add", dpi_add as *const ()) }
+        .build_cranelift()
+    {
+        Ok(_) => panic!("conflicting DPI-C prototypes built"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("function int dpi_add(input int, input int)")
+            && error.contains("function longint dpi_add(input int, input int)"),
         "{error}"
     );
 }
@@ -469,6 +573,29 @@ fn rejects_unsupported_imports_and_calls() {
                 always_comb y = f(a);
             endmodule"#,
             "called in combinational logic",
+        ),
+        (
+            r#"module Top(input int a, output int y);
+                import "DPI-C" function void f(input int x);
+                always_comb f(a);
+                assign y = a;
+            endmodule"#,
+            "DPI-C function `f` called in combinational logic",
+        ),
+        (
+            r#"module Top(input int a, output int y);
+                import "DPI-C" function void f(input int x);
+                function automatic int g(input int v); f(v); return v; endfunction
+                assign y = g(a);
+            endmodule"#,
+            "DPI-C function `f` called in combinational logic",
+        ),
+        (
+            r#"import "DPI-C" function int f(input int x);
+            module Top(input logic clk, input int a, output int y);
+                always_ff @(posedge clk) y <= f(a);
+            endmodule"#,
+            "DPI-C import or export at compilation-unit scope",
         ),
         (
             r#"module Top(input logic clk, input int a, output int y);

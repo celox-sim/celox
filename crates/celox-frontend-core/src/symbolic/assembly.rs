@@ -1797,22 +1797,29 @@ fn relocate_units(
                 event_site_base: runtime_event_site_base,
             },
         );
-        // Extern functions are shared by C symbol name across instances.
-        let extern_function_map = sim_module
-            .extern_functions
-            .iter()
-            .enumerate()
-            .map(|(local, function)| {
-                let global = extern_functions
-                    .iter()
-                    .position(|existing: &ExternFunction| existing.name == function.name)
-                    .unwrap_or_else(|| {
-                        extern_functions.push(function.clone());
-                        extern_functions.len() - 1
+        // Extern functions are shared by C symbol name across instances, and
+        // every import of one name must declare the same prototype.
+        let mut extern_function_map = HashMap::default();
+        for (local, function) in sim_module.extern_functions.iter().enumerate() {
+            let global = match extern_functions
+                .iter()
+                .position(|existing: &ExternFunction| existing.name == function.name)
+            {
+                Some(global) if extern_functions[global] != *function => {
+                    return Err(ParserError::ExternSignatureMismatch {
+                        name: function.name.clone(),
+                        first: extern_functions[global].to_string(),
+                        second: function.to_string(),
                     });
-                (local as u32, global as u32)
-            })
-            .collect::<HashMap<_, _>>();
+                }
+                Some(global) => global,
+                None => {
+                    extern_functions.push(function.clone());
+                    extern_functions.len() - 1
+                }
+            };
+            extern_function_map.insert(local as u32, global as u32);
+        }
         let mut runtime_event_site_map = HashMap::default();
         let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {

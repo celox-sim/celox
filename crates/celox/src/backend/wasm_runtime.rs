@@ -366,13 +366,15 @@ impl WasmBackend {
                 let extern_functions = extern_functions.clone();
                 linker
                     .func_new("env", import.name(), ty, move |_, params, results| {
-                        let args = params
-                            .iter()
-                            .map(|param| param.unwrap_i64() as u64)
-                            .collect::<Vec<_>>();
+                        // The SIR verifier bounds the argument count.
+                        let mut args = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+                        let args = &mut args[..params.len()];
+                        for (arg, param) in args.iter_mut().zip(params) {
+                            *arg = param.unwrap_i64() as u64;
+                        }
                         // SAFETY: the module calls each import with the
                         // argument count of the DPI-C import it links to.
-                        let result = unsafe { extern_functions.call(func, &args) };
+                        let result = unsafe { extern_functions.call(func, args) };
                         results[0] = wasmtime::Val::I64(result as i64);
                         Ok(())
                     })
