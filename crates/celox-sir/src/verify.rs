@@ -603,7 +603,7 @@ fn verify_instruction_types<A>(
                 ));
             }
             for &reg in args.iter().chain(dst) {
-                if !is_c_integer(ty(reg)?) {
+                if crate::extern_abi::ExternValue::of(ty(reg)?).is_none() {
                     return Err(SirVerifyError::instruction(
                         "TYPE.EXTERN_CALL_C_INTEGER",
                         block,
@@ -618,14 +618,6 @@ fn verify_instruction_types<A>(
         }
     }
     Ok(())
-}
-
-/// Whether a register has a C integer type an extern call can pass.
-fn is_c_integer(ty: &RegisterType) -> bool {
-    match ty {
-        RegisterType::Bit { width, .. } => matches!(width, 1 | 8 | 16 | 32 | 64),
-        RegisterType::Logic { width } => *width == 1,
-    }
 }
 
 fn verify_offset<A>(

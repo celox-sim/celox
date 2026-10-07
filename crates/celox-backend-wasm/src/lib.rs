@@ -18,6 +18,7 @@ pub type HashSet<K> = fxhash::FxHashSet<K>;
 use celox_design::{
     BinaryOp, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp,
 };
+use celox_sir::extern_abi::{ExternValue, SV_LOGIC_MASK_SHIFT};
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
     SIRValue,
@@ -642,25 +643,19 @@ fn compile_extern_call(
     for arg in args {
         let local = &locals.reg_map[arg];
         instrs.push(Instruction::LocalGet(local.value_idx));
-        match unit.register_map[arg] {
-            RegisterType::Bit {
-                width,
-                signed: true,
-            } => match width {
-                8 => instrs.push(Instruction::I64Extend8S),
-                16 => instrs.push(Instruction::I64Extend16S),
-                32 => instrs.push(Instruction::I64Extend32S),
-                _ => {}
-            },
-            RegisterType::Bit { .. } => {}
-            RegisterType::Logic { .. } => {
-                if let Some(mask) = local.mask_idx {
-                    instrs.push(Instruction::LocalGet(mask));
-                    instrs.push(Instruction::I64Const(1));
-                    instrs.push(Instruction::I64Shl);
-                    instrs.push(Instruction::I64Or);
-                }
-            }
+        let ty = ExternValue::of_verified(&unit.register_map[arg]);
+        match ty.sign_extended_width() {
+            Some(8) => instrs.push(Instruction::I64Extend8S),
+            Some(16) => instrs.push(Instruction::I64Extend16S),
+            Some(32) => instrs.push(Instruction::I64Extend32S),
+            Some(width) => unreachable!("a {width}-bit extern call argument is not a C integer"),
+            None => {}
+        }
+        if let (ExternValue::Logic, Some(mask)) = (ty, local.mask_idx) {
+            instrs.push(Instruction::LocalGet(mask));
+            instrs.push(Instruction::I64Const(SV_LOGIC_MASK_SHIFT.into()));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
         }
     }
     instrs.push(Instruction::Call(function_index));
@@ -669,33 +664,30 @@ fn compile_extern_call(
         return;
     };
     let local = &locals.reg_map[&dst];
-    match unit.register_map[&dst] {
-        RegisterType::Bit { width, .. } => {
-            if width < 64 {
-                instrs.push(Instruction::I64Const((1i64 << width) - 1));
-                instrs.push(Instruction::I64And);
-            }
-            instrs.push(Instruction::LocalSet(local.value_idx));
-            if let Some(mask) = local.mask_idx {
-                instrs.push(Instruction::I64Const(0));
-                instrs.push(Instruction::LocalSet(mask));
-            }
-        }
-        RegisterType::Logic { .. } => {
-            if let Some(mask) = local.mask_idx {
+    let ty = ExternValue::of_verified(&unit.register_map[&dst]);
+    if let Some(mask) = local.mask_idx {
+        match ty {
+            ExternValue::Logic => {
                 instrs.push(Instruction::LocalTee(local.value_idx));
-                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::I64Const(SV_LOGIC_MASK_SHIFT.into()));
                 instrs.push(Instruction::I64ShrU);
                 instrs.push(Instruction::I64Const(1));
                 instrs.push(Instruction::I64And);
                 instrs.push(Instruction::LocalSet(mask));
                 instrs.push(Instruction::LocalGet(local.value_idx));
             }
-            instrs.push(Instruction::I64Const(1));
-            instrs.push(Instruction::I64And);
-            instrs.push(Instruction::LocalSet(local.value_idx));
+            ExternValue::Integer { .. } => {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(mask));
+            }
         }
     }
+    let value_mask = ty.result_value_mask();
+    if value_mask != u64::MAX {
+        instrs.push(Instruction::I64Const(value_mask as i64));
+        instrs.push(Instruction::I64And);
+    }
+    instrs.push(Instruction::LocalSet(local.value_idx));
 }
 
 fn compile_sparse_chunk_copy(
