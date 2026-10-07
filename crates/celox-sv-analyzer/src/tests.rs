@@ -2509,3 +2509,124 @@ fn package_inlining_keeps_source_text_after_a_dpi_import() {
         "{inlined}"
     );
 }
+
+fn elaborate(source: &str) -> Result<Option<String>, AnalyzerError> {
+    elaborate_interfaces(&[(source, Path::new("interfaces.sv"))])
+        .map(|sources| sources.map(|mut sources| sources.remove(0)))
+}
+
+#[test]
+fn leaves_sources_without_interfaces_unchanged() {
+    let source = "module Top(input logic a, output logic y); assign y = a; endmodule";
+    assert_eq!(elaborate(source), Ok(None));
+}
+
+#[test]
+fn expands_interface_instances_ports_and_generic_ports() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus #(parameter int W = 4);
+            logic [W-1:0] data;
+            modport w(output data);
+        endinterface
+        module Writer(Bus.w bus, input logic [7:0] v);
+            assign bus.data = v;
+        endmodule
+        module Pass(interface bus, input logic [7:0] v);
+            Writer u(.bus(bus), .v(v));
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] y);
+            Bus #(.W(6)) b();
+            Pass p(.bus(b), .v(v));
+            assign y = b.data;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // The instance becomes a localparam and a signal per member.
+        "localparam int b$W = 6;",
+        "var logic [b$W-1:0] b$data;",
+        "assign y = b$data;",
+        // The port becomes a member port and a parameter.
+        "parameter int bus$W = 4",
+        "output var logic [bus$W-1:0] bus$data",
+        "assign bus$data = v;",
+        // The generic port is bound in a copy of the module.
+        "Pass$Bus #(.bus$W(b$W)) p (.bus$data(b$data), .v(v));",
+        "module Pass$Bus #(",
+        "Writer #(.bus$W(bus$W)) u (.bus$data(bus$data), .v(v));",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_interface_uses() {
+    const BUS: &str = r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+            function automatic logic [7:0] get(input logic [7:0] k);
+                return x + k;
+            endfunction
+            modport r(input x);
+            modport w(output x);
+        endinterface
+    "#;
+    for (body, message) in [
+        (
+            "module Top(output logic [7:0] o); Bus b(); assign o = b; endmodule",
+            "use of interface `b` other than as a port connection or through a member",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o); assign o = p.y; endmodule",
+            "access of `p.y`, which the modport of port `p` does not list",
+        ),
+        (
+            "module W(Bus.w p); assign p.x = 0; endmodule
+             module M(Bus.r p); W u(.p(p)); endmodule",
+            "port `p` of `W` drives member `x`, an input of port `p` of `M`",
+        ),
+        (
+            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b[0].get(1); endmodule",
+            "call of a function of the interface array `b`",
+        ),
+        (
+            "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
+             module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
+            "modport `r` selected in the connection of port `p` of `M`, which does not declare it",
+        ),
+    ] {
+        let source = format!("{BUS}{body}");
+        assert_eq!(
+            elaborate(&source),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{body}"
+        );
+    }
+    for (interface, message) in [
+        (
+            "interface I(input logic clk); endinterface",
+            "ports of interface `I`",
+        ),
+        (
+            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction endinterface",
+            "declaration of `k` in a nested scope of interface `I`, which shadows an interface item",
+        ),
+        (
+            "interface I; logic a; modport m(inout a); endinterface",
+            "inout or ref modport port in interface `I`",
+        ),
+    ] {
+        assert_eq!(
+            elaborate(interface),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{interface}"
+        );
+    }
+}

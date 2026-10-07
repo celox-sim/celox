@@ -45,6 +45,7 @@ synthesis and is tested at the design level.
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
+| Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
@@ -69,7 +70,12 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Interfaces and modports, classes, and tasks with timing controls.
+- Classes, and tasks with timing controls.
+- Interfaces: ports of an interface, `inout`, `ref` and expression modport
+  ports, modport `export` and clocking, tasks, type parameters, enums and
+  instances inside an interface, a modport named in a connection to a port
+  that does not declare one, calls of functions of an interface array, and
+  virtual interfaces.
 - Behavioral and verification constructs: `initial` blocks that read design
   state or use timing, `final`, delays and delayed continuous assignments
   ([#444](https://github.com/celox-sim/celox/issues/444)), event controls other than clock edges, concurrent assertions,
@@ -179,6 +185,15 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Packages** are inlined into each module that uses them. Names resolve by
   their plain identifier, so a package item and a module item with the same
   name are reported as a duplicate declaration.
+- **Interfaces** are expanded into the modules that use them before
+  analysis. The members of an interface instance `h` become signals `h$m` of
+  the module that instantiates it, and its logic runs in that module. An
+  interface port `p` becomes one port `p$m` per member its modport lists, with
+  the modport direction, and its parameters become parameters `p$P`; a port
+  without a modport has every member, as an output when the module or a child
+  writes it. A top module with an interface port therefore has ports such as
+  `bus$data`. A module with a generic `interface` port is copied once per
+  interface it is connected to, as `M$I`.
 - **Block-local variables** of an `always_comb` become signals of the module; a
   name that clashes with another signal is rejected.
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
@@ -210,5 +225,5 @@ The cases that remain excluded fall into these groups:
   the nonblocking semantics of Veryl. These designs have no SystemVerilog
   equivalent and are not emitted.
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
-  hierarchical assignments) and interfaces are not emitted as simulatable
-  SystemVerilog modules.
+  hierarchical assignments) are not emitted as simulatable SystemVerilog
+  modules.

@@ -1,0 +1,259 @@
+(group interfaces (category hierarchy))
+
+(case infers_directions_of_ports_without_modport
+  (source "interface_port_directions.sv" #"
+        interface Pair;
+            logic [7:0] a;
+            logic [7:0] b;
+        endinterface
+        module Writer(Pair p, input logic [7:0] x);
+            assign p.a = x;
+        endmodule
+        module Reflect(Pair p);
+            assign p.b = p.a + 8'd1;
+        endmodule
+        module Relay(Pair p);
+            Reflect u(.p(p));
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Pair pair();
+            Writer w(.p(pair), .x(x));
+            Relay r(.p(pair));
+            assign y = pair.b;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+(case binds_positional_connections_and_parameter_values
+  (source "interface_positional.sv" #"
+        interface Bus #(parameter int W = 4);
+            logic [W-1:0] data;
+            modport w(output data);
+            modport r(input data);
+        endinterface
+        module Writer(Bus.w bus, input logic [15:0] v);
+            assign bus.data = v[$bits(bus.data)-1:0];
+        endmodule
+        module Reader(Bus.r bus, output logic [15:0] o);
+            always_comb begin
+                o = '0;
+                o[$bits(bus.data)-1:0] = bus.data;
+            end
+        endmodule
+        module Top(input logic [15:0] v, output logic [15:0] o12, output logic [15:0] o4);
+            Bus #(12) b12();
+            Bus b4();
+            Writer w12(b12, v);
+            Writer w4(b4, v);
+            Reader r12(b12, o12);
+            Reader r4(.bus(b4), .o(o4));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x1234 0xffff)
+    (modify (set v value))
+    (assert_eq o12 (trunc 12 value))
+    (assert_eq o4 (trunc 4 value))))
+
+(case runs_interface_processes_once_per_array_element
+  (source "interface_array_processes.sv" #"
+        interface Acc;
+            logic [7:0] a;
+            logic [7:0] b;
+            logic [8:0] sum;
+            assign sum = a + b;
+        endinterface
+        module Top(input logic [7:0] x, output logic [8:0] s0, output logic [8:0] s2,
+                   output logic [8:0] t10, output logic [8:0] t11);
+            Acc row [3] ();
+            Acc grid [2][2] ();
+            for (genvar i = 0; i < 3; i++) begin : g
+                assign row[i].a = x;
+                assign row[i].b = i;
+            end
+            for (genvar i = 0; i < 2; i++) begin : gi
+                for (genvar j = 0; j < 2; j++) begin : gj
+                    assign grid[i][j].a = x;
+                    assign grid[i][j].b = 2 * i + j;
+                end
+            end
+            assign s0 = row[0].sum;
+            assign s2 = row[2].sum;
+            assign t10 = grid[1][0].sum;
+            assign t11 = grid[1][1].sum;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x80 0xff)
+    (modify (set x value))
+    (assert_eq s0 value)
+    (assert_eq s2 (+ value 2))
+    (assert_eq t10 (+ value 2))
+    (assert_eq t11 (+ value 3))))
+
+(case calls_functions_and_reads_parameters_through_instances_and_ports
+  (source "interface_functions.sv" #"
+        interface Scale #(parameter int K = 3);
+            logic [7:0] base;
+            function automatic logic [7:0] scaled(input logic [7:0] v);
+                return base + v * K;
+            endfunction
+            modport user(import scaled);
+        endinterface
+        module User(Scale.user s, input logic [7:0] v, output logic [7:0] o, output logic [7:0] k);
+            assign o = s.scaled(v);
+            assign k = 8'(s.K);
+        endmodule
+        module Top(input logic [7:0] b, input logic [7:0] v,
+                   output logic [7:0] direct, output logic [7:0] via_port, output logic [7:0] k);
+            Scale #(.K(5)) s();
+            assign s.base = b;
+            assign direct = s.scaled(v);
+            User u(.s(s), .v(v), .o(via_port), .k(k));
+        endmodule
+    "#)
+  (top Top)
+  (for (base value) (list (0 0) (1 2) (0x10 0x33) (0xff 0xff))
+    (modify (set b base) (set v value))
+    (assert_eq direct (trunc 8 (+ base (* value 5))))
+    (assert_eq via_port (trunc 8 (+ base (* value 5))))
+    (assert_eq k 5)))
+
+(case elaborates_net_members_typedefs_and_localparams
+  (source "interface_typedefs.sv" #"
+        interface Word #(parameter int W = 8);
+            localparam int MAX = (1 << W) - 1;
+            typedef logic [W-1:0] word_t;
+            word_t value;
+            wire full;
+            assign full = value == MAX;
+            modport src(output value);
+            modport dst(input value, input full);
+        endinterface
+        module Src(Word.src w, input logic [15:0] x);
+            assign w.value = x[$bits(w.value)-1:0];
+        endmodule
+        module Dst(Word.dst w, output logic [15:0] v, output logic f);
+            always_comb begin
+                v = '0;
+                v[$bits(w.value)-1:0] = w.value;
+            end
+            assign f = w.full;
+        endmodule
+        module Top(input logic [15:0] x, output logic [15:0] v6, output logic f6,
+                   output logic [15:0] v8, output logic f8);
+            Word #(.W(6)) w6();
+            Word w8();
+            Src s6(.w(w6), .x(x));
+            Src s8(.w(w8), .x(x));
+            Dst d6(.w(w6), .v(v6), .f(f6));
+            Dst d8(.w(w8), .v(v8), .f(f8));
+        endmodule
+    "#)
+  (top Top)
+  (for (value narrow narrow_full wide wide_full)
+       (list (0x10 0x10 0 0x10 0) (0x3f 0x3f 1 0x3f 0) (0xff 0x3f 1 0xff 1))
+    (modify (set x value))
+    (assert_eq v6 narrow)
+    (assert_eq f6 narrow_full)
+    (assert_eq v8 wide)
+    (assert_eq f8 wide_full)))
+
+(case binds_generic_interface_ports_per_interface
+  (source "interface_generic_ports.sv" #"
+        interface Link;
+            logic [7:0] req;
+            logic [7:0] resp;
+            modport client(output req, input resp);
+            modport server(input req, output resp);
+        endinterface
+        interface Wide;
+            logic [15:0] req;
+            logic [15:0] resp;
+            modport client(output req, input resp);
+            modport server(input req, output resp);
+        endinterface
+        module Echo(interface.server s);
+            assign s.resp = s.req + 1'b1;
+        endmodule
+        module Pass(interface s);
+            Echo e(.s(s));
+        endmodule
+        module Top(input logic [15:0] x, output logic [7:0] narrow, output logic [15:0] wide);
+            Link l();
+            Wide w();
+            assign l.req = x[7:0];
+            assign w.req = x;
+            Pass pl(.s(l));
+            Pass pw(.s(w));
+            assign narrow = l.resp;
+            assign wide = w.resp;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x00ff 0x1234 0xffff)
+    (modify (set x value))
+    (assert_eq narrow (trunc 8 (+ value 1)))
+    (assert_eq wide (trunc 16 (+ value 1)))))
+
+(case clocks_interface_processes_from_member_clocks
+  (source "interface_clocking.sv" #"
+        interface Counter;
+            logic clk;
+            logic rst_n;
+            logic [3:0] count;
+            always_ff @(posedge clk or negedge rst_n)
+                if (!rst_n) count <= 4'd0;
+                else count <= count + 4'd1;
+            modport drive(output clk, output rst_n);
+            modport watch(input count);
+        endinterface
+        module Driver(Counter.drive c, input logic clk, input logic rst_n);
+            assign c.clk = clk;
+            assign c.rst_n = rst_n;
+        endmodule
+        module Watcher(Counter.watch c, output logic [3:0] count);
+            assign count = c.count;
+        endmodule
+        module Top(input logic clk, input logic rst_n, output logic [3:0] count);
+            Counter c();
+            Driver d(.c(c), .clk(clk), .rst_n(rst_n));
+            Watcher w(.c(c), .count(count));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set rst_n 0))
+  (modify (set rst_n 1))
+  (assert_eq count 0)
+  (tick clk 3)
+  (assert_eq count 3))
+
+(case reads_undriven_interface_members_as_unknown
+  (four_state)
+  (source "interface_undriven.sv" #"
+        interface Lane;
+            logic [7:0] data;
+            logic [3:0] spare;
+            modport w(output data);
+            modport r(input data, input spare);
+        endinterface
+        module Writer(Lane.w l, input logic [7:0] a);
+            assign l.data = a;
+        endmodule
+        module Reader(Lane.r l, output logic [7:0] data, output logic [3:0] spare);
+            assign data = l.data;
+            assign spare = l.spare;
+        endmodule
+        module Top(input logic [7:0] a, output logic [7:0] data, output logic [3:0] spare);
+            Lane lane();
+            Writer w(.l(lane), .a(a));
+            Reader r(.l(lane), .data(data), .spare(spare));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0x5a))
+  (assert_eq data 0x5a)
+  (assert_eq spare (fourstate 0xf 0xf)))
