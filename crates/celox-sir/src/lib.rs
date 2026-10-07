@@ -12,6 +12,7 @@ pub mod analysis;
 pub mod builder;
 pub mod cfg;
 pub mod effects;
+pub mod extern_abi;
 mod serde_helpers;
 pub mod transform;
 pub mod two_state;

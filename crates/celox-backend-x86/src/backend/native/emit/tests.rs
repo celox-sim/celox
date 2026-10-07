@@ -1,5 +1,6 @@
 mod arithmetic;
 mod control_flow;
+mod extern_calls;
 mod features;
 mod memory;
 mod registers;

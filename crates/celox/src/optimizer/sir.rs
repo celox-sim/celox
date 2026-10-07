@@ -54,6 +54,15 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizedSir, four_sta
     });
 }
 
+pub(crate) fn redirect_final_alias_accesses(
+    program: &mut OptimizedSir,
+    aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
+) {
+    super::with_optimized_program(program, |unit| {
+        celox_sir_opt::optimizer::redirect_final_alias_accesses(unit, aliases);
+    });
+}
+
 pub(crate) fn remove_final_identity_alias_stores(
     program: &mut OptimizedSir,
     validated_aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -74,8 +83,14 @@ pub(crate) fn optimize_rooted_comb_memory(
     externally_live: &crate::HashSet<AbsoluteAddr>,
     four_state: bool,
 ) {
+    let shared_storage = program.shared_storage();
     super::with_laid_out_program(program, |unit| {
-        celox_sir_opt::optimizer::optimize_rooted_comb_memory(unit, externally_live, four_state);
+        celox_sir_opt::optimizer::optimize_rooted_comb_memory(
+            unit,
+            externally_live,
+            &shared_storage,
+            four_state,
+        );
     });
 }
 

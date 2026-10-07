@@ -2582,35 +2582,22 @@ impl NativeBackend {
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
-        let addr = self.comb_capture_enabled.as_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
+        self.memory.write_header_word(
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            self.runtime_event_buffer.as_mut_ptr() as u64,
+        );
+        self.memory.write_header_word(
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
+            self.comb_capture_enabled.as_ptr() as u64,
+        );
         self.install_extern_functions();
     }
 
     fn install_extern_functions(&mut self) {
-        let addr = self.compiled.extern_functions.as_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8)
-                .add(celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET,
+            self.compiled.extern_functions.as_ptr() as u64,
+        );
     }
 
     /// Get the shared compiled code handle.
