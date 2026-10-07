@@ -35,7 +35,7 @@ LYDITE_SOLVER=finite ../target/release/lydite audit/lemma_candidates/counter.lyd
 
 - 選択した4段RV32I実装は、手動補題を含む経路で **436/436の保存条件と7個のglobal義務**、4/16/64語メモリとの合成を検査します。元の単一queryはUnknownのままです。
 - 補題を与えない自動経路は **431/436**。5個のUnknownを含むため、全体の証明成功とは扱いません。
-- Celox の再利用可能なVeryl テストスイート715件を証明付きで実行し、**696件通過＋19件の記録済み例外**（Veryl の言語制約6件、証明バックエンド未対応のテストベンチ12件、Celox 自身も ignore している既知の失敗1件）を CI の coverage contract としています。全715件成功という意味ではありません。
+- Celox の再利用可能なVeryl テストスイート737件を証明付きで実行し、**713件通過＋24件の記録済み例外**（Veryl の言語制約6件、証明バックエンド未対応のテストベンチ12件、Celox 自身も ignore している既知の失敗5件、Celox が Unsupported として拒否する構文1件）を CI の coverage contract としています。全737件成功という意味ではありません。
 - `.lyd` の補題も自動探索も同じ型付き候補APIを使います。候補や保存済みレポートは証明ではなく、現在のqueryに対する新しい検査が必要です。
 
 実際のcheckoutの合否は[CI](../.github/workflows/lydite.yml)と新しい実行結果で確認してください。過去の集計やハッシュは現在の証明を代替しません。Rustの変換・義務生成・カーネル・選択したsolverを信頼しており、処理系全体の形式的な正しさは証明していません。
