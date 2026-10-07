@@ -70,7 +70,7 @@ fn extern_calls_preserve_live_values_and_pass_stack_arguments() {
     let state_size = BASE + (2 * LIVE as usize + 1) * 8;
     let (jit, mut state) = compile(MFunction::new(vec![block], vec![]), state_size);
 
-    let table = [weighted_sum as usize];
+    let table = [weighted_sum as *const () as usize];
     let table_slot = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET;
     let values = (0..LIVE as u64)
         .map(|index| 0x0101_0101_0000_0000 * (index + 1) + index)
