@@ -1,0 +1,389 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_interface_bidirectional",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_interface_wide_signal",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_multiple_interface_instances",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_transitive_generics",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_transitive_generics_two_level",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: Errors in port declarations.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: Errors in port declarations.\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_generic_interface_port",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_always_comb_packed_array_member",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_always_ff_on_member_clock",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_connect_modport_to_constant",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: Errors in port declarations.\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: Errors in port declarations.\n<case>/source_0.sv:49: syntax error\n<case>/source_0.sv:49: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_connect_operator",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: Errors in port declarations.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "interface::test_interface_connection",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: Errors in port declarations.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_continuous_assign_logic",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Errors in port declarations.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_four_state_x_propagation",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_instance_array_in_generate",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Errors in port declarations.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_instance_inside_generate_for",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_instance_inside_generate_if",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_member_access_in_comb_and_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_param_and_const",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Errors in port declarations.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_param_sized_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: Errors in port declarations.\n<case>/source_0.sv:32: syntax error\n<case>/source_0.sv:32: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_struct_and_packed_array_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_interface_valid_ready_handshake",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_mixin_interface",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_all_input_and_all_output_defaults",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_array_port",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_clock_reset_drive_module_ff",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: Errors in port declarations.\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: Errors in port declarations.\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_converse_same_and_partial_defaults",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: Errors in port declarations.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: Errors in port declarations.\n<case>/source_0.sv:44: syntax error\n<case>/source_0.sv:44: Errors in port declarations.\n<case>/source_0.sv:49: syntax error\n<case>/source_0.sv:49: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_modport_forwarded_through_hierarchy",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interface::test_proto_interface_generic_module",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 25,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 3,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite_version": "0.10.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

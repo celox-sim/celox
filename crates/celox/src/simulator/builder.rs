@@ -399,6 +399,7 @@ fn analyze(
         ));
         diagnostics
     };
+    celox_frontend_veryl::lower_interface_captures(&mut ir);
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled
     // entry cannot execute the same store across multiple iterations.
