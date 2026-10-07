@@ -110,6 +110,14 @@ impl AnalyzerError {
     }
 }
 
+/// Rewrite `sources` so that they no longer declare or use interfaces, or
+/// return `None` when no source declares one. See [`ast::interfaces`].
+pub fn elaborate_interfaces(
+    sources: &[(&str, &Path)],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces(sources)
+}
+
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;

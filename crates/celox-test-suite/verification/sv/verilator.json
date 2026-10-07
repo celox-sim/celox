@@ -875,6 +875,94 @@
       "tags": []
     },
     {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_generic_interface_ports_per_interface",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_positional_connections_and_parameter_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::clocks_interface_processes_from_member_clocks",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::elaborates_net_members_typedefs_and_localparams",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::infers_directions_of_ports_without_modport",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "interfaces::reads_undriven_interface_members_as_unknown",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::runs_interface_processes_once_per_array_element",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
@@ -2091,11 +2179,11 @@
     "emission_error": 0,
     "ignored": 6,
     "mismatch": 0,
-    "passed": 138,
+    "passed": 145,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 36
+    "unsupported": 37
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

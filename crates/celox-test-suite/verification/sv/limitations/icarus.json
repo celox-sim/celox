@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 27,
+    "compile_error": 35,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -308,6 +308,70 @@
       "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:5: error: Type names are not valid expressions here.\n<case>/source_0.sv:5: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:5:               : Expression is: <type>\n<case>/source_0.sv:5:               : Expression type: 10PETypename\n<case>/source_0.sv:5: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:7: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:8: error: Type names are not valid expressions here.\n<case>/source_0.sv:8: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:8:               : Expression is: <type>\n<case>/source_0.sv:8:               : Expression type: 10PETypename\n<case>/source_0.sv:8: error:",
       "expectation": "Simulation",
       "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_generic_interface_ports_per_interface",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: Errors in port declarations.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_positional_connections_and_parameter_values",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:7: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: Errors in port declarations.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::clocks_interface_processes_from_member_clocks",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::elaborates_net_members_typedefs_and_localparams",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: Errors in port declarations.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: Errors in port declarations.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::infers_directions_of_ports_without_modport",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: Errors in port declarations.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::reads_undriven_interface_members_as_unknown",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:11: sorry: Multi-dimensional arrays of instances are not yet supported.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::runs_interface_processes_once_per_array_element",
       "phase": "compile",
       "status": "compile_error"
     }
