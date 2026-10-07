@@ -10,9 +10,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
-    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION,
-    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
+    InitialStateValue, ModuleId, PortTypeKind, RegionedVarAddrBase, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use celox_frontend_core::symbolic::artifact::{
     ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
@@ -1004,6 +1005,11 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
+    if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
+        return Err(sv::AnalyzerError::Unsupported(
+            "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
+        ));
+    }
     procedural::register_locals(
         module,
         &mut variables,
@@ -1022,6 +1028,7 @@ fn lower_module_with_overrides(
         ),
         runtime_event_sites,
         runtime_errors,
+        extern_functions,
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
@@ -1036,6 +1043,7 @@ fn lower_module_with_overrides(
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
             std::mem::take(&mut pm.runtime_errors),
+            std::mem::take(&mut pm.extern_functions),
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
@@ -1132,6 +1140,7 @@ fn lower_module_with_overrides(
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
             runtime_errors,
             runtime_event_sites,
+            extern_functions,
             initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
@@ -4735,9 +4744,12 @@ fn lower_ff_processes(
             reset_clock_map.entry(*reset).or_insert(trigger_set.clock);
         }
         let sites_before = pm.runtime_event_sites.len();
+        let extern_calls_before = pm.extern_calls;
         let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
-        // A process without writes still runs for its runtime events.
-        let has_effects = pm.runtime_event_sites.len() > sites_before;
+        // A process without writes still runs for its runtime events and
+        // extern calls.
+        let has_effects =
+            pm.runtime_event_sites.len() > sites_before || pm.extern_calls > extern_calls_before;
         if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
             continue;
         }

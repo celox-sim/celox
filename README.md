@@ -215,15 +215,10 @@ locked development environment (also used by both devcontainer variants).
 See [Development environment](docs/development.md) for nix-direnv setup, mbx
 cache placement on Btrfs, and devcontainer host-directory configuration.
 
-The main local checks are:
-
-```bash
-cargo test
-pnpm install
-pnpm run build:napi
-pnpm run build
-pnpm test
-```
+Choose local checks using the [change-based validation matrix](CONTRIBUTING.md).
+Run the affected regression and integration tests before pushing. Full CI runs
+daily on the default branch and on `develop`, including external simulator
+comparisons, so broader coverage continues even when no files change.
 
 Architecture discussions, bug reports, and focused experiments are welcome in
 [GitHub Issues](https://github.com/celox-sim/celox/issues).

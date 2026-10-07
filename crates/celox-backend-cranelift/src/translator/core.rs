@@ -457,6 +457,134 @@ impl SIRTranslator {
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 self.translate_comb_capture_enable_if_changed(state, old, new, sites);
             }
+            SIRInstruction::ExternCall { dst, func, args } => {
+                self.translate_extern_call_inst(state, *dst, *func, args);
+            }
+        }
+    }
+
+    /// Call an extern function through the target's C calling convention.
+    ///
+    /// Every argument is passed and the result returned as a 64-bit integer:
+    /// the callee reads only the low bits of a narrower C type, and the
+    /// result is truncated to the destination's width.
+    fn translate_extern_call_inst(
+        &self,
+        state: &mut TranslationState,
+        dst: Option<RegisterId>,
+        func: u32,
+        args: &[RegisterId],
+    ) {
+        let table = state.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            state.mem_ptr,
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i32,
+        );
+        let function = state.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            table,
+            i32::try_from(func as u64 * 8).expect("extern function index fits the table"),
+        );
+
+        let mut signature = Signature::new(self.target_config.default_call_conv);
+        signature
+            .params
+            .extend(args.iter().map(|_| AbiParam::new(types::I64)));
+        signature.returns.push(AbiParam::new(types::I64));
+        let signature = state.builder.import_signature(signature);
+
+        let arguments = args
+            .iter()
+            .map(|arg| self.extern_call_argument(state, *arg))
+            .collect::<Vec<_>>();
+        let call = state
+            .builder
+            .ins()
+            .call_indirect(signature, function, &arguments);
+        let result = state.builder.inst_results(call)[0];
+
+        if let Some(dst) = dst {
+            let value = self.extern_call_result(state, dst, result);
+            state.regs.insert(dst, value);
+        }
+    }
+
+    /// The 64-bit C integer passed for an extern call argument.
+    fn extern_call_argument(&self, state: &mut TranslationState, arg: RegisterId) -> Value {
+        let ty = state.register_map[&arg].clone();
+        let value = state.regs[&arg].clone();
+        let raw = value.first_value(state.builder);
+        let widen = |builder: &mut FunctionBuilder, raw: Value, signed: bool| {
+            if builder.func.dfg.value_type(raw) == types::I64 {
+                raw
+            } else if signed {
+                builder.ins().sextend(types::I64, raw)
+            } else {
+                builder.ins().uextend(types::I64, raw)
+            }
+        };
+        match ty {
+            RegisterType::Bit { signed, width } => widen(state.builder, raw, signed && width > 1),
+            // An `svLogic` is `value | mask << 1`.
+            RegisterType::Logic { .. } => {
+                let raw = widen(state.builder, raw, false);
+                match value.first_mask(state.builder) {
+                    Some(mask) => {
+                        let mask = widen(state.builder, mask, false);
+                        let mask = state.builder.ins().ishl_imm_u(mask, 1);
+                        state.builder.ins().bor(raw, mask)
+                    }
+                    None => raw,
+                }
+            }
+        }
+    }
+
+    /// The destination value of an extern call returning `result`.
+    fn extern_call_result(
+        &self,
+        state: &mut TranslationState,
+        dst: RegisterId,
+        result: Value,
+    ) -> TransValue {
+        let ty = state.register_map[&dst].clone();
+        let cl_type = get_cl_type(ty.width());
+        let narrow = |builder: &mut FunctionBuilder, raw: Value| {
+            if cl_type == types::I64 {
+                raw
+            } else {
+                builder.ins().ireduce(cl_type, raw)
+            }
+        };
+        let (value, mask) = match ty {
+            RegisterType::Bit { width, .. } => {
+                let value = if width == 1 {
+                    state.builder.ins().band_imm_u(result, 1)
+                } else {
+                    result
+                };
+                (narrow(state.builder, value), None)
+            }
+            RegisterType::Logic { .. } => {
+                let value = state.builder.ins().band_imm_u(result, 1);
+                let mask = state.builder.ins().ushr_imm_u(result, 1);
+                let mask = state.builder.ins().band_imm_u(mask, 1);
+                (
+                    narrow(state.builder, value),
+                    Some(narrow(state.builder, mask)),
+                )
+            }
+        };
+        if self.options.four_state {
+            let mask = mask.unwrap_or_else(|| state.builder.ins().iconst(cl_type, 0));
+            TransValue::FourState {
+                values: vec![value],
+                masks: vec![mask],
+            }
+        } else {
+            TransValue::TwoState(vec![value])
         }
     }
 

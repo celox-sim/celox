@@ -907,6 +907,15 @@ pub enum MInst {
         active_bits_offset: i32,
         active_capacity: usize,
     },
+    /// Store argument `index` of the next `CallExtern` in the call area.
+    ExternArg { index: u8, src: VReg },
+    /// Call extern function `func` through the platform C ABI with the first
+    /// `arg_count` call-area slots as integer arguments, and store its integer
+    /// result in the call area. Every allocatable register is clobbered; the
+    /// emitter preserves the vector registers and the state base.
+    CallExtern { func: u32, arg_count: u8 },
+    /// dst = the integer result of the preceding `CallExtern`.
+    ExternResult { dst: VReg },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
     /// dst = lhs + rhs modulo 2^64
@@ -1286,6 +1295,11 @@ impl fmt::Display for MInst {
             MInst::SparseMarkActive { active_index, .. } => {
                 write!(f, "sparse_mark_active region={active_index}")
             }
+            MInst::ExternArg { index, src } => write!(f, "extern_arg[{index}] = {src}"),
+            MInst::CallExtern { func, arg_count } => {
+                write!(f, "call_extern func={func} args={arg_count}")
+            }
+            MInst::ExternResult { dst } => write!(f, "{dst} = extern_result"),
             MInst::SparseCommitWorklist {
                 descriptor_table,
                 active_capacity,
@@ -1544,9 +1558,12 @@ impl MInst {
             | MInst::Select { dst, .. }
             | MInst::CmpSelect { dst, .. }
             | MInst::CmpImmSelect { dst, .. }
-            | MInst::GuardedCmpSelect { dst, .. } => Some(*dst),
+            | MInst::GuardedCmpSelect { dst, .. }
+            | MInst::ExternResult { dst } => Some(*dst),
 
             MInst::Store { .. }
+            | MInst::ExternArg { .. }
+            | MInst::CallExtern { .. }
             | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
@@ -1631,9 +1648,12 @@ impl MInst {
             | MInst::Select { dst, .. }
             | MInst::CmpSelect { dst, .. }
             | MInst::CmpImmSelect { dst, .. }
-            | MInst::GuardedCmpSelect { dst, .. } => Some(dst),
+            | MInst::GuardedCmpSelect { dst, .. }
+            | MInst::ExternResult { dst } => Some(dst),
 
             MInst::Store { .. }
+            | MInst::ExternArg { .. }
+            | MInst::CallExtern { .. }
             | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
@@ -1678,8 +1698,10 @@ impl MInst {
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
-            | MInst::SparseCommitWorklist { .. } => Uses::none(),
-            MInst::Store { src, .. } => Uses::one(*src),
+            | MInst::SparseCommitWorklist { .. }
+            | MInst::CallExtern { .. }
+            | MInst::ExternResult { .. } => Uses::none(),
+            MInst::Store { src, .. } | MInst::ExternArg { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1808,7 +1830,7 @@ impl MInst {
                     *high = new;
                 }
             }
-            MInst::Store { src, .. } => {
+            MInst::Store { src, .. } | MInst::ExternArg { src, .. } => {
                 if *src == old {
                     *src = new;
                 }
@@ -2091,6 +2113,8 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
+            | MInst::CallExtern { .. }
+            | MInst::ExternResult { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}

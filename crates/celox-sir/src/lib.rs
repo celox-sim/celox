@@ -580,6 +580,9 @@ impl SIROffset {
     }
 }
 
+/// The largest number of arguments an [`SIRInstruction::ExternCall`] passes.
+pub const MAX_EXTERN_CALL_ARGUMENTS: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(serialize = "Addr: Serialize", deserialize = "Addr: Deserialize<'de>"))]
 pub enum SIRInstruction<Addr> {
@@ -622,6 +625,20 @@ pub enum SIRInstruction<Addr> {
         old: RegisterId,
         new: RegisterId,
         sites: Vec<u32>,
+    },
+    /// Calls an external function through the platform C ABI (a
+    /// SystemVerilog DPI-C import).
+    ///
+    /// `func` indexes the design's extern function table. Each argument and
+    /// the result are C integers whose type follows from the register: a
+    /// `Bit { width, signed }` register is an integer of that width and
+    /// signedness, and a one-bit `Logic` register is an `svLogic` holding
+    /// `value | mask << 1`. A call takes at most
+    /// [`MAX_EXTERN_CALL_ARGUMENTS`] arguments.
+    ExternCall {
+        dst: Option<RegisterId>,
+        func: u32,
+        args: Vec<RegisterId>,
     },
 }
 
@@ -727,6 +744,19 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     old.0, new.0, sites
                 )
             }
+            SIRInstruction::ExternCall { dst, func, args } => {
+                if let Some(dst) = dst {
+                    write!(f, "r{} = ", dst.0)?;
+                }
+                write!(f, "ExternCall(func={}, args=[", func)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "r{}", arg.0)?;
+                }
+                write!(f, "])")
+            }
         }
     }
 }
@@ -768,6 +798,9 @@ impl<A> SIRInstruction<A> {
             },
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
+            }
+            SIRInstruction::ExternCall { dst, func, args } => {
+                SIRInstruction::ExternCall { dst, func, args }
             }
         }
     }
@@ -825,6 +858,11 @@ impl<A> SIRInstruction<A> {
                     sites: sites.clone(),
                 }
             }
+            SIRInstruction::ExternCall { dst, func, args } => SIRInstruction::ExternCall {
+                dst: *dst,
+                func: *func,
+                args: args.clone(),
+            },
         }
     }
 }

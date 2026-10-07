@@ -9,10 +9,10 @@ use crate::{
     SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
-    BitAccess, DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId,
-    ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
-    TriggerSet, VarAtomBase, VariableMetadata,
+    BitAccess, DomainKind, ElaboratedDesign, EventTopology, ExternFunction, InitialStateValue,
+    InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
+    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -366,6 +366,7 @@ pub fn schedule_symbolic_rtl(
         mut comb_observers,
         mut runtime_errors,
         runtime_event_sites,
+        extern_functions,
         next_runtime_error_code,
     ) = timed_sub!(
         "relocate_units",
@@ -1107,6 +1108,7 @@ pub fn schedule_symbolic_rtl(
         runtime_schema: RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
+            extern_functions,
             comb_observers,
             testbench_read_roots: Default::default(),
             rtl_writes,
@@ -1378,6 +1380,7 @@ fn relocate_executation_unit_with_errors<A, B>(
     f: &impl Fn(&A) -> B,
     runtime_error_codes: &HashMap<i64, i64>,
     runtime_event_sites: &HashMap<u32, u32>,
+    extern_functions: &HashMap<u32, u32>,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -1416,6 +1419,13 @@ fn relocate_executation_unit_with_errors<A, B>(
                                     fatal_error_code: *fatal_error_code,
                                     consume_enabled: *consume_enabled,
                                 },
+                                SIRInstruction::ExternCall { dst, func, args } => {
+                                    SIRInstruction::ExternCall {
+                                        dst: *dst,
+                                        func: extern_functions[func],
+                                        args: args.clone(),
+                                    }
+                                }
                                 _ => inst.map_addr(f),
                             })
                             .collect(),
@@ -1667,6 +1677,7 @@ fn relocate_units(
         Vec<CombObserver<AbsoluteAddr>>,
         HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
         Vec<RuntimeEventSite>,
+        Vec<ExternFunction>,
         i64,
     ),
     ParserError,
@@ -1685,6 +1696,8 @@ fn relocate_units(
     let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
+    let mut extern_functions = Vec::<ExternFunction>::new();
+    let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
 
@@ -1785,6 +1798,27 @@ fn relocate_units(
                 event_site_base: runtime_event_site_base,
             },
         );
+        // Extern functions are shared by C symbol name across instances, and
+        // every import of one name must declare the same prototype.
+        let mut extern_function_map = HashMap::default();
+        for (local, function) in sim_module.extern_functions.iter().enumerate() {
+            let global = match extern_function_indices.get(&function.name).copied() {
+                Some(global) if extern_functions[global] != *function => {
+                    return Err(ParserError::ExternSignatureMismatch {
+                        name: function.name.clone(),
+                        first: extern_functions[global].to_string(),
+                        second: function.to_string(),
+                    });
+                }
+                Some(global) => global,
+                None => {
+                    extern_function_indices.insert(function.name.clone(), extern_functions.len());
+                    extern_functions.push(function.clone());
+                    extern_functions.len() - 1
+                }
+            };
+            extern_function_map.insert(local as u32, global as u32);
+        }
         let mut runtime_event_site_map = HashMap::default();
         let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
@@ -1808,6 +1842,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 )
             };
             let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
@@ -1891,6 +1926,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -1913,6 +1949,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -1937,6 +1974,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -1959,6 +1997,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -1983,6 +2022,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -2005,6 +2045,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -2047,6 +2088,7 @@ fn relocate_units(
         comb_observers,
         runtime_errors,
         runtime_event_sites,
+        extern_functions,
         next_runtime_error_code,
     ))
 }

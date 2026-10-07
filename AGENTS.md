@@ -11,6 +11,14 @@ Choose focused tests that exercise the changed behavior, then broaden validation
 in proportion to the change's scope and risk. If a required test cannot be run,
 state that explicitly in the handoff instead of silently omitting it.
 
+Use the change-based validation matrix in [CONTRIBUTING.md](CONTRIBUTING.md).
+Select the required checks from the affected behavior and its consumers before
+running them. Once they pass and no relevant failure remains unresolved,
+validation is complete. Repeat or broaden checks only for further changes, a
+failure, or a concrete unresolved concern. Do not repeat successful checks on
+the same source and configuration solely for reassurance. Daily full CI and
+periodic conformance gates provide broader coverage between changes.
+
 When a task has a clear requested outcome, pursue it without waiting for
 step-by-step instructions. Inspect the repository, make reasonable assumptions,
 implement the change, and continue while a safe, in-scope next step remains.

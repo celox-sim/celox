@@ -6,7 +6,6 @@ mod test_utils;
 
 all_backends! {
     fn indeterminate_short_circuit_lhs_executes_effectful_rhs(sim) {
-        @ignore_on(sv);
         @case "four_state_expression_semantics::indeterminate_short_circuit_lhs_executes_effectful_rhs";
     }
 

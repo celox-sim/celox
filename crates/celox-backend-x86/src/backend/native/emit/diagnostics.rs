@@ -83,6 +83,8 @@ pub(super) fn log_mir_stats(label: &str, stage: &str, func: &crate::native::mir:
                 | MInst::SparseCommit { .. }
                 | MInst::SparseMarkActive { .. }
                 | MInst::SparseCommitWorklist { .. } => memcopy += 1,
+                MInst::ExternArg { .. } | MInst::CallExtern { .. } | MInst::ExternResult { .. } => {
+                }
                 MInst::Add { .. }
                 | MInst::Add32 { .. }
                 | MInst::Sub { .. }

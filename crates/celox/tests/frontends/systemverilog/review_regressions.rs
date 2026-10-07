@@ -8020,3 +8020,52 @@ fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
         (BigUint::from(0b0011u8), BigUint::default())
     );
 }
+
+#[test]
+fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
+    // Each symbolically unrolled iteration deepens the loop's `break` and
+    // `return` conditions. Constant evaluation of those conditions must not
+    // recurse once per level: the diagnostic is reported on a 2 MiB thread,
+    // libtest's default, in a debug build.
+    let source = r#"
+        module Top (
+            input  logic [7:0] a,
+            input  logic       stop,
+            input  logic [1:0] count,
+            output logic [7:0] out
+        );
+            function automatic void notify(input logic [7:0] x);
+                $display("notify=%0d", x);
+            endfunction
+
+            function automatic logic [7:0] pass(
+                input logic [7:0] x,
+                input logic       stop_early,
+                input logic [1:0] count
+            );
+                for (int i = 0; i < count; i++) begin
+                    if (stop_early && i == 1) begin
+                        return x + i;
+                    end
+                    notify(x + i);
+                end
+                notify(x);
+                return x;
+            endfunction
+
+            always_comb begin
+                out = pass(a, stop, count);
+            end
+        endmodule
+    "#;
+    let error = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || cranelift_build_error(source))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        error.contains("loop condition that depends on run-time values"),
+        "{error}"
+    );
+}

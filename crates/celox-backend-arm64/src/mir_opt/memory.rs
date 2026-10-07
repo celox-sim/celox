@@ -157,7 +157,7 @@ pub(super) fn run(function: &mut MFunction) {
                 // All other writes (including indexed/pointer accesses and
                 // bulk or sparse updates) invalidate the cache. Using def()
                 // also makes future side-effecting opcodes conservative.
-                _ if inst.def().is_none() => available.clear(),
+                _ if inst.has_side_effects() => available.clear(),
                 _ => {}
             }
         }
@@ -204,7 +204,7 @@ pub(super) fn eliminate_overwritten_stores(function: &mut MFunction) {
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::PackedLaneCompare { .. } => pending.clear(),
                 MInst::KeepAlive { .. } => {}
-                _ if inst.def().is_none() => pending.clear(),
+                _ if inst.has_side_effects() => pending.clear(),
                 _ => {}
             }
         }

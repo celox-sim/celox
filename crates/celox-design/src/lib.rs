@@ -74,6 +74,83 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+/// A function in the host's C ABI that the design calls, such as a
+/// SystemVerilog DPI-C import. `ExternCall` instructions index the design's
+/// table of these.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternFunction {
+    /// The C symbol the function is linked by.
+    pub name: String,
+    /// The prototype every call of `name` must share (IEEE 1800-2023
+    /// 35.5.4).
+    pub signature: ExternSignature,
+}
+
+/// The prototype of an [`ExternFunction`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternSignature {
+    /// Whether the function is declared `pure`.
+    pub pure: bool,
+    /// The result, or `None` for a `void` function.
+    pub result: Option<ExternType>,
+    pub arguments: Vec<ExternType>,
+}
+
+/// A type an [`ExternFunction`] passes or returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternType {
+    /// `bit`, passed as `svBit`.
+    Bit,
+    /// `logic`, passed as `svLogic`.
+    Logic,
+    /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
+    /// that width.
+    Integer { width: usize, signed: bool },
+}
+
+impl fmt::Display for ExternType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (name, signed) = match *self {
+            ExternType::Bit => return f.write_str("bit"),
+            ExternType::Logic => return f.write_str("logic"),
+            ExternType::Integer { width: 8, signed } => ("byte", signed),
+            ExternType::Integer { width: 16, signed } => ("shortint", signed),
+            ExternType::Integer { width: 32, signed } => ("int", signed),
+            ExternType::Integer { width: 64, signed } => ("longint", signed),
+            ExternType::Integer { width, signed } => {
+                return write!(f, "{}{width}", if signed { "i" } else { "u" });
+            }
+        };
+        f.write_str(name)?;
+        if !signed {
+            f.write_str(" unsigned")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ExternFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let signature = &self.signature;
+        if signature.pure {
+            f.write_str("pure ")?;
+        }
+        f.write_str("function ")?;
+        match signature.result {
+            Some(result) => write!(f, "{result}")?,
+            None => f.write_str("void")?,
+        }
+        write!(f, " {}(", self.name)?;
+        for (index, argument) in signature.arguments.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "input {argument}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// Runtime activation recipe for one combinational event site.
 ///
 /// Expression trees used to emit the event have already been lowered into
@@ -122,6 +199,8 @@ pub struct RuntimeErrorInfo<A> {
 pub struct RuntimeSchema<A> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Extern functions called by `ExternCall`, by index.
+    pub extern_functions: Vec<ExternFunction>,
     pub comb_observers: Vec<RuntimeCombObserver<A>>,
     /// Persistent state read directly by host-side testbench execution. These
     /// are optimization roots even when no SIR instruction loads them.
@@ -140,6 +219,7 @@ impl<A> Default for RuntimeSchema<A> {
         Self {
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            extern_functions: Vec::new(),
             comb_observers: Vec::new(),
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
