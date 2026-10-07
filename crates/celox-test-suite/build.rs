@@ -68,8 +68,10 @@ mod fingerprint {
             })
             .collect();
         features.sort();
-        // metadata resolves without building or downloading. Failure disables
-        // reuse instead of trusting a partial fingerprint.
+        // Limit resolution to the platform Cargo is actually building. Without
+        // this, offline metadata requires unrelated Android/Windows packages
+        // that a clean host-only CI build has never downloaded.
+        // Failure disables reuse instead of trusting a partial fingerprint.
         let metadata = std::process::Command::new(std::env::var("CARGO")?)
             .args([
                 "metadata",
@@ -80,6 +82,8 @@ mod fingerprint {
                 "--features",
             ])
             .arg(features.join(","))
+            .arg("--filter-platform")
+            .arg(std::env::var("TARGET")?)
             .current_dir(&manifest)
             .output()?;
         if !metadata.status.success() {
