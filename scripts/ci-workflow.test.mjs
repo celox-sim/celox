@@ -141,6 +141,10 @@ test("scheduled and manual validation run all paths and external suites", () => 
     job("changes"),
     /release: \$\{\{ steps\.classify\.outputs\.release \}\}/,
   );
+  assert.match(
+    job("changes"),
+    /MERGE_GROUP_BASE_REF: \$\{\{ github\.event\.merge_group\.base_ref \}\}/,
+  );
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
   assert.match(external, /tool: \[verilator, icarus\]/);

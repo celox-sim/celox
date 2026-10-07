@@ -8,6 +8,7 @@ import {
   affectsHeliodorArm64,
   classifyFiles,
   cutsRelease,
+  isReleaseMergeGroup,
 } from "./ci-changes.mjs";
 
 const none = {
@@ -117,6 +118,7 @@ test("full validation overrides even an empty valid diff", () => {
         ...process.env,
         FULL_VALIDATION: "true",
         GITHUB_EVENT_NAME: "schedule",
+        MERGE_GROUP_BASE_REF: "",
         GITHUB_OUTPUT: "",
       },
       encoding: "utf8",
@@ -136,6 +138,11 @@ test("full validation overrides even an empty valid diff", () => {
   );
 });
 
+const MASTER_GROUP = {
+  GITHUB_EVENT_NAME: "merge_group",
+  MERGE_GROUP_BASE_REF: "refs/heads/master",
+};
+
 function runClassifier(base, head, env) {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const output = execFileSync(
@@ -147,6 +154,7 @@ function runClassifier(base, head, env) {
         ...process.env,
         FULL_VALIDATION: "",
         GITHUB_EVENT_NAME: "",
+        MERGE_GROUP_BASE_REF: "",
         GITHUB_OUTPUT: "",
         ...env,
       },
@@ -177,9 +185,34 @@ test("only the release manifest marks a release", () => {
   );
 });
 
+test("only master merge groups that change the release manifest are releases", () => {
+  const manifest = [".release-please-manifest.json"];
+  const master = { event: "merge_group", baseRef: "refs/heads/master" };
+  assert.equal(isReleaseMergeGroup({ ...master, files: manifest }), true);
+  assert.equal(isReleaseMergeGroup({ ...master, files: null }), true);
+  assert.equal(isReleaseMergeGroup({ ...master, files: ["README.md"] }), false);
+  // Syncing a release into develop carries the manifest but tags nothing.
+  for (const files of [manifest, null]) {
+    assert.equal(
+      isReleaseMergeGroup({
+        event: "merge_group",
+        baseRef: "refs/heads/develop",
+        files,
+      }),
+      false,
+    );
+  }
+  for (const event of ["pull_request", "push", "schedule"]) {
+    assert.equal(
+      isReleaseMergeGroup({ event, baseRef: "refs/heads/master", files: manifest }),
+      false,
+    );
+  }
+});
+
 test("merge groups with an unknown diff are treated as releases", () => {
   assert.deepEqual(
-    runClassifier("", "", { GITHUB_EVENT_NAME: "merge_group" }),
+    runClassifier("", "", MASTER_GROUP),
     { ...all, heliodor_arm64: true, release: true },
   );
   // Other events still run every path, but without the release gate.
@@ -203,11 +236,18 @@ test("a merge group that changes the release manifest is a release", () => {
     encoding: "utf8",
   }).trim();
   assert.equal(
-    runClassifier(baseSha, release, { GITHUB_EVENT_NAME: "merge_group" }).release,
+    runClassifier(baseSha, release, MASTER_GROUP).release,
     true,
   );
   assert.equal(
     runClassifier(baseSha, release, { GITHUB_EVENT_NAME: "pull_request" }).release,
+    false,
+  );
+  assert.equal(
+    runClassifier(baseSha, release, {
+      GITHUB_EVENT_NAME: "merge_group",
+      MERGE_GROUP_BASE_REF: "refs/heads/develop",
+    }).release,
     false,
   );
 });
@@ -219,7 +259,7 @@ test("other merge groups are not releases", () => {
     encoding: "utf8",
   }).trim();
   assert.deepEqual(
-    runClassifier(head, head, { GITHUB_EVENT_NAME: "merge_group" }),
+    runClassifier(head, head, MASTER_GROUP),
     { ...none, heliodor_arm64: false, release: false },
   );
 });

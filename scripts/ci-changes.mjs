@@ -90,12 +90,21 @@ export function affectsHeliodorArm64(files) {
     );
 }
 
-// Only a release pull request changes the release manifest. A merge group that
-// carries one is about to tag a release, so it gets the same full validation
-// as the daily run instead of the change-based subset.
 export function cutsRelease(files) {
   return files.some(
     (path) => path.replace(/^\.\//, "") === ".release-please-manifest.json",
+  );
+}
+
+// On master, only the release pull request changes the release manifest, so a
+// merge group carrying it is about to tag a release and gets full validation
+// instead of the change-based subset. Syncing master into develop carries the
+// same change without releasing anything. An undeterminable diff fails open.
+export function isReleaseMergeGroup({ event, baseRef, files }) {
+  return (
+    event === "merge_group" &&
+    baseRef === "refs/heads/master" &&
+    (files === null || cutsRelease(files))
   );
 }
 
@@ -243,10 +252,11 @@ if (
   const files = scheduledFull
     ? null
     : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  // An undeterminable merge group diff might cut a release, so it fails open.
-  const release =
-    process.env.GITHUB_EVENT_NAME === "merge_group" &&
-    (files === null || cutsRelease(files));
+  const release = isReleaseMergeGroup({
+    event: process.env.GITHUB_EVENT_NAME,
+    baseRef: process.env.MERGE_GROUP_BASE_REF,
+    files,
+  });
   const affected =
     files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
