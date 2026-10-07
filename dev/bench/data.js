@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791347833369,
+  "lastUpdate": 1791348163835,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -342513,6 +342513,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_end_to_end",
             "unit": "ms",
             "value": 290367.383114
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "c596113c556266aef9b6d6e1b85b0cb7b9ef3e28",
+          "message": "chore(deps): update napi-rs and emnapi compatibility (#1005)",
+          "timestamp": "2026-10-04T07:10:44Z",
+          "url": "https://github.com/celox-sim/celox/commit/c596113c556266aef9b6d6e1b85b0cb7b9ef3e28"
+        },
+        "date": 1791348163835,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_startup",
+            "unit": "ms",
+            "value": 11083.203628
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 311370.752231
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 322453.956612
           }
         ]
       }
