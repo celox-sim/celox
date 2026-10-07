@@ -33,6 +33,33 @@ const RELEASE_PLEASE_FILES = new Set([
   "packages/vite-plugin/package.json",
 ]);
 
+// These crates are consumers or test infrastructure, not runtime/build
+// dependencies of celox-napi. ci-changes.test.mjs checks the workspace graph
+// so adding a dependency cannot silently make this exclusion unsafe.
+const RUST_ONLY_CRATES = new Set([
+  "celox-test-suite",
+  "celox-bench",
+  "celox-bench-sv",
+  "celox-vpi",
+  "celox-wasm",
+  "lydite",
+  "lydite-celox",
+  "lydite-ir",
+  "lydite-solver",
+  "lydite-syntax",
+  "lydite-verify",
+]);
+
+function isRustOnlyPath(path) {
+  if (/(?:^|\/)Cargo\.(?:toml|lock)$/.test(path)) return false;
+  if (path.startsWith("lydite/")) return true;
+  const crate = /^crates\/([^/]+)\/(.+)$/.exec(path);
+  if (!crate) return false;
+  return (
+    RUST_ONLY_CRATES.has(crate[1]) || /^(?:tests|benches)\//.test(crate[2])
+  );
+}
+
 function startsWithAny(path, prefixes) {
   return prefixes.some((prefix) => path.startsWith(prefix));
 }
@@ -92,9 +119,15 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
 
     if (
       startsWithAny(path, ["docs/", "adr/"]) ||
-      path === "README.md"
+      path === "README.md" ||
+      path === "CONTRIBUTING.md"
     ) {
       affected.docs = true;
+      continue;
+    }
+
+    if (isRustOnlyPath(path)) {
+      affected.rust = true;
       continue;
     }
 
@@ -197,7 +230,10 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  const files = changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
+  const files =
+    process.env.FULL_VALIDATION === "true"
+      ? null
+      : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
   const affected =
     files === null
       ? { ...ALL_AFFECTED, heliodor_arm64: true }

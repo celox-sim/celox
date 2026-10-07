@@ -13,4 +13,5 @@ Use ! before the colon for a breaking change.
 
 ## Validation
 
-<!-- List the checks and tests run. -->
+<!-- List the checks and tests run, why their scope covers the change, and any
+required check that could not be run. See CONTRIBUTING.md. -->
