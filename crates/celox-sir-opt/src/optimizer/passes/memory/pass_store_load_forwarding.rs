@@ -1,7 +1,7 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{
-    collect_all_used_registers, def_reg, replace_reg_in_terminator, resolve_transitive_aliases,
-    sir_value_to_u64,
+    collect_all_used_registers, is_unused_definition, replace_reg_in_terminator,
+    resolve_transitive_aliases, sir_value_to_u64,
 };
 use crate::HashMap;
 use crate::PassOptions;
@@ -442,73 +442,11 @@ fn apply_aliases_to_inst(
     inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
     aliases: &HashMap<RegisterId, RegisterId>,
 ) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            if let Some(&to) = aliases.get(lhs) {
-                *lhs = to;
-            }
-            if let Some(&to) = aliases.get(rhs) {
-                *rhs = to;
-            }
+    inst.for_each_use_mut(|register| {
+        if let Some(&alias) = aliases.get(register) {
+            *register = alias;
         }
-        SIRInstruction::Unary(_, _, src) => {
-            if let Some(&to) = aliases.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            super::shared::replace_offset_registers(offset, aliases);
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            super::shared::replace_offset_registers(offset, aliases);
-            if let Some(&to) = aliases.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            super::shared::replace_offset_registers(offset, aliases);
-        }
-        SIRInstruction::Concat(_, args) => {
-            for arg in args {
-                if let Some(&to) = aliases.get(arg) {
-                    *arg = to;
-                }
-            }
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            if let Some(&to) = aliases.get(cond) {
-                *cond = to;
-            }
-            if let Some(&to) = aliases.get(then_val) {
-                *then_val = to;
-            }
-            if let Some(&to) = aliases.get(else_val) {
-                *else_val = to;
-            }
-        }
-        SIRInstruction::Slice(_, src, _, _) => {
-            if let Some(&to) = aliases.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                if let Some(&to) = aliases.get(arg) {
-                    *arg = to;
-                }
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            if let Some(&to) = aliases.get(old) {
-                *old = to;
-            }
-            if let Some(&to) = aliases.get(new) {
-                *new = to;
-            }
-        }
-    }
+    });
 }
 
 /// Remove instructions whose defined register is never used.
@@ -520,15 +458,9 @@ fn dead_code_eliminate(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         let mut changed = false;
         for block in eu.blocks.values_mut() {
             let before = block.instructions.len();
-            block.instructions.retain(|inst| {
-                if let Some(dst) = def_reg(inst) {
-                    // Keep if the register is used somewhere
-                    used.contains(&dst)
-                } else {
-                    // Store/Commit — always keep
-                    true
-                }
-            });
+            block
+                .instructions
+                .retain(|inst| !is_unused_definition(inst, &used));
             if block.instructions.len() != before {
                 changed = true;
             }

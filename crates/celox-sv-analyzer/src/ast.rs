@@ -17,7 +17,7 @@ use std::{
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
-use crate::{AnalyzerError, typecheck};
+use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_parameters;
 mod assignment_analysis;
@@ -89,8 +89,8 @@ use dimensions::{
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
-    expr_from_function_subroutine_call, expr_from_primary, expression_is_grouped,
-    guard_zero_divisions,
+    expr_from_function_subroutine_call, expr_from_primary, expr_from_subroutine_call,
+    expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{
@@ -105,6 +105,7 @@ use inlining::{
 };
 use instances::{
     connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,
+    node_source_text,
 };
 use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
@@ -138,6 +139,14 @@ use validation::{
 
 /// A procedural statement of the analyzer AST.
 pub type Stmt = crate::procedural::StmtBase<Expr, LValue>;
+
+/// The result of converting syntax that Celox may not be able to represent.
+type Converted<T> = Result<T, AnalyzerError>;
+
+/// The error for a construct the analyzer cannot represent.
+fn unsupported(construct: impl Into<String>) -> AnalyzerError {
+    AnalyzerError::Unsupported(construct.into())
+}
 pub type LocalVariable = crate::procedural::LocalVariableBase<crate::ir::Type>;
 pub type Subroutine = crate::procedural::SubroutineBase<Expr, LValue, crate::ir::Type>;
 pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, crate::ir::Type>;
@@ -1486,7 +1495,10 @@ impl ConditionalAssignment {
 struct Function {
     name: String,
     params: Vec<FunctionParam>,
-    body: Expr,
+    /// The function's value as one expression of its arguments, or `None`
+    /// for a function or task written as statements: a call of it is not
+    /// expanded into an expression.
+    body: Option<Expr>,
     /// For each `output` / `inout` parameter, its value when the body ends,
     /// in terms of the input parameters.
     outputs: Vec<(String, Expr)>,

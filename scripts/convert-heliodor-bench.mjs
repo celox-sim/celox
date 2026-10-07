@@ -108,6 +108,7 @@ function convertPartial() {
       "veryl-cc-sync": `veryl-cc-${arch}`,
       "celox-tiered": arch === "x86_64" ? "celox-tiered" : "celox-tiered-aarch64",
       "veryl-cc-tiered": `veryl-tiered-${arch}`,
+      "celox-parallel": `native-parallel-${arch}`,
     };
     const platform = platforms[row.runner];
     if (!platform) throw new Error(`unsupported runner: ${row.runner}`);

@@ -5999,6 +5999,39 @@
     },
     {
       "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "nba_dynamic_array::test_out_of_range_dynamic_comb_access",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "nba_dynamic_array::test_out_of_range_dynamic_ff_access_four_state",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "nba_dynamic_array::test_out_of_range_dynamic_ff_stores_are_ignored",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
       "name": "nba_dynamic_array::test_packed_rat_checkpoint_round_trip",
@@ -6015,6 +6048,17 @@
       "name": "nba_dynamic_array::test_partial_sparse_chunks_do_not_overlap_adjacent_variables",
       "phase": "compile",
       "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "nba_dynamic_array::test_partly_out_of_range_dynamic_ff_part_select",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -9059,11 +9103,11 @@
     "emission_error": 0,
     "ignored": 91,
     "mismatch": 0,
-    "passed": 502,
+    "passed": 504,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 113
+    "unsupported": 115
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

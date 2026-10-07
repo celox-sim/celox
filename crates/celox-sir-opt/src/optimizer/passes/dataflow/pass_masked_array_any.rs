@@ -541,68 +541,9 @@ fn register_use_counts(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
     };
     for block in eu.blocks.values() {
         for instruction in &block.instructions {
-            match instruction {
-                SIRInstruction::Imm(..) => {}
-                SIRInstruction::Binary(_, lhs, _, rhs) => {
-                    add(*lhs);
-                    add(*rhs);
-                }
-                SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-                    add(*source);
-                }
-                SIRInstruction::Load(_, _, offset, _) => {
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add(register);
-                    }
-                }
-                SIRInstruction::Store(_, offset, _, source, _, _) => {
-                    add(*source);
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add(register);
-                    }
-                }
-                SIRInstruction::Commit(_, _, offset, _, _) => {
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add(register);
-                    }
-                }
-                SIRInstruction::Concat(_, parts)
-                | SIRInstruction::RuntimeEvent { args: parts, .. }
-                | SIRInstruction::CombCaptureEvent { args: parts, .. } => {
-                    for &part in parts {
-                        add(part);
-                    }
-                }
-                SIRInstruction::Mux(_, condition, true_value, false_value) => {
-                    add(*condition);
-                    add(*true_value);
-                    add(*false_value);
-                }
-                SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-                    add(*old);
-                    add(*new);
-                }
-            }
+            instruction.for_each_use(&mut add);
         }
-        match &block.terminator {
-            SIRTerminator::Jump(_, arguments) => {
-                for &argument in arguments {
-                    add(argument);
-                }
-            }
-            SIRTerminator::Branch {
-                cond,
-                true_block,
-                false_block,
-            } => {
-                add(*cond);
-                for &argument in true_block.1.iter().chain(&false_block.1) {
-                    add(argument);
-                }
-            }
-            SIRTerminator::Switch { selector, .. } => add(*selector),
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-        }
+        block.terminator.for_each_use(&mut add);
     }
     counts
 }

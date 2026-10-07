@@ -41,10 +41,8 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     type_aliases: HashMap<String, Type>,
     /// The values of the local parameters declared in the body.
     local_constants: HashMap<String, String>,
-}
-
-fn unsupported(construct: impl Into<String>) -> AnalyzerError {
-    AnalyzerError::Unsupported(construct.into())
+    /// The kind of body, for the system tasks it may call.
+    body: system_functions::Body,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -97,6 +95,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         tree: &'t SyntaxTree,
         dims: &PackedDimensions,
         state: &'s mut BodyState<'a>,
+        body: system_functions::Body,
     ) -> Self {
         let type_aliases = dims.type_aliases.clone();
         Self {
@@ -108,6 +107,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             state,
             type_aliases,
             local_constants: HashMap::default(),
+            body,
         }
     }
 
@@ -301,17 +301,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn expr(&self, expr: &sv_parser::Expression) -> Result<Expr, AnalyzerError> {
-        let mut lowered = expr_from_expression_with_types(expr, self.tree, &self.dims)
-            .ok_or_else(|| unsupported("procedural expression"))?;
-        reject_unsupported_calls(&lowered)?;
+        let mut lowered = expr_from_expression_with_types(expr, self.tree, &self.dims)?;
         self.rename_expr(&mut lowered);
         Ok(lowered)
     }
 
     /// The lvalue as written (before local renaming) and as stored.
     fn lvalue(&self, node: &sv_parser::VariableLvalue) -> Result<(LValue, LValue), AnalyzerError> {
-        let lowered = variable_lvalue_from_node(node, self.tree, &self.dims)
-            .ok_or_else(|| unsupported("procedural assignment target"))?;
+        let lowered = variable_lvalue_from_node(node, self.tree, &self.dims)?;
         let mut renamed = lowered.clone();
         self.rename_lvalue(&mut renamed);
         Ok((lowered, renamed))
@@ -351,13 +348,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
         let (written, lhs) = self.lvalue(lvalue)?;
         let mut rhs = if op == "=" {
-            expr_from_expression_for_lvalue(rhs, &written, self.tree, &self.dims)
-                .ok_or_else(|| unsupported("procedural assignment expression"))?
+            expr_from_expression_for_lvalue(rhs, &written, self.tree, &self.dims)?
         } else {
-            let value = expr_from_expression_with_types(rhs, self.tree, &self.dims)
-                .ok_or_else(|| unsupported("procedural assignment expression"))?;
-            assignment_op_expr(&written, op, value, &self.dims)
-                .ok_or_else(|| unsupported(format!("assignment operator `{op}`")))?
+            let value = expr_from_expression_with_types(rhs, self.tree, &self.dims)?;
+            assignment_op_expr(&written, op, value, &self.dims)?
         };
         // A two-state member of a four-state packed struct drops unknown bits.
         if matches!(
@@ -369,7 +363,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         ) {
             rhs = coerce_procedural_assignment_rhs(rhs, &written, &self.dims);
         }
-        reject_unsupported_calls(&rhs)?;
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -389,8 +382,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             _ => return Err(unsupported("increment or decrement operator")),
         };
         let (written, lhs) = self.lvalue(lvalue)?;
-        let mut rhs = assignment_op_expr(&written, op, Expr::Literal("1".to_string()), &self.dims)
-            .ok_or_else(|| unsupported("increment or decrement"))?;
+        let mut rhs = assignment_op_expr(&written, op, Expr::Literal("1".to_string()), &self.dims)?;
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -573,9 +565,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         dimensions_from_type(signal.r#type()),
                     );
                     let mut init =
-                        expr_from_expression_for_lvalue(expr, &target, self.tree, &scoped)
-                            .ok_or_else(|| unsupported("local variable initializer"))?;
-                    reject_unsupported_calls(&init)?;
+                        expr_from_expression_for_lvalue(expr, &target, self.tree, &scoped)?;
                     self.rename_expr(&mut init);
                     Some(init)
                 }
@@ -634,7 +624,25 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
                 Ok(vec![Stmt::Call { name, args }])
             }
-            sv_parser::SubroutineCall::SystemTfCall(call) => {
+            sv_parser::SubroutineCall::SystemTfCall(system_call) => {
+                let (name, args) = system_tf_call_parts(system_call, self.tree)
+                    .ok_or_else(|| unsupported("system task or function name"))?;
+                let tf = system_functions::check_call(
+                    name,
+                    args.as_deref(),
+                    system_functions::CallSite::Statement(self.body),
+                )?;
+                if tf.expression {
+                    // A system function called as a statement is converted
+                    // and checked like the same call in an expression, then
+                    // its value is discarded. `$bits` and `$size` become
+                    // constants and do not evaluate their operands
+                    // (IEEE 1800-2023 20.6.2).
+                    let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
+                    self.rename_expr(&mut value);
+                    return Ok(vec![Stmt::Eval(value)]);
+                }
+                let call = system_call;
                 let (name, args) = match &**call {
                     sv_parser::SystemTfCall::ArgOptionl(call) => (
                         self.tree.get_str(&call.nodes.0.nodes.0),
@@ -660,31 +668,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     }
                 };
                 let name = name.ok_or_else(|| unsupported("system task"))?.to_string();
-                // A value system function in statement position runs for the
-                // effects of its operands; `$bits` and `$size` do not evaluate
-                // theirs (IEEE 1800-2023 20.6.2).
-                match name.as_str() {
-                    "$bits"
-                    | "$size"
-                    | "$left"
-                    | "$right"
-                    | "$low"
-                    | "$high"
-                    | "$increment"
-                    | "$dimensions"
-                    | "$unpacked_dimensions" => return Ok(Vec::new()),
-                    "$signed" | "$unsigned" | "$clog2" | "$countones" | "$onehot" | "$onehot0"
-                    | "$isunknown" => {
-                        let mut stmts = Vec::new();
-                        for arg in &args {
-                            if let SystemTaskArg::Expr(expr) = arg {
-                                effect_calls(expr, &mut stmts)?;
-                            }
-                        }
-                        return Ok(stmts);
-                    }
-                    _ => {}
-                }
                 // Veryl's `$assert(cond, ...)` and `$assert_continue(cond, ...)`
                 // are immediate assertions that end the simulation or continue.
                 if let ("$assert" | "$assert_continue", Some(SystemTaskArg::Expr(condition))) =
@@ -843,8 +826,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .and_then(|shapes| shapes.get(position))
         {
             let mut lowered =
-                patterns::expr_from_pattern(&pattern.nodes.1, shape, self.tree, &self.dims)
-                    .ok_or_else(|| unsupported("assignment pattern argument"))?;
+                patterns::expr_from_pattern(&pattern.nodes.1, shape, self.tree, &self.dims)?;
             self.rename_expr(&mut lowered);
             return Ok(lowered);
         }
@@ -877,9 +859,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn cond_predicate(&self, predicate: &sv_parser::CondPredicate) -> Result<Expr, AnalyzerError> {
-        let mut condition = expr_from_cond_predicate(predicate, self.tree, &self.dims)
-            .ok_or_else(|| unsupported("procedural condition"))?;
-        reject_unsupported_calls(&condition)?;
+        let mut condition = expr_from_cond_predicate(predicate, self.tree, &self.dims)?;
         self.rename_expr(&mut condition);
         Ok(condition)
     }
@@ -1050,10 +1030,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                             let target = LValue::Ident(source.clone());
                             let mut scoped = self.dims.clone();
                             scoped.insert(source.clone(), dimensions_from_type(&r#type));
-                            expr_from_expression_for_lvalue(value, &target, self.tree, &scoped)
-                                .ok_or_else(|| unsupported("for-loop initializer"))?
+                            expr_from_expression_for_lvalue(value, &target, self.tree, &scoped)?
                         };
-                        reject_unsupported_calls(&value_expr)?;
                         self.rename_expr(&mut value_expr);
                         let name = self.declare(&source, r#type.clone());
                         init.push(Stmt::Local {
@@ -1247,46 +1225,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 }
 
-/// The calls an expression evaluated only for its effects performs, as call
-/// statements in evaluation order.
-fn effect_calls(expr: &Expr, stmts: &mut Vec<Stmt>) -> Result<(), AnalyzerError> {
-    match expr {
-        Expr::Call { name, args } => {
-            stmts.push(Stmt::Call {
-                name: name.clone(),
-                args: args.iter().cloned().map(Some).collect(),
-            });
-            Ok(())
-        }
-        Expr::Ident(_) | Expr::Literal(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Resize { expr, .. } | Expr::Select { expr, .. } => {
-            effect_calls(expr, stmts)
-        }
-        Expr::Binary { left, op, right }
-            if !matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) =>
-        {
-            effect_calls(left, stmts)?;
-            effect_calls(right, stmts)
-        }
-        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
-            parts.iter().try_for_each(|part| effect_calls(part, stmts))
-        }
-        _ => {
-            let mut has_call = false;
-            visit_expr(expr, &mut |expr| {
-                has_call |= matches!(expr, Expr::Call { .. })
-            });
-            if has_call {
-                Err(unsupported(
-                    "conditionally evaluated call in a discarded value",
-                ))
-            } else {
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Whether a delay or event control is absent (sv-parser models the omitted
 /// control of `a = b` as an empty one).
 fn delay_or_event_control_is_empty(control: &sv_parser::DelayOrEventControl) -> bool {
@@ -1299,60 +1237,6 @@ fn delay_or_event_control_is_empty(control: &sv_parser::DelayOrEventControl) -> 
             )
         })
 }
-
-/// Reject the placeholder the expression converter leaves for a call it could
-/// not convert.
-fn reject_unsupported_calls(expr: &Expr) -> Result<(), AnalyzerError> {
-    let mut found = false;
-    visit_expr(expr, &mut |expr| {
-        if let Expr::Call { name, .. } = expr
-            && name == "$unsupported_function_call"
-        {
-            found = true;
-        }
-    });
-    if found {
-        Err(unsupported("subroutine call argument"))
-    } else {
-        Ok(())
-    }
-}
-
-pub(super) fn visit_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
-    f(expr);
-    match expr {
-        Expr::Ident(_) | Expr::Literal(_) => {}
-        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
-            visit_expr(expr, f)
-        }
-        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
-            parts.iter().for_each(|part| visit_expr(part, f))
-        }
-        Expr::Binary { left, right, .. } => {
-            visit_expr(left, f);
-            visit_expr(right, f);
-        }
-        Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            visit_expr(condition, f);
-            visit_expr(then_expr, f);
-            visit_expr(else_expr, f);
-        }
-        Expr::Call { args, .. } => args.iter().for_each(|arg| visit_expr(arg, f)),
-        Expr::Inside { expr, items } => {
-            visit_expr(expr, f);
-            for item in items {
-                item.exprs()
-                    .into_iter()
-                    .for_each(|operand| visit_expr(operand, f));
-            }
-        }
-    }
-}
-
 /// The declared arguments of a task or function: `(name, direction, type,
 /// default)`. An argument without a direction takes the previous one's, and
 /// one without a type the previous one's type (IEEE 1800-2023 13.3).
@@ -1642,12 +1526,13 @@ pub(super) fn subroutines_from_module_node(
         packed_dimensions,
         parameter_literals,
         state,
-        false,
+        None,
     )
 }
 
-/// The subroutines of a module; with `tolerant`, a subroutine that cannot
-/// be lowered is left out instead of failing.
+/// The subroutines of a module. With `rejected`, a subroutine that cannot be
+/// lowered is left out and the reason recorded under its name, instead of
+/// failing.
 pub(super) fn subroutines_from_module_node_with(
     node: RefNode<'_>,
     tree: &SyntaxTree,
@@ -1655,7 +1540,7 @@ pub(super) fn subroutines_from_module_node_with(
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
-    tolerant: bool,
+    mut rejected: Option<&mut HashMap<String, AnalyzerError>>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
@@ -1671,6 +1556,7 @@ pub(super) fn subroutines_from_module_node_with(
             let Some(syntax) = syntax else {
                 continue;
             };
+            let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
                     syntax.ports,
@@ -1695,7 +1581,12 @@ pub(super) fn subroutines_from_module_node_with(
                     }),
                     None => None,
                 };
-                let mut builder = BodyBuilder::new(tree, &item_dimensions, state);
+                let mut builder = BodyBuilder::new(
+                    tree,
+                    &item_dimensions,
+                    state,
+                    system_functions::Body::Subroutine,
+                );
                 builder.push_scope();
                 let mut lowered_params = Vec::new();
                 for (source, direction, r#type, default) in params {
@@ -1758,10 +1649,13 @@ pub(super) fn subroutines_from_module_node_with(
                 }
                 Ok(subroutine)
             })();
-            let subroutine = match lowered {
-                Ok(subroutine) => subroutine,
-                Err(_) if tolerant => continue,
-                Err(error) => return Err(error),
+            let subroutine = match (lowered, rejected.as_deref_mut()) {
+                (Ok(subroutine), _) => subroutine,
+                (Err(error), Some(rejected)) => {
+                    rejected.insert(name, error);
+                    continue;
+                }
+                (Err(error), None) => return Err(error),
             };
             if subroutines
                 .iter()
@@ -1832,7 +1726,12 @@ pub(super) fn initial_processes_from_module_node(
         };
         let item_dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
-        let mut builder = BodyBuilder::new(tree, &item_dimensions, state);
+        let mut builder = BodyBuilder::new(
+            tree,
+            &item_dimensions,
+            state,
+            system_functions::Body::Initial,
+        );
         let mut body = builder.statement_or_null(&initial.nodes.1)?;
         for stmt in &mut body {
             substitute_stmt_constants(stmt, &item.env, &literals);

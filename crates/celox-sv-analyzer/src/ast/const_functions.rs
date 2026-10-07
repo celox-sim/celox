@@ -27,25 +27,30 @@ pub(super) struct ConstantFunction {
 
 pub(super) type ConstantFunctionTable = HashMap<String, ConstantFunction>;
 
+/// Why functions are not constant functions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct FunctionErrors {
+    /// Every function of the module, when their declarations could not be
+    /// converted at all.
+    all: Option<AnalyzerError>,
+    by_name: HashMap<String, AnalyzerError>,
+}
+
 thread_local! {
     static FUNCTIONS: RefCell<Arc<ConstantFunctionTable>> = RefCell::new(Arc::default());
     static LOCALS: RefCell<Arc<HashMap<String, crate::ir::Type>>> = RefCell::new(Arc::default());
+    static ERRORS: RefCell<Arc<FunctionErrors>> = RefCell::new(Arc::default());
     static DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Restores the previously installed functions when dropped.
 pub(super) struct Installed {
-    previous: (
-        Arc<ConstantFunctionTable>,
-        Arc<HashMap<String, crate::ir::Type>>,
-    ),
+    previous: ConstantFunctions,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        let (functions, locals) = std::mem::take(&mut self.previous);
-        FUNCTIONS.with(|current| *current.borrow_mut() = functions);
-        LOCALS.with(|current| *current.borrow_mut() = locals);
+        replace(std::mem::take(&mut self.previous));
     }
 }
 
@@ -54,17 +59,16 @@ impl Drop for Installed {
 pub(super) struct ConstantFunctions {
     functions: Arc<ConstantFunctionTable>,
     locals: Arc<HashMap<String, crate::ir::Type>>,
+    /// Why the module's functions, or one of them by name, could not be
+    /// converted: a call of such a function reports this.
+    errors: Arc<FunctionErrors>,
 }
 
 /// Make `functions` the constant functions until the guard is dropped.
 pub(super) fn install(functions: ConstantFunctions) -> Installed {
-    let previous_functions = FUNCTIONS
-        .with(|current| std::mem::replace(&mut *current.borrow_mut(), functions.functions));
-    let previous_locals =
-        LOCALS.with(|current| std::mem::replace(&mut *current.borrow_mut(), functions.locals));
-    Installed {
-        previous: (previous_functions, previous_locals),
-    }
+    let previous = installed();
+    replace(functions);
+    Installed { previous }
 }
 
 /// Replace the installed functions; the guard of the enclosing [`install`]
@@ -72,21 +76,45 @@ pub(super) fn install(functions: ConstantFunctions) -> Installed {
 pub(super) fn replace(functions: ConstantFunctions) {
     FUNCTIONS.with(|current| *current.borrow_mut() = functions.functions);
     LOCALS.with(|current| *current.borrow_mut() = functions.locals);
+    ERRORS.with(|current| *current.borrow_mut() = functions.errors);
 }
 
 pub(super) fn installed() -> ConstantFunctions {
     ConstantFunctions {
         functions: FUNCTIONS.with(|current| current.borrow().clone()),
         locals: LOCALS.with(|current| current.borrow().clone()),
+        errors: ERRORS.with(|current| current.borrow().clone()),
     }
+}
+
+/// Why the function `name` of the installed module could not be converted,
+/// if it could not.
+pub(super) fn conversion_error(name: &str) -> Option<AnalyzerError> {
+    ERRORS.with(|current| {
+        let errors = current.borrow();
+        errors.by_name.get(name).or(errors.all.as_ref()).cloned()
+    })
 }
 
 pub(super) fn is_constant_function(name: &str) -> bool {
     FUNCTIONS.with(|current| current.borrow().contains_key(name))
 }
 
-/// The module-scope functions of a module, for constant evaluation. A
-/// function whose body cannot be lowered is left out.
+/// The module-scope functions of a module, for constant evaluation. When
+/// their bodies cannot be converted, there are none, and the reason is kept
+/// for the calls of them.
+impl ConstantFunctions {
+    fn unconverted(error: AnalyzerError) -> Self {
+        Self {
+            errors: Arc::new(FunctionErrors {
+                all: Some(error),
+                by_name: HashMap::default(),
+            }),
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn module_constant_functions(
     node: RefNode<'_>,
     tree: &SyntaxTree,
@@ -101,11 +129,11 @@ pub(super) fn module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let Ok((subroutine_params, subroutine_shapes)) =
-        procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases)
-    else {
-        return ConstantFunctions::default();
-    };
+    let (subroutine_params, subroutine_shapes) =
+        match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
+            Ok(names) => names,
+            Err(error) => return ConstantFunctions::unconverted(error),
+        };
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     let mut locals = Vec::new();
@@ -115,16 +143,18 @@ pub(super) fn module_constant_functions(
         counter: &mut counter,
         subroutine_params: &subroutine_params,
     };
-    let Ok(subroutines) = procedural::subroutines_from_module_node_with(
+    let mut rejected = HashMap::default();
+    let subroutines = match procedural::subroutines_from_module_node_with(
         node,
         tree,
         const_env,
         &dimensions,
         parameter_literals,
         &mut state,
-        true,
-    ) else {
-        return ConstantFunctions::default();
+        Some(&mut rejected),
+    ) {
+        Ok(subroutines) => subroutines,
+        Err(error) => return ConstantFunctions::unconverted(error),
     };
     let functions = subroutines
         .into_iter()
@@ -150,6 +180,10 @@ pub(super) fn module_constant_functions(
         })
         .collect();
     ConstantFunctions {
+        errors: Arc::new(FunctionErrors {
+            all: None,
+            by_name: rejected,
+        }),
         functions: Arc::new(functions),
         locals: Arc::new(
             locals
@@ -551,7 +585,12 @@ impl Frame {
                 };
                 return Some(Flow::Return(value));
             }
-            // Messages have no effect on the value.
+            // A discarded value must still be a constant.
+            Stmt::Eval(expr) => {
+                self.eval(expr)?;
+            }
+            // Messages have no effect on the value. Unknown and unsupported
+            // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }

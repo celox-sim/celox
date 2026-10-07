@@ -1168,16 +1168,7 @@ fn collect_sinkable_defs(
 }
 
 fn is_removable_pure(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::Imm(..)
-            | SIRInstruction::Binary(..)
-            | SIRInstruction::Unary(..)
-            | SIRInstruction::Load(..)
-            | SIRInstruction::Concat(..)
-            | SIRInstruction::Slice(..)
-            | SIRInstruction::Mux(..)
-    )
+    !inst.has_side_effects()
 }
 
 #[derive(Clone, Copy)]
@@ -1199,19 +1190,11 @@ fn memory_read(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess<
 }
 
 fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess<'_>> {
-    match inst {
-        SIRInstruction::Store(addr, offset, width, _, _, _) => Some(MemAccess {
-            addr,
-            offset: static_offset(offset),
-            width: *width,
-        }),
-        SIRInstruction::Commit(_, addr, offset, width, _) => Some(MemAccess {
-            addr,
-            offset: static_offset(offset),
-            width: *width,
-        }),
-        _ => None,
-    }
+    inst.memory_write().map(|write| MemAccess {
+        addr: write.addr,
+        offset: static_offset(write.offset),
+        width: write.width,
+    })
 }
 
 fn static_offset(offset: &SIROffset) -> Option<usize> {
@@ -1239,12 +1222,9 @@ fn has_intervening_memory_conflict(
 }
 
 fn is_memory_barrier(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    // State accesses are not moved across host interactions, so the host
+    // observes them in program order.
+    inst.is_host_interaction()
 }
 
 fn memory_may_alias(
@@ -2100,31 +2080,9 @@ fn count_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, u
 }
 
 fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(_, _) => Vec::new(),
-        SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
-        SIRInstruction::Unary(_, _, src) => vec![*src],
-        SIRInstruction::Load(_, _, offset, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => offset
-            .dynamic_registers()
-            .into_iter()
-            .flatten()
-            .chain(std::iter::once(*src))
-            .collect(),
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            offset.dynamic_registers().into_iter().flatten().collect()
-        }
-        SIRInstruction::Concat(_, args) => args.clone(),
-        SIRInstruction::Slice(_, src, _, _) => vec![*src],
-        SIRInstruction::Mux(_, cond, true_value, false_value) => {
-            vec![*cond, *true_value, *false_value]
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => args.clone(),
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => vec![*old, *new],
-    }
+    let mut uses = Vec::new();
+    inst.for_each_use(|register| uses.push(register));
+    uses
 }
 
 fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {

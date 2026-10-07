@@ -64,6 +64,13 @@ struct Cli {
     native_memory_width: Option<usize>,
     #[arg(long, value_enum)]
     x86_slp: Option<OnOff>,
+    /// Simulation threads, including the calling thread.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
+    threads: u32,
+    /// Partition every phase with independent work instead of only the
+    /// phases with an estimated speedup.
+    #[arg(long)]
+    always_partition: bool,
 }
 
 struct Options {
@@ -84,6 +91,8 @@ struct Options {
     pass_overrides: Vec<(bool, SirPass)>,
     native_memory_width: usize,
     x86_slp: bool,
+    threads: u32,
+    always_partition: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -207,6 +216,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 feature = "x86_64-codegen",
                 all(target_arch = "x86_64", not(feature = "arm64-codegen"))
             ))),
+        threads: cli.threads,
+        always_partition: cli.always_partition,
     };
     if opts.build_cache_dir.is_some()
         && (!matches!(opts.backend, Backend::Native)
@@ -359,6 +370,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
         opts.four_state,
         opts.compile_only
     );
+    // A separate record keeps the single-thread config line unchanged.
+    if opts.threads > 1 {
+        println!(
+            "CELOX_TEST_THREADS test={} threads={}",
+            opts.test, opts.threads
+        );
+    }
 
     let total_start = Instant::now();
     #[cfg(any(
@@ -410,7 +428,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
         .four_state(opts.four_state)
+        .threads(opts.threads as usize)
         .diagnostics_from_env();
+    if opts.always_partition {
+        builder = builder.parallel_partition(celox::ParallelPartition::Always);
+    }
     for block in &opts.native_profile_blocks {
         builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);
     }

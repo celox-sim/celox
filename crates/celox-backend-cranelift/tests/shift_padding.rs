@@ -17,6 +17,7 @@ impl LayoutSource<AbsoluteAddr> for Objects {
             ff_referenced_addresses: HashSet::default(),
             num_events: 0,
             runtime_event_sites: vec![],
+            lane_writers: Default::default(),
         }
     }
 }

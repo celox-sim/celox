@@ -32,7 +32,9 @@ fn cast_target_type(
             {
                 return Some(r#type);
             }
-            let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?;
+            let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
+                .ok()
+                .flatten()?;
             if let ConstExpr::Ident(name) = &target {
                 if let Some(r#type) = type_aliases.get(name) {
                     return expr_type_from_type(r#type, const_env);
@@ -92,25 +94,27 @@ pub(super) fn runtime_cast_expr(
     expr: Expr,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     let const_env = &packed_dimensions.const_env;
     let type_aliases = &packed_dimensions.type_aliases;
     if let Some(r#type) = cast_zero_type(cast, syntax_tree, const_env, type_aliases) {
-        return Some(Expr::Resize {
+        return Ok(Expr::Resize {
             expr: Box::new(expr),
             width: r#type.width,
             signed: r#type.signed,
         });
     }
     if let sv_parser::CastingType::Signing(signing) = &cast.nodes.0 {
-        let width = expr_static_width(&expr, packed_dimensions)?;
-        return Some(Expr::Resize {
+        let width = expr_static_width(&expr, packed_dimensions)
+            .ok_or_else(|| unsupported("signedness cast of an operand without a static width"))?;
+        return Ok(Expr::Resize {
             expr: Box::new(expr),
             width,
             signed: matches!(**signing, sv_parser::Signing::Signed(_)),
         });
     }
-    let target = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
+    let target = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)
+        .ok_or_else(|| unsupported("cast target type"))?;
     let operand_signed = expr_signedness(
         &expr,
         &packed_dimensions.expression_signedness,
@@ -126,7 +130,8 @@ pub(super) fn runtime_cast_expr(
                 .get(name)
                 .is_none_or(|r#type| r#type.signed)
         })
-    })?;
+    })
+    .ok_or_else(|| unsupported("cast of an operand whose signedness is unknown"))?;
     let expr = if cast_target_is_two_state(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
         Expr::Unary {
             op: UnaryOp::ToTwoState,
@@ -143,9 +148,9 @@ pub(super) fn runtime_cast_expr(
     if casting_type_is_numeric_size(&cast.nodes.0, syntax_tree, const_env, type_aliases)
         || target.signed == operand_signed
     {
-        Some(resized)
+        Ok(resized)
     } else {
-        Some(Expr::Resize {
+        Ok(Expr::Resize {
             expr: Box::new(resized),
             width: target.width,
             signed: target.signed,
@@ -168,7 +173,9 @@ pub(super) fn cast_zero_type(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    let ConstExpr::Literal(literal) = const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree)?
+    let ConstExpr::Literal(literal) = const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree)
+        .ok()
+        .flatten()?
     else {
         return None;
     };
@@ -200,7 +207,9 @@ pub(super) fn constant_cast_const_expr(
         syntax_tree,
         const_env,
         type_aliases,
-    )?;
+    )
+    .ok()
+    .flatten()?;
     cast_constant_operand(operand, &cast.nodes.0, syntax_tree, const_env, type_aliases)
 }
 
@@ -213,7 +222,8 @@ pub(super) fn runtime_constant_cast_const_expr(
         RefNode::Expression(&cast.nodes.2.nodes.1),
         syntax_tree,
         dimensions,
-    )?;
+    )
+    .ok()?;
     cast_constant_operand(
         operand,
         &cast.nodes.0,
@@ -306,7 +316,7 @@ fn cast_target_is_two_state(
                 .is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
         }
         sv_parser::CastingType::ConstantPrimary(primary) => {
-            let Some(ConstExpr::Ident(name)) =
+            let Ok(Some(ConstExpr::Ident(name))) =
                 const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
             else {
                 return false;
@@ -335,7 +345,7 @@ fn casting_type_is_numeric_size(
 ) -> bool {
     match casting_type {
         sv_parser::CastingType::ConstantPrimary(primary) => {
-            let Some(ConstExpr::Ident(name)) =
+            let Ok(Some(ConstExpr::Ident(name))) =
                 const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
             else {
                 return true;

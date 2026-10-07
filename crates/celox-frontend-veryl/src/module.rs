@@ -59,6 +59,8 @@ pub struct ModuleParser<'a> {
     loop_candidates: Vec<LoopRecoveryCandidate>,
     external_modules: &'a HashMap<ModuleId, ExternalModule>,
     external_output_targets: Vec<(VarId, BitAccess)>,
+    /// Lanes requested for partitioned execution.
+    parallel_lanes: u32,
 }
 
 static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalModule>> =
@@ -891,6 +893,7 @@ impl<'a> ModuleParser<'a> {
             glue_blocks: HashMap::default(),
             initial_memory_values,
             ff_parser: FfParser::new(module, *config),
+            parallel_lanes: config.parallel_lanes,
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
             loop_candidates,
@@ -1852,6 +1855,33 @@ impl<'a> ModuleParser<'a> {
             eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply_eu);
         }
 
+        // Lane-partitioned builds also lower every trigger group as several
+        // contiguous parts. Each FF declaration samples pre-edge state and
+        // stages only its own targets, so parts are independent until they
+        // publish. The sequential units above stay unchanged.
+        let mut parallel_ff_parts = HashMap::default();
+        if self.parallel_lanes > 1 {
+            const PARTS_PER_LANE: usize = 4;
+            let part_limit = PARTS_PER_LANE.saturating_mul(self.parallel_lanes as usize);
+            for (trigger_set, decls) in &ff_groups {
+                let part_count = decls.len().min(part_limit);
+                if part_count < 2 {
+                    continue;
+                }
+                let mut parts = Vec::with_capacity(part_count);
+                for part in 0..part_count {
+                    let begin = decls.len() * part / part_count;
+                    let end = decls.len() * (part + 1) / part_count;
+                    let mut builder = SIRBuilder::new();
+                    let ff_group = self
+                        .ff_parser
+                        .parse_ff_group(&decls[begin..end], &mut builder)?;
+                    parts.push(build_ff_part(builder, &ff_group));
+                }
+                parallel_ff_parts.insert(trigger_set.clone(), parts);
+            }
+        }
+
         for (external_id, external_access) in &self.external_output_targets {
             let overlaps_comb = self.comb_blocks.iter().any(|path| {
                 path.target.var().is_some_and(|target| {
@@ -1935,6 +1965,7 @@ impl<'a> ModuleParser<'a> {
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            parallel_ff_parts,
             comb_blocks: self.comb_blocks,
             comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
@@ -1945,6 +1976,47 @@ impl<'a> ModuleParser<'a> {
             store: self.store,
             reset_clock_map: self.reset_clock_map,
         })
+    }
+}
+
+/// Evaluate and apply units of one independently lowered FF part.
+fn build_ff_part(
+    mut builder: SIRBuilder<RegionedVarAddr>,
+    ff_group: &crate::lowering::ff::FfGroupParseResult,
+) -> crate::symbolic::artifact::FfPart<RegionedVarAddr> {
+    let targets = &ff_group.targets;
+    let dynamic_write_vars = &ff_group.dynamic_write_vars;
+    builder.seal_block(SIRTerminator::Return);
+    let (blocks, register_map, _) = builder.drain();
+    let mut evaluate = ExecutionUnit {
+        blocks,
+        entry_block_id: BlockId(0),
+        register_map,
+    };
+    rewrite_dynamic_ff_stores_to_sparse(&mut evaluate, dynamic_write_vars);
+    let seeds =
+        build_ff_region_copies_skipping(targets, STABLE_REGION, WORKING_REGION, dynamic_write_vars);
+    if let Some(entry) = evaluate.blocks.get_mut(&BlockId(0)) {
+        let mut instructions = seeds;
+        instructions.append(&mut entry.instructions);
+        entry.instructions = instructions;
+    }
+    let mut commits =
+        build_ff_region_copies_skipping(targets, WORKING_REGION, STABLE_REGION, dynamic_write_vars);
+    commits.extend(build_sparse_ff_commits(targets, dynamic_write_vars));
+    let mut apply_builder = SIRBuilder::new();
+    for commit in commits {
+        apply_builder.emit(commit);
+    }
+    apply_builder.seal_block(SIRTerminator::Return);
+    let (blocks, register_map, _) = apply_builder.drain();
+    crate::symbolic::artifact::FfPart {
+        evaluate,
+        apply: ExecutionUnit {
+            blocks,
+            entry_block_id: BlockId(0),
+            register_map,
+        },
     }
 }
 

@@ -3,7 +3,7 @@
 Reusable language tests for compiler and simulator implementations, in two
 suites that share one adapter contract and one script language:
 
-- [`veryl`](src/veryl): 708 Veryl cases (`src/veryl/cases/*.vtest`);
+- [`veryl`](src/veryl): 712 Veryl cases (`src/veryl/cases/*.vtest`);
 - [`sv`](src/sv): SystemVerilog cases (`src/sv/cases/*.vtest`).
 
 Each case's sources, input sequence, and assertions live together in a script

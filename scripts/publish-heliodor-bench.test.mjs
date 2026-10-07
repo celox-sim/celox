@@ -41,6 +41,7 @@ test("publishes each successful backend without requiring comparison partners", 
         ["veryl-cc-sync", `veryl-cc-${arch}`, 2],
         ["celox-tiered", arch === "x86_64" ? "celox-tiered" : "celox-tiered-aarch64", 3],
         ["veryl-cc-tiered", `veryl-tiered-${arch}`, 3],
+        ["celox-parallel", `native-parallel-${arch}`, 2],
       ]) {
         const result = convert(row(runner), arch);
         assert.equal(result.length, count);

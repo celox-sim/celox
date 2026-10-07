@@ -1091,74 +1091,11 @@ fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
     let mut counts = HashMap::default();
     for block in eu.blocks.values() {
         for instruction in &block.instructions {
-            match instruction {
-                SIRInstruction::Imm(..) => {}
-                SIRInstruction::Load(_, _, offset, _) => {
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add_register_use(&mut counts, register);
-                    }
-                }
-                SIRInstruction::Binary(_, lhs, _, rhs) => {
-                    add_register_use(&mut counts, *lhs);
-                    add_register_use(&mut counts, *rhs);
-                }
-                SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-                    add_register_use(&mut counts, *source);
-                }
-                SIRInstruction::Store(_, offset, _, source, _, _) => {
-                    add_register_use(&mut counts, *source);
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add_register_use(&mut counts, register);
-                    }
-                }
-                SIRInstruction::Commit(_, _, offset, _, _) => {
-                    for register in offset.dynamic_registers().into_iter().flatten() {
-                        add_register_use(&mut counts, register);
-                    }
-                }
-                SIRInstruction::Concat(_, sources) => {
-                    for &source in sources {
-                        add_register_use(&mut counts, source);
-                    }
-                }
-                SIRInstruction::Mux(_, condition, then_value, else_value) => {
-                    add_register_use(&mut counts, *condition);
-                    add_register_use(&mut counts, *then_value);
-                    add_register_use(&mut counts, *else_value);
-                }
-                SIRInstruction::RuntimeEvent { args, .. }
-                | SIRInstruction::CombCaptureEvent { args, .. } => {
-                    for &argument in args {
-                        add_register_use(&mut counts, argument);
-                    }
-                }
-                SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-                    add_register_use(&mut counts, *old);
-                    add_register_use(&mut counts, *new);
-                }
-            }
+            instruction.for_each_use(|register| add_register_use(&mut counts, register));
         }
-        match &block.terminator {
-            SIRTerminator::Jump(_, arguments) => {
-                for &argument in arguments {
-                    add_register_use(&mut counts, argument);
-                }
-            }
-            SIRTerminator::Branch {
-                cond,
-                true_block,
-                false_block,
-            } => {
-                add_register_use(&mut counts, *cond);
-                for &argument in true_block.1.iter().chain(&false_block.1) {
-                    add_register_use(&mut counts, argument);
-                }
-            }
-            SIRTerminator::Switch { selector, .. } => {
-                add_register_use(&mut counts, *selector);
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-        }
+        block
+            .terminator
+            .for_each_use(|register| add_register_use(&mut counts, register));
     }
     counts
 }
@@ -1194,20 +1131,11 @@ fn instruction_blocks_writeback_motion(
             }
         }
     };
-    match instruction {
-        SIRInstruction::Load(_, other, other_offset, other_width)
-        | SIRInstruction::Store(other, other_offset, other_width, _, _, _) => {
-            aliases(other, other_offset, *other_width)
-        }
-        SIRInstruction::Commit(source, destination, other_offset, other_width, _) => {
-            aliases(source, other_offset, *other_width)
-                || aliases(destination, other_offset, *other_width)
-        }
-        SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => true,
-        _ => false,
-    }
+    instruction.is_host_interaction()
+        || [instruction.memory_read(), instruction.memory_write()]
+            .into_iter()
+            .flatten()
+            .any(|access| aliases(access.addr, access.offset, access.width))
 }
 
 /// A writeback whose only operand is a merge value does not need an actual

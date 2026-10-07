@@ -217,19 +217,11 @@ fn memory_read(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess<
 }
 
 pub(super) fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess<'_>> {
-    match inst {
-        SIRInstruction::Store(addr, offset, width, _, _, _) => Some(MemAccess {
-            addr,
-            offset: offset_static(offset),
-            width: *width,
-        }),
-        SIRInstruction::Commit(_, dst, offset, width, _) => Some(MemAccess {
-            addr: dst,
-            offset: offset_static(offset),
-            width: *width,
-        }),
-        _ => None,
-    }
+    inst.memory_write().map(|write| MemAccess {
+        addr: write.addr,
+        offset: offset_static(write.offset),
+        width: write.width,
+    })
 }
 
 fn offset_static(offset: &SIROffset) -> Option<usize> {
@@ -255,12 +247,9 @@ fn has_intervening_memory_conflict(
 }
 
 pub(super) fn is_memory_barrier(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    // State accesses are not moved across host interactions, so the host
+    // observes them in program order.
+    inst.is_host_interaction()
 }
 
 fn mem_may_alias(a: MemAccess<'_>, b: MemAccess<'_>) -> bool {

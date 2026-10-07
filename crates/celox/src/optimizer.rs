@@ -1,4 +1,4 @@
-pub use celox_sir_opt::{OptLevel, OptimizeOptions, SirDiagnostics, SirPass};
+pub use celox_sir_opt::{OptLevel, OptimizeOptions, ParallelPartition, SirDiagnostics, SirPass};
 
 pub mod sir;
 
@@ -86,4 +86,17 @@ pub(crate) fn with_laid_out_program<R>(
     let result = operation(&mut unit);
     debug_assert!(layout_requirements.is_empty());
     result
+}
+
+/// Scheduler lane-partitioning request derived from optimizer options.
+pub(crate) fn parallel_schedule_options(
+    options: &OptimizeOptions,
+) -> celox_frontend_core::ParallelScheduleOptions {
+    let mut parallel =
+        celox_frontend_core::ParallelScheduleOptions::with_lanes(options.parallel_lanes());
+    if options.parallel_partition() == ParallelPartition::Always {
+        parallel.synchronization_cost = 0;
+        parallel.minimum_speedup_percent = 0;
+    }
+    parallel
 }

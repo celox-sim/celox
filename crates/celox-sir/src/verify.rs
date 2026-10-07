@@ -821,51 +821,16 @@ fn verify_use<A>(
 }
 
 fn instruction_def<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-    }
+    inst.defined_register()
 }
 
 fn instruction_uses<A>(inst: &SIRInstruction<A>) -> Vec<RegisterId> {
-    let mut uses = Vec::new();
-    match inst {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, src) => uses.push(*src),
-        SIRInstruction::Load(_, _, offset, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, bits, src, _, _) => {
-            if *bits != 0 {
-                uses.extend(offset.dynamic_registers().into_iter().flatten());
-                uses.push(*src);
-            }
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            uses.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => uses.extend(args.iter().copied()),
-        SIRInstruction::Slice(_, src, _, _) => uses.push(*src),
-        SIRInstruction::Mux(_, cond, then_value, else_value) => {
-            uses.extend([*cond, *then_value, *else_value]);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            uses.extend([*old, *new]);
-        }
+    // A zero-width store moves no bits, so its operands need no definition.
+    if matches!(inst, SIRInstruction::Store(_, _, 0, _, _, _)) {
+        return Vec::new();
     }
+    let mut uses = Vec::new();
+    inst.for_each_use(|register| uses.push(register));
     uses
 }
 

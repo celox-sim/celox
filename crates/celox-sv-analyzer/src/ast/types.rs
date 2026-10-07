@@ -544,7 +544,8 @@ pub(super) fn packed_ranges_from_ref_node_with_env(
                 const_env,
                 type_aliases,
             );
-            if let (Some(left), Some(right)) = (left, right) {
+            // Validation rejects the bounds this cannot convert.
+            if let (Ok(Some(left)), Ok(Some(right))) = (left, right) {
                 ranges.push(PackedRange::new(left, right));
             }
         }
@@ -575,7 +576,7 @@ pub(super) fn unpacked_ranges_from_dimensions_with_env(
                     const_env,
                     type_aliases,
                 );
-                match (left, right) {
+                match (left?, right?) {
                     (Some(left), Some(right)) => Ok(UnpackedRange::new(left, right)),
                     _ => Err(AnalyzerError::Unsupported(
                         "unresolved unpacked array dimension".to_string(),
@@ -589,7 +590,7 @@ pub(super) fn unpacked_ranges_from_dimensions_with_env(
                     const_env,
                     type_aliases,
                 );
-                size.map(UnpackedRange::sized).ok_or_else(|| {
+                size?.map(UnpackedRange::sized).ok_or_else(|| {
                     AnalyzerError::Unsupported("unresolved unpacked array dimension".to_string())
                 })
             }

@@ -649,3 +649,95 @@
       (assert_eq filled (<< 3 index) "filled")))
   (modify (set replace 1))
   (assert_eq filled 0xff))
+
+(case runtime_indices_select_multidimensional_packed_elements
+  ; A runtime index selects an element of a multidimensional packed array.
+  ; Out of range, a read gives X and a write is ignored (IEEE 1800-2023
+  ; 7.4.6, 11.5.1).
+  (four_state)
+  (source "runtime_packed_elements.sv" #"
+                module Top(input logic [1:0] k, input logic [7:0] i,
+                           output logic [3:0] e, output logic [7:0] w);
+                    logic [1:0][3:0] t, u;
+                    assign t = i;
+                    assign e = t[k];
+                    always_comb begin
+                        u = '0;
+                        u[k] = 4'hf;
+                    end
+                    assign w = u;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0xa5 0x3c)
+    (for k (range 0 4)
+      (modify (set i value) (set k k))
+      (let element_in (< k 2))
+      (assert_eq e (? element_in (slice value (+ (* k 4) 3) (* k 4)) (fourstate 0xf 0xf)) "e")
+      (assert_eq w (? element_in (<< 0xf (* k 4)) 0) "w"))))
+
+(case runtime_indices_select_within_multidimensional_packed_elements
+  ; Runtime indices select an element, a bit of it or a part of it, for
+  ; reading and writing.
+  (source "runtime_packed_element_parts.sv" #"
+                module Top(input logic k, input logic [1:0] j, input logic [7:0] i,
+                           output logic [3:0] e, output logic b, output logic [1:0] p,
+                           output logic [7:0] w, v, q);
+                    logic [1:0][3:0] t, u, x, y;
+                    assign t = i;
+                    assign e = t[k];
+                    assign b = t[k][j];
+                    assign p = t[k][2:1];
+                    always_comb begin
+                        u = '0;
+                        u[k] = 4'hf;
+                    end
+                    always_comb begin
+                        x = '0;
+                        x[k][j] = 1'b1;
+                    end
+                    always_comb begin
+                        y = '0;
+                        y[k][3:2] = 2'b11;
+                    end
+                    assign w = u;
+                    assign v = x;
+                    assign q = y;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0xa5 0x3c)
+    (for k (range 0 2)
+      (for j (range 0 4)
+        (modify (set i value) (set k k) (set j j))
+        (assert_eq e (slice value (+ (* k 4) 3) (* k 4)) "e")
+        (assert_eq b (bit value (+ (* k 4) j)) "b")
+        (assert_eq p (slice value (+ (* k 4) 2) (+ (* k 4) 1)) "p")
+        (assert_eq w (<< 0xf (* k 4)) "w")
+        (assert_eq v (<< 1 (+ (* k 4) j)) "v")
+        (assert_eq q (<< 0xc (* k 4)) "q")))))
+
+(case out_of_range_inner_indices_stay_in_their_element
+  ; An inner index past its dimension flattens to a position in another
+  ; element; the select is still out of range: a read gives X and a write
+  ; is ignored (IEEE 1800-2023 7.4.6, 11.5.1).
+  (four_state)
+  (source "runtime_inner_index_range.sv" #"
+                module Top(input logic [2:0] j, input logic [7:0] i,
+                           output logic b, output logic [7:0] v);
+                    logic [1:0][3:0] t, x;
+                    assign t = i;
+                    assign b = t[0][j];
+                    always_comb begin
+                        x = '0;
+                        x[0][j] = 1'b1;
+                    end
+                    assign v = x;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0xa5 0x3c)
+    (for j (range 0 8)
+      (modify (set i value) (set j j))
+      (assert_eq b (? (< j 4) (bit value j) (fourstate 1 1)) "b")
+      (assert_eq v (? (< j 4) (<< 1 j) 0) "v"))))
