@@ -262,8 +262,8 @@ pinned revision, oracle rationale, adaptations, and license attribution.
 `celox_test_suite::sv::cases()` returns cases whose designs are SystemVerilog
 source; build them with your SystemVerilog frontend through the same
 `Backend` contract. The cases cover the synthesizable subset: operators,
-generate constructs, hierarchy, indexed selects, packed structs, system
-functions and more. Rejection cases (`(expect reject)`) are designs that IEEE
+generate constructs, hierarchy, interfaces, indexed selects, packed structs,
+system functions and more. Rejection cases (`(expect reject)`) are designs that IEEE
 1800 makes illegal; a factory returns `CompilationRejected` only for a
 language error, never for an unsupported construct.
 
@@ -280,7 +280,7 @@ own native testbench use the process adapters. No expected outputs are recorded
 from Celox. The SystemVerilog suite runs the same way with `verify-sv-verilator`
 and `verify-sv-icarus`: its sources are compiled as written, and port shapes and
 clock polarity for the testbench come from the Celox SystemVerilog analyzer,
-which only reads declarations for this purpose. Its reviewed tool exclusions are
+which only reads declarations (after expanding interfaces) for this purpose. Its reviewed tool exclusions are
 in [`verification/sv/limitations.json`](verification/sv/limitations.json). Compiler diagnostics are not suppressed and emitted SV is not
 rewritten to fit a simulator.
 
