@@ -365,6 +365,11 @@ fn analyze(
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
 
+    // Veryl's emitted continuous assignments require constant output selects.
+    // Celox models these connections as ordered read/modify/write glue and
+    // validates their effects itself, including observer alias restrictions.
+    errors.retain(|error| !matches!(error, AnalyzerError::NonConstantOutputSelect { .. }));
+
     // Veryl reports combinational loops before Celox can apply its path-level
     // false-loop and true-loop authorizations. When the caller supplied such
     // an authorization, defer loop validation to the Celox scheduler: it will
@@ -400,6 +405,9 @@ fn analyze(
         diagnostics
     };
     celox_frontend_veryl::lower_interface_captures(&mut ir);
+    if !errors.iter().any(AnalyzerError::is_error) {
+        celox_frontend_veryl::lower_constant_loops(&mut ir);
+    }
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled
     // entry cannot execute the same store across multiple iterations.

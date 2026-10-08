@@ -308,6 +308,10 @@ fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
     @case "synth_dynamic_loop::test_runtime_bounds_forward_overshoot_exits_without_wraparound";
 }
 
+fn test_static_nested_loop_local_bindings_are_distinct(sim) {
+    @case "synth_dynamic_loop::test_static_nested_loop_local_bindings_are_distinct";
+}
+
 fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
     @case "synth_dynamic_loop::test_runtime_bounds_large_additive_step_exits_without_wraparound";
 }
