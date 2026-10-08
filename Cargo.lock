@@ -431,6 +431,7 @@ dependencies = [
  "celox-sir-opt",
  "celox-slt",
  "celox-state-layout",
+ "celox-sv-analyzer",
  "celox-test-suite",
  "celox-testbench",
  "clap",
