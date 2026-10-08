@@ -169,7 +169,7 @@ fn forward_and_simplify(
             }
             SIRInstruction::Store(
                 addr,
-                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
                 _,
                 _,
                 _,

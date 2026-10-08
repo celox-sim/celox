@@ -1354,7 +1354,10 @@ fn format_native_codegen_trace(
 
 fn offset_registers(offset: &SIROffset, registers: &mut Vec<RegisterId>) {
     match offset {
-        SIROffset::Dynamic(register) => registers.push(*register),
+        SIROffset::Dynamic(register)
+        | SIROffset::ElementRun {
+            index: register, ..
+        } => registers.push(*register),
         SIROffset::Element {
             index,
             dynamic_bit_offset,

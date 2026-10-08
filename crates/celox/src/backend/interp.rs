@@ -288,6 +288,20 @@ impl Machine<'_> {
                 };
                 Ok(index * stride_bits + bit_offset + extra)
             }
+            SIROffset::ElementRun { element_width, .. } => {
+                // A run crosses element boundaries, so the layout keeps every
+                // array it reads packed.
+                if self.layout.unpacked_arrays.contains_key(absolute) {
+                    return Err(InterpError::Machine(
+                        "element run addresses an element-strided array".to_string(),
+                    ));
+                }
+                dynamic(dynamics, 0)?
+                    .checked_mul(*element_width)
+                    .ok_or_else(|| {
+                        InterpError::Machine("element run offset overflows usize".to_string())
+                    })
+            }
             SIROffset::PackedElements { bit_offset, .. } => {
                 if self.layout.unpacked_arrays.contains_key(absolute) {
                     let (byte, intra) = self.layout.map_static_bit_offset(absolute, *bit_offset);

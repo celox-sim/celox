@@ -853,8 +853,7 @@ impl<'a> FfParser<'a> {
         };
         let image = crate::module::readmem_image(self.module, filename, destinations, 16, |dst| {
             dst.index
-                .0
-                .iter()
+                .expressions()
                 .map(|index| eval_constexpr(index)?.to_usize())
                 .collect()
         })?;

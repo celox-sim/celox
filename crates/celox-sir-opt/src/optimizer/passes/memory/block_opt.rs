@@ -68,9 +68,12 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
         SIRInstruction::Load(_, addr, SIROffset::PackedElements { bit_offset, .. }, bits) => {
             Some((addr, Some(*bit_offset), *bits, false))
         }
-        SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, bits) => {
-            Some((addr, None, *bits, false))
-        }
+        SIRInstruction::Load(
+            _,
+            addr,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
+            bits,
+        ) => Some((addr, None, *bits, false)),
         SIRInstruction::Store(addr, SIROffset::Static(off), bits, _, _, _) => {
             Some((addr, Some(*off), *bits, true))
         }
@@ -84,7 +87,7 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
         ) => Some((addr, Some(*bit_offset), *bits, true)),
         SIRInstruction::Store(
             addr,
-            SIROffset::Dynamic(_) | SIROffset::Element { .. },
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
             bits,
             _,
             _,
@@ -365,7 +368,12 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     .or_default()
                     .push((idx, Some(*bit_offset), *w));
             }
-            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, w) => {
+            SIRInstruction::Load(
+                _,
+                addr,
+                SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
+                w,
+            ) => {
                 load_index
                     .entry(addr.clone())
                     .or_default()
@@ -759,12 +767,15 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
             }
             SIRInstruction::Load(_, _, SIROffset::Dynamic(_), _)
             | SIRInstruction::Load(_, _, SIROffset::Element { .. }, _)
+            | SIRInstruction::Load(_, _, SIROffset::ElementRun { .. }, _)
             | SIRInstruction::Load(_, _, SIROffset::PackedElements { .. }, _)
             | SIRInstruction::Store(_, SIROffset::Dynamic(_), _, _, _, _)
             | SIRInstruction::Store(_, SIROffset::Element { .. }, _, _, _, _)
+            | SIRInstruction::Store(_, SIROffset::ElementRun { .. }, _, _, _, _)
             | SIRInstruction::Store(_, SIROffset::PackedElements { .. }, _, _, _, _)
             | SIRInstruction::Commit(_, _, SIROffset::Dynamic(_), _, _)
             | SIRInstruction::Commit(_, _, SIROffset::Element { .. }, _, _)
+            | SIRInstruction::Commit(_, _, SIROffset::ElementRun { .. }, _, _)
             | SIRInstruction::Commit(_, _, SIROffset::PackedElements { .. }, _, _) => {
                 // Dynamic ranges are deliberately a global barrier. The address
                 // is known, but keeping this rule conservative avoids depending
@@ -1234,6 +1245,11 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                     SIROffset::Dynamic(register) => {
                         if let Some(replacement) = replacement_map.get(register) {
                             *register = *replacement;
+                        }
+                    }
+                    SIROffset::ElementRun { index, .. } => {
+                        if let Some(replacement) = replacement_map.get(index) {
+                            *index = *replacement;
                         }
                     }
                     SIROffset::Element {

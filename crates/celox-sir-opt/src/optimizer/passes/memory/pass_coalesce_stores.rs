@@ -91,6 +91,7 @@ fn coalesce_block(
                 addr,
                 SIROffset::Dynamic(_)
                 | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. }
                 | SIROffset::PackedElements { .. },
                 _,
                 _,

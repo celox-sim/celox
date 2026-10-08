@@ -82,7 +82,9 @@ pub(crate) fn eliminate_dead_stores(
                     SIRInstruction::Load(
                         _,
                         addr,
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. },
                         _,
                     ) => {
                         let key = home(addr.absolute_addr());
@@ -97,7 +99,9 @@ pub(crate) fn eliminate_dead_stores(
                     SIRInstruction::Commit(
                         src,
                         _,
-                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        SIROffset::Dynamic(_)
+                        | SIROffset::Element { .. }
+                        | SIROffset::ElementRun { .. },
                         _,
                         _,
                     ) => {
