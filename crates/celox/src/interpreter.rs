@@ -20,6 +20,7 @@
 use std::cell::OnceCell;
 use std::fmt;
 
+use celox_sir::extern_abi::ExternValue;
 use celox_sir::{
     BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
     SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
@@ -637,31 +638,19 @@ fn exec_instruction<A, M: InterpMachine<A>>(
     Ok(())
 }
 
-/// The C integer passed for an extern call argument: a `Bit` register's
-/// value, sign-extended when signed, or a one-bit `Logic` register as an
-/// `svLogic` (`value | mask << 1`).
+/// The C integer passed for an extern call argument.
 fn extern_argument(regs: &Registers, arg: RegisterId) -> Result<u64, InterpError> {
     let value = regs.get(arg)?;
-    let payload = value.payload.to_u64().unwrap_or(0);
-    let width = regs.width(arg);
-    if regs.is_logic(arg) {
-        let mask = value.mask.to_u64().unwrap_or(0);
-        return Ok((payload & 1) | ((mask & 1) << 1));
-    }
-    if regs.is_signed(arg) && width > 1 && width < 64 {
-        let shift = 64 - width;
-        return Ok((((payload << shift) as i64) >> shift) as u64);
-    }
-    Ok(payload)
+    Ok(ExternValue::of_verified(&regs.ty(arg)).encode(
+        value.payload.to_u64().unwrap_or(0),
+        value.mask.to_u64().unwrap_or(0),
+    ))
 }
 
 /// The value of an extern call's destination register for C result `raw`.
 fn extern_result(regs: &Registers, dst: RegisterId, raw: u64, four_state: bool) -> SIRValue {
-    if regs.is_logic(dst) {
-        let mask = if four_state { (raw >> 1) & 1 } else { 0 };
-        return SIRValue::new_four_state(raw & 1, mask);
-    }
-    SIRValue::new(raw & mask_u64(regs.width(dst)))
+    let (value, mask) = ExternValue::of_verified(&regs.ty(dst)).decode(raw);
+    SIRValue::new_four_state(value, if four_state { mask } else { 0 })
 }
 
 fn resolve_access<'a>(
@@ -1754,8 +1743,16 @@ impl Registers {
         self.slots.get(id.0).is_some_and(|slot| slot.signed)
     }
 
-    fn is_logic(&self, id: RegisterId) -> bool {
-        self.slots.get(id.0).is_some_and(|slot| slot.logic)
+    fn ty(&self, id: RegisterId) -> RegisterType {
+        let width = self.width(id);
+        if self.slots.get(id.0).is_some_and(|slot| slot.logic) {
+            RegisterType::Logic { width }
+        } else {
+            RegisterType::Bit {
+                width,
+                signed: self.is_signed(id),
+            }
+        }
     }
 }
 

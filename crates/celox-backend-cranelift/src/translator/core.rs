@@ -1,3 +1,4 @@
+use celox_sir::extern_abi::{ExternValue, SV_LOGIC_MASK_SHIFT};
 use cranelift::codegen::ir::{
     BlockArg, FuncRef, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
 };
@@ -513,7 +514,7 @@ impl SIRTranslator {
 
     /// The 64-bit C integer passed for an extern call argument.
     fn extern_call_argument(&self, state: &mut TranslationState, arg: RegisterId) -> Value {
-        let ty = state.register_map[&arg].clone();
+        let ty = ExternValue::of_verified(&state.register_map[&arg]);
         let value = state.regs[&arg].clone();
         let raw = value.first_value(state.builder);
         let widen = |builder: &mut FunctionBuilder, raw: Value, signed: bool| {
@@ -525,20 +526,17 @@ impl SIRTranslator {
                 builder.ins().uextend(types::I64, raw)
             }
         };
-        match ty {
-            RegisterType::Bit { signed, width } => widen(state.builder, raw, signed && width > 1),
-            // An `svLogic` is `value | mask << 1`.
-            RegisterType::Logic { .. } => {
-                let raw = widen(state.builder, raw, false);
-                match value.first_mask(state.builder) {
-                    Some(mask) => {
-                        let mask = widen(state.builder, mask, false);
-                        let mask = state.builder.ins().ishl_imm_u(mask, 1);
-                        state.builder.ins().bor(raw, mask)
-                    }
-                    None => raw,
-                }
+        let raw = widen(state.builder, raw, ty.sign_extended_width().is_some());
+        match (ty, value.first_mask(state.builder)) {
+            (ExternValue::Logic, Some(mask)) => {
+                let mask = widen(state.builder, mask, false);
+                let mask = state
+                    .builder
+                    .ins()
+                    .ishl_imm_u(mask, i64::from(SV_LOGIC_MASK_SHIFT));
+                state.builder.ins().bor(raw, mask)
             }
+            _ => raw,
         }
     }
 
@@ -549,8 +547,7 @@ impl SIRTranslator {
         dst: RegisterId,
         result: Value,
     ) -> TransValue {
-        let ty = state.register_map[&dst].clone();
-        let cl_type = get_cl_type(ty.width());
+        let cl_type = get_cl_type(state.register_map[&dst].width());
         let narrow = |builder: &mut FunctionBuilder, raw: Value| {
             if cl_type == types::I64 {
                 raw
@@ -558,24 +555,24 @@ impl SIRTranslator {
                 builder.ins().ireduce(cl_type, raw)
             }
         };
-        let (value, mask) = match ty {
-            RegisterType::Bit { width, .. } => {
-                let value = if width == 1 {
-                    state.builder.ins().band_imm_u(result, 1)
-                } else {
-                    result
-                };
-                (narrow(state.builder, value), None)
-            }
-            RegisterType::Logic { .. } => {
-                let value = state.builder.ins().band_imm_u(result, 1);
-                let mask = state.builder.ins().ushr_imm_u(result, 1);
+        let ty = ExternValue::of_verified(&state.register_map[&dst]);
+        // Narrowing truncates a result to the register's type, which is wider
+        // than a one-bit register.
+        let value = match ty.result_value_mask() {
+            1 => state.builder.ins().band_imm_u(result, 1),
+            _ => result,
+        };
+        let value = narrow(state.builder, value);
+        let mask = match ty {
+            ExternValue::Logic => {
+                let mask = state
+                    .builder
+                    .ins()
+                    .ushr_imm_u(result, i64::from(SV_LOGIC_MASK_SHIFT));
                 let mask = state.builder.ins().band_imm_u(mask, 1);
-                (
-                    narrow(state.builder, value),
-                    Some(narrow(state.builder, mask)),
-                )
+                Some(narrow(state.builder, mask))
             }
+            ExternValue::Integer { .. } => None,
         };
         if self.options.four_state {
             let mask = mask.unwrap_or_else(|| state.builder.ins().iconst(cl_type, 0));

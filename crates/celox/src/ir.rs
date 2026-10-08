@@ -526,6 +526,25 @@ impl LaidOutProgram {
         self.runtime
     }
 
+    /// Map every address whose stable home is shared with another address,
+    /// such as a merged identity alias, to one representative of that home.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn shared_storage(&self) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+        let mut addresses = self.layout.offsets.iter().collect::<Vec<_>>();
+        addresses.sort_unstable_by_key(|(address, offset)| (**offset, **address));
+        let mut shared = HashMap::default();
+        for pair in addresses.windows(2) {
+            let [(first, first_offset), (address, offset)] = pair else {
+                unreachable!("windows(2) yields pairs");
+            };
+            if first_offset == offset {
+                let representative = shared.get(*first).copied().unwrap_or(**first);
+                shared.insert(**address, representative);
+            }
+        }
+        shared
+    }
+
     /// Identity of the checkpointable state layout: the path, offset, width
     /// and state kind of every state object. Simulators with the same
     /// fingerprint can exchange checkpoints.
@@ -651,6 +670,16 @@ impl OptimizedSir {
                     &aliased,
                     four_state,
                 );
+                // Accesses through an alias whose element layout matches its
+                // canonical address now name the canonical address.
+                let redirected = aliased
+                    .iter()
+                    .filter(|(alias, canonical)| {
+                        layout.unpacked_arrays.get(*alias) == layout.unpacked_arrays.get(*canonical)
+                    })
+                    .map(|(&alias, &canonical)| (alias, canonical))
+                    .collect::<crate::HashMap<_, _>>();
+                crate::optimizer::sir::redirect_final_alias_accesses(&mut program, &redirected);
             }
         }
         rebuild_rtl_writes(&mut program);

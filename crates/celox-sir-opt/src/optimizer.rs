@@ -16,7 +16,7 @@ pub use crate::{OptimizationError, OptimizationErrorKind};
 pub use api::{
     eliminate_shared_comb_state_stores, eliminate_unobserved_comb_state_stores,
     optimize_rooted_comb_memory, promote_eval_apply_working_round_trips,
-    promote_fused_comb_static_slots, remove_dead_sir_definitions,
+    promote_fused_comb_static_slots, redirect_final_alias_accesses, remove_dead_sir_definitions,
     remove_final_identity_alias_stores, retain_final_identity_aliases,
 };
 pub use native::optimize_merged_chain;

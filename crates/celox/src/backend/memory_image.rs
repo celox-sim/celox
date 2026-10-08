@@ -91,6 +91,12 @@ impl MemoryImage {
         }
     }
 
+    /// Store a native-endian word in a state-header slot, such as the
+    /// address of a host buffer that generated code reads.
+    pub(crate) fn write_header_word(&mut self, offset: usize, value: u64) {
+        self.write_bytes(offset, &value.to_ne_bytes());
+    }
+
     pub(crate) fn vcd_tracking_enabled(&self) -> bool {
         !self.raw_view_exposed
     }

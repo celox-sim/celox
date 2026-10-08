@@ -94,9 +94,10 @@ struct NativeArenaLayout {
 /// Offset of the result slot in the extern call area, after the argument
 /// slots.
 pub(super) const CALL_AREA_RESULT: i32 = celox_sir::MAX_EXTERN_CALL_ARGUMENTS as i32 * 8;
-/// Offset of the XMM0-XMM15 save area in the extern call area.
-pub(super) const CALL_AREA_XMM_SAVE: i32 = CALL_AREA_RESULT + 16;
-const CALL_AREA_SIZE: usize = CALL_AREA_XMM_SAVE as usize + 16 * 16;
+/// Offset of the save area for the low qwords of XMM0-XMM15 in the extern
+/// call area.
+pub(super) const CALL_AREA_XMM_SAVE: i32 = CALL_AREA_RESULT + 8;
+const CALL_AREA_SIZE: usize = CALL_AREA_XMM_SAVE as usize + 16 * 8;
 
 impl NativeArenaLayout {
     fn build(
@@ -1072,6 +1073,17 @@ fn emit_planned(
     debug_assert!(arena.scratch_size >= 4 * 8);
     ACTIVE_SPILL_BASE.with(|base| base.set(arena.spill_base));
     ACTIVE_SCRATCH_BASE.with(|base| base.set(arena.scratch_base));
+    // XMM15 holds the tick count or the caller's segment base, and
+    // XMM9-XMM14 the callee-saved GPRs stashed outside a tick loop.
+    let mut pinned_xmms = 0u16;
+    if tick_loop || state_base != StateBaseStrategy::R15 {
+        pinned_xmms |= 1 << 15;
+    }
+    if arena.loop_gpr_save_base.is_none() {
+        for index in 0..arena.callee_saved.len() {
+            pinned_xmms |= 1 << (9 + index);
+        }
+    }
     extern_call::set_active_call_area(
         arena.call_area,
         match (tick_loop, state_base) {
@@ -1081,6 +1093,7 @@ fn emit_planned(
                 arena.loop_segment_save.expect("loop segment save"),
             ),
         },
+        pinned_xmms,
     );
     ACTIVE_STATE_BASE.with(|active| active.set(state_base));
 
