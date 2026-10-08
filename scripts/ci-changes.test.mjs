@@ -49,6 +49,7 @@ test("Rust test infrastructure skips bindings while retaining Rust checks", () =
     "crates/celox/tests/fixtures/design.veryl",
     "crates/celox-napi/tests/fixture.json",
     "crates/celox/benches/simulation.rs",
+    "crates/celox/examples/sv_tests.rs",
     "crates/celox-bench/src/bin/celox-heliodor.rs",
     "crates/celox-bench-sv/src/main.rs",
     "crates/celox-vpi/src/lib.rs",
@@ -60,6 +61,7 @@ test("Rust test infrastructure skips bindings while retaining Rust checks", () =
     "crates/lydite-verify/src/lib.rs",
     "crates/lydite-celox/src/lib.rs",
     "lydite/conformance/veryl-proof/test_proof.py",
+    "conformance/sv-tests/expected.tsv",
   ]) {
     assert.deepEqual(classifyFiles([path]), { ...none, rust: true }, path);
   }

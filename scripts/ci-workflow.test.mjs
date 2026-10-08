@@ -21,7 +21,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: always\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, napi-linux, napi-wasm, external-suites\]/,
+    /needs: \[changes, rust-tests, sv-tests, napi-linux, napi-wasm, external-suites\]/,
   );
   assert.match(
     gate,
@@ -32,6 +32,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     CHANGES_RESULT: "success",
     RUST_REQUIRED: "true",
     RUST_RESULT: "success",
+    SV_TESTS_RESULT: "success",
     NAPI_REQUIRED: "true",
     NATIVE_RESULT: "success",
     WASM_RESULT: "success",
@@ -45,13 +46,19 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     },
     { env: success, passes: true },
     {
-      env: { ...success, RUST_REQUIRED: "false", RUST_RESULT: "skipped" },
+      env: {
+        ...success,
+        RUST_REQUIRED: "false",
+        RUST_RESULT: "skipped",
+        SV_TESTS_RESULT: "skipped",
+      },
       passes: true,
     },
   ];
   for (const producer of [
     "CHANGES_RESULT",
     "RUST_RESULT",
+    "SV_TESTS_RESULT",
     "NATIVE_RESULT",
     "WASM_RESULT",
   ]) {
