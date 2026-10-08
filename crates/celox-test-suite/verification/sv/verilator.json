@@ -1223,6 +1223,20 @@
       "verified_at_unix": 1791480329
     },
     {
+      "case_fingerprint": "212050d4b53e448a3a5b941abfdfadf020d7df04e8cfe93ef40e8059be4ad7ca",
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interfaces::initializes_interface_members_from_their_declarations",
+      "phase": "execute",
+      "reused": false,
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791480697
+    },
+    {
       "case_fingerprint": "e3c76ff834107ff7e0d7babc4b0b3cb029a3fb7ef1b2af23f9a4d7e95987ae95",
       "category": "Hierarchy",
       "detail": "",
@@ -1993,6 +2007,34 @@
       "verified_at_unix": 1791480454
     },
     {
+      "case_fingerprint": "5a0cee8312979fddf651c47fbc0605a17f5f2884ebd97e08adedf2e396345a9c",
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::declaration_initializers_define_the_initial_state",
+      "phase": "execute",
+      "reused": false,
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791480698
+    },
+    {
+      "case_fingerprint": "63819fd0b6d6b9b225f3ba4a025ef14c79dbf08c9452920819676404926e4815",
+      "category": "ControlFlow",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "procedural::declaration_initializers_keep_unknown_bits",
+      "phase": "compile",
+      "reused": false,
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791480697
+    },
+    {
       "case_fingerprint": "3de911c19933f0c2732b2a60913ae00afa9146e58ac7cc46078745efe59fbd0a",
       "category": "ControlFlow",
       "detail": "",
@@ -2005,6 +2047,20 @@
       "tag_reasons": {},
       "tags": [],
       "verified_at_unix": 1791480486
+    },
+    {
+      "case_fingerprint": "e0c281bab10f2be68f5711438521957cd8c24eba99fec9bd49c0e51034187979",
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::initial_blocks_run_after_declaration_initializers",
+      "phase": "execute",
+      "reused": false,
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791480698
     },
     {
       "case_fingerprint": "242c049617ee0c4aa8e5098ee957e28845271e517db5045687b4958b2934f388",
@@ -2945,11 +3001,11 @@
     "emission_error": 0,
     "ignored": 8,
     "mismatch": 0,
-    "passed": 152,
+    "passed": 155,
     "rejected": 6,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 37
+    "unsupported": 38
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

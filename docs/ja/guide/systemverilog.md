@@ -44,7 +44,7 @@ let mut sim = Simulator::from_sv_sources(
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット |
-| initial ブロック | 書き込む値が定数の `initial` ブロック（初期状態を定める）。定数の `if` / `for`、`$readmemh` / `$readmemb` |
+| initial ブロック | 書き込む値が定数の `initial` ブロック（初期状態を定める）。定数の `if` / `for`、`$readmemh` / `$readmemb`。値が定数の変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。`initial` ブロックより先に適用 |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
@@ -73,7 +73,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：変数宣言の初期化子（[#439](https://github.com/celox-sim/celox/issues/439)）、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
+- 宣言：定数でない、または interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
   多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、別の
   プロセスの変数と同名のブロックローカル変数（[#445](https://github.com/celox-sim/celox/issues/445)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ

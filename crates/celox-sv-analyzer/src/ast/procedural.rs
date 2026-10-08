@@ -1741,16 +1741,69 @@ pub(super) fn initial_processes_from_module_node(
     state: &mut BodyState<'_>,
 ) -> Result<Vec<InitialProcess>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
+    // Variable declaration initializers run before every `initial` and
+    // `always` procedure (IEEE 1800-2023 10.5).
+    let mut initializers = Vec::new();
     let mut processes = Vec::new();
     for item in generate::items(node, tree, const_env, &type_aliases)? {
         let sv_parser::ModuleOrGenerateItem::ModuleItem(module_item) = item.node else {
             continue;
         };
+        let item_dimensions = item.dimensions(packed_dimensions);
+        let literals = item.parameter_literals(parameter_literals);
+        if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
+            &module_item.nodes.1
+            && let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
+                declaration,
+            ) = &**declaration
+            && let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) =
+                &**declaration
+            && let sv_parser::DataDeclaration::Variable(variable) = &**data
+        {
+            let mut body = Vec::new();
+            for assignment in variable.nodes.4.nodes.0.contents() {
+                let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
+                    continue;
+                };
+                let Some((_, expr)) = &assignment.nodes.2 else {
+                    continue;
+                };
+                let name = identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), tree)
+                    .ok_or_else(|| unsupported("variable declaration initializer"))?;
+                if let Some(target) = selected_unpacked_shape(&name, 0, &item_dimensions) {
+                    check_unpacked_array_assignment(
+                        expr,
+                        &target,
+                        || format!("initializer of `{name}`"),
+                        tree,
+                        &item_dimensions,
+                    )?;
+                }
+                let lhs = LValue::Ident(name);
+                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, &item_dimensions)?;
+                body.push(Stmt::Assign {
+                    lhs,
+                    rhs,
+                    nonblocking: false,
+                });
+            }
+            for stmt in &mut body {
+                substitute_stmt_constants(stmt, &item.env, &literals);
+                qualify_stmt(&item, stmt);
+                substitute_stmt_constants(stmt, const_env, parameter_literals);
+            }
+            if !body.is_empty() {
+                initializers.push(InitialProcess {
+                    condition: None,
+                    body,
+                    initializer: true,
+                });
+            }
+            continue;
+        }
         let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
             continue;
         };
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         let mut builder = BodyBuilder::new(
             tree,
             &item_dimensions,
@@ -1766,9 +1819,11 @@ pub(super) fn initial_processes_from_module_node(
         processes.push(InitialProcess {
             condition: None,
             body,
+            initializer: false,
         });
     }
-    Ok(processes)
+    initializers.extend(processes);
+    Ok(initializers)
 }
 
 /// The names of the variables written by assignment statements.

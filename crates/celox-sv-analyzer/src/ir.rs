@@ -736,11 +736,22 @@ impl FfProcess {
 pub struct InitialProcess {
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
+    initializer: bool,
 }
 
 impl InitialProcess {
-    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
-        Self { condition, body }
+    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
+        Self {
+            condition,
+            body,
+            initializer,
+        }
+    }
+
+    /// Whether this process holds variable declaration initializers, which
+    /// run before every `initial` and `always` procedure.
+    pub fn is_initializer(&self) -> bool {
+        self.initializer
     }
 
     /// The condition of the enclosing conditional generate block, if any.
@@ -1021,6 +1032,7 @@ impl From<ast::InitialProcess> for InitialProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
+            process.is_initializer(),
         )
     }
 }

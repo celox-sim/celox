@@ -5323,9 +5323,38 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "variable declaration initializer",
+            "declaration initializer of `value` that is not constant",
             r#"
-            module Top(output logic y); logic value = 1'b1; assign y = value; endmodule
+            module Top(input logic a, output logic y); logic value = a; assign y = value; endmodule
+        "#,
+        ),
+        (
+            "procedural initialization of `value`, which a continuous assignment",
+            r#"
+            module Top(input logic a, output logic y);
+                logic value = 1'b1;
+                assign value = a;
+                assign y = value;
+            endmodule
+        "#,
+        ),
+        (
+            "procedural initialization of `value`, which a continuous assignment",
+            r#"
+            module Child(output logic o); assign o = 1'b0; endmodule
+            module Top(output logic y);
+                logic value;
+                initial value = 1'b1;
+                Child child(.o(value));
+                assign y = value;
+            endmodule
+        "#,
+        ),
+        (
+            "initializer of member `value` in the interface array `lanes`",
+            r#"
+            interface Lane; logic value = 1'b1; endinterface
+            module Top(output logic y); Lane lanes [2] (); assign y = lanes[0].value; endmodule
         "#,
         ),
         (
