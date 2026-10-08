@@ -517,6 +517,8 @@ struct PortDecl {
     name: String,
     span: Span,
     interface: Option<InterfacePort>,
+    /// Whether the module may write the actual (`output`, `inout`, `ref`).
+    writes: bool,
 }
 
 struct ModuleDecl {
@@ -587,7 +589,7 @@ struct Design<'a> {
     interfaces: HashMap<String, InterfaceDecl>,
     modules: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
-    subroutines: HashMap<String, Vec<SubroutinePorts>>,
+    subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>>,
     expansions: std::cell::RefCell<HashMap<(String, String, String), Expansion>>,
     /// The expansions being computed, to reject a recursive instantiation.
     expanding: std::cell::RefCell<HashSet<(String, String, String)>>,
@@ -601,6 +603,11 @@ impl<'a> Design<'a> {
                 match node {
                     RefNode::InterfaceDeclarationAnsi(declaration) => {
                         let interface = InterfaceDecl::collect(declaration, index, file)?;
+                        if interfaces.contains_key(&interface.name) {
+                            return Err(AnalyzerError::DuplicateModule {
+                                name: interface.name,
+                            });
+                        }
                         interfaces.insert(interface.name.clone(), interface);
                     }
                     RefNode::InterfaceDeclarationNonansi(_)
@@ -612,15 +619,21 @@ impl<'a> Design<'a> {
             }
         }
         let mut modules = HashMap::default();
-        let mut subroutines: HashMap<String, Vec<SubroutinePorts>> = HashMap::default();
+        let mut subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>> = HashMap::default();
         if !interfaces.is_empty() {
             for (index, file) in files.iter().enumerate() {
                 let syntax_tree = &file.syntax_tree;
+                let scopes = Scope::collect(file)?;
                 for node in syntax_tree {
                     let subroutine = match node {
                         RefNode::ModuleDeclarationAnsi(declaration) => {
                             let module =
                                 ModuleDecl::collect(declaration, index, file, &interfaces)?;
+                            // Modules and interfaces share one name space; the
+                            // module analysis reports duplicate modules.
+                            if interfaces.contains_key(&module.name) {
+                                return Err(AnalyzerError::DuplicateModule { name: module.name });
+                            }
                             modules.insert(module.name.clone(), module);
                             continue;
                         }
@@ -643,10 +656,13 @@ impl<'a> Design<'a> {
                         _ => None,
                     };
                     if let Some((identifier, root)) = subroutine {
+                        let scope = file
+                            .node_span(root.clone())
+                            .map_or(Scope::Unit, |span| Scope::of(span, &scopes));
                         subroutines
                             .entry(name(identifier, syntax_tree)?)
                             .or_default()
-                            .push(subroutine_ports(root, syntax_tree)?);
+                            .push((scope, subroutine_ports(root, syntax_tree)?));
                     }
                 }
             }
@@ -829,13 +845,13 @@ impl<'a> Design<'a> {
         // a write that depends on them needs a modport.
         let conditional_write = |member: &str, context: Context| {
             unsupported(format!(
-                "write of `{port_name}.{member}` inside {} of module `{module_name}`, whose port `{port_name}` has no modport",
+                "write of `{port_name}.{member}` {} of module `{module_name}`, whose port `{port_name}` has no modport",
                 context.description()
             ))
         };
         let mut written: HashSet<String> = HashSet::default();
         for (handle, member, context) in &uses.writes {
-            if handle == port_name {
+            if handle == port_name && interface.member(member).is_some() {
                 if *context != Context::Module {
                     return Err(conditional_write(member, *context));
                 }
@@ -902,17 +918,46 @@ impl<'a> Design<'a> {
     fn collect_written_arguments(
         &self,
         call: &sv_parser::TfCall,
+        module_name: &str,
         file: &File<'_>,
         writes: &mut HashSet<usize>,
     ) -> Result<(), AnalyzerError> {
         let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
             return Ok(());
         };
-        let callee = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
-        let callee =
-            normalize_identifier(callee.rsplit(['.', ':']).next().unwrap_or(callee).trim());
-        let Some(declarations) = self.subroutines.get(&callee) else {
+        let text = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
+        let callee = normalize_identifier(text.rsplit(['.', ':']).next().unwrap_or(text).trim());
+        let Some(declared) = self.subroutines.get(&callee) else {
             return Ok(());
+        };
+        // The declarations the call can refer to: of the named package, of an
+        // interface for a call through a handle, or of the module itself, and
+        // otherwise of a package or the compilation unit.
+        let in_scope = |filter: &dyn Fn(&Scope) -> bool| -> Vec<&SubroutinePorts> {
+            declared
+                .iter()
+                .filter(|(scope, _)| filter(scope))
+                .map(|(_, ports)| ports)
+                .collect()
+        };
+        let declarations = if let Some((package, _)) = text.rsplit_once("::") {
+            let package =
+                normalize_identifier(package.rsplit("::").next().unwrap_or(package).trim());
+            in_scope(&|scope| match scope {
+                Scope::Package(name) => *name == package,
+                Scope::Unit => package == "$unit",
+                _ => false,
+            })
+        } else if text.contains('.') {
+            in_scope(&|scope| matches!(scope, Scope::Interface(_)))
+        } else {
+            let local =
+                in_scope(&|scope| matches!(scope, Scope::Module(name) if name == module_name));
+            if local.is_empty() {
+                in_scope(&|scope| matches!(scope, Scope::Package(_) | Scope::Unit))
+            } else {
+                local
+            }
         };
         // Positional actuals by index, named ones by formal name.
         let mut actuals: Vec<(Result<usize, String>, &sv_parser::Expression)> = Vec::new();
@@ -988,7 +1033,7 @@ impl<'a> Design<'a> {
                     subroutines.extend(file.node_span(RefNode::TaskDeclaration(task)));
                 }
                 RefNode::TfCall(call) => {
-                    self.collect_written_arguments(call, file, &mut lvalues)?
+                    self.collect_written_arguments(call, module_name, file, &mut lvalues)?
                 }
                 RefNode::VariableLvalue(lvalue) => {
                     lvalues.extend(
@@ -1013,6 +1058,57 @@ impl<'a> Design<'a> {
             }
         }
         let context = |span: Span| Context::of(span, &generates, &subroutines);
+        // Actuals of child ports: written ones, and ones of children whose
+        // port directions are not known here.
+        let mut unknown = HashSet::default();
+        for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            let RefNode::ModuleInstantiation(instantiation) = node else {
+                continue;
+            };
+            let child_name = name(
+                RefNode::ModuleIdentifier(&instantiation.nodes.0),
+                &file.syntax_tree,
+            )?;
+            if self.interfaces.contains_key(&child_name) {
+                continue;
+            }
+            let Some(child) = self.modules.get(&child_name) else {
+                for node in RefNode::ModuleInstantiation(instantiation) {
+                    if let RefNode::Expression(expression) = node {
+                        unknown.extend(
+                            file.node_span(RefNode::Expression(expression))
+                                .map(|span| span.0),
+                        );
+                    }
+                }
+                continue;
+            };
+            let instance_context = context(file.span(RefNode::ModuleInstantiation(instantiation))?);
+            for instance in instantiation.nodes.2.contents() {
+                for (formal, actual) in
+                    connections(instance, child, file, child.has_interface_ports())?
+                {
+                    let (Some(port), Some(expression)) = (child.port(&formal), actual) else {
+                        continue;
+                    };
+                    if port.interface.is_none() {
+                        if port.writes {
+                            lvalues.extend(
+                                file.node_span(RefNode::Expression(expression))
+                                    .map(|span| span.0),
+                            );
+                        }
+                    } else if let Some(actual) = actual_handle(expression, file)? {
+                        uses.children.push(ChildBinding {
+                            module: child_name.clone(),
+                            formal,
+                            handle: actual.handle,
+                            context: instance_context,
+                        });
+                    }
+                }
+            }
+        }
         let ports: HashSet<&str> = module
             .ports
             .iter()
@@ -1022,45 +1118,18 @@ impl<'a> Design<'a> {
         for reference in file.handle_references(module.span, |name| ports.contains(name)) {
             if let Some((item, _)) = reference.item {
                 let context = context(reference.span);
+                if unknown.contains(&reference.span.0) {
+                    uses.writes.push((
+                        reference.handle.clone(),
+                        item.clone(),
+                        Context::UnknownPort,
+                    ));
+                }
                 if lvalues.contains(&reference.span.0) {
                     uses.writes
                         .push((reference.handle.clone(), item.clone(), context));
                 }
                 uses.references.push((reference.handle, item, context));
-            }
-        }
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            let RefNode::ModuleInstantiation(instantiation) = node else {
-                continue;
-            };
-            let child_name = name(
-                RefNode::ModuleIdentifier(&instantiation.nodes.0),
-                &file.syntax_tree,
-            )?;
-            let Some(child) = self.modules.get(&child_name) else {
-                continue;
-            };
-            if !child.has_interface_ports() {
-                continue;
-            }
-            for instance in instantiation.nodes.2.contents() {
-                for (formal, actual) in connections(instance, child, file)? {
-                    if child
-                        .port(&formal)
-                        .is_some_and(|port| port.interface.is_some())
-                        && let Some(expression) = actual
-                        && let Some(actual) = actual_handle(expression, file)?
-                    {
-                        uses.children.push(ChildBinding {
-                            module: child_name.clone(),
-                            formal,
-                            handle: actual.handle,
-                            context: context(
-                                file.span(RefNode::ModuleInstantiation(instantiation))?,
-                            ),
-                        });
-                    }
-                }
             }
         }
         Ok(uses)
@@ -1329,7 +1398,7 @@ impl<'a> Design<'a> {
             let mut child_bindings = Vec::new();
             let mut connection_texts = Vec::new();
             let mut parameter_texts = Vec::new();
-            let actuals = connections(instance, &self.modules[&child_name], file)?;
+            let actuals = connections(instance, &self.modules[&child_name], file, true)?;
             for (formal, actual) in actuals {
                 let Some((_, Some(formal_port))) =
                     child_ports.iter().find(|(name, _)| *name == formal)
@@ -1863,6 +1932,62 @@ fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
     name
 }
 
+/// The scope that declares a subroutine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scope {
+    Module(String),
+    Interface(String),
+    Package(String),
+    /// A class or program, whose subroutines a module cannot call by a
+    /// plain name.
+    Other,
+    /// The compilation unit.
+    Unit,
+}
+
+impl Scope {
+    /// The design elements and classes of `file` with their spans.
+    fn collect(file: &File<'_>) -> Result<Vec<(Span, Self)>, AnalyzerError> {
+        let mut scopes = Vec::new();
+        for node in &file.syntax_tree {
+            let (identifier, scope): (Option<RefNode<'_>>, fn(String) -> Self) = match node {
+                RefNode::ModuleDeclaration(_) => {
+                    (unwrap_node!(node.clone(), ModuleIdentifier), Self::Module)
+                }
+                RefNode::InterfaceDeclaration(_) => (
+                    unwrap_node!(node.clone(), InterfaceIdentifier),
+                    Self::Interface,
+                ),
+                RefNode::PackageDeclaration(_) => {
+                    (unwrap_node!(node.clone(), PackageIdentifier), Self::Package)
+                }
+                RefNode::ProgramDeclaration(_) | RefNode::ClassDeclaration(_) => {
+                    (None, |_| Self::Other)
+                }
+                _ => continue,
+            };
+            let Some(span) = file.node_span(node.clone()) else {
+                continue;
+            };
+            let name = match identifier {
+                Some(identifier) => name(identifier, &file.syntax_tree)?,
+                None => String::new(),
+            };
+            scopes.push((span, scope(name)));
+        }
+        Ok(scopes)
+    }
+
+    /// The innermost of `scopes` containing `span`.
+    fn of(span: Span, scopes: &[(Span, Self)]) -> Self {
+        scopes
+            .iter()
+            .filter(|(outer, _)| outer.0 <= span.0 && span.1 <= outer.1)
+            .min_by_key(|(outer, _)| outer.1 - outer.0)
+            .map_or(Self::Unit, |(_, scope)| scope.clone())
+    }
+}
+
 /// Where an access in a module body is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Context {
@@ -1872,6 +1997,9 @@ enum Context {
     Generate,
     /// Inside a function or task, which may never be called.
     Subroutine,
+    /// Connected to a port of a module whose port directions are not known
+    /// here.
+    UnknownPort,
 }
 
 impl Context {
@@ -1892,9 +2020,10 @@ impl Context {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Module => "the body",
-            Self::Generate => "a generate construct",
-            Self::Subroutine => "a function or task",
+            Self::Module => "in the body",
+            Self::Generate => "inside a generate construct",
+            Self::Subroutine => "inside a function or task",
+            Self::UnknownPort => "through a port of a module that is not analyzed here",
         }
     }
 }
@@ -2011,10 +2140,13 @@ fn actual_handle(
 }
 
 /// The port connections of `instance` of `module` as `(formal, actual)`.
+/// Implicit and wildcard named connections, which cannot name an interface
+/// item, are rejected when `strict`, and skipped otherwise.
 fn connections<'b>(
     instance: &'b sv_parser::HierarchicalInstance,
     module: &ModuleDecl,
     file: &File<'_>,
+    strict: bool,
 ) -> Result<Vec<(String, Option<&'b sv_parser::Expression>)>, AnalyzerError> {
     let Some(list) = &instance.nodes.1.nodes.1 else {
         return Ok(Vec::new());
@@ -2046,18 +2178,23 @@ fn connections<'b>(
             .0
             .contents()
             .into_iter()
-            .map(|connection| match connection {
+            .filter_map(|connection| match connection {
                 sv_parser::NamedPortConnection::Identifier(connection) => {
-                    let formal = name(RefNode::PortIdentifier(&connection.nodes.2), &file.syntax_tree)?;
+                    let formal = match name(RefNode::PortIdentifier(&connection.nodes.2), &file.syntax_tree) {
+                        Ok(formal) => formal,
+                        Err(error) => return Some(Err(error)),
+                    };
                     match &connection.nodes.3 {
-                        Some(actual) => Ok((formal, actual.nodes.1.as_ref())),
-                        None => Err(unsupported(format!(
+                        Some(actual) => Some(Ok((formal, actual.nodes.1.as_ref()))),
+                        None if !strict => None,
+                        None => Some(Err(unsupported(format!(
                             "implicit named port connection `.{formal}` to a module with interface ports"
-                        ))),
+                        )))),
                     }
                 }
+                sv_parser::NamedPortConnection::Asterisk(_) if !strict => None,
                 sv_parser::NamedPortConnection::Asterisk(_) => {
-                    Err(unsupported("wildcard port connection"))
+                    Some(Err(unsupported("wildcard port connection")))
                 }
             })
             .collect(),
@@ -2407,8 +2544,11 @@ impl InterfaceDecl {
             }
             sv_parser::NonPortInterfaceItem::TimeunitsDeclaration(_) => return Ok(()),
             sv_parser::NonPortInterfaceItem::GenerateRegion(region) => {
-                self.items
-                    .push(Item::Process(file.span(RefNode::GenerateRegion(region))?));
+                // Only the items: `generate` regions do not nest, and an
+                // instance array places the logic in a generate loop.
+                let (_, start) = file.span(RefNode::Keyword(&region.nodes.0))?;
+                let (end, _) = file.span(RefNode::Keyword(&region.nodes.2))?;
+                self.items.push(Item::Process((start, end)));
                 return Ok(());
             }
             sv_parser::NonPortInterfaceItem::InterfaceOrGenerateItem(item) => item,
@@ -2866,8 +3006,28 @@ impl ModuleDecl {
             // A port without a header inherits the interface and modport of
             // the previous port (IEEE 1800-2023 23.2.2.3).
             let mut previous: Option<InterfacePort> = None;
+            // A port without a direction inherits the previous one; the first
+            // defaults to inout.
+            let mut writes = true;
             for (_, port) in list.contents() {
                 let port_span = file.span(RefNode::AnsiPortDeclaration(port))?;
+                let direction = match port {
+                    sv_parser::AnsiPortDeclaration::Net(net) => match &net.nodes.0 {
+                        Some(sv_parser::NetPortHeaderOrInterfacePortHeader::NetPortHeader(
+                            header,
+                        )) => header.nodes.0.as_ref(),
+                        _ => None,
+                    },
+                    sv_parser::AnsiPortDeclaration::Variable(variable) => variable
+                        .nodes
+                        .0
+                        .as_ref()
+                        .and_then(|header| header.nodes.0.as_ref()),
+                    sv_parser::AnsiPortDeclaration::Paren(paren) => paren.nodes.0.as_ref(),
+                };
+                if let Some(direction) = direction {
+                    writes = !matches!(direction, sv_parser::PortDirection::Input(_));
+                }
                 let (identifier, interface) = match port {
                     sv_parser::AnsiPortDeclaration::Net(net) => {
                         let interface = match &net.nodes.0 {
@@ -2967,6 +3127,7 @@ impl ModuleDecl {
                     name: name(identifier, syntax_tree)?,
                     span: port_span,
                     interface,
+                    writes,
                 });
             }
         }

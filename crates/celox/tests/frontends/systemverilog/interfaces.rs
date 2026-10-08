@@ -38,4 +38,8 @@ sv_backends! {
     fn rewrites_nested_references_and_keeps_declaration_functions(sim) {
         @case "interfaces::rewrites_nested_references_and_keeps_declaration_functions";
     }
+
+    fn drives_members_through_child_outputs_and_array_generate_regions(sim) {
+        @case "interfaces::drives_members_through_child_outputs_and_array_generate_regions";
+    }
 }

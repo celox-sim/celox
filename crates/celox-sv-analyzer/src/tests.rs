@@ -2685,6 +2685,74 @@ fn expands_nested_references_functions_and_written_arguments() {
 }
 
 #[test]
+fn infers_writes_through_child_ports_and_scoped_subroutines() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+            logic [7:0] z;
+        endinterface
+        interface Gen;
+            logic a;
+            logic b;
+            generate
+                if (1) begin : copy
+                    assign b = a;
+                end
+            endgenerate
+        endinterface
+        package pk;
+            function automatic void touch(output logic [7:0] a);
+                a = 0;
+            endfunction
+        endpackage
+        module Out(output logic [7:0] o);
+            assign o = 8'd1;
+        endmodule
+        module M(Bus p, output logic [7:0] o);
+            function automatic logic [7:0] touch(input logic [7:0] a);
+                return a;
+            endfunction
+            Out named(.o(p.x));
+            Out ordered(p.y);
+            assign o = touch(p.z);
+        endmodule
+        module Top(input logic v, output logic o);
+            Gen g [2] ();
+            assign g[0].a = v;
+            assign g[1].a = v;
+            assign o = g[1].b;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // Actuals of child outputs are written; the module's own `touch`
+        // reads its argument, whatever a package declares.
+        "output var logic [7:0] p$x",
+        "output var logic [7:0] p$y",
+        "input var logic [7:0] p$z",
+        // The items of a generate region are placed in the array loop.
+        "for (genvar g$$i0 = 0; g$$i0 <= (2) - 1; g$$i0++) begin : g$$g0",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    let top = &elaborated[elaborated.find("module Top").unwrap()..];
+    assert!(!top.contains("generate"), "{elaborated}");
+    assert_eq!(
+        elaborate("interface I; endinterface interface I; endinterface"),
+        Err(AnalyzerError::DuplicateModule {
+            name: "I".to_string()
+        })
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;

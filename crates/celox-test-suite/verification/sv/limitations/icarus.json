@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 40,
+    "compile_error": 41,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -324,6 +324,14 @@
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: Errors in port declarations.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Errors in port declarations.\n",
       "expectation": "Simulation",
       "name": "interfaces::clocks_interface_processes_from_member_clocks",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
       "phase": "compile",
       "status": "compile_error"
     },

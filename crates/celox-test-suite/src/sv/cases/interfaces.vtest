@@ -355,3 +355,34 @@
     (assert_eq middle (trunc 4 (+ value 2)))
     (assert_eq driven (trunc 4 (+ value 1)))
     (assert_eq sized value)))
+
+(case drives_members_through_child_outputs_and_array_generate_regions
+  (source "interface_child_outputs.sv" #"
+        interface Pair;
+            logic [7:0] a;
+            logic [7:0] b;
+            generate
+                if (1) begin : copy
+                    assign b = a + 8'd1;
+                end
+            endgenerate
+        endinterface
+        module Inc(input logic [7:0] i, output logic [7:0] o);
+            assign o = i + 8'd2;
+        endmodule
+        module Drive(Pair p, input logic [7:0] v);
+            Inc u(.i(v), .o(p.a));
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] b0, output logic [7:0] b1);
+            Pair pairs [2] ();
+            Drive d0(.p(pairs[0]), .v(v));
+            Drive d1(.p(pairs[1]), .v(v + 8'd3));
+            assign b0 = pairs[0].b;
+            assign b1 = pairs[1].b;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xfc)
+    (modify (set v value))
+    (assert_eq b0 (trunc 8 (+ value 3)))
+    (assert_eq b1 (trunc 8 (+ value 6)))))
