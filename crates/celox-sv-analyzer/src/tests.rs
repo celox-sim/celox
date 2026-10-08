@@ -2627,6 +2627,64 @@ fn expands_interface_parameters_functions_and_grouped_ports() {
 }
 
 #[test]
+fn expands_nested_references_functions_and_written_arguments() {
+    let elaborated = elaborate(
+        r#"
+        interface Cfg #(parameter int N = 2);
+        endinterface
+        interface Lane;
+            function automatic int bits();
+                return 4;
+            endfunction
+            function automatic logic [3:0] inc(input logic [3:0] v);
+                return v + 1;
+            endfunction
+            logic [bits()-1:0] i0;
+            logic [3:0] g0;
+            assign g0 = inc(i0);
+            modport r(input g0);
+        endinterface
+        module Reader(Lane.r l, output logic [3:0] o);
+            assign o = l.g0;
+        endmodule
+        module Driver(Lane l, input logic [3:0] v);
+            function automatic void drive(output logic [3:0] d, input logic [3:0] s);
+                d = s;
+            endfunction
+            always_comb drive(l.i0, v);
+        endmodule
+        module Top(input logic [3:0] v, output logic [3:0] o);
+            Cfg #(.N(3)) cfg();
+            Lane rows [cfg.N] ();
+            Driver d(.l(rows[cfg.N - 1]), .v(v));
+            Reader r(.l(rows[cfg.N - 1]), .o(o));
+            assign rows[cfg.N - 2].i0 = v;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // References inside selects and instance dimensions are rewritten.
+        "var logic [rows$bits()-1:0] rows$i0[cfg$N];",
+        "assign rows$i0[cfg$N - 2] = v;",
+        ".l$i0(rows$i0[cfg$N - 1])",
+        // Loop helper names cannot collide with the items `i0` and `g0`.
+        "for (genvar rows$$i0 = 0; rows$$i0 <= (cfg$N) - 1; rows$$i0++) begin : rows$$g0",
+        "assign rows$g0[rows$$i0] = rows$inc(rows$i0[rows$$i0]);",
+        // A function a declaration calls is declared with the port.
+        "function automatic int l$bits();",
+        // An actual of an `output` subroutine argument is written.
+        "output var logic [l$bits()-1:0] l$i0",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
@@ -2679,6 +2737,14 @@ fn rejects_unsupported_interface_uses() {
             "declaration of `p` in module `M`, which shadows an interface",
         ),
         (
+            "module Top(output logic [7:0] o); Bus \\b.0 (); assign o = \\b.0 .x; endmodule",
+            "escaped identifier `\\b.0` that is not a simple identifier in a design with interfaces",
+        ),
+        (
+            "module F(Bus p); function automatic void h(); p.x = 1; endfunction endmodule",
+            "write of `p.x` inside a function or task of module `F`, whose port `p` has no modport",
+        ),
+        (
             "module W(Bus p); if (0) begin : g assign p.x = 0; end endmodule",
             "write of `p.x` inside a generate construct of module `W`, whose port `p` has no modport",
         ),
@@ -2696,6 +2762,12 @@ fn rejects_unsupported_interface_uses() {
         );
     }
     for (interface, message) in [
+        (
+            "interface I; logic x; logic y; function automatic logic f(); return x; endfunction
+             assign y = f(); endinterface
+             module Top(); I a [2] (); endmodule",
+            "call of function `f` of interface `I`, which accesses members, in the logic of the instance array `a`",
+        ),
         (
             "interface I(input logic clk); endinterface",
             "ports of interface `I`",

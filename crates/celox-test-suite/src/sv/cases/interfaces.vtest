@@ -298,3 +298,60 @@
     (modify (set v value))
     (assert_eq sum (trunc 16 (+ (trunc 8 value) (trunc 12 value))))
     (assert_eq scaled (trunc 8 (* (trunc 8 value) 3)))))
+
+(case rewrites_nested_references_and_keeps_declaration_functions
+  (source "interface_nested_references.sv" #"
+        interface Cfg #(parameter int N = 2);
+        endinterface
+        interface Lane;
+            function automatic logic [3:0] inc(input logic [3:0] v);
+                return v + 4'd1;
+            endfunction
+            logic [3:0] i0;
+            logic [3:0] g0;
+            assign g0 = inc(i0);
+            modport r(input g0);
+        endinterface
+        interface Sized;
+            function automatic int bits();
+                return 4;
+            endfunction
+            logic [bits()-1:0] data;
+            modport r(input data);
+        endinterface
+        module Reader(Lane.r l, output logic [3:0] o);
+            assign o = l.g0;
+        endmodule
+        module SizedReader(Sized.r s, output logic [3:0] o);
+            assign o = s.data;
+        endmodule
+        module Driver(Lane l, input logic [3:0] v);
+            function automatic void drive(output logic [3:0] d, input logic [3:0] s);
+                d = s;
+            endfunction
+            always_comb drive(l.i0, v);
+        endmodule
+        module Top(input logic [3:0] v, output logic [3:0] last, output logic [3:0] middle,
+                   output logic [3:0] driven, output logic [3:0] sized);
+            Cfg #(.N(3)) cfg();
+            Lane rows [cfg.N] ();
+            Lane one();
+            Sized s();
+            for (genvar i = 0; i < cfg.N; i++) begin : g
+                assign rows[i].i0 = v + i;
+            end
+            Reader r(.l(rows[cfg.N - 1]), .o(last));
+            assign middle = rows[1].g0;
+            Driver d(.l(one), .v(v));
+            assign driven = one.g0;
+            assign s.data = v;
+            SizedReader sr(.s(s), .o(sized));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 5 0xf)
+    (modify (set v value))
+    (assert_eq last (trunc 4 (+ value 3)))
+    (assert_eq middle (trunc 4 (+ value 2)))
+    (assert_eq driven (trunc 4 (+ value 1)))
+    (assert_eq sized value)))

@@ -24,8 +24,9 @@
 //!
 //! `$` may continue but not start an identifier (IEEE 1800-2023 5.6), and the
 //! generated names keep the SystemVerilog scoping of the names they replace.
-//! A design with interfaces may not use `$` in its own identifiers, so that
-//! generated names cannot collide with them.
+//! A design with interfaces may not use `$` or escaped identifiers that are
+//! not simple identifiers, so that generated names are valid and cannot
+//! collide with its own.
 
 use std::path::Path;
 
@@ -72,6 +73,13 @@ pub fn elaborate_interfaces(
                 continue;
             };
             let identifier = normalize_identifier(file.text(token));
+            // A generated name joins plain identifiers.
+            if identifier.starts_with('\\') {
+                return Err(unsupported(format!(
+                    "escaped identifier `{}` that is not a simple identifier in a design with interfaces",
+                    identifier.trim_end()
+                )));
+            }
             if identifier.contains(SEPARATOR) {
                 return Err(unsupported(format!(
                     "identifier `{identifier}` containing `{SEPARATOR}` in a design with interfaces, which interface elaboration reserves for generated names"
@@ -223,8 +231,10 @@ impl<'a> File<'a> {
                 )
             });
             let selects = match &item {
-                Some(_) => self.code[token.1..tokens[next].0].trim().to_string(),
-                None => String::new(),
+                Some(_) if !self.code[token.1..tokens[next].0].trim().is_empty() => {
+                    Some((token.1, tokens[next].0))
+                }
+                _ => None,
             };
             references.push(TokenReference {
                 handle,
@@ -440,6 +450,40 @@ impl InterfaceDecl {
             .collect()
     }
 
+    /// The functions that parameter, constant and member declarations call,
+    /// which every expansion of the interface declares.
+    fn declaration_functions(&self) -> HashSet<String> {
+        let mut spans = Vec::new();
+        for item in &self.items {
+            match item {
+                Item::Parameter(index) => {
+                    let parameter = &self.parameters[*index];
+                    spans.extend(parameter.data_type);
+                    spans.extend(parameter.default);
+                }
+                Item::Constant { span, .. } => spans.push(*span),
+                Item::Member(index) => {
+                    let member = &self.members[*index];
+                    spans.extend(member.data_type);
+                    spans.extend(member.dimensions.iter().copied());
+                }
+                Item::Function(_) | Item::Process(_) => {}
+            }
+        }
+        spans
+            .into_iter()
+            .flat_map(|span| self.referenced(span))
+            .filter(|name| self.function(name).is_some())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether `function`, or a function it calls, accesses a member.
+    fn accesses_members(&self, function: &str) -> bool {
+        let closure = self.function_closure(&HashSet::from_iter([function.to_string()]));
+        !self.captured_members(&closure).is_empty()
+    }
+
     /// The members that `functions` access: an output for a member one of
     /// them assigns, an input for one they only read.
     fn captured_members(&self, functions: &[String]) -> HashMap<String, Direction> {
@@ -514,8 +558,8 @@ impl Expansion {
 /// The interface a port connection binds and how it names it.
 struct Actual {
     handle: String,
-    /// The text of the element selects after the handle name.
-    selects: String,
+    /// The span of the element selects after the handle name.
+    selects: Option<Span>,
     /// A modport named in the connection (`h.mp`).
     modport: Option<String>,
 }
@@ -535,14 +579,15 @@ struct ChildBinding {
     module: String,
     formal: String,
     handle: String,
-    /// Whether the instantiation is inside a generate construct.
-    in_generate: bool,
+    context: Context,
 }
 
 struct Design<'a> {
     files: &'a [File<'a>],
     interfaces: HashMap<String, InterfaceDecl>,
     modules: HashMap<String, ModuleDecl>,
+    /// The ports of every subroutine declared or imported, by name.
+    subroutines: HashMap<String, Vec<SubroutinePorts>>,
     expansions: std::cell::RefCell<HashMap<(String, String, String), Expansion>>,
     /// The expansions being computed, to reject a recursive instantiation.
     expanding: std::cell::RefCell<HashSet<(String, String, String)>>,
@@ -567,12 +612,41 @@ impl<'a> Design<'a> {
             }
         }
         let mut modules = HashMap::default();
+        let mut subroutines: HashMap<String, Vec<SubroutinePorts>> = HashMap::default();
         if !interfaces.is_empty() {
             for (index, file) in files.iter().enumerate() {
-                for node in &file.syntax_tree {
-                    if let RefNode::ModuleDeclarationAnsi(declaration) = node {
-                        let module = ModuleDecl::collect(declaration, index, file, &interfaces)?;
-                        modules.insert(module.name.clone(), module);
+                let syntax_tree = &file.syntax_tree;
+                for node in syntax_tree {
+                    let subroutine = match node {
+                        RefNode::ModuleDeclarationAnsi(declaration) => {
+                            let module =
+                                ModuleDecl::collect(declaration, index, file, &interfaces)?;
+                            modules.insert(module.name.clone(), module);
+                            continue;
+                        }
+                        RefNode::FunctionDeclaration(declaration) => unwrap_node!(
+                            RefNode::FunctionDeclaration(declaration),
+                            FunctionIdentifier
+                        )
+                        .map(|identifier| (identifier, node.clone())),
+                        RefNode::TaskDeclaration(declaration) => {
+                            unwrap_node!(RefNode::TaskDeclaration(declaration), TaskIdentifier)
+                                .map(|identifier| (identifier, node.clone()))
+                        }
+                        RefNode::FunctionPrototype(prototype) => Some((
+                            RefNode::FunctionIdentifier(&prototype.nodes.2),
+                            node.clone(),
+                        )),
+                        RefNode::TaskPrototype(prototype) => {
+                            Some((RefNode::TaskIdentifier(&prototype.nodes.1), node.clone()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((identifier, root)) = subroutine {
+                        subroutines
+                            .entry(name(identifier, syntax_tree)?)
+                            .or_default()
+                            .push(subroutine_ports(root, syntax_tree)?);
                     }
                 }
             }
@@ -581,6 +655,7 @@ impl<'a> Design<'a> {
             files,
             interfaces,
             modules,
+            subroutines,
             expansions: Default::default(),
             expanding: Default::default(),
         })
@@ -722,6 +797,7 @@ impl<'a> Design<'a> {
                     }
                 }
             }
+            imports.extend(interface.declaration_functions());
             let functions = interface.function_closure(&imports);
             // An imported function runs in the interface scope, so a member it
             // assigns is driven through the port whatever the modport lists.
@@ -748,37 +824,41 @@ impl<'a> Design<'a> {
         // a child writes is an output.
         let uses = self.module_uses(module_name)?;
         let interface = self.interface(interface_name)?;
-        let called: HashSet<String> = uses
-            .references
-            .iter()
-            .filter(|(handle, item)| handle == port_name && interface.function(item).is_some())
-            .map(|(_, item)| item.clone())
-            .collect();
-        let functions = interface.function_closure(&called);
-        // The directions do not depend on generate conditions or loop bounds,
-        // which are not evaluated here, so a write that depends on them needs
-        // a modport.
-        let generate_write = |member: &str| {
+        // The directions do not depend on generate conditions, loop bounds
+        // or which subroutines are called, which are not evaluated here, so
+        // a write that depends on them needs a modport.
+        let conditional_write = |member: &str, context: Context| {
             unsupported(format!(
-                "write of `{port_name}.{member}` inside a generate construct of module `{module_name}`, whose port `{port_name}` has no modport"
+                "write of `{port_name}.{member}` inside {} of module `{module_name}`, whose port `{port_name}` has no modport",
+                context.description()
             ))
         };
         let mut written: HashSet<String> = HashSet::default();
-        for (handle, member, in_generate) in &uses.writes {
+        for (handle, member, context) in &uses.writes {
             if handle == port_name {
-                if *in_generate {
-                    return Err(generate_write(member));
+                if *context != Context::Module {
+                    return Err(conditional_write(member, *context));
                 }
                 written.insert(member.clone());
             }
         }
-        written.extend(
-            interface
-                .captured_members(&functions)
-                .into_iter()
-                .filter(|(_, direction)| *direction == Direction::Output)
-                .map(|(member, _)| member),
-        );
+        let mut called = interface.declaration_functions();
+        for (handle, item, context) in &uses.references {
+            if handle != port_name || interface.function(item).is_none() {
+                continue;
+            }
+            let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
+            for (member, direction) in interface.captured_members(&closure) {
+                if direction == Direction::Output {
+                    if *context != Context::Module {
+                        return Err(conditional_write(&member, *context));
+                    }
+                    written.insert(member);
+                }
+            }
+            called.insert(item.clone());
+        }
+        let functions = interface.function_closure(&called);
         let member_names: Vec<String> = interface
             .members
             .iter()
@@ -792,8 +872,8 @@ impl<'a> Design<'a> {
             let child_expansion = self.expansion(&child.module, &child.formal, interface_name)?;
             for (member, direction) in child_expansion.members {
                 if direction == Direction::Output {
-                    if child.in_generate {
-                        return Err(generate_write(&member));
+                    if child.context != Context::Module {
+                        return Err(conditional_write(&member, child.context));
                     }
                     written.insert(member);
                 }
@@ -815,6 +895,80 @@ impl<'a> Design<'a> {
         })
     }
 
+    /// Add to `writes` the start offsets of the actual arguments of `call`
+    /// that the called subroutine may write. A subroutine is found by name;
+    /// when its declarations disagree about an argument, the call is
+    /// rejected.
+    fn collect_written_arguments(
+        &self,
+        call: &sv_parser::TfCall,
+        file: &File<'_>,
+        writes: &mut HashSet<usize>,
+    ) -> Result<(), AnalyzerError> {
+        let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
+            return Ok(());
+        };
+        let callee = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
+        let callee =
+            normalize_identifier(callee.rsplit(['.', ':']).next().unwrap_or(callee).trim());
+        let Some(declarations) = self.subroutines.get(&callee) else {
+            return Ok(());
+        };
+        // Positional actuals by index, named ones by formal name.
+        let mut actuals: Vec<(Result<usize, String>, &sv_parser::Expression)> = Vec::new();
+        let named = match arguments {
+            sv_parser::ListOfArguments::Ordered(list) => {
+                for (index, actual) in list.nodes.0.contents().into_iter().enumerate() {
+                    if let Some(actual) = actual {
+                        actuals.push((Ok(index), actual));
+                    }
+                }
+                &list.nodes.1
+            }
+            sv_parser::ListOfArguments::Named(list) => {
+                if let Some(actual) = &list.nodes.2.nodes.1 {
+                    actuals.push((
+                        Err(name(RefNode::Identifier(&list.nodes.1), &file.syntax_tree)?),
+                        actual,
+                    ));
+                }
+                &list.nodes.3
+            }
+        };
+        for (_, _, formal, actual) in named {
+            if let Some(actual) = &actual.nodes.1 {
+                actuals.push((
+                    Err(name(RefNode::Identifier(formal), &file.syntax_tree)?),
+                    actual,
+                ));
+            }
+        }
+        for (formal, actual) in actuals {
+            let mut directions = declarations.iter().filter_map(|ports| match &formal {
+                Ok(index) => ports.get(*index).map(|(_, writes)| *writes),
+                Err(formal) => ports
+                    .iter()
+                    .find(|(name, _)| name.as_deref() == Some(formal.as_str()))
+                    .map(|(_, writes)| *writes),
+            });
+            let Some(first) = directions.next() else {
+                continue;
+            };
+            if directions.any(|writes| writes != first) {
+                return Err(unsupported(format!(
+                    "call of `{callee}`, whose declarations disagree about the direction of an argument, in a module with interface ports"
+                )));
+            }
+            if first {
+                writes.extend(
+                    file.node_span(RefNode::Expression(actual))
+                        .map(|span| span.0),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The interface accesses of a module body, by handle name.
     fn module_uses(&self, module_name: &str) -> Result<ModuleUses, AnalyzerError> {
         let module = &self.modules[module_name];
@@ -824,8 +978,18 @@ impl<'a> Design<'a> {
         // An assignment target starts where its lvalue starts.
         let mut lvalues = HashSet::default();
         let mut generates = Vec::new();
+        let mut subroutines = Vec::new();
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             match node {
+                RefNode::FunctionDeclaration(function) => {
+                    subroutines.extend(file.node_span(RefNode::FunctionDeclaration(function)));
+                }
+                RefNode::TaskDeclaration(task) => {
+                    subroutines.extend(file.node_span(RefNode::TaskDeclaration(task)));
+                }
+                RefNode::TfCall(call) => {
+                    self.collect_written_arguments(call, file, &mut lvalues)?
+                }
                 RefNode::VariableLvalue(lvalue) => {
                     lvalues.extend(
                         file.node_span(RefNode::VariableLvalue(lvalue))
@@ -848,11 +1012,7 @@ impl<'a> Design<'a> {
                 _ => {}
             }
         }
-        let in_generate = |(start, end): Span| {
-            generates
-                .iter()
-                .any(|generate| generate.0 <= start && end <= generate.1)
-        };
+        let context = |span: Span| Context::of(span, &generates, &subroutines);
         let ports: HashSet<&str> = module
             .ports
             .iter()
@@ -861,14 +1021,12 @@ impl<'a> Design<'a> {
             .collect();
         for reference in file.handle_references(module.span, |name| ports.contains(name)) {
             if let Some((item, _)) = reference.item {
+                let context = context(reference.span);
                 if lvalues.contains(&reference.span.0) {
-                    uses.writes.push((
-                        reference.handle.clone(),
-                        item.clone(),
-                        in_generate(reference.span),
-                    ));
+                    uses.writes
+                        .push((reference.handle.clone(), item.clone(), context));
                 }
-                uses.references.push((reference.handle, item));
+                uses.references.push((reference.handle, item, context));
             }
         }
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
@@ -897,7 +1055,7 @@ impl<'a> Design<'a> {
                             module: child_name.clone(),
                             formal,
                             handle: actual.handle,
-                            in_generate: in_generate(
+                            context: context(
                                 file.span(RefNode::ModuleInstantiation(instantiation))?,
                             ),
                         });
@@ -1021,6 +1179,9 @@ impl<'a> Design<'a> {
 
         // References to interface items through a handle: `h[i].m`, `h.f(...)`.
         let mut references = Vec::new();
+        // Member references with element selects, whose selects may contain
+        // references themselves: `(span, flattened name, selects)`.
+        let mut selected = Vec::new();
         let mut consumed: Vec<Span> = Vec::new();
         // Bare handles and modport selections, valid only as port connections.
         let mut pending: Vec<(Span, String)> = Vec::new();
@@ -1041,7 +1202,14 @@ impl<'a> Design<'a> {
                         reference.handle, reference.handle
                     )));
                 }
-                format!("{}{}", joined(&reference.handle, &item), reference.selects)
+                let name = joined(&reference.handle, &item);
+                match reference.selects {
+                    Some(selects) => {
+                        selected.push((span, name, selects));
+                        continue;
+                    }
+                    None => name,
+                }
             } else if interface.function(&item).is_some() {
                 let reachable = match &handle.port {
                     Some(expansion) => expansion.functions.contains(&item),
@@ -1053,7 +1221,7 @@ impl<'a> Design<'a> {
                         reference.handle, reference.handle
                     )));
                 }
-                if !reference.selects.is_empty() || handle.arrayed {
+                if reference.selects.is_some() || handle.arrayed {
                     return Err(unsupported(format!(
                         "call of a function of the interface array `{}`",
                         reference.handle
@@ -1072,6 +1240,15 @@ impl<'a> Design<'a> {
                 )));
             };
             references.push(Edit { span, text });
+        }
+        // Inner references first, so that each select is rendered with them.
+        selected.sort_by_key(|(span, _, _): &(Span, String, Span)| span.1 - span.0);
+        for (span, name, selects) in selected {
+            let selects = apply(file.code, selects, &references);
+            references.push(Edit {
+                span,
+                text: format!("{name}{}", selects.trim()),
+            });
         }
 
         let mut edits: Vec<Edit> = Vec::new();
@@ -1120,6 +1297,7 @@ impl<'a> Design<'a> {
                     &dimensions,
                     &overrides,
                     file,
+                    &|span| render(span, &references),
                 )?);
             }
             edits.push(Edit {
@@ -1223,7 +1401,10 @@ impl<'a> Design<'a> {
                         ".{}({}{})",
                         joined(&formal, member),
                         joined(&actual.handle, member),
-                        actual.selects
+                        actual
+                            .selects
+                            .map(|selects| render(selects, &references))
+                            .unwrap_or_default()
                     ));
                 }
                 for parameter in &self.interface(&handle.interface)?.parameters {
@@ -1342,7 +1523,12 @@ impl<'a> Design<'a> {
                     }
                 }
             }
-            if !expansion.functions.is_empty() && !interface_port.dimensions.is_empty() {
+            if !interface_port.dimensions.is_empty()
+                && expansion
+                    .functions
+                    .iter()
+                    .any(|function| interface.accesses_members(function))
+            {
                 return Err(unsupported(format!(
                     "functions of the interface port array `{port}`"
                 )));
@@ -1475,10 +1661,13 @@ impl<'a> Design<'a> {
         dimensions: &[(Span, &sv_parser::UnpackedDimension)],
         overrides: &[(String, String)],
         file: &File<'_>,
+        render: &dyn Fn(Span) -> String,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
+        // Helper names start with the separator, which no interface item name
+        // contains, so they cannot collide with a flattened item.
         let genvars: Vec<String> = (0..dimensions.len())
-            .map(|index| joined(instance, &format!("i{index}")))
+            .map(|index| joined(instance, &format!("{SEPARATOR}i{index}")))
             .collect();
         let element: String = genvars.iter().map(|genvar| format!("[{genvar}]")).collect();
         let plain = |item: &str| Some(joined(instance, item));
@@ -1491,7 +1680,7 @@ impl<'a> Design<'a> {
         };
         let instance_dimensions: String = dimensions
             .iter()
-            .map(|(span, _)| file.text(*span))
+            .map(|(span, _)| render(*span))
             .collect::<Vec<_>>()
             .join("");
         let mut declarations = Vec::new();
@@ -1547,9 +1736,11 @@ impl<'a> Design<'a> {
                     ));
                 }
                 Item::Function(index) => {
-                    // The functions of an instance array cannot be called, as
-                    // an element would need its own copy.
-                    if dimensions.is_empty() {
+                    // A function of an instance array that accesses members
+                    // would need a copy per element; logic that calls one is
+                    // rejected below.
+                    let function = &interface.functions[*index];
+                    if dimensions.is_empty() || !interface.accesses_members(&function.name) {
                         declarations.push(interface.render(
                             interface_file,
                             interface.functions[*index].span,
@@ -1558,6 +1749,22 @@ impl<'a> Design<'a> {
                     }
                 }
                 Item::Process(span) => {
+                    if !dimensions.is_empty() {
+                        let called: HashSet<String> = interface
+                            .referenced(*span)
+                            .filter(|name| interface.function(name).is_some())
+                            .map(str::to_string)
+                            .collect();
+                        if let Some(function) = called
+                            .iter()
+                            .find(|function| interface.accesses_members(function))
+                        {
+                            return Err(unsupported(format!(
+                                "call of function `{function}` of interface `{}`, which accesses members, in the logic of the instance array `{instance}`",
+                                interface.name
+                            )));
+                        }
+                    }
                     if dimensions.is_empty() {
                         declarations.push(interface.render(interface_file, *span, &plain));
                     } else {
@@ -1576,16 +1783,14 @@ impl<'a> Design<'a> {
                         "0".to_string(),
                         format!(
                             "({}) - 1",
-                            file.text(
-                                file.span(RefNode::ConstantExpression(&size.nodes.0.nodes.1))?
-                            )
+                            render(file.span(RefNode::ConstantExpression(&size.nodes.0.nodes.1))?)
                         ),
                     ),
                     sv_parser::UnpackedDimension::Range(range) => {
-                        let left = file.text(
+                        let left = render(
                             file.span(RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0))?,
                         );
-                        let right = file.text(
+                        let right = render(
                             file.span(RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.2))?,
                         );
                         (
@@ -1596,7 +1801,7 @@ impl<'a> Design<'a> {
                 };
                 body = format!(
                     "for (genvar {genvar} = {low}; {genvar} <= {high}; {genvar}++) begin : {}\n    {body}\n    end",
-                    joined(instance, &format!("g{index}"))
+                    joined(instance, &format!("{SEPARATOR}g{index}"))
                 );
             }
             text.push_str("\n    ");
@@ -1658,20 +1863,105 @@ fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
     name
 }
 
+/// Where an access in a module body is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Context {
+    Module,
+    /// Inside a generate construct, whose conditions and loop bounds are
+    /// not evaluated here.
+    Generate,
+    /// Inside a function or task, which may never be called.
+    Subroutine,
+}
+
+impl Context {
+    fn of(span: Span, generates: &[Span], subroutines: &[Span]) -> Self {
+        let inside = |spans: &[Span]| {
+            spans
+                .iter()
+                .any(|outer| outer.0 <= span.0 && span.1 <= outer.1)
+        };
+        if inside(subroutines) {
+            Self::Subroutine
+        } else if inside(generates) {
+            Self::Generate
+        } else {
+            Self::Module
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Module => "the body",
+            Self::Generate => "a generate construct",
+            Self::Subroutine => "a function or task",
+        }
+    }
+}
+
+/// The ports of a subroutine in order: the name, unless omitted, and whether
+/// the subroutine may write the actual argument (`output`, `inout`, `ref`).
+type SubroutinePorts = Vec<(Option<String>, bool)>;
+
+fn subroutine_ports(
+    root: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<SubroutinePorts, AnalyzerError> {
+    let writes = |direction: &sv_parser::TfPortDirection| match direction {
+        sv_parser::TfPortDirection::PortDirection(direction) => {
+            !matches!(direction.as_ref(), sv_parser::PortDirection::Input(_))
+        }
+        sv_parser::TfPortDirection::ConstRef(_) => false,
+    };
+    let mut ports = Vec::new();
+    // A port without a direction inherits the previous one, initially input.
+    let mut inherited = false;
+    for node in root {
+        match node {
+            RefNode::TfPortItem(item) => {
+                if let Some(direction) = &item.nodes.1 {
+                    inherited = writes(direction);
+                }
+                let port = item
+                    .nodes
+                    .4
+                    .as_ref()
+                    .map(|(identifier, _, _)| {
+                        name(RefNode::PortIdentifier(identifier), syntax_tree)
+                    })
+                    .transpose()?;
+                ports.push((port, inherited));
+            }
+            RefNode::TfPortDeclaration(declaration) => {
+                let writes = writes(&declaration.nodes.1);
+                for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
+                    ports.push((
+                        Some(name(RefNode::PortIdentifier(identifier), syntax_tree)?),
+                        writes,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(ports)
+}
+
 #[derive(Default)]
 struct ModuleUses {
-    /// `(handle, member, inside a generate construct)` assignment targets.
-    writes: Vec<(String, String, bool)>,
-    /// `(handle, item)` references, including function calls.
-    references: Vec<(String, String)>,
+    /// `(handle, member, context)` assignment targets, including actual
+    /// arguments of subroutine ports that write them.
+    writes: Vec<(String, String, Context)>,
+    /// `(handle, item, context)` references, including function calls.
+    references: Vec<(String, String, Context)>,
     children: Vec<ChildBinding>,
 }
 
 /// A reference to an interface handle found in the tokens.
 struct TokenReference {
     handle: String,
-    /// The text of the element selects between the handle and the item.
-    selects: String,
+    /// The span of the element selects between the handle and the item.
+    selects: Option<Span>,
     /// The item after the handle and its selects, with its span.
     item: Option<(String, Span)>,
     /// The span of the handle name.
@@ -1703,22 +1993,17 @@ fn actual_handle(
     }
     let syntax_tree = &file.syntax_tree;
     let identifier = &primary.nodes.1;
-    let trailing = file
-        .node_span(RefNode::Select(&primary.nodes.2))
-        .map(|span| file.text(span).to_string())
-        .unwrap_or_default();
+    let non_empty = |span: Option<Span>| span.filter(|span| span.1 > span.0);
+    let trailing = non_empty(file.node_span(RefNode::Select(&primary.nodes.2)));
     match identifier.nodes.1.as_slice() {
         [] => Ok(Some(Actual {
             handle: name(RefNode::Identifier(&identifier.nodes.2), syntax_tree)?,
             selects: trailing,
             modport: None,
         })),
-        [(head, selects, _)] if trailing.is_empty() => Ok(Some(Actual {
+        [(head, selects, _)] if trailing.is_none() => Ok(Some(Actual {
             handle: name(RefNode::Identifier(head), syntax_tree)?,
-            selects: file
-                .node_span(RefNode::ConstantBitSelect(selects))
-                .map(|span| file.text(span).to_string())
-                .unwrap_or_default(),
+            selects: non_empty(file.node_span(RefNode::ConstantBitSelect(selects))),
             modport: Some(name(RefNode::Identifier(&identifier.nodes.2), syntax_tree)?),
         })),
         _ => Ok(None),

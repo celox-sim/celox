@@ -34,4 +34,8 @@ sv_backends! {
     fn overrides_body_parameters_and_drives_members_from_imported_functions(sim) {
         @case "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions";
     }
+
+    fn rewrites_nested_references_and_keeps_declaration_functions(sim) {
+        @case "interfaces::rewrites_nested_references_and_keeps_declaration_functions";
+    }
 }
