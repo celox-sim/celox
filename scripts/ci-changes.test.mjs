@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { dirname, relative } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { affectsHeliodorArm64, classifyFiles } from "./ci-changes.mjs";
+import {
+  affectsHeliodorArm64,
+  classifyFiles,
+  cutsRelease,
+  isReleaseMergeGroup,
+} from "./ci-changes.mjs";
 
 const none = {
   docs: false,
@@ -109,7 +116,13 @@ test("full validation overrides even an empty valid diff", () => {
     ["scripts/ci-changes.mjs", head, head],
     {
       cwd: root,
-      env: { ...process.env, FULL_VALIDATION: "true", GITHUB_OUTPUT: "" },
+      env: {
+        ...process.env,
+        FULL_VALIDATION: "true",
+        GITHUB_EVENT_NAME: "schedule",
+        MERGE_GROUP_BASE_REF: "",
+        GITHUB_OUTPUT: "",
+      },
       encoding: "utf8",
     },
   );
@@ -123,7 +136,145 @@ test("full validation overrides even an empty valid diff", () => {
           return [name, value === "true"];
         }),
     ),
-    { ...all, heliodor_arm64: true },
+    { ...all, heliodor_arm64: true, release: false },
+  );
+});
+
+const MASTER_GROUP = {
+  GITHUB_EVENT_NAME: "merge_group",
+  MERGE_GROUP_BASE_REF: "refs/heads/master",
+};
+
+const classifier = fileURLToPath(new URL("./ci-changes.mjs", import.meta.url));
+
+// The classifier diffs base..head in the repository at cwd.
+function runClassifier(
+  base,
+  head,
+  env,
+  cwd = fileURLToPath(new URL("../", import.meta.url)),
+) {
+  const output = execFileSync(
+    process.execPath,
+    [classifier, base, head],
+    {
+      cwd,
+      env: {
+        ...process.env,
+        FULL_VALIDATION: "",
+        GITHUB_EVENT_NAME: "",
+        MERGE_GROUP_BASE_REF: "",
+        GITHUB_OUTPUT: "",
+        ...env,
+      },
+      encoding: "utf8",
+    },
+  );
+  return Object.fromEntries(
+    output
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [name, value] = line.split("=");
+        return [name, value === "true"];
+      }),
+  );
+}
+
+test("only the release manifest marks a release", () => {
+  assert.equal(cutsRelease([".release-please-manifest.json"]), true);
+  assert.equal(
+    cutsRelease(["crates/celox/src/lib.rs", "./.release-please-manifest.json"]),
+    true,
+  );
+  assert.equal(cutsRelease([]), false);
+  assert.equal(
+    cutsRelease(["CHANGELOG.md", "release-please-config.json"]),
+    false,
+  );
+});
+
+test("only master merge groups that change the release manifest are releases", () => {
+  const manifest = [".release-please-manifest.json"];
+  const master = { event: "merge_group", baseRef: "refs/heads/master" };
+  assert.equal(isReleaseMergeGroup({ ...master, files: manifest }), true);
+  assert.equal(isReleaseMergeGroup({ ...master, files: null }), true);
+  assert.equal(isReleaseMergeGroup({ ...master, files: ["README.md"] }), false);
+  // Syncing a release into develop carries the manifest but tags nothing.
+  for (const files of [manifest, null]) {
+    assert.equal(
+      isReleaseMergeGroup({
+        event: "merge_group",
+        baseRef: "refs/heads/develop",
+        files,
+      }),
+      false,
+    );
+  }
+  for (const event of ["pull_request", "push", "schedule"]) {
+    assert.equal(
+      isReleaseMergeGroup({ event, baseRef: "refs/heads/master", files: manifest }),
+      false,
+    );
+  }
+});
+
+test("merge groups with an unknown diff are treated as releases", () => {
+  assert.deepEqual(
+    runClassifier("", "", MASTER_GROUP),
+    { ...all, heliodor_arm64: true, release: true },
+  );
+  // Other events still run every path, but without the release gate.
+  assert.deepEqual(
+    runClassifier("", "", { GITHUB_EVENT_NAME: "pull_request" }),
+    { ...all, heliodor_arm64: true, release: false },
+  );
+});
+
+// CI checks out a single commit, so build the history this test needs.
+test("a merge group that changes the release manifest is a release", (t) => {
+  const repository = mkdtempSync(join(tmpdir(), "celox-ci-changes-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  const commitManifest = (version) => {
+    writeFileSync(
+      join(repository, ".release-please-manifest.json"),
+      `{".": "${version}"}\n`,
+    );
+    git("add", ".release-please-manifest.json");
+    git("commit", "--quiet", "-m", `release ${version}`);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  git("config", "user.name", "test");
+  git("config", "user.email", "test@example.com");
+  git("config", "commit.gpgsign", "false");
+  const base = commitManifest("0.1.0");
+  const release = commitManifest("0.2.0");
+  const classify = (env) =>
+    runClassifier(base, release, env, repository).release;
+
+  assert.equal(classify(MASTER_GROUP), true);
+  assert.equal(classify({ GITHUB_EVENT_NAME: "pull_request" }), false);
+  assert.equal(
+    classify({
+      GITHUB_EVENT_NAME: "merge_group",
+      MERGE_GROUP_BASE_REF: "refs/heads/develop",
+    }),
+    false,
+  );
+});
+
+test("other merge groups are not releases", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  assert.deepEqual(
+    runClassifier(head, head, MASTER_GROUP),
+    { ...none, heliodor_arm64: false, release: false },
   );
 });
 
@@ -216,8 +367,20 @@ test("ordinary package version changes exercise JavaScript and NAPI", () => {
   });
 });
 
+// The files a release pull request changes, as in #1007.
+const releasePullRequestFiles = [...releaseFiles, "Cargo.lock", "Cargo.toml"];
+
 test("Release Please version updates skip product validation", () => {
   assert.deepEqual(classifyFiles(releaseFiles, { releasePlease: true }), none);
+  assert.deepEqual(
+    classifyFiles(releasePullRequestFiles, { releasePlease: true }),
+    none,
+  );
+});
+
+test("Cargo version bumps outside Release Please keep broad coverage", () => {
+  assert.equal(classifyFiles(releasePullRequestFiles).rust, true);
+  assert.equal(classifyFiles(["Cargo.lock"]).napi, true);
 });
 
 test("Release Please source changes still exercise affected products", () => {

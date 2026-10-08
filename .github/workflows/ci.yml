@@ -29,6 +29,7 @@ jobs:
       STABLE_LANE: ${{ github.ref_name == 'master' || github.base_ref == 'master' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
+      release: ${{ steps.classify.outputs.release }}
       javascript: ${{ steps.classify.outputs.javascript }}
       napi: ${{ steps.classify.outputs.napi }}
       napi_arm64: ${{ steps.classify.outputs.napi_arm64 }}
@@ -45,6 +46,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
       - name: Reject development dependencies from the stable lane
@@ -217,7 +220,10 @@ jobs:
 
   external-suites:
     name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    # Scheduled and manual runs compare even when change detection fails. A
+    # merge group that cuts a release also compares before it can merge.
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -403,7 +409,7 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, napi-linux, napi-wasm]
+    needs: [changes, rust-tests, napi-linux, napi-wasm, external-suites]
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     env:
@@ -413,6 +419,10 @@ jobs:
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
+      # Only a release merge group gates on the comparisons. Full runs report
+      # them through report-full-validation instead.
+      RELEASE_REQUIRED: ${{ needs.changes.outputs.release }}
+      EXTERNAL_RESULT: ${{ needs.external-suites.result }}
     steps:
       - name: Check tests and builds
         run: |
@@ -425,6 +435,9 @@ jobs:
           fi
           if [ "$NAPI_REQUIRED" != false ] || [ "$WASM_RESULT" != skipped ]; then
             test "$WASM_RESULT" = success
+          fi
+          if [ "$RELEASE_REQUIRED" != false ]; then
+            test "$EXTERNAL_RESULT" = success
           fi
 
   arm64-backend:
@@ -661,3 +674,43 @@ jobs:
       - name: Run Playground browser tests
         timeout-minutes: 5
         run: pnpm --filter @celox-sim/playground exec playwright test
+
+  # Full runs are not merge gates, so a failure must reach someone. Keep one
+  # issue per branch open while full CI fails and close it once it passes.
+  report-full-validation:
+    name: Report full validation
+    needs:
+      [
+        changes,
+        docs,
+        lint,
+        rust-tests,
+        external-suites,
+        napi-linux,
+        napi-wasm,
+        rust,
+        arm64-backend,
+        napi-windows,
+        napi-linux-arm64,
+        js-ubuntu,
+        js-windows,
+        playground-browser,
+      ]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
+      - name: Open, update, or close the full CI issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/report-full-ci.mjs
