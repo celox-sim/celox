@@ -24,9 +24,14 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
+// Release Please also bumps workspace versions in the Cargo manifest and lock.
+// Its pull request can skip product validation because the merge group that
+// cuts the release runs full validation (see isReleaseMergeGroup).
 const RELEASE_PLEASE_FILES = new Set([
   ".release-please-manifest.json",
   "CHANGELOG.md",
+  "Cargo.lock",
+  "Cargo.toml",
   "VERSION",
   "crates/celox-napi/package.json",
   "packages/celox/package.json",
@@ -88,6 +93,24 @@ export function affectsHeliodorArm64(files) {
           "scripts/tests/run-heliodor-bench-gate.sh",
         ].includes(path),
     );
+}
+
+export function cutsRelease(files) {
+  return files.some(
+    (path) => path.replace(/^\.\//, "") === ".release-please-manifest.json",
+  );
+}
+
+// On master, only the release pull request changes the release manifest, so a
+// merge group carrying it is about to tag a release and gets full validation
+// instead of the change-based subset. Syncing master into develop carries the
+// same change without releasing anything. An undeterminable diff fails open.
+export function isReleaseMergeGroup({ event, baseRef, files }) {
+  return (
+    event === "merge_group" &&
+    baseRef === "refs/heads/master" &&
+    (files === null || cutsRelease(files))
+  );
 }
 
 export function classifyFiles(files, { releasePlease = false } = {}) {
@@ -230,12 +253,17 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  const files =
-    process.env.FULL_VALIDATION === "true"
-      ? null
-      : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
+  const scheduledFull = process.env.FULL_VALIDATION === "true";
+  const files = scheduledFull
+    ? null
+    : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
+  const release = isReleaseMergeGroup({
+    event: process.env.GITHUB_EVENT_NAME,
+    baseRef: process.env.MERGE_GROUP_BASE_REF,
+    files,
+  });
   const affected =
-    files === null
+    files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
           ...classifyFiles(files, {
@@ -243,5 +271,5 @@ if (
           }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
-  writeOutputs(affected);
+  writeOutputs({ ...affected, release });
 }
