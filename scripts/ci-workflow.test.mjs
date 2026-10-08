@@ -145,6 +145,11 @@ test("scheduled and manual validation run all paths and external suites", () => 
     job("changes"),
     /MERGE_GROUP_BASE_REF: \$\{\{ github\.event\.merge_group\.base_ref \}\}/,
   );
+  // Only the repository's own release branch may skip PR product checks.
+  assert.match(
+    job("changes"),
+    /RELEASE_PLEASE_PR: \$\{\{ github\.event_name == 'pull_request' && github\.head_ref == 'release-please--branches--master--components--celox' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/,
+  );
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
   assert.match(external, /tool: \[verilator, icarus\]/);

@@ -24,9 +24,14 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
+// Release Please also bumps workspace versions in the Cargo manifest and lock.
+// Its pull request can skip product validation because the merge group that
+// cuts the release runs full validation (see isReleaseMergeGroup).
 const RELEASE_PLEASE_FILES = new Set([
   ".release-please-manifest.json",
   "CHANGELOG.md",
+  "Cargo.lock",
+  "Cargo.toml",
   "VERSION",
   "crates/celox-napi/package.json",
   "packages/celox/package.json",

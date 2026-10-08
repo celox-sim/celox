@@ -353,8 +353,20 @@ test("ordinary package version changes exercise JavaScript and NAPI", () => {
   });
 });
 
+// The files a release pull request changes, as in #1007.
+const releasePullRequestFiles = [...releaseFiles, "Cargo.lock", "Cargo.toml"];
+
 test("Release Please version updates skip product validation", () => {
   assert.deepEqual(classifyFiles(releaseFiles, { releasePlease: true }), none);
+  assert.deepEqual(
+    classifyFiles(releasePullRequestFiles, { releasePlease: true }),
+    none,
+  );
+});
+
+test("Cargo version bumps outside Release Please keep broad coverage", () => {
+  assert.equal(classifyFiles(releasePullRequestFiles).rust, true);
+  assert.equal(classifyFiles(["Cargo.lock"]).napi, true);
 });
 
 test("Release Please source changes still exercise affected products", () => {
