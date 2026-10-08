@@ -62,7 +62,22 @@ minimum safety net, not the definition of validation completeness.
 
 ## CI coverage and cadence
 
-Pull requests and pushes use `scripts/ci-changes.mjs` to select jobs:
+Pull requests and merge groups use `scripts/ci-changes.mjs` to select jobs.
+Each change is validated where it matters rather than repeatedly:
+
+- Pull requests run the Linux jobs (lint, Rust tests, Linux and WASI NAPI, JS
+  on Ubuntu, Playground). Windows NAPI/JS and the ARM64 NAPI and backend jobs
+  are skipped there, which their required checks accept, and run in the merge
+  group instead. They rarely fail when the Linux jobs pass. Dispatch `ci.yml` on
+  a branch to run them before queueing.
+- The merge group validates the exact tree that lands, so pushes to `master` and
+  `develop` do not run CI again. Daily full runs keep those branches' build
+  caches current for pull requests.
+- `sync-develop.yml` opens or updates the master-to-develop synchronization pull
+  request once a day (22:07 UTC) rather than on every master push. Dispatch it
+  to sync sooner.
+
+Job selection:
 
 - Rust tests, benches, the common test suite, benchmark crates, VPI, the separate
   wasm binding crate, and lydite retain Rust checks without triggering NAPI and
