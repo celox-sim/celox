@@ -14,7 +14,7 @@ Optional integer arguments replace the default counts. Flat designs default to
 128, 512, and 2,048 signals/processes; hierarchy measurements default to 8, 32,
 and 128 modules. Each reported phase is the median of three fresh runs. Inputs
 and output counts are checked; wall-clock thresholds are deliberately absent.
-The [probe source](../../crates/celox-sv-analyzer/examples/scaling.rs) contains
+The [probe source](https://github.com/celox-sim/celox/blob/740f969402818f7d2552d0991d5c96247c456533/crates/celox-sv-analyzer/examples/scaling.rs) contains
 the generators and measurement boundaries.
 
 ## Changed algorithms
@@ -128,4 +128,5 @@ cargo clippy --locked -p celox-sv-analyzer -p celox-frontend-sv --all-targets --
 cargo test --locked -p celox-sv-analyzer -p celox-frontend-sv --all-features
 cargo test --locked -p celox --features sv-dpi --test systemverilog --test sv_unpacked_array --test sv_dpi
 cargo doc --locked -p celox-sv-analyzer -p celox-frontend-sv --no-deps
+pnpm docs:build
 ```
