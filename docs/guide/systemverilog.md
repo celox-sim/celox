@@ -72,7 +72,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 
 - Classes, and tasks with timing controls.
 - Interfaces: ports of an interface, `inout`, `ref` and expression modport
-  ports, modport `export` and clocking, tasks, type parameters, enums and
+  ports, modport `export` and clocking, tasks, type parameters, implicit nets, enums and
   instances inside an interface, a modport named in a connection to a port
   that does not declare one, calls of functions of an interface array,
   writes through a port without a modport, and calls through a port of an

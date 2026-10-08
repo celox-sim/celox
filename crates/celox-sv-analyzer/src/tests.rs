@@ -3128,6 +3128,35 @@ fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
         elaborated[start..end].to_string()
     };
     let (l, c, s) = (module("L"), module("C"), module("S"));
+    // An imported function that loads a member drives it.
+    let loaded = elaborate(
+        r#"
+        interface I;
+            logic [7:0] mem [4];
+            function automatic void load();
+                $readmemh("data.hex", mem);
+            endfunction
+            modport m(import load);
+        endinterface
+        module L(I.m p);
+            initial p.load();
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        loaded.contains("output var logic [7:0] p$mem[4]"),
+        "{loaded}"
+    );
+    assert_eq!(
+        elaborate("interface I; logic x; modport m(input x, output x); endinterface"),
+        Err(AnalyzerError::DuplicateModportItem {
+            interface: "I".to_string(),
+            modport: "m".to_string(),
+            name: "x".to_string(),
+        })
+    );
     for (text, expected) in [
         (&l, "output var logic [7:0] p$mem[4]"),
         (&c, "output var logic [7:0] p$hi"),
@@ -3238,6 +3267,10 @@ fn rejects_unsupported_interface_uses() {
         (
             "interface I; enum {Idle, Busy} state; endinterface",
             "enum type in interface `I`",
+        ),
+        (
+            "interface I; assign x = 1'b1; endinterface",
+            "implicit net `x` in interface `I`",
         ),
         (
             "interface I; typedef enum {Idle, Busy} state_t; state_t state; endinterface",

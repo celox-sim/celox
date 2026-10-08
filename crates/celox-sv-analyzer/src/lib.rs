@@ -45,6 +45,12 @@ pub enum AnalyzerError {
     DuplicateModule { name: String },
     #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
     DuplicateModport { interface: String, name: String },
+    #[error("Modport `{modport}` of interface `{interface}` lists `{name}` more than once")]
+    DuplicateModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+    },
     #[error(
         "Modport `{modport}` of interface `{interface}` names `{name}`, which is not {expected}"
     )]

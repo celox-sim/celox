@@ -3098,6 +3098,10 @@ impl InterfaceDecl {
         // than members of a struct or a hierarchical name, named connections,
         // and package-qualified names.
         let mut member_spans = Vec::new();
+        let declared: HashSet<String> =
+            declared_names(RefNode::InterfaceDeclarationAnsi(declaration), syntax_tree)?
+                .into_iter()
+                .collect();
         for node in RefNode::InterfaceDeclarationAnsi(declaration) {
             match node {
                 RefNode::MemberIdentifier(identifier) => {
@@ -3114,6 +3118,28 @@ impl InterfaceDecl {
                         file.node_span(RefNode::NetLvalue(lvalue))
                             .map(|span| span.0),
                     );
+                    // An undeclared target would be an implicit net of the
+                    // interface, which is not renamed per instance.
+                    if let sv_parser::NetLvalue::Identifier(target) = lvalue {
+                        let target_name = file.text(
+                            file.span(RefNode::PsOrHierarchicalNetIdentifier(&target.nodes.0))?,
+                        );
+                        if !target_name.contains(['.', ':']) {
+                            let target_name = normalize_identifier(target_name.trim());
+                            if !interface.names.contains(&target_name)
+                                && !declared.contains(&target_name)
+                            {
+                                return Err(unsupported(format!(
+                                    "implicit net `{target_name}` in interface `{interface_name}`"
+                                )));
+                            }
+                        }
+                    }
+                }
+                RefNode::SystemTfCall(call) => {
+                    if let Some(destination) = readmem_destination(call, file)? {
+                        written_expression(destination, file, &mut interface.lvalues);
+                    }
                 }
                 _ => {}
             }
@@ -3667,6 +3693,17 @@ impl InterfaceDecl {
                             self.name
                         )));
                     }
+                }
+            }
+            let mut listed = HashSet::default();
+            for item in &items {
+                let (ModportItem::Member(_, item_name) | ModportItem::Import(item_name)) = item;
+                if !listed.insert(item_name) {
+                    return Err(AnalyzerError::DuplicateModportItem {
+                        interface: self.name.clone(),
+                        modport: modport_name,
+                        name: item_name.clone(),
+                    });
                 }
             }
             if self.modports.contains_key(&modport_name) {
