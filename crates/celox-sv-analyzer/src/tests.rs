@@ -3233,6 +3233,58 @@ fn resolves_scoped_handles_imports_and_grouped_instances() {
 }
 
 #[test]
+fn separates_type_names_unit_subroutines_and_macros_by_file() {
+    // A module type may share the name of an interface port.
+    let elaborated = elaborate(
+        "module bus(input logic a); endmodule
+         interface I; logic x; endinterface
+         module M(I bus); bus u(.a(bus.x)); endmodule",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(elaborated.contains("bus u(.a(bus$x))"), "{elaborated}");
+
+    // Compilation-unit functions of another file are not visible.
+    let sources = elaborate_interfaces(&[
+        (
+            "function automatic void touch(output logic [7:0] v); v = 0; endfunction
+             module N(); endmodule",
+            Path::new("other.sv"),
+        ),
+        (
+            "function automatic void touch(input logic [7:0] v); endfunction
+             interface I; logic [7:0] x; endinterface
+             module M(I p); always_comb touch(p.x); endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(
+        sources[1].contains("input var logic [7:0] p$x"),
+        "{}",
+        sources[1]
+    );
+
+    // Macros of an interface may be undefined in another file.
+    let interface = "`define W 8\ninterface I; logic [`W-1:0] x; endinterface";
+    assert!(
+        elaborate(&format!("{interface}\nmodule M(I p); endmodule"))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        elaborate_interfaces(&[
+            (interface, Path::new("interface.sv")),
+            ("module M(I p); endmodule", Path::new("module.sv")),
+        ]),
+        Err(AnalyzerError::Unsupported(
+            "macro in interface `I`, which a module of another source file uses".to_string()
+        ))
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;

@@ -98,6 +98,9 @@ struct File<'a> {
     tokens: Vec<Span>,
     /// The start offsets of the identifier tokens.
     identifiers: HashSet<usize>,
+    /// The start offsets of the module or interface names of instantiations,
+    /// which live in another name space than handles.
+    type_names: HashSet<usize>,
 }
 
 impl<'a> File<'a> {
@@ -106,8 +109,22 @@ impl<'a> File<'a> {
         let mut blanks = Vec::new();
         let mut locates = Vec::new();
         let mut identifiers = HashSet::default();
+        let mut type_names = HashSet::default();
         for node in &syntax_tree {
             match node {
+                RefNode::ModuleInstantiation(instantiation) => {
+                    let root = RefNode::ModuleIdentifier(&instantiation.nodes.0);
+                    let start = match unwrap_node!(root, SimpleIdentifier, EscapedIdentifier) {
+                        Some(RefNode::SimpleIdentifier(identifier)) => {
+                            origin_span(&syntax_tree, &identifier.nodes.0)
+                        }
+                        Some(RefNode::EscapedIdentifier(identifier)) => {
+                            origin_span(&syntax_tree, &identifier.nodes.0)
+                        }
+                        _ => None,
+                    };
+                    type_names.extend(start.map(|(start, _)| start));
+                }
                 RefNode::SimpleIdentifier(identifier) => {
                     if let Some((start, _)) = origin_span(&syntax_tree, &identifier.nodes.0) {
                         identifiers.insert(start);
@@ -144,6 +161,7 @@ impl<'a> File<'a> {
             syntax_tree,
             tokens,
             identifiers,
+            type_names,
         })
     }
 
@@ -192,7 +210,7 @@ impl<'a> File<'a> {
         let last = self.tokens.partition_point(|&(start, _)| start < span.1);
         let tokens = &self.tokens[first..last];
         for (index, &token) in tokens.iter().enumerate() {
-            if !self.identifiers.contains(&token.0) {
+            if !self.identifiers.contains(&token.0) || self.type_names.contains(&token.0) {
                 continue;
             }
             let handle = normalize_identifier(self.text(token));
@@ -399,6 +417,8 @@ struct InterfaceDecl {
     /// Whether the header has a parameter port list, which makes a body
     /// `parameter` a localparam.
     has_parameter_port_list: bool,
+    /// Whether the declaration uses macros or other compiler directives.
+    uses_macros: bool,
     parameters: Vec<InterfaceParameter>,
     items: Vec<Item>,
     members: Vec<Member>,
@@ -457,6 +477,22 @@ impl InterfaceDecl {
             .filter(|function| closure.contains(&function.name))
             .map(|function| function.name.clone())
             .collect()
+    }
+
+    /// Reject copying the interface into a module of another source file
+    /// when it uses macros, which that file may not define.
+    fn check_macros(
+        &self,
+        file: &File<'_>,
+        interface_file: &File<'_>,
+    ) -> Result<(), AnalyzerError> {
+        if self.uses_macros && !std::ptr::eq(file, interface_file) {
+            return Err(unsupported(format!(
+                "macro in interface `{}`, which a module of another source file uses",
+                self.name
+            )));
+        }
+        Ok(())
     }
 
     /// The spans of parameter, constant and member declarations.
@@ -662,7 +698,7 @@ struct Design<'a> {
     interfaces: HashMap<String, InterfaceDecl>,
     modules: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
-    subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>>,
+    subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
     /// The names each package declares.
     packages: HashMap<String, HashSet<String>>,
     expansions: std::cell::RefCell<HashMap<(String, String, String), Expansion>>,
@@ -694,7 +730,8 @@ impl<'a> Design<'a> {
             }
         }
         let mut modules = HashMap::default();
-        let mut subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>> = HashMap::default();
+        let mut subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>> =
+            HashMap::default();
         let mut packages: HashMap<String, HashSet<String>> = HashMap::default();
         if !interfaces.is_empty() {
             for (index, file) in files.iter().enumerate() {
@@ -748,7 +785,7 @@ impl<'a> Design<'a> {
                         subroutines
                             .entry(name(identifier, syntax_tree)?)
                             .or_default()
-                            .push((scope, subroutine_ports(root, syntax_tree)?));
+                            .push((scope, index, subroutine_ports(root, syntax_tree)?));
                     }
                 }
             }
@@ -812,6 +849,7 @@ impl<'a> Design<'a> {
                             &Scope::Interface(interface.name.clone()),
                             &|_| None,
                             file,
+                            interface.file,
                             &subroutines,
                             &visible_imports(&unit, &scoped, file.span(RefNode::TfCall(call))?),
                             &mut interface.lvalues,
@@ -1294,6 +1332,7 @@ impl<'a> Design<'a> {
                         &Scope::Module(module_name.to_string()),
                         &|handle| interface_at(handle, span),
                         file,
+                        module.file,
                         &self.subroutines,
                         &visible_imports(&unit, &scoped, span),
                         &mut lvalues,
@@ -1891,6 +1930,7 @@ impl<'a> Design<'a> {
             let interface = self.interface(interface_name)?;
             let rename = |item: &str| Some(joined(port, item));
             let interface_file = file_of(self.files, interface);
+            interface.check_macros(file, interface_file)?;
             for item in &interface.items {
                 let header = match item {
                     Item::Parameter(index) => {
@@ -2089,6 +2129,7 @@ impl<'a> Design<'a> {
         render: &dyn Fn(Span) -> String,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
+        interface.check_macros(file, interface_file)?;
         // Helper names start with the separator, which no interface item name
         // contains, so they cannot collide with a flattened item.
         let genvars: Vec<String> = (0..dimensions.len())
@@ -2376,7 +2417,8 @@ fn written_arguments(
     local: &Scope,
     handle_interface: &dyn Fn(&str) -> Option<String>,
     file: &File<'_>,
-    subroutines: &HashMap<String, Vec<(Scope, SubroutinePorts)>>,
+    file_index: usize,
+    subroutines: &HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
     imports: &[(String, Option<String>)],
     writes: &mut HashSet<usize>,
 ) -> Result<(), AnalyzerError> {
@@ -2392,11 +2434,14 @@ fn written_arguments(
     // interface for a call through a handle, or of the calling module or
     // interface itself, and otherwise of the compilation unit or a package
     // that `imports` import it from.
+    // A compilation-unit declaration is visible only in its own file.
     let in_scope = |filter: &dyn Fn(&Scope) -> bool| -> Vec<&SubroutinePorts> {
         declared
             .iter()
-            .filter(|(scope, _)| filter(scope))
-            .map(|(_, ports)| ports)
+            .filter(|(scope, index, _)| {
+                (*scope != Scope::Unit || *index == file_index) && filter(scope)
+            })
+            .map(|(_, _, ports)| ports)
             .collect()
     };
     let declarations = if let Some((package, _)) = text.rsplit_once("::") {
@@ -3062,6 +3107,9 @@ impl InterfaceDecl {
             file: file_index,
             start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
             has_parameter_port_list: header.nodes.5.is_some(),
+            uses_macros: file
+                .text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?)
+                .contains('`'),
             parameters: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
