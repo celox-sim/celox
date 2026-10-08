@@ -43,6 +43,29 @@ pub enum AnalyzerError {
     MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
+    #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
+    DuplicateModport { interface: String, name: String },
+    #[error("Duplicate declaration in interface `{interface}`: {name}")]
+    DuplicateInterfaceItem { interface: String, name: String },
+    #[error("Interface `{interface}` has no parameter `{name}`")]
+    UnknownInterfaceParameter { interface: String, name: String },
+    #[error("Parameter `{name}` of interface `{interface}` is overridden more than once")]
+    DuplicateInterfaceParameterOverride { interface: String, name: String },
+    #[error("Modport `{modport}` of interface `{interface}` lists `{name}` more than once")]
+    DuplicateModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+    },
+    #[error(
+        "Modport `{modport}` of interface `{interface}` names `{name}`, which is not {expected}"
+    )]
+    UnknownModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+        expected: &'static str,
+    },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]
@@ -121,6 +144,14 @@ impl AnalyzerError {
             .find(|(prefix, _)| construct.starts_with(prefix))
             .map_or(SV_FRONTEND_TRACKING_ISSUE, |&(_, issue)| issue)
     }
+}
+
+/// Rewrite `sources` so that they no longer declare or use interfaces, or
+/// return `None` when no source declares one. See [`ast::interfaces`].
+pub fn elaborate_interfaces(
+    sources: &[(&str, &Path)],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces(sources)
 }
 
 /// Parse and analyze a SystemVerilog source string.

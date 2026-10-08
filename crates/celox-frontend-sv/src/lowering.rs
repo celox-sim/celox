@@ -171,6 +171,20 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
+    // Interfaces are expanded into the modules that use them first.
+    let elaborated = sv::elaborate_interfaces(sources)?;
+    let elaborated_sources: Vec<(&str, &Path)>;
+    let sources = match &elaborated {
+        Some(codes) => {
+            elaborated_sources = codes
+                .iter()
+                .zip(sources)
+                .map(|(code, (_, path))| (code.as_str(), *path))
+                .collect();
+            elaborated_sources.as_slice()
+        }
+        None => sources,
+    };
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
         .iter()
