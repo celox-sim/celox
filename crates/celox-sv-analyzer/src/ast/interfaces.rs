@@ -98,8 +98,9 @@ struct File<'a> {
     tokens: Vec<Span>,
     /// The start offsets of the identifier tokens.
     identifiers: HashSet<usize>,
-    /// The start offsets of the module or interface names of instantiations,
-    /// which live in another name space than handles.
+    /// The start offsets of the module or interface names of instantiations
+    /// and of struct and union member names, which live in other name spaces
+    /// than handles.
     type_names: HashSet<usize>,
 }
 
@@ -124,6 +125,22 @@ impl<'a> File<'a> {
                         _ => None,
                     };
                     type_names.extend(start.map(|(start, _)| start));
+                }
+                RefNode::StructUnionMember(member) => {
+                    for node in RefNode::StructUnionMember(member) {
+                        let RefNode::VariableIdentifier(identifier) = node else {
+                            continue;
+                        };
+                        let start = match &identifier.nodes.0 {
+                            sv_parser::Identifier::SimpleIdentifier(identifier) => {
+                                origin_span(&syntax_tree, &identifier.nodes.0)
+                            }
+                            sv_parser::Identifier::EscapedIdentifier(identifier) => {
+                                origin_span(&syntax_tree, &identifier.nodes.0)
+                            }
+                        };
+                        type_names.extend(start.map(|(start, _)| start));
+                    }
                 }
                 RefNode::SimpleIdentifier(identifier) => {
                     if let Some((start, _)) = origin_span(&syntax_tree, &identifier.nodes.0) {
@@ -194,6 +211,19 @@ impl<'a> File<'a> {
         index
             .checked_sub(1)
             .map(|index| self.text(self.tokens[index]))
+    }
+
+    /// Whether `span` has a use `.name.` or `.name[` of `name` after a
+    /// scope, such as `g.h.x` for an instance `h` in a generate block `g`.
+    fn has_qualified_use(&self, span: Span, name: &str) -> bool {
+        let first = self.tokens.partition_point(|&(start, _)| start < span.0);
+        let last = self.tokens.partition_point(|&(start, _)| start < span.1);
+        self.tokens[first..last].iter().any(|&token| {
+            self.identifiers.contains(&token.0)
+                && normalize_identifier(self.text(token)) == name
+                && self.previous_token(token.0) == Some(".")
+                && matches!(self.next_token(token.1), Some("." | "["))
+        })
     }
 
     /// The references `h<selects>.item` and bare `h` in `span` to a name
@@ -481,14 +511,17 @@ impl InterfaceDecl {
 
     /// Reject copying the interface into a module of another source file
     /// when it uses macros, which that file may not define.
+    /// The module starts at `module_start`, and must follow the interface
+    /// and so the macro definitions before it.
     fn check_macros(
         &self,
         file: &File<'_>,
         interface_file: &File<'_>,
+        module_start: usize,
     ) -> Result<(), AnalyzerError> {
-        if self.uses_macros && !std::ptr::eq(file, interface_file) {
+        if self.uses_macros && (!std::ptr::eq(file, interface_file) || module_start < self.start) {
             return Err(unsupported(format!(
-                "macro in interface `{}`, which a module of another source file uses",
+                "macro in interface `{}`, which a module of another source file or before it uses",
                 self.name
             )));
         }
@@ -693,6 +726,10 @@ struct ChildBinding {
     context: Context,
 }
 
+/// A module, its port, the interface bound to it and the bindings of the
+/// module's other generic ports.
+type ExpansionKey = (String, String, String, Vec<(String, String)>);
+
 struct Design<'a> {
     files: &'a [File<'a>],
     interfaces: HashMap<String, InterfaceDecl>,
@@ -701,9 +738,9 @@ struct Design<'a> {
     subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
     /// The names each package declares.
     packages: HashMap<String, HashSet<String>>,
-    expansions: std::cell::RefCell<HashMap<(String, String, String), Expansion>>,
+    expansions: std::cell::RefCell<HashMap<ExpansionKey, Expansion>>,
     /// The expansions being computed, to reject a recursive instantiation.
-    expanding: std::cell::RefCell<HashSet<(String, String, String)>>,
+    expanding: std::cell::RefCell<HashSet<ExpansionKey>>,
 }
 
 impl<'a> Design<'a> {
@@ -943,14 +980,20 @@ impl<'a> Design<'a> {
     }
 
     /// The members and functions that `port` of `module` carries when it is
-    /// bound to `interface`.
+    /// bound to `interface` and its other generic ports as `bindings` says.
     fn expansion(
         &self,
         module: &str,
         port: &str,
         interface: &str,
+        bindings: &[(String, String)],
     ) -> Result<Expansion, AnalyzerError> {
-        let key = (module.to_string(), port.to_string(), interface.to_string());
+        let key = (
+            module.to_string(),
+            port.to_string(),
+            interface.to_string(),
+            bindings.to_vec(),
+        );
         if let Some(expansion) = self.expansions.borrow().get(&key) {
             return Ok(expansion.clone());
         }
@@ -959,7 +1002,7 @@ impl<'a> Design<'a> {
                 "recursive instantiation through interface port `{port}` of module `{module}`"
             )));
         }
-        let expansion = self.compute_expansion(module, port, interface);
+        let expansion = self.compute_expansion(module, port, interface, bindings);
         self.expanding.borrow_mut().remove(&key);
         let expansion = expansion?;
         self.expansions.borrow_mut().insert(key, expansion.clone());
@@ -971,6 +1014,7 @@ impl<'a> Design<'a> {
         module_name: &str,
         port_name: &str,
         interface_name: &str,
+        bindings: &[(String, String)],
     ) -> Result<Expansion, AnalyzerError> {
         let module = &self.modules[module_name];
         let port = module
@@ -981,7 +1025,7 @@ impl<'a> Design<'a> {
                     "module `{module_name}` has no interface port `{port_name}`"
                 ))
             })?;
-        let uses = self.module_uses(module_name, (port_name, interface_name))?;
+        let uses = self.module_uses(module_name, (port_name, interface_name), bindings)?;
         let interface = self.interface(interface_name)?;
         // A port declares the interface's parameters, constants and types in
         // the module header, before the member ports they would refer to.
@@ -1053,7 +1097,7 @@ impl<'a> Design<'a> {
                 .filter(|child| child.handle == port_name)
             {
                 let child_expansion =
-                    self.expansion(&child.module, &child.formal, interface_name)?;
+                    self.expansion(&child.module, &child.formal, interface_name, &[])?;
                 for (member, direction) in child_expansion.members {
                     let Some(access) = imported.get(&member) else {
                         continue;
@@ -1124,7 +1168,8 @@ impl<'a> Design<'a> {
             .iter()
             .filter(|child| child.handle == port_name)
         {
-            let child_expansion = self.expansion(&child.module, &child.formal, interface_name)?;
+            let child_expansion =
+                self.expansion(&child.module, &child.formal, interface_name, &[])?;
             for (member, direction) in child_expansion.members {
                 if direction == Direction::Output {
                     if child.context != Context::Module {
@@ -1237,6 +1282,7 @@ impl<'a> Design<'a> {
         &self,
         module_name: &str,
         bound: (&str, &str),
+        bindings: &[(String, String)],
     ) -> Result<ModuleUses, AnalyzerError> {
         let module = &self.modules[module_name];
         let file = &self.files[module.file];
@@ -1248,6 +1294,10 @@ impl<'a> Design<'a> {
             if let Some(interface) = &port.interface {
                 let interface = match &interface.interface {
                     None if port.name == bound.0 => Some(bound.1.to_string()),
+                    None => bindings
+                        .iter()
+                        .find(|(name, _)| *name == port.name)
+                        .map(|(_, interface)| interface.clone()),
                     interface => interface.clone(),
                 };
                 handle_interfaces.insert(port.name.clone(), interface);
@@ -1488,7 +1538,7 @@ impl<'a> Design<'a> {
                         ))
                     })?,
             };
-            let expansion = self.expansion(module_name, port, &interface)?;
+            let expansion = self.expansion(module_name, port, &interface, bindings)?;
             handles.insert(
                 port.clone(),
                 module_span,
@@ -1545,6 +1595,13 @@ impl<'a> Design<'a> {
                             port: None,
                             arrayed: !instance.nodes.0.nodes.1.is_empty(),
                         };
+                        if scope != module_span
+                            && file.has_qualified_use(module_span, &instance_name)
+                        {
+                            return Err(unsupported(format!(
+                                "hierarchical reference to interface instance `{instance_name}` through a generate block"
+                            )));
+                        }
                         if handles.declared_in(&instance_name, scope) {
                             return Err(AnalyzerError::DuplicateInstance {
                                 module: module_name.to_string(),
@@ -1832,7 +1889,8 @@ impl<'a> Design<'a> {
                         "modport `{modport}` selected in the connection of port `{formal}` of `{child_name}`, which does not declare it"
                     )));
                 }
-                let child_expansion = self.expansion(&child_name, &formal, &handle.interface)?;
+                let child_expansion =
+                    self.expansion(&child_name, &formal, &handle.interface, &[])?;
                 for (member, direction) in &child_expansion.members {
                     if let Some(expansion) = &handle.port {
                         match expansion.direction(member) {
@@ -1930,7 +1988,7 @@ impl<'a> Design<'a> {
             let interface = self.interface(interface_name)?;
             let rename = |item: &str| Some(joined(port, item));
             let interface_file = file_of(self.files, interface);
-            interface.check_macros(file, interface_file)?;
+            interface.check_macros(file, interface_file, module_span.0)?;
             for item in &interface.items {
                 let header = match item {
                     Item::Parameter(index) => {
@@ -2129,7 +2187,7 @@ impl<'a> Design<'a> {
         render: &dyn Fn(Span) -> String,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
-        interface.check_macros(file, interface_file)?;
+        interface.check_macros(file, interface_file, scope_start)?;
         // Helper names start with the separator, which no interface item name
         // contains, so they cannot collide with a flattened item.
         let genvars: Vec<String> = (0..dimensions.len())
@@ -2298,11 +2356,26 @@ fn declared_names(
         .collect()
 }
 
-/// The identifiers of the declarations under `root`.
+/// The identifiers of the declarations under `root`, other than struct and
+/// union members, which have their own name space.
 fn declared_identifiers(root: RefNode<'_>) -> Vec<RefNode<'_>> {
     let mut names = Vec::new();
+    let mut members = HashSet::default();
     for node in root {
         let identifier = match node {
+            RefNode::StructUnionMember(member) => {
+                for node in RefNode::StructUnionMember(member) {
+                    if let RefNode::VariableDeclAssignmentVariable(declarator) = node {
+                        members.insert(std::ptr::from_ref(declarator));
+                    }
+                }
+                continue;
+            }
+            RefNode::VariableDeclAssignmentVariable(declarator)
+                if members.contains(&std::ptr::from_ref(declarator)) =>
+            {
+                continue;
+            }
             RefNode::VariableDeclAssignmentVariable(declarator) => {
                 RefNode::VariableIdentifier(&declarator.nodes.0)
             }
@@ -3052,14 +3125,7 @@ fn check_no_connections(
 ) -> Result<(), AnalyzerError> {
     match &instance.nodes.1.nodes.1 {
         None => Ok(()),
-        Some(sv_parser::ListOfPortConnections::Ordered(list))
-            if list
-                .nodes
-                .0
-                .contents()
-                .iter()
-                .all(|connection| connection.nodes.1.is_none()) =>
-        {
+        Some(sv_parser::ListOfPortConnections::Ordered(list)) if matches!(list.nodes.0.contents()[..], [connection] if connection.nodes.1.is_none()) => {
             Ok(())
         }
         Some(_) => Err(unsupported(format!("ports of interface `{interface}`"))),
@@ -3152,11 +3218,29 @@ impl InterfaceDecl {
         {
             *declared.entry(declared_name).or_default() += 1;
         }
-        for (declared_name, count) in declared {
-            if count > 1 && interface.names.contains(&declared_name) {
+        for (declared_name, count) in &declared {
+            if *count > 1 && interface.names.contains(declared_name) {
                 return Err(unsupported(format!(
                     "declaration of `{declared_name}` in a nested scope of interface `{interface_name}`, which shadows an interface item"
                 )));
+            }
+        }
+        // Unnamed generate blocks get names such as `genblk1` that would not
+        // be renamed per instance.
+        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
+            if let RefNode::Identifier(identifier) = node {
+                let identifier_name = name(RefNode::Identifier(identifier), syntax_tree)?;
+                if identifier_name
+                    .strip_prefix("genblk")
+                    .is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                    })
+                    && !declared.contains_key(&identifier_name)
+                {
+                    return Err(unsupported(format!(
+                        "reference to the implicit generate block name `{identifier_name}` in interface `{interface_name}`"
+                    )));
+                }
             }
         }
         // Generate block names belong to the interface scope as well.

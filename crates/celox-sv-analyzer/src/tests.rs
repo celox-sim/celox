@@ -3279,9 +3279,79 @@ fn separates_type_names_unit_subroutines_and_macros_by_file() {
             ("module M(I p); endmodule", Path::new("module.sv")),
         ]),
         Err(AnalyzerError::Unsupported(
-            "macro in interface `I`, which a module of another source file uses".to_string()
+            "macro in interface `I`, which a module of another source file or before it uses"
+                .to_string()
         ))
     );
+}
+
+#[test]
+fn resolves_sibling_generic_ports_and_struct_fields() {
+    let elaborated = elaborate(
+        r#"
+        interface A;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endinterface
+        interface B;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endinterface
+        interface P;
+            logic [7:0] x;
+        endinterface
+        module G(interface api, P p);
+            always_comb api.touch(p.x);
+        endmodule
+        module S(P bus, output logic [7:0] o);
+            typedef struct packed { logic [7:0] bus; } T;
+            T t;
+            assign t.bus = bus.x;
+            assign o = t.bus;
+        endmodule
+        module Top(output logic [7:0] o);
+            B b();
+            P q();
+            G g(.api(b), .p(q));
+            S s(.bus(q), .o(o));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    // `api` is bound to `B`, whose `touch` only reads `p.x`.
+    assert!(
+        elaborated.contains("input var logic [7:0] p$x"),
+        "{elaborated}"
+    );
+    for (source, message) in [
+        (
+            "module M(I p); endmodule
+             `define W 8
+             interface I; logic [`W-1:0] x; endinterface",
+            "macro in interface `I`, which a module of another source file or before it uses",
+        ),
+        (
+            "interface I; if (1) begin logic x; end logic y; assign y = genblk1.x; endinterface",
+            "reference to the implicit generate block name `genblk1` in interface `I`",
+        ),
+        (
+            "interface I; logic x; endinterface
+             module M(output logic y); if (1) begin : g I h(); end assign y = g.h.x; endmodule",
+            "hierarchical reference to interface instance `h` through a generate block",
+        ),
+        (
+            "interface I; endinterface module Top; I h(,); endmodule",
+            "ports of interface `I`",
+        ),
+    ] {
+        assert_eq!(
+            elaborate(source),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{source}"
+        );
+    }
 }
 
 #[test]

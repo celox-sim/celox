@@ -81,7 +81,10 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   is not declared with an ANSI header, calls from the logic of an interface instance array of a
   function that accesses members, member references in the parameter,
   constant, type or member declarations of an interface used through a port,
-  macros in an interface used by a module of another source file,
+  macros in an interface used by a module of another source file or before
+  it, references to implicit generate block names (`genblk1`) in an
+  interface, hierarchical references to an interface instance through a
+  generate block (`g.h.x`),
   declarations that reuse the name of an
   interface instance or port, package items of one name reaching a module
   from two packages through the imports of its interfaces (or hidden by a
