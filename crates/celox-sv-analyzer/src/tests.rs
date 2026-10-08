@@ -2753,6 +2753,90 @@ fn infers_writes_through_child_ports_and_scoped_subroutines() {
 }
 
 #[test]
+fn interface_functions_write_members_through_subroutine_arguments() {
+    let elaborated = elaborate(
+        r#"
+        interface S;
+            logic [7:0] state;
+            function automatic void put(output logic [7:0] d, input logic [7:0] v);
+                d = v;
+            endfunction
+            function automatic void load(input logic [7:0] v);
+                put(state, v);
+            endfunction
+            modport m(import load);
+        endinterface
+        module L(S.m s, input logic [7:0] v);
+            always_comb s.load(v);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("output var logic [7:0] s$state"),
+        "{elaborated}"
+    );
+}
+
+#[test]
+fn rejects_invalid_and_colliding_interface_declarations() {
+    assert_eq!(
+        elaborate("interface I; logic x; modport m(input x); modport m(output x); endinterface"),
+        Err(AnalyzerError::DuplicateModport {
+            interface: "I".to_string(),
+            name: "m".to_string()
+        })
+    );
+    assert_eq!(
+        elaborate(
+            "interface I; logic a;
+                 function automatic logic helper(); return a; endfunction
+                 function automatic logic f(input logic helper); return helper; endfunction
+             endinterface"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "declaration of `helper` in a nested scope of interface `I`, which shadows an interface item"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        elaborate(
+            r#"
+            package pa; typedef logic [7:0] word_t; endpackage
+            package pb; typedef logic [3:0] word_t; endpackage
+            interface A; import pa::*; word_t d; modport r(input d); endinterface
+            interface B; import pb::*; word_t d; modport r(input d); endinterface
+            module M(A.r a, B.r b, output logic [7:0] o, output logic [3:0] q);
+                assign o = a.d;
+                assign q = b.d;
+            endmodule
+            "#
+        ),
+        Err(AnalyzerError::Unsupported(
+            "package items `pa::word_t` and `pb::word_t` in module `M`, one of them imported through an interface"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        elaborate(
+            r#"
+            package pa; typedef logic [7:0] word_t; endpackage
+            interface A; import pa::*; word_t d; modport r(input d); endinterface
+            module M(A.r a, output logic [7:0] o);
+                typedef logic [3:0] word_t;
+                assign o = a.d;
+            endmodule
+            "#
+        ),
+        Err(AnalyzerError::Unsupported(
+            "declaration of `word_t` in module `M`, which hides the package item `pa::word_t` of an interface it uses"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;

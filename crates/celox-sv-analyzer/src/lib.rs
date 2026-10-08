@@ -43,6 +43,8 @@ pub enum AnalyzerError {
     MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
+    #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
+    DuplicateModport { interface: String, name: String },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]

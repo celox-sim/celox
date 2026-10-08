@@ -341,8 +341,9 @@ enum HeaderForm {
     TypeAlias { name: Span, data_type: Span },
     /// `localparam type <text>`; the span covers the type assignments.
     LocalType(Span),
-    /// A package import, inserted in the module header.
-    Import(Span),
+    /// A package import, inserted in the module header, and what it imports:
+    /// `(package, item)`, with no item for a wildcard import.
+    Import(Span, Vec<(String, Option<String>)>),
 }
 
 enum MemberKind {
@@ -590,6 +591,8 @@ struct Design<'a> {
     modules: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
     subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>>,
+    /// The names each package declares.
+    packages: HashMap<String, HashSet<String>>,
     expansions: std::cell::RefCell<HashMap<(String, String, String), Expansion>>,
     /// The expansions being computed, to reject a recursive instantiation.
     expanding: std::cell::RefCell<HashSet<(String, String, String)>>,
@@ -620,6 +623,7 @@ impl<'a> Design<'a> {
         }
         let mut modules = HashMap::default();
         let mut subroutines: HashMap<String, Vec<(Scope, SubroutinePorts)>> = HashMap::default();
+        let mut packages: HashMap<String, HashSet<String>> = HashMap::default();
         if !interfaces.is_empty() {
             for (index, file) in files.iter().enumerate() {
                 let syntax_tree = &file.syntax_tree;
@@ -636,6 +640,16 @@ impl<'a> Design<'a> {
                             }
                             modules.insert(module.name.clone(), module);
                             continue;
+                        }
+                        RefNode::PackageDeclaration(declaration) => {
+                            packages.insert(
+                                name(
+                                    RefNode::PackageIdentifier(&declaration.nodes.3),
+                                    syntax_tree,
+                                )?,
+                                package_items(declaration, syntax_tree)?,
+                            );
+                            None
                         }
                         RefNode::FunctionDeclaration(declaration) => unwrap_node!(
                             RefNode::FunctionDeclaration(declaration),
@@ -667,11 +681,40 @@ impl<'a> Design<'a> {
                 }
             }
         }
+        // A member an interface passes to a written subroutine argument is
+        // assigned as well.
+        for interface in interfaces.values_mut() {
+            let file = &files[interface.file];
+            for node in &file.syntax_tree {
+                let RefNode::InterfaceDeclarationAnsi(declaration) = node else {
+                    continue;
+                };
+                if name(
+                    RefNode::InterfaceIdentifier(&declaration.nodes.0.nodes.3),
+                    &file.syntax_tree,
+                )? != interface.name
+                {
+                    continue;
+                }
+                for node in RefNode::InterfaceDeclarationAnsi(declaration) {
+                    if let RefNode::TfCall(call) = node {
+                        written_arguments(
+                            call,
+                            &Scope::Interface(interface.name.clone()),
+                            file,
+                            &subroutines,
+                            &mut interface.lvalues,
+                        )?;
+                    }
+                }
+            }
+        }
         Ok(Self {
             files,
             interfaces,
             modules,
             subroutines,
+            packages,
             expansions: Default::default(),
             expanding: Default::default(),
         })
@@ -911,105 +954,80 @@ impl<'a> Design<'a> {
         })
     }
 
-    /// Add to `writes` the start offsets of the actual arguments of `call`
-    /// that the called subroutine may write. A subroutine is found by name;
-    /// when its declarations disagree about an argument, the call is
-    /// rejected.
-    fn collect_written_arguments(
+    /// Reject a module that the expansion would give package items of one
+    /// name from two packages, or a declaration hiding one. The imports of
+    /// the interfaces it uses move into its scope, where packages are
+    /// inlined by plain name.
+    fn check_imported_names(
         &self,
-        call: &sv_parser::TfCall,
         module_name: &str,
+        declaration: &sv_parser::ModuleDeclarationAnsi,
         file: &File<'_>,
-        writes: &mut HashSet<usize>,
+        handles: &HashMap<String, Handle>,
     ) -> Result<(), AnalyzerError> {
-        let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
-            return Ok(());
-        };
-        let text = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
-        let callee = normalize_identifier(text.rsplit(['.', ':']).next().unwrap_or(text).trim());
-        let Some(declared) = self.subroutines.get(&callee) else {
-            return Ok(());
-        };
-        // The declarations the call can refer to: of the named package, of an
-        // interface for a call through a handle, or of the module itself, and
-        // otherwise of a package or the compilation unit.
-        let in_scope = |filter: &dyn Fn(&Scope) -> bool| -> Vec<&SubroutinePorts> {
-            declared
-                .iter()
-                .filter(|(scope, _)| filter(scope))
-                .map(|(_, ports)| ports)
-                .collect()
-        };
-        let declarations = if let Some((package, _)) = text.rsplit_once("::") {
-            let package =
-                normalize_identifier(package.rsplit("::").next().unwrap_or(package).trim());
-            in_scope(&|scope| match scope {
-                Scope::Package(name) => *name == package,
-                Scope::Unit => package == "$unit",
-                _ => false,
-            })
-        } else if text.contains('.') {
-            in_scope(&|scope| matches!(scope, Scope::Interface(_)))
-        } else {
-            let local =
-                in_scope(&|scope| matches!(scope, Scope::Module(name) if name == module_name));
-            if local.is_empty() {
-                in_scope(&|scope| matches!(scope, Scope::Package(_) | Scope::Unit))
-            } else {
-                local
+        let mut used: Vec<&str> = handles
+            .values()
+            .map(|handle| handle.interface.as_str())
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        let names = |(package, item): &(String, Option<String>)| -> Vec<String> {
+            match item {
+                Some(item) => vec![item.clone()],
+                None => self
+                    .packages
+                    .get(package)
+                    .map(|names| names.iter().cloned().collect())
+                    .unwrap_or_default(),
             }
         };
-        // Positional actuals by index, named ones by formal name.
-        let mut actuals: Vec<(Result<usize, String>, &sv_parser::Expression)> = Vec::new();
-        let named = match arguments {
-            sv_parser::ListOfArguments::Ordered(list) => {
-                for (index, actual) in list.nodes.0.contents().into_iter().enumerate() {
-                    if let Some(actual) = actual {
-                        actuals.push((Ok(index), actual));
+        let mut imported: HashMap<String, String> = HashMap::default();
+        let add = |import: &(String, Option<String>),
+                   imported: &mut HashMap<String, String>|
+         -> Result<(), AnalyzerError> {
+            for item in names(import) {
+                if let Some(other) = imported.insert(item.clone(), import.0.clone())
+                    && other != import.0
+                {
+                    return Err(unsupported(format!(
+                        "package items `{other}::{item}` and `{}::{item}` in module `{module_name}`, one of them imported through an interface",
+                        import.0
+                    )));
+                }
+            }
+            Ok(())
+        };
+        for interface in used {
+            for item in &self.interface(interface)?.items {
+                if let Item::Constant {
+                    header: HeaderForm::Import(_, imports),
+                    ..
+                } = item
+                {
+                    for import in imports {
+                        add(import, &mut imported)?;
                     }
                 }
-                &list.nodes.1
-            }
-            sv_parser::ListOfArguments::Named(list) => {
-                if let Some(actual) = &list.nodes.2.nodes.1 {
-                    actuals.push((
-                        Err(name(RefNode::Identifier(&list.nodes.1), &file.syntax_tree)?),
-                        actual,
-                    ));
-                }
-                &list.nodes.3
-            }
-        };
-        for (_, _, formal, actual) in named {
-            if let Some(actual) = &actual.nodes.1 {
-                actuals.push((
-                    Err(name(RefNode::Identifier(formal), &file.syntax_tree)?),
-                    actual,
-                ));
             }
         }
-        for (formal, actual) in actuals {
-            let mut directions = declarations.iter().filter_map(|ports| match &formal {
-                Ok(index) => ports.get(*index).map(|(_, writes)| *writes),
-                Err(formal) => ports
-                    .iter()
-                    .find(|(name, _)| name.as_deref() == Some(formal.as_str()))
-                    .map(|(_, writes)| *writes),
-            });
-            let Some(first) = directions.next() else {
-                continue;
-            };
-            if directions.any(|writes| writes != first) {
-                return Err(unsupported(format!(
-                    "call of `{callee}`, whose declarations disagree about the direction of an argument, in a module with interface ports"
-                )));
-            }
-            if first {
-                writes.extend(
-                    file.node_span(RefNode::Expression(actual))
-                        .map(|span| span.0),
-                );
-            }
+        if imported.is_empty() {
+            return Ok(());
+        }
+        let own: Vec<String> = declared_names(
+            RefNode::ModuleDeclarationAnsi(declaration),
+            &file.syntax_tree,
+        )?;
+        if let Some(name) = own.iter().find(|name| imported.contains_key(*name)) {
+            return Err(unsupported(format!(
+                "declaration of `{name}` in module `{module_name}`, which hides the package item `{}::{name}` of an interface it uses",
+                imported[name]
+            )));
+        }
+        for import in imported_items(
+            RefNode::ModuleDeclarationAnsi(declaration),
+            &file.syntax_tree,
+        )? {
+            add(&import, &mut imported)?;
         }
         Ok(())
     }
@@ -1032,9 +1050,13 @@ impl<'a> Design<'a> {
                 RefNode::TaskDeclaration(task) => {
                     subroutines.extend(file.node_span(RefNode::TaskDeclaration(task)));
                 }
-                RefNode::TfCall(call) => {
-                    self.collect_written_arguments(call, module_name, file, &mut lvalues)?
-                }
+                RefNode::TfCall(call) => written_arguments(
+                    call,
+                    &Scope::Module(module_name.to_string()),
+                    file,
+                    &self.subroutines,
+                    &mut lvalues,
+                )?,
                 RefNode::VariableLvalue(lvalue) => {
                     lvalues.extend(
                         file.node_span(RefNode::VariableLvalue(lvalue))
@@ -1233,6 +1255,7 @@ impl<'a> Design<'a> {
         if handles.is_empty() && child_instantiations.is_empty() && clone_name.is_none() {
             return Ok(None);
         }
+        self.check_imported_names(module_name, declaration, file, &handles)?;
         // Handle references are found by name, so no declaration may reuse
         // the name of a handle.
         for declared in declared_names(
@@ -1584,7 +1607,7 @@ impl<'a> Design<'a> {
                         "localparam type {}",
                         interface.render(interface_file, *span, &rename)
                     )),
-                    HeaderForm::Import(span) => {
+                    HeaderForm::Import(span, _) => {
                         let import = interface_file.text(*span).to_string();
                         if !header_imports.contains(&import) {
                             header_imports.push(import);
@@ -1880,8 +1903,9 @@ impl<'a> Design<'a> {
     }
 }
 
-/// The names that variable, net, parameter, type, subroutine port, loop
-/// variable and genvar declarations under `root` declare, with repetitions.
+/// The names that variable, net, parameter, type, subroutine, subroutine
+/// port, loop variable and genvar declarations under `root` declare, with
+/// repetitions.
 /// A genvar is listed once per use.
 fn declared_names(
     root: RefNode<'_>,
@@ -1912,6 +1936,18 @@ fn declared_names(
                 continue;
             }
             RefNode::GenvarIdentifier(identifier) => RefNode::GenvarIdentifier(identifier),
+            RefNode::FunctionDeclaration(function) => {
+                match unwrap_node!(RefNode::FunctionDeclaration(function), FunctionIdentifier) {
+                    Some(identifier) => identifier,
+                    None => continue,
+                }
+            }
+            RefNode::TaskDeclaration(task) => {
+                match unwrap_node!(RefNode::TaskDeclaration(task), TaskIdentifier) {
+                    Some(identifier) => identifier,
+                    None => continue,
+                }
+            }
             _ => continue,
         };
         names.push(name(identifier, syntax_tree)?);
@@ -1930,6 +1966,163 @@ fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
         name.push_str(interface);
     }
     name
+}
+
+/// Add to `writes` the start offsets of the actual arguments of `call`
+/// that the called subroutine may write. A subroutine is found by name;
+/// when its declarations disagree about an argument, the call is
+/// rejected.
+fn written_arguments(
+    call: &sv_parser::TfCall,
+    local: &Scope,
+    file: &File<'_>,
+    subroutines: &HashMap<String, Vec<(Scope, SubroutinePorts)>>,
+    writes: &mut HashSet<usize>,
+) -> Result<(), AnalyzerError> {
+    let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
+        return Ok(());
+    };
+    let text = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
+    let callee = normalize_identifier(text.rsplit(['.', ':']).next().unwrap_or(text).trim());
+    let Some(declared) = subroutines.get(&callee) else {
+        return Ok(());
+    };
+    // The declarations the call can refer to: of the named package, of an
+    // interface for a call through a handle, or of the calling module or
+    // interface itself, and
+    // otherwise of a package or the compilation unit.
+    let in_scope = |filter: &dyn Fn(&Scope) -> bool| -> Vec<&SubroutinePorts> {
+        declared
+            .iter()
+            .filter(|(scope, _)| filter(scope))
+            .map(|(_, ports)| ports)
+            .collect()
+    };
+    let declarations = if let Some((package, _)) = text.rsplit_once("::") {
+        let package = normalize_identifier(package.rsplit("::").next().unwrap_or(package).trim());
+        in_scope(&|scope| match scope {
+            Scope::Package(name) => *name == package,
+            Scope::Unit => package == "$unit",
+            _ => false,
+        })
+    } else if text.contains('.') {
+        in_scope(&|scope| matches!(scope, Scope::Interface(_)))
+    } else {
+        let own = in_scope(&|scope| scope == local);
+        if own.is_empty() {
+            in_scope(&|scope| matches!(scope, Scope::Package(_) | Scope::Unit))
+        } else {
+            own
+        }
+    };
+    // Positional actuals by index, named ones by formal name.
+    let mut actuals: Vec<(Result<usize, String>, &sv_parser::Expression)> = Vec::new();
+    let named = match arguments {
+        sv_parser::ListOfArguments::Ordered(list) => {
+            for (index, actual) in list.nodes.0.contents().into_iter().enumerate() {
+                if let Some(actual) = actual {
+                    actuals.push((Ok(index), actual));
+                }
+            }
+            &list.nodes.1
+        }
+        sv_parser::ListOfArguments::Named(list) => {
+            if let Some(actual) = &list.nodes.2.nodes.1 {
+                actuals.push((
+                    Err(name(RefNode::Identifier(&list.nodes.1), &file.syntax_tree)?),
+                    actual,
+                ));
+            }
+            &list.nodes.3
+        }
+    };
+    for (_, _, formal, actual) in named {
+        if let Some(actual) = &actual.nodes.1 {
+            actuals.push((
+                Err(name(RefNode::Identifier(formal), &file.syntax_tree)?),
+                actual,
+            ));
+        }
+    }
+    for (formal, actual) in actuals {
+        let mut directions = declarations.iter().filter_map(|ports| match &formal {
+            Ok(index) => ports.get(*index).map(|(_, writes)| *writes),
+            Err(formal) => ports
+                .iter()
+                .find(|(name, _)| name.as_deref() == Some(formal.as_str()))
+                .map(|(_, writes)| *writes),
+        });
+        let Some(first) = directions.next() else {
+            continue;
+        };
+        if directions.any(|writes| writes != first) {
+            return Err(unsupported(format!(
+                "call of `{callee}`, whose declarations disagree about the direction of an argument, in a module with interface ports"
+            )));
+        }
+        if first {
+            writes.extend(
+                file.node_span(RefNode::Expression(actual))
+                    .map(|span| span.0),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What the package imports under `root` import: `(package, item)`, with
+/// no item for a wildcard import.
+fn imported_items(
+    root: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<Vec<(String, Option<String>)>, AnalyzerError> {
+    let mut items = Vec::new();
+    for node in root {
+        match node {
+            RefNode::PackageImportItemIdentifier(item) => items.push((
+                name(RefNode::PackageIdentifier(&item.nodes.0), syntax_tree)?,
+                Some(name(RefNode::Identifier(&item.nodes.2), syntax_tree)?),
+            )),
+            RefNode::PackageImportItemAsterisk(item) => items.push((
+                name(RefNode::PackageIdentifier(&item.nodes.0), syntax_tree)?,
+                None,
+            )),
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+/// The names that the items of `package` declare.
+fn package_items(
+    package: &sv_parser::PackageDeclaration,
+    syntax_tree: &SyntaxTree,
+) -> Result<HashSet<String>, AnalyzerError> {
+    let mut names = HashSet::default();
+    for (_, item) in &package.nodes.6 {
+        let root = RefNode::PackageItem(item);
+        // Only the name of a subroutine; its ports and locals are its own.
+        let subroutine = unwrap_node!(root.clone(), FunctionDeclaration)
+            .and_then(|function| unwrap_node!(function, FunctionIdentifier))
+            .or_else(|| {
+                unwrap_node!(root.clone(), TaskDeclaration)
+                    .and_then(|task| unwrap_node!(task, TaskIdentifier))
+            });
+        if let Some(identifier) = subroutine {
+            names.insert(name(identifier, syntax_tree)?);
+            continue;
+        }
+        names.extend(declared_names(root.clone(), syntax_tree)?);
+        for node in root {
+            if let RefNode::EnumNameDeclaration(declaration) = node {
+                names.insert(name(
+                    RefNode::EnumIdentifier(&declaration.nodes.0),
+                    syntax_tree,
+                )?);
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// The scope that declares a subroutine.
@@ -2797,6 +2990,10 @@ impl InterfaceDecl {
                             span: item_span,
                             header: HeaderForm::Import(
                                 file.span(RefNode::PackageImportDeclaration(import))?,
+                                imported_items(
+                                    RefNode::PackageImportDeclaration(import),
+                                    syntax_tree,
+                                )?,
                             ),
                         });
                     }
@@ -2917,6 +3114,12 @@ impl InterfaceDecl {
                         )));
                     }
                 }
+            }
+            if self.modports.contains_key(&modport_name) {
+                return Err(AnalyzerError::DuplicateModport {
+                    interface: self.name.clone(),
+                    name: modport_name,
+                });
             }
             self.modports.insert(modport_name, items);
         }
