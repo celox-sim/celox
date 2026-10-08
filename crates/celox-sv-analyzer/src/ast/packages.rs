@@ -39,7 +39,7 @@ pub struct PackageSource {
 /// the preprocessed text, which can differ from the source (the preprocessor
 /// widens the space after `"DPI-C"`), so each token is mapped back and text
 /// the preprocessor inserted is skipped.
-fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(usize, usize)> {
+pub(super) fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(usize, usize)> {
     let origin = |offset| {
         syntax_tree.get_origin(&sv_parser::Locate {
             offset,

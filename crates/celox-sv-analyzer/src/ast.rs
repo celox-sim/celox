@@ -38,6 +38,7 @@ mod functions;
 mod generate;
 mod inlining;
 mod instances;
+pub mod interfaces;
 pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
