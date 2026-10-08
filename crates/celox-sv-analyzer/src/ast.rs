@@ -19,6 +19,7 @@ use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
 use crate::{AnalyzerError, system_functions, typecheck};
 
+mod array_compatibility;
 mod array_parameters;
 mod assignment_analysis;
 mod case;
@@ -37,16 +38,22 @@ mod functions;
 mod generate;
 mod inlining;
 mod instances;
+pub mod interfaces;
+pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
 mod parameters;
 mod patterns;
 mod procedural;
+mod scoped_map;
 mod selects;
 mod statements;
 mod types;
 mod validation;
 
+use array_compatibility::{
+    check_unpacked_array_assignment, net_lvalue_unpacked_shape, variable_lvalue_unpacked_shape,
+};
 use assignment_analysis::two_state_conditions_are_complements;
 use case::expr_is_two_state;
 use casts::{
@@ -105,7 +112,7 @@ use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
 };
 use instances::{
-    connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,
+    collect_connected_nets, expr_ident_name, identifier_text, instances_from_module_node,
     node_source_text,
 };
 use parameters::{
@@ -115,6 +122,7 @@ use parameters::{
     infer_parameter_value_type, parameter_element_literal, parameter_value_env,
     parameters_from_ref_node, substitute_typed_parameter_literals,
 };
+use scoped_map::{ScopedMap, Signedness};
 use selects::{
     add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
     part_select_bounds, product_expr, variable_lvalue_from_node,
@@ -163,6 +171,18 @@ pub struct ModuleInterface {
 /// The interface of each module, by module name.
 pub type ModuleInterfaces = HashMap<String, ModuleInterface>;
 
+/// Local declarations take precedence over interfaces supplied by other files.
+struct InterfaceLookup<'a> {
+    local: &'a ModuleInterfaces,
+    extra: &'a ModuleInterfaces,
+}
+
+impl InterfaceLookup<'_> {
+    fn get(&self, name: &str) -> Option<&ModuleInterface> {
+        self.local.get(name).or_else(|| self.extra.get(name))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     modules: Vec<Module>,
@@ -192,7 +212,10 @@ impl Source {
                         syntax_tree,
                         module_name,
                         &parameter_overrides,
-                        &interfaces,
+                        &InterfaceLookup {
+                            local: &interfaces,
+                            extra: &ModuleInterfaces::default(),
+                        },
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(_) => {
@@ -232,16 +255,32 @@ impl Source {
         parameter_overrides: &HashMap<String, ConstExpr>,
         extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
-        let mut interfaces = extra_interfaces.clone();
-        interfaces.extend(Self::module_interfaces_from_syntax(syntax_tree)?);
+        let index = module_index::ModuleIndex::new(syntax_tree)?;
+        Self::from_indexed_syntax_module(
+            syntax_tree,
+            &index,
+            module_name,
+            parameter_overrides,
+            extra_interfaces,
+        )
+    }
+
+    pub(crate) fn from_indexed_syntax_module(
+        syntax_tree: &SyntaxTree,
+        index: &module_index::ModuleIndex,
+        module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        extra_interfaces: &ModuleInterfaces,
+    ) -> Result<Self, AnalyzerError> {
+        let interfaces = InterfaceLookup {
+            local: &index.interfaces,
+            extra: extra_interfaces,
+        };
         let mut modules = Vec::new();
-        for node in syntax_tree {
+        for node in index.nodes(syntax_tree, module_name) {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
-                    if module_name_from_node(node.clone(), syntax_tree)? != module_name {
-                        continue;
-                    }
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -334,7 +373,7 @@ impl Module {
         syntax_tree: &SyntaxTree,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
-        interfaces: &ModuleInterfaces,
+        interfaces: &InterfaceLookup<'_>,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
@@ -438,7 +477,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &type_aliases,
-            &parameter_packed_dimensions(&parameters),
+            &parameter_packed_dimensions(&parameters).into(),
             &parameter_value_env(&parameters, &const_env),
         ) {
             Ok(()) => {}
@@ -491,7 +530,7 @@ impl Module {
                     syntax_tree,
                     &const_env,
                     &type_aliases,
-                    &parameter_packed_dimensions(&parameters),
+                    &parameter_packed_dimensions(&parameters).into(),
                     &parameter_value_env(&parameters, &const_env),
                 )?;
             }
@@ -531,11 +570,9 @@ impl Module {
         {
             validate_unpacked_dimension_sizes(r#type.unpacked_ranges(), &const_env)?;
         }
+        let signal_names: HashSet<_> = signals.iter().map(Signal::name).collect();
         if let Some(parameter) = parameters.iter().find(|parameter| {
-            ports.iter().any(|port| port.name() == parameter.name())
-                || signals
-                    .iter()
-                    .any(|signal| signal.name() == parameter.name())
+            port_names.contains(parameter.name()) || signal_names.contains(parameter.name())
         }) {
             return Err(AnalyzerError::Unsupported(format!(
                 "parameter name collides with port or signal `{}`",
@@ -652,7 +689,7 @@ impl Module {
                 ))
             }));
         packed_dimensions.functions = Arc::new(functions.clone());
-        packed_dimensions.expression_signedness = Arc::new(expression_signedness.clone());
+        packed_dimensions.expression_signedness = expression_signedness.clone().into();
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
                 connection.actual_expr = connection.actual_expr.take().map(|expr| {
@@ -692,8 +729,6 @@ impl Module {
             syntax_tree,
             &const_env,
             &packed_dimensions,
-            &functions,
-            &expression_signedness,
             &parameter_values,
             &mut body_state,
         )?
@@ -732,16 +767,19 @@ impl Module {
                 .flat_map(|process| process.body.iter())
                 .chain(ff_processes.iter().flat_map(|process| process.body.iter())),
         );
+        let mut connected_nets = HashSet::default();
+        for connection in instances
+            .iter()
+            .flat_map(|instance| instance.port_connections())
+        {
+            if let Some(expr) = connection.actual_expr() {
+                collect_connected_nets(expr, &mut connected_nets);
+            }
+        }
         if let Some(signal) = signals.iter().find(|signal| {
             signal.is_net()
                 && !procedurally_written.contains(signal.name())
-                && !instances.iter().any(|instance| {
-                    instance.port_connections().iter().any(|connection| {
-                        connection
-                            .actual_expr()
-                            .is_some_and(|expr| connection_references_net(expr, signal.name()))
-                    })
-                })
+                && !connected_nets.contains(signal.name())
         }) {
             return Err(AnalyzerError::Unsupported(format!(
                 "undriven net declaration `{}`",
@@ -1713,13 +1751,13 @@ struct FunctionReturnMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackedDimensions {
-    variables: VariablePackedDimensions,
+    variables: ScopedMap<VariableDimensions>,
     const_env: HashMap<String, i128>,
     type_aliases: HashMap<String, Type>,
     function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: HashMap<String, Expr>,
-    expression_signedness: Arc<HashMap<String, bool>>,
+    expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
@@ -1728,18 +1766,18 @@ struct PackedDimensions {
 
 impl PackedDimensions {
     fn new(
-        variables: VariablePackedDimensions,
+        variables: impl Into<ScopedMap<VariableDimensions>>,
         const_env: &HashMap<String, i128>,
         type_aliases: &HashMap<String, Type>,
     ) -> Self {
         Self {
-            variables,
+            variables: variables.into(),
             const_env: const_env.clone(),
             type_aliases: type_aliases.clone(),
             function_return_types: HashMap::default(),
             functions: Arc::default(),
             parameter_values: HashMap::default(),
-            expression_signedness: Arc::default(),
+            expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             subroutine_param_shapes: Arc::default(),
         }
@@ -1747,7 +1785,7 @@ impl PackedDimensions {
 }
 
 impl Deref for PackedDimensions {
-    type Target = VariablePackedDimensions;
+    type Target = ScopedMap<VariableDimensions>;
 
     fn deref(&self) -> &Self::Target {
         &self.variables
@@ -1757,6 +1795,12 @@ impl Deref for PackedDimensions {
 impl DerefMut for PackedDimensions {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.variables
+    }
+}
+
+impl Signedness for PackedDimensions {
+    fn signedness(&self, name: &str) -> Option<bool> {
+        self.get(name).map(|dimensions| dimensions.signed)
     }
 }
 

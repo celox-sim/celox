@@ -25,6 +25,38 @@ fn cheap_mux_stays_branchless() {
 }
 
 #[test]
+fn branchless_mux_widens_the_narrower_arm() {
+    // An SLT mux is as wide as its wider arm; the SIR mux needs both arms at
+    // that width.
+    let mut arena = SLTNodeArena::new();
+    let cond = input(&mut arena, 0, 1);
+    let then_expr = input(&mut arena, 1, 32);
+    let else_expr = constant(&mut arena, 0, 64);
+    let mux = arena
+        .alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        })
+        .unwrap();
+    let mut builder = SIRBuilder::new();
+    let result = SLTToSIRLowerer::new(false).lower(
+        &mut builder,
+        mux,
+        &arena,
+        &mut crate::HashMap::default(),
+    );
+    assert_eq!(builder.register(&result).width(), 64);
+    let eu = finish_lowering(builder);
+
+    assert_eq!(branch_count(&eu), 0);
+    assert_eq!(
+        instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+        1
+    );
+}
+
+#[test]
 fn expected_cost_uses_static_equality_probability() {
     let even = StaticBranchProbability::EVEN;
     let equality = StaticBranchProbability {

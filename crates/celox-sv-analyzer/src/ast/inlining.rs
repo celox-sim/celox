@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn expr_signedness(
     expr: &Expr,
-    identifiers: &HashMap<String, bool>,
+    identifiers: &impl Signedness,
     functions: &HashMap<String, Function>,
 ) -> Option<bool> {
     expr_signedness_with_return_types(expr, identifiers, functions, &HashMap::default())
@@ -12,12 +12,12 @@ pub(super) fn expr_signedness(
 
 pub(super) fn expr_signedness_with_return_types(
     expr: &Expr,
-    identifiers: &HashMap<String, bool>,
+    identifiers: &impl Signedness,
     functions: &HashMap<String, Function>,
     function_return_types: &HashMap<String, FunctionReturnMetadata>,
 ) -> Option<bool> {
     match expr {
-        Expr::Ident(name) => identifiers.get(name).copied(),
+        Expr::Ident(name) => identifiers.signedness(name),
         Expr::Literal(literal) => {
             typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
         }
@@ -111,7 +111,7 @@ pub(super) fn expr_signedness_with_return_types(
 pub(super) fn expand_expr_calls(
     expr: Expr,
     functions: &HashMap<String, Function>,
-    expression_signedness: &HashMap<String, bool>,
+    expression_signedness: &impl Signedness,
     depth: usize,
     apply_return_type: bool,
 ) -> Expr {

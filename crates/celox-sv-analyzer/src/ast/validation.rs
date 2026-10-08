@@ -100,7 +100,7 @@ pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    parameter_dimensions: &VariablePackedDimensions,
+    parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Result<(), AnalyzerError> {
     let mut indexed_dimensions =

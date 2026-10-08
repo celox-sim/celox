@@ -7,8 +7,6 @@ pub(super) fn comb_processes_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    functions: &HashMap<String, Function>,
-    expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
@@ -20,10 +18,7 @@ pub(super) fn comb_processes_from_module_node(
         &packed_dimensions.type_aliases,
     )? {
         let start = processes.len();
-        let mut base_dimensions = packed_dimensions.clone();
-        base_dimensions.functions = Arc::new(functions.clone());
-        base_dimensions.expression_signedness = Arc::new(expression_signedness.clone());
-        let dimensions = item.dimensions(&base_dimensions);
+        let dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
         comb_processes_from_module_or_generate_item(
             item.node,
@@ -31,8 +26,6 @@ pub(super) fn comb_processes_from_module_node(
             syntax_tree,
             &item.env,
             &dimensions,
-            &dimensions.functions,
-            &dimensions.expression_signedness,
             &literals,
             &mut processes,
             state,
@@ -55,8 +48,6 @@ fn comb_processes_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    functions: &HashMap<String, Function>,
-    expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
     state: &mut procedural::BodyState<'_>,
@@ -68,8 +59,6 @@ fn comb_processes_from_module_or_generate_item(
             syntax_tree,
             const_env,
             packed_dimensions,
-            functions,
-            expression_signedness,
             parameter_literals,
             processes,
             state,
@@ -84,8 +73,6 @@ fn comb_processes_from_module_common_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    functions: &HashMap<String, Function>,
-    expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
     state: &mut procedural::BodyState<'_>,
@@ -117,7 +104,6 @@ fn comb_processes_from_module_common_item(
             let mut local_packed_dimensions = packed_dimensions.clone();
             local_packed_dimensions.const_env = const_env.clone();
             local_packed_dimensions.parameter_values = parameter_literals.clone();
-            let _ = (functions, expression_signedness);
             if let Some(process) = comb_process_from_always_construct(
                 always,
                 condition,
@@ -181,6 +167,15 @@ fn net_declaration_assignments(
         };
         let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("net declaration assignment".to_string()))?;
+        if let Some(target) = packed_dimensions.get(&name) {
+            check_unpacked_array_assignment(
+                expression,
+                target,
+                || "net declaration assignment".to_string(),
+                syntax_tree,
+                packed_dimensions,
+            )?;
+        }
         let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?;
         assignments.push(Assignment::new(LValue::Ident(name), rhs));
     }
@@ -201,6 +196,17 @@ fn assignments_from_continuous_assign(
             .contents()
             .into_iter()
             .map(|assignment| {
+                if let Some(target) =
+                    net_lvalue_unpacked_shape(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                {
+                    check_unpacked_array_assignment(
+                        &assignment.nodes.2,
+                        &target,
+                        || "continuous assignment".to_string(),
+                        syntax_tree,
+                        packed_dimensions,
+                    )?;
+                }
                 let lhs =
                     net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(
@@ -231,6 +237,19 @@ fn assignments_from_continuous_assign(
             .contents()
             .into_iter()
             .map(|assignment| {
+                if let Some(target) = variable_lvalue_unpacked_shape(
+                    &assignment.nodes.0,
+                    syntax_tree,
+                    packed_dimensions,
+                ) {
+                    check_unpacked_array_assignment(
+                        &assignment.nodes.2,
+                        &target,
+                        || "continuous assignment".to_string(),
+                        syntax_tree,
+                        packed_dimensions,
+                    )?;
+                }
                 let lhs =
                     variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(

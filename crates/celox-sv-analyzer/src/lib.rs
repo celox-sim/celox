@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
+mod parsed;
 pub mod procedural;
 pub mod symbol;
 pub mod syntax;
@@ -24,6 +25,7 @@ pub mod typecheck;
 pub use ast::packages::PackageSource;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
+pub use parsed::ParsedSource;
 
 /// Internal marker used to defer division-by-zero state handling until the
 /// simulator's two-state/four-state mode is known.
@@ -41,6 +43,29 @@ pub enum AnalyzerError {
     MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
+    #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
+    DuplicateModport { interface: String, name: String },
+    #[error("Duplicate declaration in interface `{interface}`: {name}")]
+    DuplicateInterfaceItem { interface: String, name: String },
+    #[error("Interface `{interface}` has no parameter `{name}`")]
+    UnknownInterfaceParameter { interface: String, name: String },
+    #[error("Parameter `{name}` of interface `{interface}` is overridden more than once")]
+    DuplicateInterfaceParameterOverride { interface: String, name: String },
+    #[error("Modport `{modport}` of interface `{interface}` lists `{name}` more than once")]
+    DuplicateModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+    },
+    #[error(
+        "Modport `{modport}` of interface `{interface}` names `{name}`, which is not {expected}"
+    )]
+    UnknownModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+        expected: &'static str,
+    },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]
@@ -60,6 +85,17 @@ pub enum AnalyzerError {
     /// such as a task used as a value or a wrong number of arguments.
     #[error("invalid call of `{name}`: {detail}")]
     InvalidSystemTfCall { name: String, detail: String },
+    /// An unpacked array assigned, passed as a subroutine argument, connected
+    /// to a port, or used as an assignment pattern item where its type is not
+    /// assignment compatible with the target array (IEEE 1800-2023 7.6, 10.8).
+    #[error(
+        "{context}: an unpacked array of type `{actual}` is not assignment compatible with `{target}`"
+    )]
+    IncompatibleUnpackedArray {
+        context: String,
+        actual: typecheck::UnpackedArrayType,
+        target: typecheck::UnpackedArrayType,
+    },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -108,6 +144,14 @@ impl AnalyzerError {
             .find(|(prefix, _)| construct.starts_with(prefix))
             .map_or(SV_FRONTEND_TRACKING_ISSUE, |&(_, issue)| issue)
     }
+}
+
+/// Rewrite `sources` so that they no longer declare or use interfaces, or
+/// return `None` when no source declares one. See [`ast::interfaces`].
+pub fn elaborate_interfaces(
+    sources: &[(&str, &Path)],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces(sources)
 }
 
 /// Parse and analyze a SystemVerilog source string.
@@ -179,18 +223,11 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
     parameter_overrides: &HashMap<String, ir::ConstExpr>,
     interfaces: &ModuleInterfaces,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let parameter_overrides = parameter_overrides
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone().into()))
-        .collect();
-    let source = ast::Source::from_syntax_module_with_parameter_expr_overrides(
-        &syntax_tree,
+    ParsedSource::parse(code, path)?.analyze_module_with_parameter_expr_overrides(
         module_name,
-        &parameter_overrides,
-        &interfaces.clone().into_iter().collect(),
-    )?;
-    analyze::analyze_source(source)
+        parameter_overrides,
+        interfaces,
+    )
 }
 
 /// The positional interface (ports and overridable parameters) of every

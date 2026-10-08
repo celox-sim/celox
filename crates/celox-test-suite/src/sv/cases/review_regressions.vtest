@@ -447,3 +447,151 @@
     (modify (set a value))
     (expand y (y0 y1 y2 y3 y4 y5)
       (assert_eq {y} value "{y}"))))
+
+(case default_pattern_fills_each_element_of_unpacked_subarrays
+  ; IEEE 1800-2023 10.9.1: `default:` applies recursively to each element of
+  ; an unmatched subarray, evaluated in the context of the element type,
+  ; unless the value matches the subarray type.
+  (source "nested_default_pattern.sv" #"
+                module Top(input logic [7:0] d,
+                           output logic [7:0] y00, y01, y10, y11,
+                           output logic [31:0] z00, z01, z10, z11);
+                    logic signed [7:0] a [2][2];
+                    int b [2];
+                    int c [2][2];
+                    always_comb begin
+                        a = '{default: 4'sh8};
+                        if (d[0]) a = '{1: '{default: d[3:0]}, default: 8'sh7f};
+                        y00 = a[0][0];
+                        y01 = a[0][1];
+                        y10 = a[1][0];
+                        y11 = a[1][1];
+                    end
+                    always_comb begin
+                        b = '{32'(d), 32'(d) + 1};
+                        c = '{default: b};
+                        z00 = c[0][0];
+                        z01 = c[0][1];
+                        z10 = c[1][0];
+                        z11 = c[1][1];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set d 0x20))
+  (expand y (y00 y01 y10 y11)
+    (assert_eq {y} 0xf8 "{y}"))
+  (assert_eq z00 0x20)
+  (assert_eq z01 0x21)
+  (assert_eq z10 0x20)
+  (assert_eq z11 0x21)
+  (modify (set d 0x35))
+  (assert_eq y00 0x7f)
+  (assert_eq y01 0x7f)
+  (assert_eq y10 0x05)
+  (assert_eq y11 0x05))
+
+(case int_parameters_are_signed_in_comparisons_and_loop_bounds
+  ; IEEE 1800-2023 6.20.2 and 6.11: a parameter declared `int` has that
+  ; signed type, so comparing it with a signed operand is a signed
+  ; comparison (11.8.1).
+  (source "signed_int_parameter.sv" #"
+                module Top #(parameter int S = 2, parameter int unsigned U = 2)
+                           (input logic clk, input int lo,
+                            output logic lt_s, lt_u,
+                            output int unsigned cs, cu, fs, fu);
+                    always_comb begin
+                        lt_s = lo < S;
+                        lt_u = lo < U;
+                        cs = 0;
+                        for (int j = lo; j < S; j++) cs += 1;
+                        cu = 0;
+                        for (int j = lo; j < U; j++) cu += 1;
+                    end
+                    always_ff @(posedge clk) begin
+                        int unsigned c;
+                        c = 0;
+                        for (int j = lo; j < S; j++) c += 1;
+                        fs <= c;
+                        c = 0;
+                        for (int j = lo; j < U; j++) c += 1;
+                        fu <= c;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set lo (- 0x100000000 2)))
+  (tick clk)
+  (assert_eq lt_s 1)
+  (assert_eq lt_u 0)
+  (assert_eq cs 4)
+  (assert_eq cu 0)
+  (assert_eq fs 4)
+  (assert_eq fu 0)
+  (modify (set lo 1))
+  (tick clk)
+  (assert_eq lt_s 1)
+  (assert_eq lt_u 1)
+  (assert_eq cs 1)
+  (assert_eq cu 1)
+  (assert_eq fs 1)
+  (assert_eq fu 1))
+
+(case run_time_for_condition_uses_the_relational_operand_context
+  ; IEEE 1800-2023 11.6.1 and 11.8.2: the operands of a relational operator
+  ; are sized to the larger of the two, so `j < b + 8'd1` with an `int` j
+  ; adds at 32 bits and b = 255 runs 256 iterations.
+  (source "for_condition_context.sv" #"
+                module Top(input logic clk, input logic [7:0] b,
+                           output logic [31:0] y0, y1, y2, f0);
+                    always_comb begin
+                        y0 = 0;
+                        for (int j = 0; j < b + 8'd1; j++) y0 = y0 + 1;
+                    end
+                    always_comb begin
+                        y1 = 0;
+                        for (int j = 0; j <= b + 8'd1; j++) y1 = y1 + 1;
+                    end
+                    always_comb begin
+                        y2 = 0;
+                        for (int j = b + 8'd1; j > 0; j--) y2 = y2 + 1;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [31:0] c;
+                        c = 0;
+                        for (int j = 0; j < b + 8'd1; j++) c = c + 1;
+                        f0 <= c;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 1 254 255)
+    (modify (set b value))
+    (tick clk)
+    (assert_eq y0 (+ value 1) "y0")
+    (assert_eq y1 (+ value 2) "y1")
+    (assert_eq y2 (+ value 1) "y2")
+    (assert_eq f0 (+ value 1) "f0")))
+
+(case size_of_a_type_uses_the_dimension_argument
+  ; IEEE 1800-2023 20.7: $size(t, n) is the number of elements of dimension
+  ; n of t, numbered from the slowest varying dimension (1); an integer
+  ; type is a packed array with a single [n-1:0] dimension.
+  (source "size_type_dimension.sv" #"
+                module Top(output int p1, p2, t1, t2, t3, d);
+                    typedef logic [3:0][5:0] pair_t;
+                    assign p1 = $size(logic [9:0][19:0], 1);
+                    assign p2 = $size(logic [9:0][19:0], 2);
+                    assign t1 = $size(pair_t, 1);
+                    assign t2 = $size(pair_t, 2);
+                    assign t3 = $size(shortint, 1);
+                    assign d = $size(logic [9:0][19:0]);
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq p1 10)
+  (assert_eq p2 20)
+  (assert_eq t1 4)
+  (assert_eq t2 6)
+  (assert_eq t3 16)
+  (assert_eq d 10))

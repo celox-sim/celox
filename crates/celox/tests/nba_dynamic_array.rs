@@ -5,7 +5,6 @@ mod test_utils;
 all_backends! {
 
     fn test_subbyte_arithmetic_padding_does_not_corrupt_concat(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_subbyte_arithmetic_padding_does_not_corrupt_concat";
     }
 
@@ -46,7 +45,6 @@ all_backends! {
     }
 
     fn test_dynamic_ff_array_partial_squash_preserves_head_and_branch(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_dynamic_ff_array_partial_squash_preserves_head_and_branch";
     }
 
@@ -63,17 +61,16 @@ all_backends! {
     }
 
     // The Veryl reference simulator writes through an unknown index instead
-    // of ignoring the write (IEEE 1800-2023 7.4.6). The SV frontend rejects
-    // four-state always_ff event signals.
+    // of ignoring the write (IEEE 1800-2023 7.4.6).
     fn test_out_of_range_dynamic_ff_access_four_state(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "nba_dynamic_array::test_out_of_range_dynamic_ff_access_four_state";
     }
 
     // The Veryl reference simulator reads an existing element through an
-    // invalid index; the SV frontend rejects the emitted design.
+    // invalid index.
     fn test_out_of_range_dynamic_comb_access(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "nba_dynamic_array::test_out_of_range_dynamic_comb_access";
     }
 
@@ -217,10 +214,9 @@ all_backends! {
 // and keep the in-range bits of a `-:` part select that starts below bit 0
 // (IEEE 1800-2023 7.4.6, 11.5.1). In a two-state simulation an invalid read,
 // like any X, reads 0. The Veryl reference simulator applies `grid[0][3]` to
-// another element, and the SV frontend rejects a dynamic unpacked-array write
-// after a partial write to the same array.
+// another element.
 fn test_out_of_range_dynamic_comb_access_two_state(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -310,10 +306,8 @@ fn test_out_of_range_dynamic_comb_access_two_state(sim) {
 all_backends! {
 // A loop variable's known range removes only the checks it proves
 // unnecessary: `src[i + off]` can still leave the array when `off` is large,
-// while `dst[i * 8 +: 8]` in `0..4` cannot. The SV frontend rejects the
-// emitted accumulating `always_comb` assignment.
+// while `dst[i * 8 +: 8]` in `0..4` cannot.
 fn test_loop_variable_range_keeps_needed_checks(sim) {
-    @ignore_on(sv);
     @setup {
         let source = r#"
             module Top (
@@ -371,10 +365,10 @@ fn test_loop_variable_range_keeps_needed_checks(sim) {
 all_backends! {
 // Functions read their array arguments through the same checks, in
 // combinational and sequential code: an invalid index reads X. Icarus 13.0
-// and the SV frontend do not support unpacked-array function formals, and
-// the Veryl reference simulator reads an existing element.
+// does not support unpacked-array function formals, and the Veryl reference
+// simulator reads an existing element.
 fn test_out_of_range_dynamic_read_in_function_is_unknown(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -527,7 +521,7 @@ all_backends! {
 // is an always_ff local or a function argument held in a register
 // (IEEE 1800-2023 7.4.6).
 fn test_invalid_reads_agree_across_paths_in_four_state(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (

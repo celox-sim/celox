@@ -17,6 +17,7 @@ all_backends! {
 
 fn hierarchical_readmemh_runs_in_statement_order_across_branches_and_clock_edges(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_first_directory, first) = memory_file("2a\n11\n");
@@ -62,6 +63,7 @@ fn hierarchical_readmemh_runs_in_statement_order_across_branches_and_clock_edges
 
 fn hierarchical_readmemh_initializes_child_and_settles_comb(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_directory, path) = memory_file("1\n2\n3\n4\n");
@@ -93,6 +95,7 @@ fn hierarchical_readmemh_initializes_child_and_settles_comb(sim) {
 
 fn hierarchical_readmemh_resolves_nested_parameterized_memories(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let expected = (BigUint::from(1u8) << 64) | BigUint::from(0x1abu32);
@@ -131,6 +134,7 @@ fn hierarchical_readmemh_resolves_nested_parameterized_memories(sim) {
 
 fn hierarchical_readmemh_uses_each_calling_instance_and_preserves_write_order(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_first_directory, first) = memory_file("11\n22\n");
@@ -173,6 +177,7 @@ fn hierarchical_readmemh_uses_each_calling_instance_and_preserves_write_order(si
 
 fn hierarchical_readmemh_preserves_four_state_and_sparse_addresses(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_directory, path) = memory_file("/* skip first element */ @1\nx5\nz0\n");
@@ -203,6 +208,7 @@ fn hierarchical_readmemh_preserves_four_state_and_sparse_addresses(sim) {
 
 fn hierarchical_readmemh_honors_constant_branches_and_loops(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_directory, path) = memory_file("ab\n");
@@ -240,6 +246,7 @@ fn hierarchical_readmemh_honors_constant_branches_and_loops(sim) {
 
 fn hierarchical_readmemh_flattens_multidimensional_arrays(sim) {
     @omit_veryl;
+    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
     @ignore_on(sv);
     @setup {
         let (_directory, path) = memory_file("11\n22\n33\n44\n");

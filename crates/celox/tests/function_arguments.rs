@@ -77,6 +77,8 @@ fn test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body(sim)
 
 fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index: "select index `observe(copied)`"
+    // (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (

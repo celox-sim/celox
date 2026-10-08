@@ -7,7 +7,7 @@
 //! dependency.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
@@ -107,8 +107,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
-    source_code: String,
-    source_path: PathBuf,
+    source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
     /// positional port and parameter connections.
@@ -172,22 +171,49 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
+    // Interfaces are expanded into the modules that use them first.
+    let elaborated = sv::elaborate_interfaces(sources)?;
+    let elaborated_sources: Vec<(&str, &Path)>;
+    let sources = match &elaborated {
+        Some(codes) => {
+            elaborated_sources = codes
+                .iter()
+                .zip(sources)
+                .map(|(code, (_, path))| (code.as_str(), *path))
+                .collect();
+            elaborated_sources.as_slice()
+        }
+        None => sources,
+    };
     let mut modules = HashMap::default();
+    let sources: Vec<_> = sources
+        .iter()
+        .map(|(code, path)| {
+            Ok((
+                std::rc::Rc::new(sv::ParsedSource::parse(code, path)?),
+                *code,
+                *path,
+            ))
+        })
+        .collect::<Result<_, sv::AnalyzerError>>()?;
     let mut interfaces = sv::ModuleInterfaces::default();
-    for (code, path) in sources {
-        interfaces.extend(sv::source_module_interfaces(code, path)?);
+    for (source, _, _) in &sources {
+        interfaces.extend(source.module_interfaces().clone());
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let mut packages = HashMap::default();
-    for (code, path) in sources {
-        for package in sv::source_packages(code, path)? {
+    for (source, _, _) in &sources {
+        for package in source.packages()? {
             packages.insert(package.name.clone(), package);
         }
     }
     let packages = std::sync::Arc::new(packages);
-    for (code, path) in sources {
-        let implicit_net_permissions = sv::source_module_implicit_net_permissions(code, path)?;
-        for module_name in sv::source_module_names(code, path)? {
+    for (source, code, path) in &sources {
+        let implicit_net_permissions: HashMap<_, _> =
+            sv::source_module_implicit_net_permissions(code, path)?
+                .into_iter()
+                .collect();
+        for module_name in source.module_names().iter().cloned() {
             let name = module_name.clone();
             if modules.contains_key(&name) {
                 return Err(sv::AnalyzerError::DuplicateModule { name: module_name });
@@ -196,12 +222,11 @@ fn analyze_sources(
                 name,
                 AnalyzedSvModule {
                     implicit_nets_allowed: implicit_net_permissions
-                        .iter()
-                        .find_map(|(name, allowed)| (name == &module_name).then_some(*allowed))
+                        .get(&module_name)
+                        .copied()
                         .unwrap_or(true),
                     name: module_name,
-                    source_code: (*code).to_string(),
-                    source_path: (*path).to_path_buf(),
+                    source: source.clone(),
                     interfaces: interfaces.clone(),
                     packages: packages.clone(),
                 },
@@ -843,26 +868,12 @@ fn specialize_module(
         .iter()
         .filter_map(|parameter| Some((parameter.name.clone(), parameter.type_text.clone()?)))
         .collect();
-    let typed = sv::apply_module_type_parameters(
-        &module.source_code,
-        &module.source_path,
-        &module.name,
-        &type_overrides,
-    )?;
-    let typed_code = typed.as_deref().unwrap_or(&module.source_code);
-    // A module that uses packages is analyzed with their items inlined.
-    let inlined = sv::inline_module_packages(
-        typed_code,
-        &module.source_path,
-        &module.name,
-        &module.packages,
-    )?;
-    let ir = sv::analyze_source_module_with_parameter_expr_overrides(
-        inlined.as_deref().unwrap_or(typed_code),
-        &module.source_path,
+    let ir = module.source.analyze_module(
         &module.name,
         &overrides,
+        &type_overrides,
         &module.interfaces,
+        &module.packages,
     )?;
     let specialized = ir
         .modules()
@@ -1917,6 +1928,62 @@ type SvGlue = (
     SLTNodeArena<GlueAddr>,
 );
 
+/// The type of `variable` when it is an unpacked array.
+fn unpacked_array_type(variable: &SvVariable) -> Option<sv::typecheck::UnpackedArrayType> {
+    let element_width = unpacked_element_width(variable)?;
+    Some(sv::typecheck::UnpackedArrayType {
+        dims: variable.array_dims.clone(),
+        element_width,
+        signed: variable.signed,
+        four_state: variable.is_4state,
+    })
+}
+
+/// Rejects an unpacked array connected to an unpacked array input or output
+/// port of an incompatible type: such a connection is an assignment-like
+/// context (IEEE 1800-2023 10.8, 23.3.3), which requires equivalent element
+/// types and equal element counts (7.6).
+fn check_unpacked_port_connection(
+    connection: &LoweredSvPortConnection,
+    child: &LoweredSvModule,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+) -> Result<(), ParserError> {
+    let Some(sv::ir::Expr::Ident(actual)) = connection.actual_expr.as_ref() else {
+        return Ok(());
+    };
+    let Some(port) = child
+        .signal_names
+        .get(&connection.formal)
+        .and_then(|id| child.variables.get(id))
+        .filter(|port| matches!(port.kind, VariableKind::Input | VariableKind::Output))
+    else {
+        return Ok(());
+    };
+    let (Some(target), Some(actual_type)) = (
+        unpacked_array_type(port),
+        parent_signal_names
+            .get(actual)
+            .and_then(|id| parent_variables.get(id))
+            .and_then(unpacked_array_type),
+    ) else {
+        return Ok(());
+    };
+    if actual_type.is_assignment_compatible_with(&target) {
+        return Ok(());
+    }
+    let error = sv::AnalyzerError::IncompatibleUnpackedArray {
+        context: format!("connection of port `{}`", connection.formal),
+        actual: actual_type,
+        target,
+    };
+    Err(ParserError::illegal_context(
+        "systemverilog port connection",
+        error.to_string(),
+        None,
+    ))
+}
+
 fn build_instance_glue(
     parent_variables: &HashMap<SourceVarId, SvVariable>,
     parent_signal_names: &HashMap<String, SourceVarId>,
@@ -1946,6 +2013,7 @@ fn build_instance_glue(
                 None,
             ));
         }
+        check_unpacked_port_connection(connection, child, parent_variables, parent_signal_names)?;
     }
 
     for child_port_id in &child.port_order {
@@ -4960,7 +5028,10 @@ fn sv_glue_expr_is_signed(
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
-                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+                sv::ir::UnaryOp::Plus
+                    | sv::ir::UnaryOp::Minus
+                    | sv::ir::UnaryOp::BitNot
+                    | sv::ir::UnaryOp::ToTwoState
             ) && sv_glue_expr_is_signed(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
@@ -5019,7 +5090,10 @@ fn sv_expr_is_signed_with_parameters(
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
-                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+                sv::ir::UnaryOp::Plus
+                    | sv::ir::UnaryOp::Minus
+                    | sv::ir::UnaryOp::BitNot
+                    | sv::ir::UnaryOp::ToTwoState
             ) && sv_expr_is_signed_with_parameters(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
