@@ -740,23 +740,7 @@ impl<'a> Design<'a> {
             if !interfaces.values().any(|interface| interface.file == index) {
                 continue;
             }
-            let scopes = Scope::collect(file)?;
-            let mut unit_imports = Vec::new();
-            for node in &file.syntax_tree {
-                let RefNode::PackageImportDeclaration(import) = node else {
-                    continue;
-                };
-                let span = file.span(RefNode::PackageImportDeclaration(import))?;
-                if Scope::of(span, &scopes) == Scope::Unit {
-                    unit_imports.push((
-                        span,
-                        imported_items(
-                            RefNode::PackageImportDeclaration(import),
-                            &file.syntax_tree,
-                        )?,
-                    ));
-                }
-            }
+            let unit_imports = unit_imports(file)?;
             for interface in interfaces
                 .values_mut()
                 .filter(|interface| interface.file == index)
@@ -780,6 +764,17 @@ impl<'a> Design<'a> {
         // assigned as well.
         for interface in interfaces.values_mut() {
             let file = &files[interface.file];
+            let imports: Vec<(String, Option<String>)> = interface
+                .items
+                .iter()
+                .flat_map(|item| match item {
+                    Item::Constant {
+                        header: HeaderForm::Import { imports, .. },
+                        ..
+                    } => imports.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
             for node in &file.syntax_tree {
                 let RefNode::InterfaceDeclarationAnsi(declaration) = node else {
                     continue;
@@ -799,6 +794,7 @@ impl<'a> Design<'a> {
                             &|_| None,
                             file,
                             &subroutines,
+                            &imports,
                             &mut interface.lvalues,
                         )?;
                     }
@@ -928,7 +924,22 @@ impl<'a> Design<'a> {
                     "module `{module_name}` has no interface port `{port_name}`"
                 ))
             })?;
+        let uses = self.module_uses(module_name, (port_name, interface_name))?;
         let interface = self.interface(interface_name)?;
+        // The directions do not depend on generate conditions, loop bounds
+        // or which subroutines are called, which are not evaluated here, so
+        // a write that depends on them needs a modport, and an imported
+        // function that writes must be called unconditionally.
+        let through = match &port.modport {
+            Some(modport) => format!(" through its port `{port_name}` of modport `{modport}`"),
+            None => format!(", whose port `{port_name}` has no modport"),
+        };
+        let conditional_write = |member: &str, context: Context| {
+            unsupported(format!(
+                "write of `{port_name}.{member}` {} of module `{module_name}`{through}",
+                context.description()
+            ))
+        };
         if let Some(modport) = &port.modport {
             let items = interface.modports.get(modport).ok_or_else(|| {
                 unsupported(format!(
@@ -947,15 +958,52 @@ impl<'a> Design<'a> {
                     }
                 }
             }
-            let callable = imports.clone();
-            imports.extend(interface.declaration_functions());
-            let functions = interface.function_closure(&imports);
-            // An imported function runs in the interface scope, so a member it
-            // assigns is driven through the port whatever the modport lists.
+            // An imported function runs in the interface scope, so the
+            // members it accesses pass through the port whatever the modport
+            // lists, but only when the module or a child calls it.
+            let imported = interface.captured_members(&interface.function_closure(&imports));
+            let mut called = interface.declaration_functions();
+            for (handle, item, context) in &uses.references {
+                if handle != port_name || !imports.contains(item) {
+                    continue;
+                }
+                let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
+                for (member, direction) in interface.captured_members(&closure) {
+                    if direction == Direction::Output && *context != Context::Module {
+                        return Err(conditional_write(&member, *context));
+                    }
+                }
+                called.insert(item.clone());
+            }
+            let functions = interface.function_closure(&called);
             for (member, direction) in interface.captured_members(&functions) {
                 let listed = listed.entry(member).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
+                }
+            }
+            for child in uses
+                .children
+                .iter()
+                .filter(|child| child.handle == port_name)
+            {
+                let child_expansion =
+                    self.expansion(&child.module, &child.formal, interface_name)?;
+                for (member, direction) in child_expansion.members {
+                    let Some(access) = imported.get(&member) else {
+                        continue;
+                    };
+                    if direction == Direction::Output
+                        && *access == Direction::Output
+                        && listed.get(&member) != Some(&Direction::Output)
+                    {
+                        if child.context != Context::Module {
+                            return Err(conditional_write(&member, child.context));
+                        }
+                        listed.insert(member, Direction::Output);
+                    } else {
+                        listed.entry(member).or_insert(Direction::Input);
+                    }
                 }
             }
             return Ok(Expansion {
@@ -969,22 +1017,11 @@ impl<'a> Design<'a> {
                     })
                     .collect(),
                 functions,
-                callable: Some(callable),
+                callable: Some(imports),
             });
         }
         // Without a modport every member is reachable. A member the module or
         // a child writes is an output.
-        let uses = self.module_uses(module_name, (port_name, interface_name))?;
-        let interface = self.interface(interface_name)?;
-        // The directions do not depend on generate conditions, loop bounds
-        // or which subroutines are called, which are not evaluated here, so
-        // a write that depends on them needs a modport.
-        let conditional_write = |member: &str, context: Context| {
-            unsupported(format!(
-                "write of `{port_name}.{member}` {} of module `{module_name}`, whose port `{port_name}` has no modport",
-                context.description()
-            ))
-        };
         let mut written: HashSet<String> = HashSet::default();
         for (handle, member, context) in &uses.writes {
             if handle == port_name && interface.member(member).is_some() {
@@ -1175,6 +1212,17 @@ impl<'a> Design<'a> {
             }
         }
         let handle_interface = |handle: &str| handle_interfaces.get(handle).cloned().flatten();
+        // The imports visible in the module: compilation-unit ones before it
+        // and its own.
+        let mut imports: Vec<(String, Option<String>)> = unit_imports(file)?
+            .into_iter()
+            .filter(|(span, _)| span.1 <= module.span.0)
+            .flat_map(|(_, imports)| imports)
+            .collect();
+        imports.extend(imported_items(
+            RefNode::ModuleDeclarationAnsi(declaration),
+            &file.syntax_tree,
+        )?);
         // An assignment target starts where its lvalue starts.
         let mut lvalues = HashSet::default();
         let mut generates = Vec::new();
@@ -1193,6 +1241,7 @@ impl<'a> Design<'a> {
                     &handle_interface,
                     file,
                     &self.subroutines,
+                    &imports,
                     &mut lvalues,
                 )?,
                 RefNode::VariableLvalue(lvalue) => {
@@ -1357,9 +1406,15 @@ impl<'a> Design<'a> {
         let mut child_instantiations = Vec::new();
         // An instance belongs to the innermost generate block around it.
         let mut blocks = Vec::new();
+        // The generate blocks that are a single item without `begin`.
+        let mut bare_blocks = HashSet::default();
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             if let RefNode::GenerateBlock(block) = node {
-                blocks.extend(file.node_span(RefNode::GenerateBlock(block)));
+                let span = file.node_span(RefNode::GenerateBlock(block));
+                blocks.extend(span);
+                if let (Some(span), sv_parser::GenerateBlock::GenerateItem(_)) = (span, block) {
+                    bare_blocks.insert(span);
+                }
             }
         }
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
@@ -1551,8 +1606,19 @@ impl<'a> Design<'a> {
                     &dimensions,
                     &overrides,
                     file,
+                    module_span.0,
                     &|span| render(span, &references),
                 )?);
+            }
+            // The items replacing the bare item of a generate construct
+            // need a block to stay in it.
+            if blocks
+                .iter()
+                .filter(|block| block.0 <= statement.0 && statement.1 <= block.1)
+                .min_by_key(|block| block.1 - block.0)
+                .is_some_and(|block| bare_blocks.contains(block))
+            {
+                text = format!("begin\n    {text}\n    end");
             }
             edits.push(Edit {
                 span: statement,
@@ -1772,7 +1838,11 @@ impl<'a> Design<'a> {
                         "localparam type {}",
                         interface.render(interface_file, *span, &rename)
                     )),
-                    HeaderForm::Import { unit: true, .. } if interface.file == module.file => {}
+                    // A compilation-unit import before the module is
+                    // already visible in it.
+                    HeaderForm::Import {
+                        unit: true, span, ..
+                    } if interface.file == module.file && span.1 <= module.span.0 => {}
                     HeaderForm::Import { span, .. } => {
                         let import = interface_file.text(*span).to_string();
                         if !header_imports.contains(&import) {
@@ -1911,7 +1981,8 @@ impl<'a> Design<'a> {
     }
 
     /// The items of interface `interface` for an instance `instance` with
-    /// unpacked `dimensions` and parameter `overrides` (already rendered).
+    /// unpacked `dimensions` and parameter `overrides` (already rendered),
+    /// in a module of `file` that starts at `scope_start`.
     fn instance_text(
         &self,
         interface: &InterfaceDecl,
@@ -1919,6 +1990,7 @@ impl<'a> Design<'a> {
         dimensions: &[(Span, &sv_parser::UnpackedDimension)],
         overrides: &[(String, String)],
         file: &File<'_>,
+        scope_start: usize,
         render: &dyn Fn(Span) -> String,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
@@ -1972,9 +2044,12 @@ impl<'a> Design<'a> {
                     ));
                 }
                 Item::Constant {
-                    header: HeaderForm::Import { unit: true, .. },
+                    header:
+                        HeaderForm::Import {
+                            unit: true, span, ..
+                        },
                     ..
-                } if std::ptr::eq(file, interface_file) => {}
+                } if std::ptr::eq(file, interface_file) && span.1 <= scope_start => {}
                 Item::Constant { span, .. } => {
                     // A localparam of the parameter port list has no `;`.
                     let mut constant = interface.render(interface_file, *span, &plain);
@@ -2148,6 +2223,7 @@ fn written_arguments(
     handle_interface: &dyn Fn(&str) -> Option<String>,
     file: &File<'_>,
     subroutines: &HashMap<String, Vec<(Scope, SubroutinePorts)>>,
+    imports: &[(String, Option<String>)],
     writes: &mut HashSet<usize>,
 ) -> Result<(), AnalyzerError> {
     let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
@@ -2160,8 +2236,8 @@ fn written_arguments(
     };
     // The declarations the call can refer to: of the named package, of an
     // interface for a call through a handle, or of the calling module or
-    // interface itself, and
-    // otherwise of a package or the compilation unit.
+    // interface itself, and otherwise of the compilation unit or a package
+    // that `imports` import it from.
     let in_scope = |filter: &dyn Fn(&Scope) -> bool| -> Vec<&SubroutinePorts> {
         declared
             .iter()
@@ -2185,7 +2261,13 @@ fn written_arguments(
     } else {
         let own = in_scope(&|scope| scope == local);
         if own.is_empty() {
-            in_scope(&|scope| matches!(scope, Scope::Package(_) | Scope::Unit))
+            in_scope(&|scope| match scope {
+                Scope::Package(package) => imports.iter().any(|(imported, item)| {
+                    imported == package && item.as_ref().is_none_or(|item| *item == callee)
+                }),
+                Scope::Unit => true,
+                _ => false,
+            })
         } else {
             own
         }
@@ -2243,6 +2325,27 @@ fn written_arguments(
         }
     }
     Ok(())
+}
+
+/// The compilation-unit package imports of `file` and what they import.
+fn unit_imports(
+    file: &File<'_>,
+) -> Result<Vec<(Span, Vec<(String, Option<String>)>)>, AnalyzerError> {
+    let scopes = Scope::collect(file)?;
+    let mut imports = Vec::new();
+    for node in &file.syntax_tree {
+        let RefNode::PackageImportDeclaration(import) = node else {
+            continue;
+        };
+        let span = file.span(RefNode::PackageImportDeclaration(import))?;
+        if Scope::of(span, &scopes) == Scope::Unit {
+            imports.push((
+                span,
+                imported_items(RefNode::PackageImportDeclaration(import), &file.syntax_tree)?,
+            ));
+        }
+    }
+    Ok(imports)
 }
 
 /// What the package imports under `root` import: `(package, item)`, with
@@ -2663,6 +2766,18 @@ impl InterfaceDecl {
         if !header.nodes.4.is_empty() {
             return Err(unsupported(format!(
                 "package import in the header of interface `{interface_name}`"
+            )));
+        }
+        // Enumerators are declared in the enclosing scope and would not be
+        // renamed per instance.
+        if unwrap_node!(
+            RefNode::InterfaceDeclarationAnsi(declaration),
+            EnumNameDeclaration
+        )
+        .is_some()
+        {
+            return Err(unsupported(format!(
+                "enum type in interface `{interface_name}`"
             )));
         }
         let mut interface = Self {
@@ -3138,14 +3253,6 @@ impl InterfaceDecl {
                         if !typedef.nodes.3.is_empty() {
                             return Err(unsupported(format!(
                                 "unpacked typedef in interface `{}`",
-                                self.name
-                            )));
-                        }
-                        if unwrap_node!(RefNode::DataType(&typedef.nodes.1), EnumNameDeclaration)
-                            .is_some()
-                        {
-                            return Err(unsupported(format!(
-                                "enum type in interface `{}`",
                                 self.name
                             )));
                         }

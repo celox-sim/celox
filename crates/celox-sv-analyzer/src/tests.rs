@@ -2924,6 +2924,81 @@ fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
 }
 
 #[test]
+fn keeps_generate_branches_imports_and_uncalled_writers_in_scope() {
+    let elaborated = elaborate(
+        r#"
+        package pa;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endpackage
+        package pb;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endpackage
+        interface I;
+            logic [7:0] x;
+            logic [7:0] y;
+            assign y = x + 1;
+            function automatic void set(input logic [7:0] v);
+                x = v;
+            endfunction
+            modport m(input x, import set);
+        endinterface
+        module R(I.m p, output logic [7:0] o);
+            assign o = p.x;
+        endmodule
+        module S(I p);
+            import pa::*;
+            always_comb touch(p.x);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o);
+            if (1) I h(); else I h();
+            for (genvar i = 0; i < 1; i++) I k();
+            I b();
+            assign b.x = v;
+            R r(.p(b), .o(o));
+            S s(.p(b));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // The items of a bare generate item stay in its branch.
+        "if (1) begin",
+        "end else begin",
+        "i++) begin",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    // `R` never calls `set`, and `pb::touch` is not imported into `S`.
+    assert!(
+        !elaborated.contains("output var logic [7:0] p$x"),
+        "{elaborated}"
+    );
+
+    // A compilation-unit import after a module is copied into it.
+    let elaborated = elaborate(
+        r#"
+        package pk; typedef logic [5:0] word_t; endpackage
+        module M(I p, output logic [5:0] o); assign o = p.x; endmodule
+        import pk::*;
+        interface I; word_t x; endinterface
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("module M import pk::*;"),
+        "{elaborated}"
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
@@ -3017,6 +3092,14 @@ fn rejects_unsupported_interface_uses() {
         (
             "interface I(input logic clk); endinterface",
             "ports of interface `I`",
+        ),
+        (
+            "interface I; enum {Idle, Busy} state; endinterface",
+            "enum type in interface `I`",
+        ),
+        (
+            "interface I; typedef enum {Idle, Busy} state_t; state_t state; endinterface",
+            "enum type in interface `I`",
         ),
         (
             "interface I; logic k; function automatic logic f(input logic k); return k; endfunction endinterface",

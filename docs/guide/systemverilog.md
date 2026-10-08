@@ -75,7 +75,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ports, modport `export` and clocking, tasks, type parameters, enums and
   instances inside an interface, a modport named in a connection to a port
   that does not declare one, calls of functions of an interface array,
-  writes through a port without a modport inside a generate construct or a
+  writes through a port without a modport, and calls through a port of an
+  imported function that writes members, inside a generate construct or a
   function or task, connections of a member of such a port to a module that
   is not declared with an ANSI header, calls from the logic of an interface instance array of a
   function that accesses members, declarations that reuse the name of an
