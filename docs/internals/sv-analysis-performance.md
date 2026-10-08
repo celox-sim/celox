@@ -206,11 +206,13 @@ cargo doc --locked -p celox-sv-analyzer -p celox-frontend-sv --no-deps
 pnpm docs:build
 ```
 
-The type-query follow-up also validates the suite catalogue and the new shared
-case with both available independent simulators:
+The type-query follow-up also validates the suite catalogue, including the
+retained-report integration tests, and the new shared case with both available
+independent simulators. Add each new case's observed results to both retained
+reports under `crates/celox-test-suite/verification/sv` and recompute their counts:
 
 ```sh
-cargo test --locked -p celox-test-suite --lib --features verilator,icarus
+cargo test --locked -p celox-test-suite --features verilator,icarus
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-verilator -- --filter generate::size_queries_use_generate_local_parameter_types
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-icarus -- --filter generate::size_queries_use_generate_local_parameter_types
 ```
