@@ -57,11 +57,12 @@ const RUST_ONLY_CRATES = new Set([
 
 function isRustOnlyPath(path) {
   if (/(?:^|\/)Cargo\.(?:toml|lock)$/.test(path)) return false;
-  if (path.startsWith("lydite/")) return true;
+  if (startsWithAny(path, ["lydite/", "conformance/"])) return true;
   const crate = /^crates\/([^/]+)\/(.+)$/.exec(path);
   if (!crate) return false;
   return (
-    RUST_ONLY_CRATES.has(crate[1]) || /^(?:tests|benches)\//.test(crate[2])
+    RUST_ONLY_CRATES.has(crate[1]) ||
+    /^(?:tests|benches|examples)\//.test(crate[2])
   );
 }
 

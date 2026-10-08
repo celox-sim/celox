@@ -309,6 +309,45 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  sv-tests:
+    name: sv-tests conformance
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch the pinned sv-tests revision
+        run: |
+          revision="$(cat conformance/sv-tests/revision)"
+          git init -q "$RUNNER_TEMP/sv-tests"
+          git -C "$RUNNER_TEMP/sv-tests" fetch -q --depth 1 \
+            https://github.com/chipsalliance/sv-tests.git "$revision"
+          git -C "$RUNNER_TEMP/sv-tests" checkout -q FETCH_HEAD
+
+      # Any change from the retained results fails, improvements included, so
+      # that the expectations follow the frontend.
+      - name: Compare elaboration results with the retained expectations
+        run: >-
+          cargo run --locked --release -p celox --features systemverilog
+          --example sv_tests -- "$RUNNER_TEMP/sv-tests/tests"
+          --expected conformance/sv-tests/expected.tsv
+          --report "$RUNNER_TEMP/sv-tests-report.tsv"
+
+      - name: Retain the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sv-tests-report
+          path: ${{ runner.temp }}/sv-tests-report.tsv
+          if-no-files-found: ignore
+          retention-days: 14
+
   napi-linux:
     name: NAPI Build (Linux x64)
     needs: changes
@@ -409,13 +448,14 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, sv-tests, napi-linux, napi-wasm, external-suites]
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
+      SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
@@ -429,6 +469,9 @@ jobs:
           test "$CHANGES_RESULT" = success
           if [ "$RUST_REQUIRED" != false ] || [ "$RUST_RESULT" != skipped ]; then
             test "$RUST_RESULT" = success
+          fi
+          if [ "$RUST_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
+            test "$SV_TESTS_RESULT" = success
           fi
           if [ "$NAPI_REQUIRED" != false ] || [ "$NATIVE_RESULT" != skipped ]; then
             test "$NATIVE_RESULT" = success
@@ -685,6 +728,7 @@ jobs:
         docs,
         lint,
         rust-tests,
+        sv-tests,
         external-suites,
         napi-linux,
         napi-wasm,
