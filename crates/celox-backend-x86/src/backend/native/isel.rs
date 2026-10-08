@@ -11,6 +11,7 @@
 mod bit_count;
 mod concat;
 mod dynamic_load_cache;
+mod extern_call;
 mod four_state;
 mod instruction;
 mod memory;
@@ -1484,20 +1485,7 @@ pub fn lower_execution_unit_with_diagnostics(
             }
 
             // Track known bit width for redundant mask elimination.
-            let dst_reg = match inst {
-                SIRInstruction::Imm(d, _)
-                | SIRInstruction::Binary(d, _, _, _)
-                | SIRInstruction::Unary(d, _, _)
-                | SIRInstruction::Load(d, _, _, _)
-                | SIRInstruction::Concat(d, _)
-                | SIRInstruction::Slice(d, _, _, _)
-                | SIRInstruction::Mux(d, _, _, _) => Some(*d),
-                SIRInstruction::Store(..)
-                | SIRInstruction::Commit(..)
-                | SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-            };
+            let dst_reg = inst.defined_register();
             if let Some(dr) = dst_reg {
                 let w = ctx.sir_width(&dr);
                 if w <= 64 {

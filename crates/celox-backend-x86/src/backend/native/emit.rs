@@ -14,6 +14,7 @@
 mod arithmetic;
 mod control_flow;
 mod diagnostics;
+mod extern_call;
 mod folded_operands;
 mod instruction;
 mod memory;
@@ -83,9 +84,20 @@ struct NativeArenaLayout {
     loop_gpr_save_base: Option<i32>,
     loop_segment_save: Option<i32>,
     loop_xmm15_save: Option<i32>,
+    /// Arguments, result and vector-register save area of extern calls,
+    /// present when the function calls an extern function.
+    call_area: Option<i32>,
     total_size: u32,
     callee_saved: Vec<PhysReg>,
 }
+
+/// Offset of the result slot in the extern call area, after the argument
+/// slots.
+pub(super) const CALL_AREA_RESULT: i32 = celox_sir::MAX_EXTERN_CALL_ARGUMENTS as i32 * 8;
+/// Offset of the save area for the low qwords of XMM0-XMM15 in the extern
+/// call area.
+pub(super) const CALL_AREA_XMM_SAVE: i32 = CALL_AREA_RESULT + 8;
+const CALL_AREA_SIZE: usize = CALL_AREA_XMM_SAVE as usize + 16 * 8;
 
 impl NativeArenaLayout {
     fn build(
@@ -182,39 +194,29 @@ impl NativeArenaLayout {
                 "native loop XMM15 save area overflows",
             )
         })?;
-        let total_size = align16(
+        let overflow = |what: &'static str| {
+            EmitInputError::new("EMIT.NATIVE_ARENA_RANGE", None, None, None, what)
+        };
+        let loop_save_size = usize::from(tick_loop)
+            * (8 + callee_saved
+                .len()
+                .checked_mul(8)
+                .ok_or_else(|| overflow("native loop save area overflows"))?
+                + usize::from(cfg!(target_os = "windows")) * 16);
+        let loop_save_end = align16(
             loop_save_base
-                .checked_add(
-                    usize::from(tick_loop)
-                        * (8 + callee_saved.len().checked_mul(8).ok_or_else(|| {
-                            EmitInputError::new(
-                                "EMIT.NATIVE_ARENA_RANGE",
-                                None,
-                                None,
-                                None,
-                                "native loop save area overflows",
-                            )
-                        })? + usize::from(cfg!(target_os = "windows")) * 16),
-                )
-                .ok_or_else(|| {
-                    EmitInputError::new(
-                        "EMIT.NATIVE_ARENA_RANGE",
-                        None,
-                        None,
-                        None,
-                        "native loop save area overflows",
-                    )
-                })?,
+                .checked_add(loop_save_size)
+                .ok_or_else(|| overflow("native loop save area overflows"))?,
         )
-        .ok_or_else(|| {
-            EmitInputError::new(
-                "EMIT.NATIVE_ARENA_RANGE",
-                None,
-                None,
-                None,
-                "native arena alignment overflows",
-            )
-        })?;
+        .ok_or_else(|| overflow("native arena alignment overflows"))?;
+        let calls_extern = func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|inst| matches!(inst, MInst::CallExtern { .. }));
+        let total_size = loop_save_end
+            .checked_add(usize::from(calls_extern) * CALL_AREA_SIZE)
+            .ok_or_else(|| overflow("native extern call area overflows"))?;
 
         let to_i32 = |value: usize, what: &'static str| {
             i32::try_from(value).map_err(|_| {
@@ -239,6 +241,9 @@ impl NativeArenaLayout {
                 .transpose()?,
             loop_xmm15_save: (tick_loop && cfg!(target_os = "windows"))
                 .then(|| to_i32(loop_xmm15_save, "native loop XMM15 save"))
+                .transpose()?,
+            call_area: calls_extern
+                .then(|| to_i32(loop_save_end, "native extern call area"))
                 .transpose()?,
             total_size: u32::try_from(total_size).map_err(|_| {
                 EmitInputError::new(
@@ -1068,6 +1073,28 @@ fn emit_planned(
     debug_assert!(arena.scratch_size >= 4 * 8);
     ACTIVE_SPILL_BASE.with(|base| base.set(arena.spill_base));
     ACTIVE_SCRATCH_BASE.with(|base| base.set(arena.scratch_base));
+    // XMM15 holds the tick count or the caller's segment base, and
+    // XMM9-XMM14 the callee-saved GPRs stashed outside a tick loop.
+    let mut pinned_xmms = 0u16;
+    if tick_loop || state_base != StateBaseStrategy::R15 {
+        pinned_xmms |= 1 << 15;
+    }
+    if arena.loop_gpr_save_base.is_none() {
+        for index in 0..arena.callee_saved.len() {
+            pinned_xmms |= 1 << (9 + index);
+        }
+    }
+    extern_call::set_active_call_area(
+        arena.call_area,
+        match (tick_loop, state_base) {
+            (_, StateBaseStrategy::R15) => extern_call::CallerSegment::None,
+            (false, _) => extern_call::CallerSegment::Xmm15,
+            (true, _) => extern_call::CallerSegment::Arena(
+                arena.loop_segment_save.expect("loop segment save"),
+            ),
+        },
+        pinned_xmms,
+    );
     ACTIVE_STATE_BASE.with(|active| active.set(state_base));
 
     let mut epilogue_label = asm.create_label();

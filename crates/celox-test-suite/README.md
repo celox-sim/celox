@@ -3,7 +3,7 @@
 Reusable language tests for compiler and simulator implementations, in two
 suites that share one adapter contract and one script language:
 
-- [`veryl`](src/veryl): 712 Veryl cases (`src/veryl/cases/*.vtest`);
+- [`veryl`](src/veryl): 737 Veryl cases (`src/veryl/cases/*.vtest`);
 - [`sv`](src/sv): SystemVerilog cases (`src/sv/cases/*.vtest`).
 
 Each case's sources, input sequence, and assertions live together in a script
@@ -293,6 +293,13 @@ cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
   --report crates/celox-test-suite/verification/icarus.json
 python3 crates/celox-test-suite/scripts/summarize.py
 
+# Reuse unchanged successful cases; new, changed and failed cases run again.
+# The first run (or a report without fingerprints) establishes the baseline.
+cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
+  --incremental --jobs 8 --report crates/celox-test-suite/verification/verilator.json
+cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
+  --incremental --jobs 8 --report crates/celox-test-suite/verification/icarus.json
+
 # Reproduce one case; omit --report to preserve the complete retained report:
 cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
   --filter four_state::test_four_state_initial_and_set --jobs 1
@@ -305,12 +312,46 @@ cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
 cargo test -p celox-test-suite --all-features --test oracles -- --ignored
 ```
 
-Normal verification excludes the reviewed limitations. The newly reconstructed
-upstream cases retain three Icarus compilation failures (`inside` expressions and
-unpacked array parameters), so a full Icarus run currently exits nonzero.
-See [the upstream case notes](UPSTREAM_CASES.md) for details. New failures still
+`--incremental` is available on all four Veryl/SystemVerilog runners. Its baseline
+is `--report` when supplied, otherwise `<output>/results.json`. Only unchanged
+`passed` and `rejected` results are reused; previous failures are retried, and
+ignored/unsupported cases are classified again. Deleted cases disappear from
+the next report. Reuse does not require old simulator build directories.
+
+Each fingerprint covers HDL sources (including resolved standard library
+parts), stimulus, assertions, parameters, state mode, and the reviewed tool
+exclusion. Moving a case in its script does not invalidate it. Changes to the
+compiled verifier, resolved dependency versions/features, local dependency
+sources, workspace manifests/lockfile, tools, compiler flags, or
+`--include-ignored` invalidate reuse. If tool/dependency identification is
+incomplete, the runner verifies the selection afresh. A malformed baseline
+report is an error, not evidence of a pass.
+
+Reports retain the original status and `verified_at_unix` for reused cases, mark
+them with `reused: true`, and count fresh/reused results separately in
+`run_counts`. This distinguishes previous evidence from assertions executed in
+this invocation. `--filter` and `--exclude-stronger-than-sv` still limit the
+report to the selected cases; omit them when refreshing a complete report.
+Use a separate report for a filtered run to preserve an existing full baseline.
+Omit `--incremental` to force a fresh run. Daily CI does so intentionally.
+
+Normal verification excludes the reviewed limitations. The retained Veryl
+reports contain eleven Icarus compilation failures and one Verilator compilation
+failure, including upstream `inside` expressions and unpacked array parameters.
+Fresh runs still exit nonzero when these failures persist.
+See [the verification results](verification/README.md) and
+[upstream case notes](UPSTREAM_CASES.md) for details. New failures still
 produce a nonzero exit. Run the two
 commands independently so a failure in one does not prevent the other running.
+
+Daily CI still executes these cases. Its report gate compares failures against
+the checked-in reports: only an identical retained failure (case, expectation,
+status, phase, diagnostic and tool version) is accepted.
+Diagnostic comparison ignores outer line whitespace and line endings to allow
+checkout-dependent alignment; wording and source locations must match.
+The raw runner exit status and complete fresh catalogue are checked as well.
+New/changed failures remain blocking, and accepted failures remain visible in the report rather
+than becoming passes or additional exclusions.
 
 Both require a C++ compiler and GNU `timeout` on `PATH`. Verilator additionally
 needs GNU make; Icarus needs `iverilog`, `iverilog-vpi`, and `vvp`. The Nix dev

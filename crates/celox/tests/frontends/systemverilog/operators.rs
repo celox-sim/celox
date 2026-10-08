@@ -134,4 +134,8 @@ sv_backends! {
     fn negates_wide_systemverilog_values(sim) {
         @case "operators::negates_wide_systemverilog_values";
     }
+
+    fn unknown_logical_operand_evaluates_effectful_right_operand(sim) {
+        @case "operators::unknown_logical_operand_evaluates_effectful_right_operand";
+    }
 }

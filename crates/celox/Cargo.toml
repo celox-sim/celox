@@ -23,6 +23,8 @@ host-runtime = [
     "celox-sir-opt/timing",
 ]
 systemverilog = ["dep:celox-frontend-sv"]
+# Accept SystemVerilog DPI-C imports, linked to C functions at build time.
+sv-dpi = ["systemverilog", "celox-frontend-sv/dpi"]
 arm64-codegen = ["host-runtime", "dep:celox-backend-arm64"]
 x86_64-codegen = [
     "host-runtime",
@@ -112,6 +114,11 @@ harness = false
 name = "systemverilog"
 path = "tests/systemverilog.rs"
 required-features = ["systemverilog"]
+
+[[test]]
+name = "sv_dpi"
+path = "tests/sv_dpi.rs"
+required-features = ["sv-dpi"]
 
 [[bench]]
 name = "compilation"

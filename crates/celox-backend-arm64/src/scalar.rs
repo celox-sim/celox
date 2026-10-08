@@ -26,6 +26,7 @@ const STATE_REG: u8 = 0;
 mod tests;
 
 mod blocks;
+mod extern_call;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
 // x28 is reserved as the base of the target-owned spill frame.  Keeping the
@@ -511,6 +512,13 @@ fn emit_function_with_branches(
     for &(register, page) in state_pages.secondary.iter().flatten() {
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
+    let call_saves = extern_call::call_saves(function, assignment)?;
+    // d29 holds the state pointer and d31 the tick count in a tick loop.
+    let pinned_fp: &[u8] = match (tick_loop, tick_counter_in_fp) {
+        (false, _) => &[],
+        (true, false) => &[29],
+        (true, true) => &[29, 31],
+    };
     for (block_index, block) in emission_blocks.iter().enumerate() {
         let next_block = emission_blocks.get(block_index + 1).map(|block| block.id);
         let label = block_labels[&block.id];
@@ -519,7 +527,19 @@ fn emit_function_with_branches(
             ; .arch aarch64
             ; =>label
         );
-        for instruction in &block.insts {
+        for (index, instruction) in block.insts.iter().enumerate() {
+            if let MInst::CallExtern { dst, func, args } = instruction {
+                extern_call::emit_call_extern(
+                    &mut ops,
+                    assignment,
+                    *dst,
+                    *func,
+                    args,
+                    &call_saves[&(block.id, index)],
+                    pinned_fp,
+                )?;
+                continue;
+            }
             emit_instruction(
                 &mut ops,
                 instruction,
@@ -629,6 +649,7 @@ fn emit_instruction(
 ) -> Result<(), EmitError> {
     let is_next = |target| next_block.is_some_and(|next| labels[&next] == labels[&target]);
     match instruction {
+        MInst::CallExtern { .. } => unreachable!("the block loop emits extern calls"),
         MInst::Mov { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             if dst != src {

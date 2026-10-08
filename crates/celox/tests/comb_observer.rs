@@ -2324,6 +2324,10 @@ module Top (
 
 fn test_outputless_statement_call_after_loop_return_stays_inactive(sim) {
     @omit_veryl;
+    // The SV frontend rejects this run-time-bound loop: it cannot unroll it
+    // ("loop condition that depends on run-time values"), and it does not
+    // support `$display` inside a folded combinational loop. The rejection is
+    // covered by `run_time_bound_loop_return_reports_unsupported_on_a_small_stack`.
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (

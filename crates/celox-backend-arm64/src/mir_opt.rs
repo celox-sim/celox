@@ -691,9 +691,10 @@ fn propagate_exact_copies(function: &mut MFunction) {
             }
         }
         block.insts.retain(|instruction| {
-            instruction
-                .def()
-                .is_none_or(|dst| !aliases.contains_key(&dst))
+            instruction.has_side_effects()
+                || instruction
+                    .def()
+                    .is_some_and(|dst| !aliases.contains_key(&dst))
         });
     }
 }
@@ -718,9 +719,10 @@ fn dead_code_eliminate(function: &mut MFunction) {
         for block in &mut function.blocks {
             let before = block.insts.len();
             block.insts.retain(|instruction| {
-                instruction
-                    .def()
-                    .is_none_or(|definition| used.contains(&definition))
+                instruction.has_side_effects()
+                    || instruction
+                        .def()
+                        .is_some_and(|definition| used.contains(&definition))
             });
             removed |= before != block.insts.len();
             let before = block.phis.len();

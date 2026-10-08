@@ -32,6 +32,9 @@ pub(super) fn lower_instruction(
         return;
     }
     match inst {
+        SIRInstruction::ExternCall { dst, func, args } => {
+            extern_call::lower_extern_call(ctx, block, *dst, *func, args);
+        }
         SIRInstruction::RuntimeEvent { site_id, args } => {
             let event_ptr = load_runtime_event_ptr(ctx, block);
             lower_runtime_event_write(ctx, block, event_ptr, *site_id, args);

@@ -69,6 +69,31 @@
   "reason": "Instance arrays are unsupported by the Celox Veryl frontend; Celox ignores this case on every backend (crates/celox/tests/hierarchy.rs).",
   "panic": "compile hierarchy::test_instance_array_broadcast_and_unpacked_array_connection: lower: IllegalContext { feature: \"output port destination\", detail: \"destination slice 0..8 does not fit output width 4\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\nmodule Child (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>\\n) {\\nassign y = if en ? ~a : a;\\n}\\nmodule Top (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>[2]\\n) {\\ninst u: Child [2] (\\na,\\nen,\\ny,\\n);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(210), length: 1 } }) }"
  },
+ "interface::test_generic_interface_port": {
+  "kind": "celox_unsupported",
+  "reason": "The Celox frontend reports generic interface ports as Unsupported (#1088): the analyzer IR keeps them abstract, so their forwarding connections cannot be lowered.",
+  "panic": "compile interface::test_generic_interface_port: lower: Unsupported { issue: 1088, phase: SimulatorParser, feature: \"generic interface port\", detail: \"module ClientPass port bus\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\ninterface Link {\\n    var req : logic<8>;\\n    var resp: logic<8>;\\n    modport client {\\n        req : output,\\n        resp: input,\\n    }\\n    modport server {\\n        ..converse(client)\\n    }\\n}\\nmodule Client (\\n    bus : modport Link::client,\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    assign bus.req = x;\\n    assign resp    = bus.resp;\\n}\\nmodule ClientPass (\\n    bus : interface::client,\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    inst u: Client (bus, x, resp);\\n}\\nmodule Server (\\n    bus: modport Link::server,\\n) {\\n    assign bus.resp = ~bus.req;\\n}\\nmodule ServerPass (\\n    bus: interface,\\n) {\\n    inst u: Server (bus);\\n}\\nmodule Top (\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    inst l: Link;\\n    inst c: ClientPass (bus: l, x, resp);\\n    inst s: ServerPass (bus: l);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(362), length: 10 } }) }"
+ },
+ "interface::test_interface_always_comb_packed_array_member": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_always_comb_packed_array_member at 142:3: assert_eq q: expected 0x11, got 0x0"
+ },
+ "interface::test_interface_always_ff_on_member_clock": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_always_ff_on_member_clock at 200:3: assert_eq count: expected 0x3, got 0x0"
+ },
+ "interface::test_interface_continuous_assign_logic": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_continuous_assign_logic at 92:3: assert_eq total: expected 0x12c, got 0x0"
+ },
+ "interface::test_interface_param_and_const": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_param_and_const at 1124:3: assert_eq f12: expected 0x1, got 0x0"
+ },
  "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops": {
   "kind": "veryl_language_restriction",
   "reason": "Veryl rejects a negative constant for-range bound (InvalidForRange::NegativeBound).",

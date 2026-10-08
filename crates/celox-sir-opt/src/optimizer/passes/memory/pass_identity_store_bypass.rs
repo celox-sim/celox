@@ -204,6 +204,59 @@ pub(crate) fn remove_final_identity_alias_stores(
     });
 }
 
+/// Name every stable-region access of a merged alias by its canonical
+/// address.
+///
+/// Once the layout gives both addresses one home they denote the same bytes,
+/// but address-keyed analyses would still treat a Store to the canonical
+/// address and a Load of the alias as independent: dead-store elimination
+/// could drop the Store, and a lane task merging both units could move the
+/// Load above it.
+pub(crate) fn redirect_final_alias_accesses(
+    program: &mut OptimizationContext,
+    aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+) {
+    if aliases.is_empty() {
+        return;
+    }
+    let redirect = |address: &mut RegionedAbsoluteAddr| {
+        if address.region == STABLE_REGION
+            && let Some(&canonical) = aliases.get(&address.absolute_addr())
+        {
+            *address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, canonical);
+        }
+    };
+    let sir = &mut *program.sir;
+    let units = sir
+        .eval_comb
+        .iter_mut()
+        .chain(sir.eval_apply_ffs.values_mut().flatten())
+        .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
+        .chain(sir.eval_only_ffs.values_mut().flatten())
+        .chain(sir.apply_ffs.values_mut().flatten())
+        .chain(
+            sir.parallel
+                .iter_mut()
+                .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
+        );
+    for unit in units {
+        for block in unit.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                match instruction {
+                    SIRInstruction::Load(_, address, ..) | SIRInstruction::Store(address, ..) => {
+                        redirect(address);
+                    }
+                    SIRInstruction::Commit(source, destination, ..) => {
+                        redirect(source);
+                        redirect(destination);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn retain_aliases_valid_for_units(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,

@@ -6,37 +6,37 @@ expression: output
 === Native function eval_comb ===
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
-  v3 = load.i32 [sim + 40]
-  v5 = load.i32 [sim + 44]
-  v7 = load.i32 [sim + 48]
-  v9 = load.i32 [sim + 52]
-  v11 = load.i32 [sim + 56]
-  v13 = load.i32 [sim + 60]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
+  v3 = load.i32 [sim + 48]
+  v5 = load.i32 [sim + 52]
+  v7 = load.i32 [sim + 56]
+  v9 = load.i32 [sim + 60]
+  v11 = load.i32 [sim + 64]
+  v13 = load.i32 [sim + 68]
   v2 = xor.w32 v0, v1
-  v15 = load.i32 [sim + 64]
-  v17 = load.i32 [sim + 68]
+  v15 = load.i32 [sim + 72]
+  v17 = load.i32 [sim + 76]
   v4 = xor.w32 v2, v3
-  v19 = load.i32 [sim + 72]
+  v19 = load.i32 [sim + 80]
   v6 = xor.w32 v4, v5
-  v21 = load.i32 [sim + 76]
+  v21 = load.i32 [sim + 84]
   v8 = xor.w32 v6, v7
-  v23 = load.i32 [sim + 80]
+  v23 = load.i32 [sim + 88]
   v10 = xor.w32 v8, v9
-  v25 = load.i32 [sim + 84]
+  v25 = load.i32 [sim + 92]
   v12 = xor.w32 v10, v11
-  v27 = load.i32 [sim + 88]
+  v27 = load.i32 [sim + 96]
   v14 = xor.w32 v12, v13
-  v29 = load.i32 [sim + 92]
+  v29 = load.i32 [sim + 100]
   v16 = xor.w32 v14, v15
-  v31 = load.i32 [sim + 96]
+  v31 = load.i32 [sim + 104]
   v18 = xor.w32 v16, v17
-  v33 = load.i32 [sim + 100]
+  v33 = load.i32 [sim + 108]
   v20 = xor.w32 v18, v19
-  v35 = load.i32 [sim + 104]
+  v35 = load.i32 [sim + 112]
   v22 = xor.w32 v20, v21
-  v37 = load.i32 [sim + 108]
+  v37 = load.i32 [sim + 116]
   v24 = xor.w32 v22, v23
   v26 = xor.w32 v24, v25
   v28 = xor.w32 v26, v27
@@ -45,81 +45,81 @@ bb0:
   v34 = xor.w32 v32, v33
   v36 = xor.w32 v34, v35
   v38 = xor.w32 v36, v37
-  store.i32 [sim + 192], v38
+  store.i32 [sim + 200], v38
   v39 = add.w32 v38, v0
-  store.i32 [sim + 112], v39
+  store.i32 [sim + 120], v39
   v40 = add.w32 v38, v1
-  store.i32 [sim + 116], v40
+  store.i32 [sim + 124], v40
   v41 = add.w32 v38, v3
-  store.i32 [sim + 120], v41
+  store.i32 [sim + 128], v41
   v42 = add.w32 v38, v5
-  store.i32 [sim + 124], v42
+  store.i32 [sim + 132], v42
   v43 = add.w32 v38, v7
-  store.i32 [sim + 128], v43
+  store.i32 [sim + 136], v43
   v44 = add.w32 v38, v9
-  store.i32 [sim + 132], v44
+  store.i32 [sim + 140], v44
   v45 = add.w32 v38, v11
-  store.i32 [sim + 136], v45
+  store.i32 [sim + 144], v45
   v46 = add.w32 v38, v13
-  store.i32 [sim + 140], v46
+  store.i32 [sim + 148], v46
   v47 = add.w32 v38, v15
-  store.i32 [sim + 144], v47
+  store.i32 [sim + 152], v47
   v48 = add.w32 v38, v17
-  store.i32 [sim + 148], v48
+  store.i32 [sim + 156], v48
   v49 = add.w32 v38, v19
-  store.i32 [sim + 152], v49
+  store.i32 [sim + 160], v49
   v50 = add.w32 v38, v21
-  store.i32 [sim + 156], v50
+  store.i32 [sim + 164], v50
   v51 = add.w32 v38, v23
-  store.i32 [sim + 160], v51
+  store.i32 [sim + 168], v51
   v52 = add.w32 v38, v25
-  store.i32 [sim + 164], v52
+  store.i32 [sim + 172], v52
   v53 = add.w32 v38, v27
-  store.i32 [sim + 168], v53
+  store.i32 [sim + 176], v53
   v54 = add.w32 v38, v29
-  store.i32 [sim + 172], v54
+  store.i32 [sim + 180], v54
   v55 = add.w32 v38, v31
-  store.i32 [sim + 176], v55
+  store.i32 [sim + 184], v55
   v56 = add.w32 v38, v33
-  store.i32 [sim + 180], v56
+  store.i32 [sim + 188], v56
   v57 = add.w32 v38, v35
-  store.i32 [sim + 184], v57
+  store.i32 [sim + 192], v57
   v58 = add.w32 v38, v37
-  store.i32 [sim + 188], v58
+  store.i32 [sim + 196], v58
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
-  v3 = load.i32 [sim + 40]
-  v5 = load.i32 [sim + 44]
-  v7 = load.i32 [sim + 48]
-  v9 = load.i32 [sim + 52]
-  v11 = load.i32 [sim + 56]
-  v13 = load.i32 [sim + 60]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
+  v3 = load.i32 [sim + 48]
+  v5 = load.i32 [sim + 52]
+  v7 = load.i32 [sim + 56]
+  v9 = load.i32 [sim + 60]
+  v11 = load.i32 [sim + 64]
+  v13 = load.i32 [sim + 68]
   v2 = xor.w32 v0, v1
-  v15 = load.i32 [sim + 64]
-  v17 = load.i32 [sim + 68]
+  v15 = load.i32 [sim + 72]
+  v17 = load.i32 [sim + 76]
   v4 = xor.w32 v2, v3
-  v19 = load.i32 [sim + 72]
+  v19 = load.i32 [sim + 80]
   v6 = xor.w32 v4, v5
-  v21 = load.i32 [sim + 76]
+  v21 = load.i32 [sim + 84]
   v8 = xor.w32 v6, v7
-  v23 = load.i32 [sim + 80]
+  v23 = load.i32 [sim + 88]
   v10 = xor.w32 v8, v9
-  v25 = load.i32 [sim + 84]
+  v25 = load.i32 [sim + 92]
   v12 = xor.w32 v10, v11
-  v27 = load.i32 [sim + 88]
+  v27 = load.i32 [sim + 96]
   v14 = xor.w32 v12, v13
-  v29 = load.i32 [sim + 92]
+  v29 = load.i32 [sim + 100]
   v16 = xor.w32 v14, v15
-  v31 = load.i32 [sim + 96]
+  v31 = load.i32 [sim + 104]
   v18 = xor.w32 v16, v17
-  v33 = load.i32 [sim + 100]
+  v33 = load.i32 [sim + 108]
   v20 = xor.w32 v18, v19
-  v35 = load.i32 [sim + 104]
+  v35 = load.i32 [sim + 112]
   v22 = xor.w32 v20, v21
-  v37 = load.i32 [sim + 108]
+  v37 = load.i32 [sim + 116]
   v24 = xor.w32 v22, v23
   v26 = xor.w32 v24, v25
   v28 = xor.w32 v26, v27
@@ -128,220 +128,220 @@ bb0:
   v34 = xor.w32 v32, v33
   v36 = xor.w32 v34, v35
   v38 = xor.w32 v36, v37
-  store.i32 [sim + 192], v38
+  store.i32 [sim + 200], v38
   v39 = add.w32 v38, v0
-  store.i32 [sim + 112], v39
+  store.i32 [sim + 120], v39
   v40 = add.w32 v38, v1
-  store.i32 [sim + 116], v40
+  store.i32 [sim + 124], v40
   v41 = add.w32 v38, v3
-  store.i32 [sim + 120], v41
+  store.i32 [sim + 128], v41
   v42 = add.w32 v38, v5
-  store.i32 [sim + 124], v42
+  store.i32 [sim + 132], v42
   v43 = add.w32 v38, v7
-  store.i32 [sim + 128], v43
+  store.i32 [sim + 136], v43
   v44 = add.w32 v38, v9
-  store.i32 [sim + 132], v44
+  store.i32 [sim + 140], v44
   v45 = add.w32 v38, v11
-  store.i32 [sim + 136], v45
+  store.i32 [sim + 144], v45
   v46 = add.w32 v38, v13
-  store.i32 [sim + 140], v46
+  store.i32 [sim + 148], v46
   v47 = add.w32 v38, v15
-  store.i32 [sim + 144], v47
+  store.i32 [sim + 152], v47
   v48 = add.w32 v38, v17
-  store.i32 [sim + 148], v48
+  store.i32 [sim + 156], v48
   v49 = add.w32 v38, v19
-  store.i32 [sim + 152], v49
+  store.i32 [sim + 160], v49
   v50 = add.w32 v38, v21
-  store.i32 [sim + 156], v50
+  store.i32 [sim + 164], v50
   v51 = add.w32 v38, v23
-  store.i32 [sim + 160], v51
+  store.i32 [sim + 168], v51
   v52 = add.w32 v38, v25
-  store.i32 [sim + 164], v52
+  store.i32 [sim + 172], v52
   v53 = add.w32 v38, v27
-  store.i32 [sim + 168], v53
+  store.i32 [sim + 176], v53
   v54 = add.w32 v38, v29
-  store.i32 [sim + 172], v54
+  store.i32 [sim + 180], v54
   v55 = add.w32 v38, v31
-  store.i32 [sim + 176], v55
+  store.i32 [sim + 184], v55
   v56 = add.w32 v38, v33
-  store.i32 [sim + 180], v56
+  store.i32 [sim + 188], v56
   v57 = add.w32 v38, v35
-  store.i32 [sim + 184], v57
+  store.i32 [sim + 192], v57
   v58 = add.w32 v38, v37
-  store.i32 [sim + 188], v58
+  store.i32 [sim + 196], v58
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v2 = xor.w32 v0, v1
-  v3 = load.i32 [sim + 40]
+  v3 = load.i32 [sim + 48]
   v4 = xor.w32 v2, v3
-  v5 = load.i32 [sim + 44]
+  v5 = load.i32 [sim + 52]
   v6 = xor.w32 v4, v5
-  v7 = load.i32 [sim + 48]
+  v7 = load.i32 [sim + 56]
   v8 = xor.w32 v6, v7
-  v9 = load.i32 [sim + 52]
+  v9 = load.i32 [sim + 60]
   v10 = xor.w32 v8, v9
-  v11 = load.i32 [sim + 56]
+  v11 = load.i32 [sim + 64]
   v12 = xor.w32 v10, v11
-  v13 = load.i32 [sim + 60]
+  v13 = load.i32 [sim + 68]
   v14 = xor.w32 v12, v13
-  v15 = load.i32 [sim + 64]
+  v15 = load.i32 [sim + 72]
   v16 = xor.w32 v14, v15
-  v17 = load.i32 [sim + 68]
+  v17 = load.i32 [sim + 76]
   v18 = xor.w32 v16, v17
-  v19 = load.i32 [sim + 72]
+  v19 = load.i32 [sim + 80]
   v20 = xor.w32 v18, v19
-  v21 = load.i32 [sim + 76]
+  v21 = load.i32 [sim + 84]
   v22 = xor.w32 v20, v21
-  v23 = load.i32 [sim + 80]
+  v23 = load.i32 [sim + 88]
   v24 = xor.w32 v22, v23
-  v25 = load.i32 [sim + 84]
+  v25 = load.i32 [sim + 92]
   v26 = xor.w32 v24, v25
-  v27 = load.i32 [sim + 88]
+  v27 = load.i32 [sim + 96]
   v28 = xor.w32 v26, v27
-  v29 = load.i32 [sim + 92]
+  v29 = load.i32 [sim + 100]
   v30 = xor.w32 v28, v29
-  v31 = load.i32 [sim + 96]
+  v31 = load.i32 [sim + 104]
   v32 = xor.w32 v30, v31
-  v33 = load.i32 [sim + 100]
+  v33 = load.i32 [sim + 108]
   v34 = xor.w32 v32, v33
-  v35 = load.i32 [sim + 104]
+  v35 = load.i32 [sim + 112]
   v36 = xor.w32 v34, v35
-  v37 = load.i32 [sim + 108]
+  v37 = load.i32 [sim + 116]
   v38 = xor.w32 v36, v37
-  store.i32 [sim + 192], v38
+  store.i32 [sim + 200], v38
   v39 = add.w32 v38, v0
-  store.i32 [sim + 112], v39
+  store.i32 [sim + 120], v39
   v40 = add.w32 v38, v1
-  store.i32 [sim + 116], v40
+  store.i32 [sim + 124], v40
   v41 = add.w32 v38, v3
-  store.i32 [sim + 120], v41
+  store.i32 [sim + 128], v41
   v42 = add.w32 v38, v5
-  store.i32 [sim + 124], v42
+  store.i32 [sim + 132], v42
   v43 = add.w32 v38, v7
-  store.i32 [sim + 128], v43
+  store.i32 [sim + 136], v43
   v44 = add.w32 v38, v9
-  store.i32 [sim + 132], v44
+  store.i32 [sim + 140], v44
   v45 = add.w32 v38, v11
-  store.i32 [sim + 136], v45
+  store.i32 [sim + 144], v45
   v46 = add.w32 v38, v13
-  store.i32 [sim + 140], v46
+  store.i32 [sim + 148], v46
   v47 = add.w32 v38, v15
-  store.i32 [sim + 144], v47
+  store.i32 [sim + 152], v47
   v48 = add.w32 v38, v17
-  store.i32 [sim + 148], v48
+  store.i32 [sim + 156], v48
   v49 = add.w32 v38, v19
-  store.i32 [sim + 152], v49
+  store.i32 [sim + 160], v49
   v50 = add.w32 v38, v21
-  store.i32 [sim + 156], v50
+  store.i32 [sim + 164], v50
   v51 = add.w32 v38, v23
-  store.i32 [sim + 160], v51
+  store.i32 [sim + 168], v51
   v52 = add.w32 v38, v25
-  store.i32 [sim + 164], v52
+  store.i32 [sim + 172], v52
   v53 = add.w32 v38, v27
-  store.i32 [sim + 168], v53
+  store.i32 [sim + 176], v53
   v54 = add.w32 v38, v29
-  store.i32 [sim + 172], v54
+  store.i32 [sim + 180], v54
   v55 = add.w32 v38, v31
-  store.i32 [sim + 176], v55
+  store.i32 [sim + 184], v55
   v56 = add.w32 v38, v33
-  store.i32 [sim + 180], v56
+  store.i32 [sim + 188], v56
   v57 = add.w32 v38, v35
-  store.i32 [sim + 184], v57
+  store.i32 [sim + 192], v57
   v58 = add.w32 v38, v37
-  store.i32 [sim + 188], v58
+  store.i32 [sim + 196], v58
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i32 [sim + 32]
-  v1 = load.i32 [sim + 36]
+  v0 = load.i32 [sim + 40]
+  v1 = load.i32 [sim + 44]
   v2 = xor.w32 v0, v1
-  v3 = load.i32 [sim + 40]
+  v3 = load.i32 [sim + 48]
   v4 = xor.w32 v2, v3
-  v5 = load.i32 [sim + 44]
+  v5 = load.i32 [sim + 52]
   v6 = xor.w32 v4, v5
-  v7 = load.i32 [sim + 48]
+  v7 = load.i32 [sim + 56]
   v8 = xor.w32 v6, v7
-  v9 = load.i32 [sim + 52]
+  v9 = load.i32 [sim + 60]
   v10 = xor.w32 v8, v9
-  v11 = load.i32 [sim + 56]
+  v11 = load.i32 [sim + 64]
   v12 = xor.w32 v10, v11
-  v13 = load.i32 [sim + 60]
+  v13 = load.i32 [sim + 68]
   v14 = xor.w32 v12, v13
-  v15 = load.i32 [sim + 64]
+  v15 = load.i32 [sim + 72]
   v16 = xor.w32 v14, v15
-  v17 = load.i32 [sim + 68]
+  v17 = load.i32 [sim + 76]
   v18 = xor.w32 v16, v17
-  v19 = load.i32 [sim + 72]
+  v19 = load.i32 [sim + 80]
   v20 = xor.w32 v18, v19
-  v21 = load.i32 [sim + 76]
+  v21 = load.i32 [sim + 84]
   v22 = xor.w32 v20, v21
-  v23 = load.i32 [sim + 80]
+  v23 = load.i32 [sim + 88]
   v24 = xor.w32 v22, v23
-  v25 = load.i32 [sim + 84]
+  v25 = load.i32 [sim + 92]
   v26 = xor.w32 v24, v25
-  v27 = load.i32 [sim + 88]
+  v27 = load.i32 [sim + 96]
   v28 = xor.w32 v26, v27
-  v29 = load.i32 [sim + 92]
+  v29 = load.i32 [sim + 100]
   v30 = xor.w32 v28, v29
-  v31 = load.i32 [sim + 96]
+  v31 = load.i32 [sim + 104]
   v32 = xor.w32 v30, v31
-  v33 = load.i32 [sim + 100]
+  v33 = load.i32 [sim + 108]
   v34 = xor.w32 v32, v33
-  v35 = load.i32 [sim + 104]
+  v35 = load.i32 [sim + 112]
   v36 = xor.w32 v34, v35
-  v37 = load.i32 [sim + 108]
+  v37 = load.i32 [sim + 116]
   v38 = xor.w32 v36, v37
-  store.i32 [sim + 192], v38
+  store.i32 [sim + 200], v38
   v39 = add.w32 v38, v0
-  store.i32 [sim + 112], v39
+  store.i32 [sim + 120], v39
   v40 = add.w32 v38, v1
-  store.i32 [sim + 116], v40
+  store.i32 [sim + 124], v40
   v41 = add.w32 v38, v3
-  store.i32 [sim + 120], v41
+  store.i32 [sim + 128], v41
   v42 = add.w32 v38, v5
-  store.i32 [sim + 124], v42
+  store.i32 [sim + 132], v42
   v43 = add.w32 v38, v7
-  store.i32 [sim + 128], v43
+  store.i32 [sim + 136], v43
   v44 = add.w32 v38, v9
-  store.i32 [sim + 132], v44
+  store.i32 [sim + 140], v44
   v45 = add.w32 v38, v11
-  store.i32 [sim + 136], v45
+  store.i32 [sim + 144], v45
   v46 = add.w32 v38, v13
-  store.i32 [sim + 140], v46
+  store.i32 [sim + 148], v46
   v47 = add.w32 v38, v15
-  store.i32 [sim + 144], v47
+  store.i32 [sim + 152], v47
   v48 = add.w32 v38, v17
-  store.i32 [sim + 148], v48
+  store.i32 [sim + 156], v48
   v49 = add.w32 v38, v19
-  store.i32 [sim + 152], v49
+  store.i32 [sim + 160], v49
   v50 = add.w32 v38, v21
-  store.i32 [sim + 156], v50
-  v59 = load.i32 [sim + 80]
+  store.i32 [sim + 164], v50
+  v59 = load.i32 [sim + 88]
   v51 = add.w32 v38, v59
-  store.i32 [sim + 160], v51
-  v60 = load.i32 [sim + 84]
+  store.i32 [sim + 168], v51
+  v60 = load.i32 [sim + 92]
   v52 = add.w32 v38, v60
-  store.i32 [sim + 164], v52
-  v61 = load.i32 [sim + 88]
+  store.i32 [sim + 172], v52
+  v61 = load.i32 [sim + 96]
   v53 = add.w32 v38, v61
-  store.i32 [sim + 168], v53
-  v62 = load.i32 [sim + 92]
+  store.i32 [sim + 176], v53
+  v62 = load.i32 [sim + 100]
   v54 = add.w32 v38, v62
-  store.i32 [sim + 172], v54
-  v63 = load.i32 [sim + 96]
+  store.i32 [sim + 180], v54
+  v63 = load.i32 [sim + 104]
   v55 = add.w32 v38, v63
-  store.i32 [sim + 176], v55
-  v64 = load.i32 [sim + 100]
+  store.i32 [sim + 184], v55
+  v64 = load.i32 [sim + 108]
   v56 = add.w32 v38, v64
-  store.i32 [sim + 180], v56
-  v65 = load.i32 [sim + 104]
+  store.i32 [sim + 188], v56
+  v65 = load.i32 [sim + 112]
   v57 = add.w32 v38, v65
-  store.i32 [sim + 184], v57
+  store.i32 [sim + 192], v57
   v58 = add.w32 v38, v37
-  store.i32 [sim + 188], v58
+  store.i32 [sim + 196], v58
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -421,94 +421,94 @@ x86-64 disassembly of emitted function:
   0x0000001e  movq xmm13,r14
   0x00000023  wrgsbase rdi
 bb0:
-  0x00000028  mov eax,[qword gs:20h]
-  0x00000032  mov edx,[gs:24h]
+  0x00000028  mov eax,[qword gs:28h]
+  0x00000032  mov edx,[gs:2Ch]
   0x0000003a  mov esi,eax
   0x0000003c  xor esi,edx
-  0x0000003e  mov edi,[gs:28h]
+  0x0000003e  mov edi,[gs:30h]
   0x00000046  xor esi,edi
-  0x00000048  mov r8d,[gs:2Ch]
+  0x00000048  mov r8d,[gs:34h]
   0x00000051  xor esi,r8d
-  0x00000054  mov r9d,[gs:30h]
+  0x00000054  mov r9d,[gs:38h]
   0x0000005d  xor esi,r9d
-  0x00000060  mov r10d,[gs:34h]
+  0x00000060  mov r10d,[gs:3Ch]
   0x00000069  xor esi,r10d
-  0x0000006c  mov r11d,[gs:38h]
+  0x0000006c  mov r11d,[gs:40h]
   0x00000075  xor esi,r11d
-  0x00000078  mov ecx,[gs:3Ch]
+  0x00000078  mov ecx,[gs:44h]
   0x00000080  xor esi,ecx
-  0x00000082  mov ebx,[gs:40h]
+  0x00000082  mov ebx,[gs:48h]
   0x0000008a  xor esi,ebx
-  0x0000008c  mov ebp,[gs:44h]
+  0x0000008c  mov ebp,[gs:4Ch]
   0x00000094  xor esi,ebp
-  0x00000096  mov r12d,[gs:48h]
+  0x00000096  mov r12d,[gs:50h]
   0x0000009f  xor esi,r12d
-  0x000000a2  mov r13d,[gs:4Ch]
+  0x000000a2  mov r13d,[gs:54h]
   0x000000ab  xor esi,r13d
-  0x000000ae  mov r14d,[gs:50h]
+  0x000000ae  mov r14d,[gs:58h]
   0x000000b7  xor esi,r14d
-  0x000000ba  mov r14d,[gs:54h]
+  0x000000ba  mov r14d,[gs:5Ch]
   0x000000c3  xor esi,r14d
-  0x000000c6  mov r14d,[gs:58h]
+  0x000000c6  mov r14d,[gs:60h]
   0x000000cf  xor esi,r14d
-  0x000000d2  mov r14d,[gs:5Ch]
+  0x000000d2  mov r14d,[gs:64h]
   0x000000db  xor esi,r14d
-  0x000000de  mov r14d,[gs:60h]
+  0x000000de  mov r14d,[gs:68h]
   0x000000e7  xor esi,r14d
-  0x000000ea  mov r14d,[gs:64h]
+  0x000000ea  mov r14d,[gs:6Ch]
   0x000000f3  xor esi,r14d
-  0x000000f6  mov r14d,[gs:68h]
+  0x000000f6  mov r14d,[gs:70h]
   0x000000ff  xor esi,r14d
-  0x00000102  mov r14d,[gs:6Ch]
+  0x00000102  mov r14d,[gs:74h]
   0x0000010b  xor esi,r14d
-  0x0000010e  mov [gs:0C0h],esi
+  0x0000010e  mov [gs:0C8h],esi
   0x00000116  add eax,esi
-  0x00000118  mov [qword gs:70h],eax
+  0x00000118  mov [qword gs:78h],eax
   0x00000122  add edx,esi
-  0x00000124  mov [gs:74h],edx
+  0x00000124  mov [gs:7Ch],edx
   0x0000012c  add edi,esi
-  0x0000012e  mov [gs:78h],edi
+  0x0000012e  mov [gs:80h],edi
   0x00000136  add r8d,esi
-  0x00000139  mov [gs:7Ch],r8d
+  0x00000139  mov [gs:84h],r8d
   0x00000142  add r9d,esi
-  0x00000145  mov [gs:80h],r9d
+  0x00000145  mov [gs:88h],r9d
   0x0000014e  add r10d,esi
-  0x00000151  mov [gs:84h],r10d
+  0x00000151  mov [gs:8Ch],r10d
   0x0000015a  add r11d,esi
-  0x0000015d  mov [gs:88h],r11d
+  0x0000015d  mov [gs:90h],r11d
   0x00000166  add ecx,esi
-  0x00000168  mov [gs:8Ch],ecx
+  0x00000168  mov [gs:94h],ecx
   0x00000170  add ebx,esi
-  0x00000172  mov [gs:90h],ebx
+  0x00000172  mov [gs:98h],ebx
   0x0000017a  add ebp,esi
-  0x0000017c  mov [gs:94h],ebp
+  0x0000017c  mov [gs:9Ch],ebp
   0x00000184  add r12d,esi
-  0x00000187  mov [gs:98h],r12d
+  0x00000187  mov [gs:0A0h],r12d
   0x00000190  add r13d,esi
-  0x00000193  mov [gs:9Ch],r13d
-  0x0000019c  mov eax,[qword gs:50h]
+  0x00000193  mov [gs:0A4h],r13d
+  0x0000019c  mov eax,[qword gs:58h]
   0x000001a6  add eax,esi
-  0x000001a8  mov [qword gs:0A0h],eax
-  0x000001b2  mov eax,[qword gs:54h]
+  0x000001a8  mov [qword gs:0A8h],eax
+  0x000001b2  mov eax,[qword gs:5Ch]
   0x000001bc  add eax,esi
-  0x000001be  mov [qword gs:0A4h],eax
-  0x000001c8  mov eax,[qword gs:58h]
+  0x000001be  mov [qword gs:0ACh],eax
+  0x000001c8  mov eax,[qword gs:60h]
   0x000001d2  add eax,esi
-  0x000001d4  mov [qword gs:0A8h],eax
-  0x000001de  mov eax,[qword gs:5Ch]
+  0x000001d4  mov [qword gs:0B0h],eax
+  0x000001de  mov eax,[qword gs:64h]
   0x000001e8  add eax,esi
-  0x000001ea  mov [qword gs:0ACh],eax
-  0x000001f4  mov eax,[qword gs:60h]
+  0x000001ea  mov [qword gs:0B4h],eax
+  0x000001f4  mov eax,[qword gs:68h]
   0x000001fe  add eax,esi
-  0x00000200  mov [qword gs:0B0h],eax
-  0x0000020a  mov eax,[qword gs:64h]
+  0x00000200  mov [qword gs:0B8h],eax
+  0x0000020a  mov eax,[qword gs:6Ch]
   0x00000214  add eax,esi
-  0x00000216  mov [qword gs:0B4h],eax
-  0x00000220  mov eax,[qword gs:68h]
+  0x00000216  mov [qword gs:0BCh],eax
+  0x00000220  mov eax,[qword gs:70h]
   0x0000022a  add eax,esi
-  0x0000022c  mov [qword gs:0B8h],eax
+  0x0000022c  mov [qword gs:0C0h],eax
   0x00000236  add esi,r14d
-  0x00000239  mov [gs:0BCh],esi
+  0x00000239  mov [gs:0C4h],esi
   0x00000241  xor eax,eax
   0x00000243  jmp short 0000000000000245h
   0x00000245  movq r14,xmm13

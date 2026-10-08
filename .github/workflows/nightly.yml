@@ -10,6 +10,17 @@ permissions:
   contents: read
 
 jobs:
+  # ci.yml schedules the default branch itself. Exercise develop's Veryl HEAD
+  # lane daily as well; manual CI dispatch always enables full validation.
+  queue-ci-develop:
+    name: Queue develop full validation
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch full CI on develop
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref develop
+
   # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
   # develop ref here as well so the same nightly coverage exercises Veryl HEAD.
   queue-heliodor-develop:

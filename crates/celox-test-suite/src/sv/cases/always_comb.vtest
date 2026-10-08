@@ -47,3 +47,36 @@
     (set d 1))
   (assert_eq x 1)
   (assert_eq y 1))
+
+(case settles_feedback_through_disjoint_bits_of_one_variable
+  (source "disjoint_bit_feedback.sv" #"
+        module Top(input logic inp, output logic out);
+            logic [1:0] v;
+            logic lo;
+            always_comb lo = v[1];
+            assign v = {inp, lo};
+            assign out = v[0];
+        endmodule
+    "#)
+  (top Top)
+  (for bit (list 0 1 0 1)
+    (modify (set inp bit))
+    (assert_eq out bit)))
+
+(case orders_dynamic_array_read_after_its_writer
+  (source "dynamic_array_read_order.sv" #"
+        module Top(input logic [1:0] i, output logic [7:0] o);
+            logic [7:0] a [0:3];
+            assign o = a[i];
+            always_comb begin
+                a[0] = 8'hAA;
+                a[1] = 8'hBB;
+                a[2] = 8'hCC;
+                a[3] = 8'hDD;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for (index expected) (list (0 0xaa) (1 0xbb) (2 0xcc) (3 0xdd))
+    (modify (set i index))
+    (assert_eq o expected)))

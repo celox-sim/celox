@@ -182,6 +182,8 @@ pub struct SharedNativeCode {
     options: NativeRuntimeOptions,
     /// (offset, byte_size) pairs for 4-state variables that need X initialization.
     four_state_inits: Vec<(usize, usize)>,
+    /// The extern functions the code calls.
+    extern_functions: crate::dpi::ExternFunctionTable,
 }
 
 // Safety: JitCode contains Mmap which is Send+Sync after creation.
@@ -197,6 +199,20 @@ impl SharedNativeCode {
     /// validation and the container checksum detect corruption, but do not
     /// authenticate code before it is mapped executable and invoked.
     pub unsafe fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
+        // Safety: upheld by this constructor's caller.
+        unsafe { Self::from_image_with_dpi(program_image, &crate::DpiSymbols::default()) }
+    }
+
+    /// Attach a compiler-produced image, linking the extern functions its
+    /// code calls from `dpi`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::from_image`].
+    pub unsafe fn from_image_with_dpi(
+        program_image: NativeProgramImage,
+        dpi: &crate::DpiSymbols,
+    ) -> Result<Self, SimulatorError> {
         program_image.validate().map_err(|message| {
             codegen_message(format!("invalid native program image: {message}"))
         })?;
@@ -207,6 +223,9 @@ impl SharedNativeCode {
                 format_native_feature_bits(unavailable)
             )));
         }
+        // Loading DPI-C libraries runs their initializers and keeps them
+        // loaded, so it waits until the image is known to be usable.
+        let extern_functions = dpi.resolve(&program_image.runtime_schema.extern_functions)?;
         let symbols = program_image
             .symbols
             .iter()
@@ -281,6 +300,7 @@ impl SharedNativeCode {
             options: program_image.options,
             four_state_inits: program_image.four_state_inits.clone(),
             program_image,
+            extern_functions,
         })
     }
 
@@ -352,6 +372,8 @@ struct NativeRuntimeOptions {
 pub(crate) struct NativeRuntimeSchema {
     pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Extern functions the code calls, resolved when the image is attached.
+    pub(crate) extern_functions: Vec<celox_design::ExternFunction>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
@@ -445,6 +467,7 @@ impl NativeProgramImage {
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
+                extern_functions: self.runtime_schema.extern_functions.clone(),
                 comb_observers: self.runtime_schema.comb_observers.clone(),
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
@@ -2153,6 +2176,7 @@ fn compile_program(
             runtime_schema: NativeRuntimeSchema {
                 runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
+                extern_functions: sir.runtime().runtime_schema.extern_functions.clone(),
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
@@ -2346,7 +2370,21 @@ impl NativeBackend {
     /// is mapped executable and invoked.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, SimulatorError> {
         // Safety: upheld by this constructor's caller.
-        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+        unsafe { Self::from_image_with_dpi(image, &crate::DpiSymbols::default()) }
+    }
+
+    /// Load a compiler-produced image, linking the extern functions its code
+    /// calls from `dpi`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::from_image`].
+    pub unsafe fn from_image_with_dpi(
+        image: NativeProgramImage,
+        dpi: &crate::DpiSymbols,
+    ) -> Result<Self, SimulatorError> {
+        // Safety: upheld by this constructor's caller.
+        let shared = Arc::new(unsafe { SharedNativeCode::from_image_with_dpi(image, dpi)? });
         Ok(Self::from_shared(shared))
     }
 
@@ -2356,7 +2394,7 @@ impl NativeBackend {
     ) -> Result<Self, SimulatorError> {
         let image = Self::compile_image(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
-        unsafe { Self::from_image(image) }
+        unsafe { Self::from_image_with_dpi(image, &options.dpi) }
     }
 
     #[cfg(any(
@@ -2369,7 +2407,7 @@ impl NativeBackend {
     ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
         let (image, trace) = Self::compile_image_with_codegen_trace(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
-        let shared = unsafe { SharedNativeCode::from_image(image)? };
+        let shared = unsafe { SharedNativeCode::from_image_with_dpi(image, &options.dpi)? };
         let backend = Self::from_shared(Arc::new(shared));
         Ok((backend, trace))
     }
@@ -2421,7 +2459,7 @@ impl NativeBackend {
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
-        Self {
+        let mut backend = Self {
             compiled: shared,
             memory,
             runtime_event_buffer,
@@ -2429,7 +2467,11 @@ impl NativeBackend {
             execution_timing: None,
             lane_pool: None,
             lane_selectors: Default::default(),
-        }
+        };
+        // The state names the previous tier's extern function table; point it
+        // at the one this code owns.
+        backend.install_extern_functions();
+        backend
     }
 
     fn apply_initial_values(&mut self, initial_state: &[InitialStateValue<AbsoluteAddr>]) {
@@ -2543,22 +2585,22 @@ impl NativeBackend {
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
-        let addr = self.comb_capture_enabled.as_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
+        self.memory.write_header_word(
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            self.runtime_event_buffer.as_mut_ptr() as u64,
+        );
+        self.memory.write_header_word(
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
+            self.comb_capture_enabled.as_ptr() as u64,
+        );
+        self.install_extern_functions();
+    }
+
+    fn install_extern_functions(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET,
+            self.compiled.extern_functions.as_ptr() as u64,
+        );
     }
 
     /// Get the shared compiled code handle.

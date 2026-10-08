@@ -1175,3 +1175,74 @@
   (assert_eq y (- modulus value))
   (set a 0)
   (assert_eq y 0))
+
+(case unknown_logical_operand_evaluates_effectful_right_operand
+  ; IEEE 1800-2023 11.4.7: the second operand of && is skipped only when the
+  ; first is logically false, and that of || only when it is logically true.
+  ; An ambiguous (x) first operand evaluates the second in both.
+  (four_state)
+  (source "logical_short_circuit.sv" #"
+        module Top(
+            input bit clk,
+            input logic u,
+            output logic and_hit,
+            output logic or_hit,
+            output logic and_result,
+            output logic or_result,
+            output logic ff_and_hit,
+            output logic ff_or_hit,
+            output logic ff_and_result,
+            output logic ff_or_result
+        );
+            logic ff_and_seen, ff_or_seen;
+
+            function automatic logic mark_and();
+                and_hit = 1'b1;
+                return 1'b1;
+            endfunction
+            function automatic logic mark_or();
+                or_hit = 1'b1;
+                return 1'b1;
+            endfunction
+            function automatic logic mark_ff_and();
+                ff_and_seen = 1'b1;
+                return 1'b1;
+            endfunction
+            function automatic logic mark_ff_or();
+                ff_or_seen = 1'b1;
+                return 1'b1;
+            endfunction
+
+            always_comb begin
+                and_hit = 1'b0;
+                or_hit = 1'b0;
+                and_result = u && mark_and();
+                or_result = u || mark_or();
+            end
+
+            always_ff @(posedge clk) begin
+                ff_and_seen = 1'b0;
+                ff_or_seen = 1'b0;
+                ff_and_result <= u && mark_ff_and();
+                ff_or_result <= u || mark_ff_or();
+                ff_and_hit <= ff_and_seen;
+                ff_or_hit <= ff_or_seen;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for (value and_effect or_effect and_value or_value)
+       (list
+         ((fourstate 1 1) 1 1 (fourstate 1 1) 1)
+         (0 0 1 0 1)
+         (1 1 0 1 1))
+    (modify (set u value))
+    (assert_eq and_hit and_effect)
+    (assert_eq or_hit or_effect)
+    (assert_eq and_result and_value)
+    (assert_eq or_result or_value)
+    (tick clk)
+    (assert_eq ff_and_hit and_effect)
+    (assert_eq ff_or_hit or_effect)
+    (assert_eq ff_and_result and_value)
+    (assert_eq ff_or_result or_value)))

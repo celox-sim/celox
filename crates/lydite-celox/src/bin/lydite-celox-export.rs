@@ -74,6 +74,7 @@ fn compile(design: &Value) -> Result<Compiled, String> {
     if diagnostics.iter().any(|e| e.is_error()) {
         return Err(format!("frontend diagnostics: {diagnostics:?}"));
     }
+    celox_frontend_veryl::lower_interface_captures(&mut ir);
     let provenance = loop_sources.match_unrolled(&ir);
     let config = BuildConfig::from(&metadata.build);
     let top = resource_table::insert_str(design["top"].as_str().ok_or("no top")?);

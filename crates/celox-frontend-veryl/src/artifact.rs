@@ -465,6 +465,7 @@ pub(crate) fn project_module_with_ids(
                 })
                 .collect(),
             runtime_event_sites: module.runtime_event_sites.clone(),
+            extern_functions: Vec::new(),
             initial_memory_values: module
                 .initial_memory_values
                 .iter()

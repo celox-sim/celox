@@ -96,6 +96,33 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::R15,
 ];
 
+/// The registers an extern call changes: those a C function need not
+/// preserve, and RBX, which holds the state pointer during the call sequence.
+#[cfg(not(target_os = "windows"))]
+const EXTERN_CALL_CLOBBERS: &[PhysReg] = &[
+    PhysReg::RAX,
+    PhysReg::RCX,
+    PhysReg::RDX,
+    PhysReg::RSI,
+    PhysReg::RDI,
+    PhysReg::R8,
+    PhysReg::R9,
+    PhysReg::R10,
+    PhysReg::R11,
+    PhysReg::RBX,
+];
+#[cfg(target_os = "windows")]
+const EXTERN_CALL_CLOBBERS: &[PhysReg] = &[
+    PhysReg::RAX,
+    PhysReg::RCX,
+    PhysReg::RDX,
+    PhysReg::R8,
+    PhysReg::R9,
+    PhysReg::R10,
+    PhysReg::R11,
+    PhysReg::RBX,
+];
+
 // ────────────────────────────────────────────────────────────────
 // Register constraints
 // ────────────────────────────────────────────────────────────────
@@ -181,6 +208,7 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // Return.  Model the clobber at the allocation boundary instead so
         // only genuinely live-through values are moved to their homes.
         MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
+        MInst::CallExtern { .. } => EXTERN_CALL_CLOBBERS,
         _ => &[],
     }
 }

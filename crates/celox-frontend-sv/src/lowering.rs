@@ -6,12 +6,14 @@
 //! than in the public `celox` facade or in a misleading frontend-to-frontend
 //! dependency.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
-    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION,
-    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
+    InitialStateValue, ModuleId, PortTypeKind, RegionedVarAddrBase, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use celox_frontend_core::symbolic::artifact::{
     ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
@@ -1003,6 +1005,11 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
+    if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
+        return Err(sv::AnalyzerError::Unsupported(
+            "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
+        ));
+    }
     procedural::register_locals(
         module,
         &mut variables,
@@ -1021,6 +1028,7 @@ fn lower_module_with_overrides(
         ),
         runtime_event_sites,
         runtime_errors,
+        extern_functions,
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
@@ -1035,6 +1043,7 @@ fn lower_module_with_overrides(
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
             std::mem::take(&mut pm.runtime_errors),
+            std::mem::take(&mut pm.extern_functions),
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
@@ -1131,6 +1140,7 @@ fn lower_module_with_overrides(
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
             runtime_errors,
             runtime_event_sites,
+            extern_functions,
             initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
@@ -1493,6 +1503,7 @@ pub(crate) fn attach_instance_glue(
             None,
         ),
     })?;
+    module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
     // Combinational event sites follow the flip-flop ones.
@@ -1785,6 +1796,23 @@ fn lower_comb_processes(
     }
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites))
+}
+
+/// The bit boundaries at which combinational processes write or statically
+/// read each variable. Flattening splits paths at these boundaries (and at
+/// those propagated through ports), so bit-disjoint dependencies on one
+/// variable are scheduled independently instead of forming a false loop.
+fn comb_boundaries(paths: &[LogicPath<SourceVarId>]) -> HashMap<SourceVarId, BTreeSet<usize>> {
+    let mut boundaries: HashMap<SourceVarId, BTreeSet<usize>> = HashMap::default();
+    for path in paths {
+        for atom in path.target.var().into_iter().chain(&path.sources) {
+            boundaries
+                .entry(atom.id)
+                .or_default()
+                .extend([atom.access.lsb, atom.access.msb + 1]);
+        }
+    }
+    boundaries
 }
 
 fn ensure_parent_output_signals(
@@ -3977,18 +4005,18 @@ fn lower_dynamic_array_selection_slt<A: std::hash::Hash + Eq + Clone>(
 ) -> Option<NodeId> {
     let packed_element_width = unpacked_element_width(variable_info)?;
     if element_width == packed_element_width {
-        return arena
-            .alloc(SLTNode::Input {
-                variable,
-                signed,
-                index: vec![SLTIndex {
-                    node: index,
-                    stride: element_width,
-                    kind: dynamic_array_index_kind(variable_info, element_width),
-                }],
-                access,
-            })
-            .ok();
+        return dynamic_array_input_slt(
+            arena,
+            variable,
+            signed,
+            SLTIndex {
+                node: index,
+                stride: element_width,
+                kind: dynamic_array_index_kind(variable_info, element_width),
+            },
+            access,
+            variable_info.width,
+        );
     }
     if access.lsb != 0 || access.msb.checked_add(1)? != element_width {
         return None;
@@ -4026,23 +4054,52 @@ fn lower_dynamic_array_selection_slt<A: std::hash::Hash + Eq + Clone>(
                 ))
                 .ok()?
         };
-        let node = arena
-            .alloc(SLTNode::Input {
-                variable: variable.clone(),
-                signed,
-                index: vec![SLTIndex {
-                    node,
-                    stride: packed_element_width,
-                    kind: SLTIndexKind::Unpacked {
-                        element_width: packed_element_width,
-                    },
-                }],
-                access: BitAccess::new(0, packed_element_width - 1),
-            })
-            .ok()?;
+        let node = dynamic_array_input_slt(
+            arena,
+            variable.clone(),
+            signed,
+            SLTIndex {
+                node,
+                stride: packed_element_width,
+                kind: SLTIndexKind::Unpacked {
+                    element_width: packed_element_width,
+                },
+            },
+            BitAccess::new(0, packed_element_width - 1),
+            variable_info.width,
+        )?;
         nodes.push((node, packed_element_width));
     }
     arena.alloc(SLTNode::Concat(nodes)).ok()
+}
+
+/// Bits `access` of the element `index` selects. The input itself spans the
+/// whole variable, because shared dependency analysis takes an indexed input's
+/// footprint from its access range: a run-time index may reach any element.
+/// Lowering composes the outer slice into the indexed load, so the selected
+/// element is still loaded directly.
+fn dynamic_array_input_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    variable: A,
+    signed: bool,
+    index: SLTIndex,
+    access: BitAccess,
+    variable_width: usize,
+) -> Option<NodeId> {
+    let input = arena
+        .alloc(SLTNode::Input {
+            variable,
+            signed,
+            index: vec![index],
+            access: BitAccess::new(0, variable_width.checked_sub(1)?),
+        })
+        .ok()?;
+    arena
+        .alloc(SLTNode::Slice {
+            expr: input,
+            access,
+        })
+        .ok()
 }
 
 fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> SIROffset {
@@ -4687,9 +4744,12 @@ fn lower_ff_processes(
             reset_clock_map.entry(*reset).or_insert(trigger_set.clock);
         }
         let sites_before = pm.runtime_event_sites.len();
+        let extern_calls_before = pm.extern_calls;
         let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
-        // A process without writes still runs for its runtime events.
-        let has_effects = pm.runtime_event_sites.len() > sites_before;
+        // A process without writes still runs for its runtime events and
+        // extern calls.
+        let has_effects =
+            pm.runtime_event_sites.len() > sites_before || pm.extern_calls > extern_calls_before;
         if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
             continue;
         }

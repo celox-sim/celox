@@ -68,6 +68,8 @@ pub struct SharedJitCode {
     four_state_inits: Vec<(usize, usize)>,
     /// Lane-partitioned kernels, one function per task.
     lane_kernels: Option<JitLaneKernels>,
+    /// The extern functions the code calls.
+    extern_functions: crate::dpi::ExternFunctionTable,
 }
 
 /// One lane-partitioned kernel with its task functions.
@@ -662,6 +664,9 @@ impl JitBackend {
         }
 
         let layout = engine.layout().clone();
+        let extern_functions = options
+            .dpi
+            .resolve(&sir.runtime().runtime_schema.extern_functions)?;
         let options = options.clone();
 
         Ok(SharedJitCode {
@@ -676,6 +681,7 @@ impl JitBackend {
             options,
             four_state_inits,
             lane_kernels,
+            extern_functions,
         })
     }
 
@@ -738,7 +744,7 @@ impl JitBackend {
             memory.resize_zeroed_within_capacity(target_words);
         }
         let comb_func = shared.comb_func;
-        Self {
+        let mut backend = Self {
             shared,
             memory,
             runtime_event_buffer,
@@ -746,7 +752,11 @@ impl JitBackend {
             comb_func,
             lane_pool: None,
             lane_selectors: Default::default(),
-        }
+        };
+        // The state names the previous tier's extern function table; point it
+        // at the one this code owns.
+        backend.install_extern_functions();
+        backend
     }
 
     fn install_event_buffers(&mut self) {
@@ -754,22 +764,22 @@ impl JitBackend {
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
-        let addr = self.comb_capture_enabled.as_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
+        self.memory.write_header_word(
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            self.runtime_event_buffer.as_mut_ptr() as u64,
+        );
+        self.memory.write_header_word(
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
+            self.comb_capture_enabled.as_ptr() as u64,
+        );
+        self.install_extern_functions();
+    }
+
+    fn install_extern_functions(&mut self) {
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET,
+            self.shared.extern_functions.as_ptr() as u64,
+        );
     }
 
     /// Returns the shared compiled code, allowing it to be reused for

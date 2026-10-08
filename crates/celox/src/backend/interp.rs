@@ -36,6 +36,7 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
+use crate::dpi::ExternFunctionTable;
 use crate::interpreter::{
     InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot, execute_prepared_unit,
 };
@@ -179,6 +180,7 @@ unsafe fn gather_strided(base: *const u8, offset: usize, array: &SignalArrayLayo
 struct Machine<'a> {
     memory: &'a mut [u64],
     layout: &'a MemoryLayout,
+    extern_functions: &'a ExternFunctionTable,
     four_state: bool,
     /// Per-site enable bytes for comb capture events.
     comb_capture_enabled: &'a mut [u8],
@@ -1014,6 +1016,12 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         Ok(())
     }
 
+    fn call_extern(&mut self, func: u32, args: &[u64]) -> Result<u64, InterpError> {
+        // SAFETY: the frontend gives each call the argument count of the
+        // DPI-C import it links to.
+        Ok(unsafe { self.extern_functions.call(func, args) })
+    }
+
     fn emit_comb_capture_event(
         &mut self,
         site_id: u32,
@@ -1122,6 +1130,7 @@ fn prepare_units(
 fn run_units(
     memory: &mut [u64],
     layout: &MemoryLayout,
+    extern_functions: &ExternFunctionTable,
     four_state: bool,
     comb_capture_enabled: &mut [u8],
     units: &mut [PreparedUnit],
@@ -1141,6 +1150,7 @@ fn run_units(
             let machine = Machine {
                 memory: &mut *memory,
                 layout,
+                extern_functions,
                 four_state,
                 comb_capture_enabled: &mut *comb_capture_enabled,
                 trigger_snapshots,
@@ -1161,6 +1171,7 @@ fn run_units(
             // be constructed for every execution unit in the loop.
             memory: &mut *memory,
             layout,
+            extern_functions,
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
             trigger_snapshots,
@@ -1226,6 +1237,8 @@ pub struct InterpBackend {
     event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>>,
     /// Reused group-entry trigger snapshots; sorted by address and region.
     trigger_snapshots: Vec<((AbsoluteAddr, u32), u64)>,
+    /// The extern functions the units call.
+    extern_functions: ExternFunctionTable,
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
@@ -1428,6 +1441,9 @@ impl InterpBackend {
             event_trigger_addrs,
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
+            extern_functions: options
+                .dpi
+                .resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
         };
         backend.install_event_buffers();
         Ok(backend)
@@ -1438,22 +1454,20 @@ impl InterpBackend {
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         };
 
-        let addr = self.runtime_event_buffer.as_mut_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
-        let addr = self.comb_capture_enabled.as_ptr() as u64;
-        let ptr = unsafe {
-            (self.memory.as_mut_ptr() as *mut u8).add(STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
-                as *mut u64
-        };
-        unsafe {
-            std::ptr::write_unaligned(ptr, addr);
-        }
+        self.memory.write_header_word(
+            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+            self.runtime_event_buffer.as_mut_ptr() as u64,
+        );
+        self.memory.write_header_word(
+            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
+            self.comb_capture_enabled.as_ptr() as u64,
+        );
+        // Interpreted units call extern functions directly, but a compiled
+        // tier that adopts this state reads the table from the header.
+        self.memory.write_header_word(
+            celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET,
+            self.extern_functions.as_ptr() as u64,
+        );
     }
 
     /// Returns the pre-computed 4-state initialization regions
@@ -1499,6 +1513,7 @@ impl SimBackend for InterpBackend {
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
+            &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
             &mut self.eval_comb_units,
@@ -1512,6 +1527,7 @@ impl SimBackend for InterpBackend {
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
+            &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
             self.eval_apply_units
@@ -1534,6 +1550,7 @@ impl SimBackend for InterpBackend {
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
+            &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
             units,
@@ -1547,6 +1564,7 @@ impl SimBackend for InterpBackend {
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
+            &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
             self.eval_only_units
@@ -1564,6 +1582,7 @@ impl SimBackend for InterpBackend {
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
+            &self.extern_functions,
             self.four_state,
             &mut self.comb_capture_enabled,
             self.apply_units

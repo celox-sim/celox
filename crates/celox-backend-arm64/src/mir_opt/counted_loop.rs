@@ -41,8 +41,9 @@ pub(super) fn may_write(inst: &MInst, start: i64, end: i64) -> bool {
         | MInst::JumpTable { .. }
         | MInst::Return
         | MInst::ReturnError { .. } => false,
-        // Pointer stores and runtime/sparse pseudos may change state memory.
-        _ => inst.def().is_none(),
+        // Pointer stores, runtime/sparse pseudos and extern calls may change
+        // state memory.
+        _ => inst.has_side_effects(),
     }
 }
 
@@ -90,7 +91,7 @@ pub(super) fn hoist_invariant_loads(func: &mut MFunction) {
             .blocks
             .iter()
             .flat_map(|&block| &func.blocks[block].insts)
-            .filter(|inst| inst.def().is_none())
+            .filter(|inst| inst.has_side_effects())
             .cloned()
             .collect::<Vec<_>>();
         let mut moved = Vec::new();

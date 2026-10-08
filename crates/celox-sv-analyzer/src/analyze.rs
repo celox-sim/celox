@@ -115,30 +115,33 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .cloned()
             .map(Into::into)
             .collect();
-        modules.push(ir::Module::new(
-            id,
-            module.name().to_string(),
-            parameters,
-            ports,
-            signals,
-            instances,
-            assignments,
-            comb_processes,
-            ff_processes,
-            module
-                .initial_processes()
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect(),
-            module.locals().to_vec(),
-            module
-                .subroutines()
-                .iter()
-                .cloned()
-                .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
-                .collect(),
-        ));
+        modules.push(
+            ir::Module::new(
+                id,
+                module.name().to_string(),
+                parameters,
+                ports,
+                signals,
+                instances,
+                assignments,
+                comb_processes,
+                ff_processes,
+                module
+                    .initial_processes()
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
+                module.locals().to_vec(),
+                module
+                    .subroutines()
+                    .iter()
+                    .cloned()
+                    .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
+                    .collect(),
+            )
+            .with_dpi_imports(module.dpi_imports().to_vec()),
+        );
     }
 
     Ok(ir::Ir::new(modules))

@@ -399,6 +399,7 @@ fn analyze(
         ));
         diagnostics
     };
+    celox_frontend_veryl::lower_interface_captures(&mut ir);
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled
     // entry cannot execute the same store across multiple iterations.
@@ -1203,6 +1204,8 @@ mod host {
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
+        /// Where the C functions of DPI-C imports are found.
+        pub dpi: crate::DpiSymbols,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1301,7 +1304,9 @@ mod host {
 
         // Safety: callers either produced the image in this process or loaded
         // it from an explicitly trusted native-image artifact.
-        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+        let backend = unsafe {
+            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+        };
         initialize_native_backend(
             backend,
             program.into_runtime(),
@@ -1384,6 +1389,7 @@ mod host {
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
+                dpi: crate::DpiSymbols::default(),
             }
         }
     }
@@ -1690,6 +1696,38 @@ mod host {
         /// Enable or disable the Cranelift IR verifier.
         pub fn enable_verifier(mut self, enable: bool) -> Self {
             self.options.cranelift_options.enable_verifier = enable;
+            self
+        }
+
+        /// Link DPI-C imports to the C functions of a shared library.
+        ///
+        /// Libraries are searched in the order they are added, after the
+        /// functions registered with [`Self::dpi_function`]. A library stays
+        /// loaded for the rest of the process.
+        ///
+        /// # Safety
+        ///
+        /// Loading the library runs its initializers. Every C function a
+        /// DPI-C import is linked to must have the signature that import
+        /// declares (IEEE 1800-2023 35.5.6).
+        pub unsafe fn dpi_library(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.options.dpi.add_library(path.into());
+            self
+        }
+
+        /// Link the DPI-C import whose C name is `name` to `function`.
+        ///
+        /// Registering `name` again replaces the earlier function.
+        ///
+        /// # Safety
+        ///
+        /// `function` must be a C function with the signature its DPI-C
+        /// import declares (IEEE 1800-2023 35.5.6), and must stay valid while
+        /// any simulator built from this builder exists.
+        pub unsafe fn dpi_function(mut self, name: impl Into<String>, function: *const ()) -> Self {
+            self.options
+                .dpi
+                .add_function(name.into(), function as usize);
             self
         }
 
@@ -2117,6 +2155,12 @@ mod host {
                 }
             }
 
+            // Link DPI-C imports before code generation, so a missing C
+            // function fails the build early; the backends reuse the result.
+            self.options
+                .dpi
+                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+
             Ok((
                 laid_out,
                 warnings,
@@ -2501,7 +2545,9 @@ mod host {
             let program = image.runtime_program();
             // Safety: the caller is explicitly loading a trusted native-image
             // artifact, and `from_image` validates its structure first.
-            let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+            let backend = unsafe {
+                crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+            };
             initialize_native_backend(
                 backend,
                 program,

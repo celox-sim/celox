@@ -16,7 +16,7 @@ default = []
 emit = ["dep:veryl-analyzer", "dep:veryl-emitter", "dep:veryl-parser", "dep:veryl-metadata"]
 # The external-simulator runners shared by both suites. Port shapes of the
 # SystemVerilog cases come from the Celox SystemVerilog analyzer.
-external = ["emit", "dep:clap", "dep:serde_json", "dep:celox-sv-analyzer"]
+external = ["emit", "dep:clap", "dep:serde_json", "dep:sha2", "dep:celox-sv-analyzer"]
 verilator = ["external"]
 icarus = ["external"]
 
@@ -52,9 +52,14 @@ veryl-metadata = { workspace = true, optional = true }
 celox-sv-analyzer = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.11", optional = true }
 num-bigint.workspace = true
 num-traits.workspace = true
 veryl-std.workspace = true
+
+[build-dependencies]
+serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.11", optional = true }
 
 [lints]
 workspace = true

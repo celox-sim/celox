@@ -4,7 +4,29 @@
       "category": "Combinational",
       "detail": "",
       "expectation": "Simulation",
+      "name": "always_comb::orders_dynamic_array_read_after_its_writer",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "always_comb::preserves_intervening_reads_when_merging_conditional_writes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "always_comb::settles_feedback_through_disjoint_bits_of_one_variable",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -395,6 +417,28 @@
       "name": "hierarchy::drives_omitted_and_open_child_inputs_with_z",
       "phase": "compile",
       "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::settles_feedback_beside_dynamic_child_reader",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::settles_feedback_through_disjoint_bits_of_child_input",
+      "phase": "execute",
+      "status": "passed",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1228,6 +1272,17 @@
     },
     {
       "category": "Operators",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "operators::unknown_logical_operand_evaluates_effectful_right_operand",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::zero_extends_mixed_signed_arithmetic_operands",
@@ -1992,11 +2047,11 @@
     "emission_error": 0,
     "ignored": 6,
     "mismatch": 0,
-    "passed": 130,
+    "passed": 134,
     "rejected": 3,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 35
+    "unsupported": 36
   },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

@@ -335,17 +335,51 @@ impl WasmBackend {
             }
         }
 
-        // Helper: instantiate a WASM module with the shared memory.
+        let extern_functions = options
+            .dpi
+            .resolve(&sir.runtime().runtime_schema.extern_functions)?;
+
+        // Helper: instantiate a WASM module with the shared memory and the
+        // extern functions it imports.
         fn instantiate_module(
             engine: &Engine,
             store: &mut Store<()>,
             module: &Module,
             memory: &Memory,
+            extern_functions: &crate::dpi::ExternFunctionTable,
         ) -> Result<TypedFunc<(), i64>, crate::SimulatorError> {
             let mut linker = Linker::new(engine);
             linker
                 .define(&mut *store, "env", "memory", *memory)
                 .map_err(|source| wasm_codegen_error("linking", source))?;
+            for import in module.imports() {
+                let Some(func) = import
+                    .name()
+                    .strip_prefix("celox_extern_")
+                    .and_then(|index| index.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                let Some(ty) = import.ty().func().cloned() else {
+                    continue;
+                };
+                let extern_functions = extern_functions.clone();
+                linker
+                    .func_new("env", import.name(), ty, move |_, params, results| {
+                        // The SIR verifier bounds the argument count.
+                        let mut args = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+                        let args = &mut args[..params.len()];
+                        for (arg, param) in args.iter_mut().zip(params) {
+                            *arg = param.unwrap_i64() as u64;
+                        }
+                        // SAFETY: the module calls each import with the
+                        // argument count of the DPI-C import it links to.
+                        let result = unsafe { extern_functions.call(func, args) };
+                        results[0] = wasmtime::Val::I64(result as i64);
+                        Ok(())
+                    })
+                    .map_err(|source| wasm_codegen_error("linking", source))?;
+            }
             let instance = linker
                 .instantiate(&mut *store, module)
                 .map_err(|source| wasm_codegen_error("instantiation", source))?;
@@ -355,22 +389,28 @@ impl WasmBackend {
             Ok(func)
         }
 
-        let comb_func = instantiate_module(&engine, &mut store, &comb_module, &memory)?;
+        let comb_func = instantiate_module(
+            &engine,
+            &mut store,
+            &comb_module,
+            &memory,
+            &extern_functions,
+        )?;
 
         let mut event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> = HashMap::default();
         for (addr, module) in &event_modules {
-            let func = instantiate_module(&engine, &mut store, module, &memory)?;
+            let func = instantiate_module(&engine, &mut store, module, &memory, &extern_functions)?;
             event_funcs.entry(*addr).or_default().push(func);
         }
         let mut eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> =
             HashMap::default();
         for (addr, module) in &eval_only_modules {
-            let func = instantiate_module(&engine, &mut store, module, &memory)?;
+            let func = instantiate_module(&engine, &mut store, module, &memory, &extern_functions)?;
             eval_only_funcs.entry(*addr).or_default().push(func);
         }
         let mut apply_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>> = HashMap::default();
         for (addr, module) in &apply_modules {
-            let func = instantiate_module(&engine, &mut store, module, &memory)?;
+            let func = instantiate_module(&engine, &mut store, module, &memory, &extern_functions)?;
             apply_funcs.entry(*addr).or_default().push(func);
         }
 

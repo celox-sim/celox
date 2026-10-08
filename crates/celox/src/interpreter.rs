@@ -20,6 +20,7 @@
 use std::cell::OnceCell;
 use std::fmt;
 
+use celox_sir::extern_abi::ExternValue;
 use celox_sir::{
     BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
     SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
@@ -226,6 +227,18 @@ pub trait InterpMachine<A> {
         new: &SIRValue,
         sites: &[u32],
     ) -> Result<(), InterpError>;
+
+    /// Call extern function `func` with C integer arguments and return its
+    /// C integer result (zero when it returns nothing).
+    ///
+    /// The default keeps custom interpreter machines source-compatible; the
+    /// production backend calls the resolved function.
+    fn call_extern(&mut self, func: u32, args: &[u64]) -> Result<u64, InterpError> {
+        let _ = args;
+        Err(InterpError::UnsupportedOperation(format!(
+            "call of extern function {func}"
+        )))
+    }
 }
 
 /// Outcome of one interpreted unit invocation.
@@ -608,8 +621,36 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             let new = regs.get(*new)?.clone();
             machine.enable_comb_capture_if_changed(&old, &new, sites)?;
         }
+        SIRInstruction::ExternCall { dst, func, args } => {
+            // The SIR verifier bounds the argument count.
+            let mut values = [0; celox_sir::MAX_EXTERN_CALL_ARGUMENTS];
+            let values = &mut values[..args.len()];
+            for (value, &arg) in values.iter_mut().zip(args) {
+                *value = extern_argument(regs, arg)?;
+            }
+            let result = machine.call_extern(*func, values)?;
+            if let Some(dst) = dst {
+                let value = extern_result(regs, *dst, result, four_state);
+                regs.set(*dst, value);
+            }
+        }
     }
     Ok(())
+}
+
+/// The C integer passed for an extern call argument.
+fn extern_argument(regs: &Registers, arg: RegisterId) -> Result<u64, InterpError> {
+    let value = regs.get(arg)?;
+    Ok(ExternValue::of_verified(&regs.ty(arg)).encode(
+        value.payload.to_u64().unwrap_or(0),
+        value.mask.to_u64().unwrap_or(0),
+    ))
+}
+
+/// The value of an extern call's destination register for C result `raw`.
+fn extern_result(regs: &Registers, dst: RegisterId, raw: u64, four_state: bool) -> SIRValue {
+    let (value, mask) = ExternValue::of_verified(&regs.ty(dst)).decode(raw);
+    SIRValue::new_four_state(value, if four_state { mask } else { 0 })
 }
 
 fn resolve_access<'a>(
@@ -1561,6 +1602,8 @@ struct RegisterSlot {
     value: Option<RegisterValue>,
     width: usize,
     signed: bool,
+    /// The register is a four-state `Logic` register.
+    logic: bool,
     generation: u64,
 }
 
@@ -1617,6 +1660,7 @@ impl Registers {
         for (id, register_type) in register_map {
             self.slots[id.0].width = register_type.width();
             self.slots[id.0].signed = register_type.is_signed();
+            self.slots[id.0].logic = matches!(register_type, RegisterType::Logic { .. });
         }
     }
 
@@ -1697,6 +1741,18 @@ impl Registers {
 
     fn is_signed(&self, id: RegisterId) -> bool {
         self.slots.get(id.0).is_some_and(|slot| slot.signed)
+    }
+
+    fn ty(&self, id: RegisterId) -> RegisterType {
+        let width = self.width(id);
+        if self.slots.get(id.0).is_some_and(|slot| slot.logic) {
+            RegisterType::Logic { width }
+        } else {
+            RegisterType::Bit {
+                width,
+                signed: self.is_signed(id),
+            }
+        }
     }
 }
 

@@ -209,6 +209,9 @@ pub fn estimate_clif_cost(
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => 12 + args.len() * 2,
         SIRInstruction::CombCaptureEnableIfChanged { sites, .. } => 4 + sites.len() * 2,
+        // A call saves the caller's live values and moves each argument into
+        // its ABI register.
+        SIRInstruction::ExternCall { args, .. } => 20 + args.len() * 2,
     }
 }
 

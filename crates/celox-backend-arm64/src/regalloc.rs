@@ -242,6 +242,59 @@ fn verify_allocated_with_intervals(
     verify_interval_registers(function, intervals)
 }
 
+/// The values live across each extern call, keyed by block and instruction
+/// index: those live after the call that it does not define.
+pub(crate) fn values_live_across_calls(
+    function: &MFunction,
+    intervals: &LiveIntervals<VReg>,
+) -> Vec<((BlockId, usize), BTreeSet<VReg>)> {
+    let mut calls = Vec::new();
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        if !block
+            .insts
+            .iter()
+            .any(|instruction| matches!(instruction, MInst::CallExtern { .. }))
+        {
+            continue;
+        }
+        let mut live = intervals.live_out(block_index).cloned().unwrap_or_default();
+        for (index, instruction) in block.insts.iter().enumerate().rev() {
+            if let Some(def) = instruction.def() {
+                live.remove(&def);
+            }
+            if matches!(instruction, MInst::CallExtern { .. }) {
+                calls.push(((block.id, index), live.clone()));
+            }
+            live.extend(instruction.uses());
+        }
+    }
+    calls
+}
+
+/// [`values_live_across_calls`] for allocated MIR.
+pub(crate) fn allocated_values_live_across_calls(
+    function: &MFunction,
+) -> Result<Vec<((BlockId, usize), BTreeSet<VReg>)>, TargetRegallocError> {
+    let facts = build_facts(function)?;
+    let intervals = analyze_live_intervals(&facts)
+        .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
+    Ok(values_live_across_calls(function, &intervals))
+}
+
+/// Registers a C function preserves, which values live across an extern call
+/// try first.
+const CALL_PRESERVED_REGISTERS: [Arm64Reg; 9] = [
+    Arm64Reg::new(19),
+    Arm64Reg::new(20),
+    Arm64Reg::new(21),
+    Arm64Reg::new(22),
+    Arm64Reg::new(23),
+    Arm64Reg::new(24),
+    Arm64Reg::new(25),
+    Arm64Reg::new(26),
+    Arm64Reg::new(27),
+];
+
 const ALLOCATABLE_REGISTERS: [Arm64Reg; 24] = [
     Arm64Reg::new(1),
     Arm64Reg::new(2),
@@ -924,6 +977,12 @@ fn color_intervals(
         .map(|(&value, neighbors)| (Reverse(neighbors.len()), value))
         .collect::<Vec<_>>();
     order.sort_unstable();
+    // The emitter saves a caller-saved register around every call it lives
+    // across, so such values try the registers a C function preserves first.
+    let crosses_call = values_live_across_calls(function, intervals)
+        .into_iter()
+        .flat_map(|(_, values)| values)
+        .collect::<BTreeSet<_>>();
 
     let mut assignment = Assignment::default();
     for (_, value) in order {
@@ -937,13 +996,24 @@ fn color_intervals(
             .flatten()
             .filter_map(|neighbor| assignment.get(neighbor))
             .find(|register| !used.contains(register));
+        let free = |registers: &[Arm64Reg]| {
+            registers
+                .iter()
+                .copied()
+                .find(|register| !used.contains(register))
+        };
         let register = preferred
-            .or_else(|| {
-                ALLOCATABLE_REGISTERS
-                    .iter()
-                    .copied()
-                    .find(|register| !used.contains(register))
+            .filter(|register| {
+                !crosses_call.contains(&value) || CALL_PRESERVED_REGISTERS.contains(register)
             })
+            .or_else(|| {
+                crosses_call
+                    .contains(&value)
+                    .then(|| free(&CALL_PRESERVED_REGISTERS))
+                    .flatten()
+            })
+            .or(preferred)
+            .or_else(|| free(&ALLOCATABLE_REGISTERS))
             .ok_or(TargetRegallocError::RegisterPressure { value })?;
         assignment.set(value, register);
     }
