@@ -342,8 +342,14 @@ enum HeaderForm {
     /// `localparam type <text>`; the span covers the type assignments.
     LocalType(Span),
     /// A package import, inserted in the module header, and what it imports:
-    /// `(package, item)`, with no item for a wildcard import.
-    Import(Span, Vec<(String, Option<String>)>),
+    /// `(package, item)`, with no item for a wildcard import. A
+    /// compilation-unit import before the interface (`unit`) is only copied
+    /// into other files, where it is not visible.
+    Import {
+        span: Span,
+        imports: Vec<(String, Option<String>)>,
+        unit: bool,
+    },
 }
 
 enum MemberKind {
@@ -388,6 +394,8 @@ enum ModportItem {
 struct InterfaceDecl {
     name: String,
     file: usize,
+    /// The start of the declaration in its file.
+    start: usize,
     /// Whether the header has a parameter port list, which makes a body
     /// `parameter` a localparam.
     has_parameter_port_list: bool,
@@ -546,7 +554,11 @@ impl ModuleDecl {
 #[derive(Clone)]
 struct Expansion {
     members: Vec<(String, Direction)>,
+    /// The functions to declare: the callable ones and those they and the
+    /// declarations call.
     functions: Vec<String>,
+    /// The functions the module may call, or `None` for all of them.
+    callable: Option<HashSet<String>>,
 }
 
 impl Expansion {
@@ -574,6 +586,48 @@ struct Handle {
     /// The expansion of a port; `None` for an instance, which has every member.
     port: Option<Expansion>,
     arrayed: bool,
+}
+
+/// The interface handles of a module, by name and declaring scope: the
+/// module or a generate block.
+#[derive(Default)]
+struct Handles {
+    by_name: HashMap<String, Vec<(Span, Handle)>>,
+}
+
+impl Handles {
+    fn insert(&mut self, name: String, scope: Span, handle: Handle) {
+        self.by_name.entry(name).or_default().push((scope, handle));
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    fn declared_in(&self, name: &str, scope: Span) -> bool {
+        self.by_name
+            .get(name)
+            .is_some_and(|handles| handles.iter().any(|(declared, _)| *declared == scope))
+    }
+
+    /// The handle `name` refers to at `span`: the one of the innermost
+    /// scope around it.
+    fn at(&self, name: &str, span: Span) -> Option<&Handle> {
+        self.by_name
+            .get(name)?
+            .iter()
+            .filter(|(scope, _)| scope.0 <= span.0 && span.1 <= scope.1)
+            .min_by_key(|(scope, _)| scope.1 - scope.0)
+            .map(|(_, handle)| handle)
+    }
+
+    fn all(&self) -> impl Iterator<Item = &Handle> {
+        self.by_name.values().flatten().map(|(_, handle)| handle)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
 }
 
 /// A child instantiation found in a module body: its module, the formal
@@ -681,6 +735,47 @@ impl<'a> Design<'a> {
                 }
             }
         }
+        // Compilation-unit imports before an interface are visible in it.
+        for (index, file) in files.iter().enumerate() {
+            if !interfaces.values().any(|interface| interface.file == index) {
+                continue;
+            }
+            let scopes = Scope::collect(file)?;
+            let mut unit_imports = Vec::new();
+            for node in &file.syntax_tree {
+                let RefNode::PackageImportDeclaration(import) = node else {
+                    continue;
+                };
+                let span = file.span(RefNode::PackageImportDeclaration(import))?;
+                if Scope::of(span, &scopes) == Scope::Unit {
+                    unit_imports.push((
+                        span,
+                        imported_items(
+                            RefNode::PackageImportDeclaration(import),
+                            &file.syntax_tree,
+                        )?,
+                    ));
+                }
+            }
+            for interface in interfaces
+                .values_mut()
+                .filter(|interface| interface.file == index)
+            {
+                let preceding: Vec<Item> = unit_imports
+                    .iter()
+                    .filter(|(span, _)| span.1 <= interface.start)
+                    .map(|(span, imports)| Item::Constant {
+                        span: *span,
+                        header: HeaderForm::Import {
+                            span: *span,
+                            imports: imports.clone(),
+                            unit: true,
+                        },
+                    })
+                    .collect();
+                interface.items.splice(0..0, preceding);
+            }
+        }
         // A member an interface passes to a written subroutine argument is
         // assigned as well.
         for interface in interfaces.values_mut() {
@@ -701,6 +796,7 @@ impl<'a> Design<'a> {
                         written_arguments(
                             call,
                             &Scope::Interface(interface.name.clone()),
+                            &|_| None,
                             file,
                             &subroutines,
                             &mut interface.lvalues,
@@ -743,7 +839,6 @@ impl<'a> Design<'a> {
 
     fn elaborate(&self) -> Result<Vec<String>, AnalyzerError> {
         let mut edits: Vec<Vec<Edit>> = vec![Vec::new(); self.files.len()];
-        let mut appended: Vec<Vec<String>> = vec![Vec::new(); self.files.len()];
         let mut names: Vec<String> = self.modules.keys().cloned().collect();
         names.sort();
         let mut clones: Vec<(String, Vec<(String, String)>)> = Vec::new();
@@ -779,22 +874,18 @@ impl<'a> Design<'a> {
                         self.files[module.file].text(module.span).to_string()
                     }
                 };
-            appended[self.modules[&name].file].push(text);
+            // Beside the original, under the same compiler directives.
+            let module = &self.modules[&name];
+            edits[module.file].push(Edit {
+                span: (module.span.1, module.span.1),
+                text: format!("\n{text}\n"),
+            });
         }
         Ok(self
             .files
             .iter()
             .zip(edits)
-            .zip(appended)
-            .map(|((file, edits), appended)| {
-                let mut text = apply(file.code, (0, file.code.len()), &edits);
-                for module in appended {
-                    text.push('\n');
-                    text.push_str(&module);
-                    text.push('\n');
-                }
-                text
-            })
+            .map(|(file, edits)| apply(file.code, (0, file.code.len()), &edits))
             .collect())
     }
 
@@ -856,6 +947,7 @@ impl<'a> Design<'a> {
                     }
                 }
             }
+            let callable = imports.clone();
             imports.extend(interface.declaration_functions());
             let functions = interface.function_closure(&imports);
             // An imported function runs in the interface scope, so a member it
@@ -877,11 +969,12 @@ impl<'a> Design<'a> {
                     })
                     .collect(),
                 functions,
+                callable: Some(callable),
             });
         }
         // Without a modport every member is reachable. A member the module or
         // a child writes is an output.
-        let uses = self.module_uses(module_name)?;
+        let uses = self.module_uses(module_name, (port_name, interface_name))?;
         let interface = self.interface(interface_name)?;
         // The directions do not depend on generate conditions, loop bounds
         // or which subroutines are called, which are not evaluated here, so
@@ -951,6 +1044,7 @@ impl<'a> Design<'a> {
                 })
                 .collect(),
             functions,
+            callable: None,
         })
     }
 
@@ -963,10 +1057,10 @@ impl<'a> Design<'a> {
         module_name: &str,
         declaration: &sv_parser::ModuleDeclarationAnsi,
         file: &File<'_>,
-        handles: &HashMap<String, Handle>,
+        handles: &Handles,
     ) -> Result<(), AnalyzerError> {
         let mut used: Vec<&str> = handles
-            .values()
+            .all()
             .map(|handle| handle.interface.as_str())
             .collect();
         used.sort_unstable();
@@ -1000,7 +1094,7 @@ impl<'a> Design<'a> {
         for interface in used {
             for item in &self.interface(interface)?.items {
                 if let Item::Constant {
-                    header: HeaderForm::Import(_, imports),
+                    header: HeaderForm::Import { imports, .. },
                     ..
                 } = item
                 {
@@ -1032,12 +1126,55 @@ impl<'a> Design<'a> {
         Ok(())
     }
 
-    /// The interface accesses of a module body, by handle name.
-    fn module_uses(&self, module_name: &str) -> Result<ModuleUses, AnalyzerError> {
+    /// The interface accesses of a module body, by handle name. `bound`
+    /// names a port and the interface it is bound to.
+    fn module_uses(
+        &self,
+        module_name: &str,
+        bound: (&str, &str),
+    ) -> Result<ModuleUses, AnalyzerError> {
         let module = &self.modules[module_name];
         let file = &self.files[module.file];
         let declaration = self.module_node(module)?;
         let mut uses = ModuleUses::default();
+        // The interface of each handle, unless generic or ambiguous.
+        let mut handle_interfaces: HashMap<String, Option<String>> = HashMap::default();
+        for port in &module.ports {
+            if let Some(interface) = &port.interface {
+                let interface = match &interface.interface {
+                    None if port.name == bound.0 => Some(bound.1.to_string()),
+                    interface => interface.clone(),
+                };
+                handle_interfaces.insert(port.name.clone(), interface);
+            }
+        }
+        for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            let RefNode::ModuleInstantiation(instantiation) = node else {
+                continue;
+            };
+            let type_name = name(
+                RefNode::ModuleIdentifier(&instantiation.nodes.0),
+                &file.syntax_tree,
+            )?;
+            if !self.interfaces.contains_key(&type_name) {
+                continue;
+            }
+            for instance in instantiation.nodes.2.contents() {
+                let instance_name = name(
+                    RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
+                    &file.syntax_tree,
+                )?;
+                handle_interfaces
+                    .entry(instance_name)
+                    .and_modify(|interface| {
+                        if interface.as_ref() != Some(&type_name) {
+                            *interface = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(type_name.clone()));
+            }
+        }
+        let handle_interface = |handle: &str| handle_interfaces.get(handle).cloned().flatten();
         // An assignment target starts where its lvalue starts.
         let mut lvalues = HashSet::default();
         let mut generates = Vec::new();
@@ -1053,6 +1190,7 @@ impl<'a> Design<'a> {
                 RefNode::TfCall(call) => written_arguments(
                     call,
                     &Scope::Module(module_name.to_string()),
+                    &handle_interface,
                     file,
                     &self.subroutines,
                     &mut lvalues,
@@ -1173,7 +1311,7 @@ impl<'a> Design<'a> {
         let module_span = module.span;
 
         // The interface handles: ports first, then instances.
-        let mut handles: HashMap<String, Handle> = HashMap::default();
+        let mut handles = Handles::default();
         let interface_ports: Vec<(String, InterfacePort, Span)> = module
             .ports
             .iter()
@@ -1200,6 +1338,7 @@ impl<'a> Design<'a> {
             let expansion = self.expansion(module_name, port, &interface)?;
             handles.insert(
                 port.clone(),
+                module_span,
                 Handle {
                     interface: interface.clone(),
                     port: Some(expansion.clone()),
@@ -1216,6 +1355,13 @@ impl<'a> Design<'a> {
         }
         let mut interface_instantiations = Vec::new();
         let mut child_instantiations = Vec::new();
+        // An instance belongs to the innermost generate block around it.
+        let mut blocks = Vec::new();
+        for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            if let RefNode::GenerateBlock(block) = node {
+                blocks.extend(file.node_span(RefNode::GenerateBlock(block)));
+            }
+        }
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             if let RefNode::ModuleInstantiation(instantiation) = node {
                 let type_name = name(
@@ -1223,6 +1369,13 @@ impl<'a> Design<'a> {
                     &file.syntax_tree,
                 )?;
                 if self.interfaces.contains_key(&type_name) {
+                    let statement = file.span(RefNode::ModuleInstantiation(instantiation))?;
+                    let scope = blocks
+                        .iter()
+                        .filter(|block| block.0 <= statement.0 && statement.1 <= block.1)
+                        .min_by_key(|block| block.1 - block.0)
+                        .copied()
+                        .unwrap_or(module_span);
                     for instance in instantiation.nodes.2.contents() {
                         let instance_name = name(
                             RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
@@ -1233,14 +1386,13 @@ impl<'a> Design<'a> {
                             port: None,
                             arrayed: !instance.nodes.0.nodes.1.is_empty(),
                         };
-                        if let Some(previous) = handles.get(&instance_name)
-                            && (previous.interface != handle.interface || previous.port.is_some())
-                        {
-                            return Err(unsupported(format!(
-                                "interface name `{instance_name}` declared twice with different interfaces in module `{module_name}`"
-                            )));
+                        if handles.declared_in(&instance_name, scope) {
+                            return Err(AnalyzerError::DuplicateInstance {
+                                module: module_name.to_string(),
+                                name: instance_name,
+                            });
                         }
-                        handles.insert(instance_name, handle);
+                        handles.insert(instance_name, scope, handle);
                     }
                     interface_instantiations.push(instantiation);
                 } else if self
@@ -1262,7 +1414,7 @@ impl<'a> Design<'a> {
             RefNode::ModuleDeclarationAnsi(declaration),
             &file.syntax_tree,
         )? {
-            if handles.contains_key(&declared) {
+            if handles.contains(&declared) {
                 return Err(unsupported(format!(
                     "declaration of `{declared}` in module `{module_name}`, which shadows an interface"
                 )));
@@ -1277,8 +1429,15 @@ impl<'a> Design<'a> {
         let mut consumed: Vec<Span> = Vec::new();
         // Bare handles and modport selections, valid only as port connections.
         let mut pending: Vec<(Span, String)> = Vec::new();
-        for reference in file.handle_references(module_span, |name| handles.contains_key(name)) {
-            let handle = &handles[&reference.handle];
+        for reference in file.handle_references(module_span, |name| handles.contains(name)) {
+            let handle = handles
+                .at(&reference.handle, reference.span)
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "reference to interface `{}` outside the generate block that declares it",
+                        reference.handle
+                    ))
+                })?;
             let interface = self.interface(&handle.interface)?;
             let Some((item, item_span)) = reference.item else {
                 pending.push((reference.span, reference.handle));
@@ -1304,7 +1463,10 @@ impl<'a> Design<'a> {
                 }
             } else if interface.function(&item).is_some() {
                 let reachable = match &handle.port {
-                    Some(expansion) => expansion.functions.contains(&item),
+                    Some(expansion) => expansion
+                        .callable
+                        .as_ref()
+                        .is_none_or(|callable| callable.contains(&item)),
                     None => true,
                 };
                 if !reachable {
@@ -1445,7 +1607,10 @@ impl<'a> Design<'a> {
                         "interface port `{formal}` of `{child_name}` connected to an expression that is not an interface"
                     ))
                 })?;
-                let handle = handles.get(&actual.handle).cloned().ok_or_else(|| {
+                let handle = handles
+                    .at(&actual.handle, file.span(RefNode::Expression(expression))?)
+                    .cloned()
+                    .ok_or_else(|| {
                     unsupported(format!(
                         "interface port `{formal}` of `{child_name}` connected to `{}`, which is not an interface",
                         actual.handle
@@ -1607,7 +1772,8 @@ impl<'a> Design<'a> {
                         "localparam type {}",
                         interface.render(interface_file, *span, &rename)
                     )),
-                    HeaderForm::Import(span, _) => {
+                    HeaderForm::Import { unit: true, .. } if interface.file == module.file => {}
+                    HeaderForm::Import { span, .. } => {
                         let import = interface_file.text(*span).to_string();
                         if !header_imports.contains(&import) {
                             header_imports.push(import);
@@ -1805,6 +1971,10 @@ impl<'a> Design<'a> {
                         joined(instance, &parameter.name)
                     ));
                 }
+                Item::Constant {
+                    header: HeaderForm::Import { unit: true, .. },
+                    ..
+                } if std::ptr::eq(file, interface_file) => {}
                 Item::Constant { span, .. } => {
                     // A localparam of the parameter port list has no `;`.
                     let mut constant = interface.render(interface_file, *span, &plain);
@@ -1975,6 +2145,7 @@ fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
 fn written_arguments(
     call: &sv_parser::TfCall,
     local: &Scope,
+    handle_interface: &dyn Fn(&str) -> Option<String>,
     file: &File<'_>,
     subroutines: &HashMap<String, Vec<(Scope, SubroutinePorts)>>,
     writes: &mut HashSet<usize>,
@@ -2005,8 +2176,12 @@ fn written_arguments(
             Scope::Unit => package == "$unit",
             _ => false,
         })
-    } else if text.contains('.') {
-        in_scope(&|scope| matches!(scope, Scope::Interface(_)))
+    } else if let Some((handle, _)) = text.split_once('.') {
+        let handle = normalize_identifier(handle.split('[').next().unwrap_or(handle).trim());
+        match handle_interface(&handle) {
+            Some(interface) => in_scope(&|scope| *scope == Scope::Interface(interface.clone())),
+            None => in_scope(&|scope| matches!(scope, Scope::Interface(_))),
+        }
     } else {
         let own = in_scope(&|scope| scope == local);
         if own.is_empty() {
@@ -2493,6 +2668,7 @@ impl InterfaceDecl {
         let mut interface = Self {
             name: interface_name.clone(),
             file: file_index,
+            start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
             has_parameter_port_list: header.nodes.5.is_some(),
             parameters: Vec::new(),
             items: Vec::new(),
@@ -2988,13 +3164,14 @@ impl InterfaceDecl {
                     sv_parser::DataDeclaration::PackageImportDeclaration(import) => {
                         self.items.push(Item::Constant {
                             span: item_span,
-                            header: HeaderForm::Import(
-                                file.span(RefNode::PackageImportDeclaration(import))?,
-                                imported_items(
+                            header: HeaderForm::Import {
+                                span: file.span(RefNode::PackageImportDeclaration(import))?,
+                                imports: imported_items(
                                     RefNode::PackageImportDeclaration(import),
                                     syntax_tree,
                                 )?,
-                            ),
+                                unit: false,
+                            },
                         });
                     }
                     sv_parser::DataDeclaration::NetTypeDeclaration(_) => {

@@ -2563,6 +2563,11 @@ fn expands_interface_instances_ports_and_generic_ports() {
             "missing `{expected}` in:\n{elaborated}"
         );
     }
+    // The copy stays beside the original, under the same directives.
+    assert!(
+        elaborated.find("module Pass$Bus") < elaborated.find("module Top"),
+        "{elaborated}"
+    );
 }
 
 #[test]
@@ -2837,15 +2842,100 @@ fn rejects_invalid_and_colliding_interface_declarations() {
 }
 
 #[test]
+fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+        endinterface
+        interface A;
+            logic [7:0] x;
+        endinterface
+        interface B;
+            logic [3:0] x;
+        endinterface
+        interface T;
+            function automatic logic [7:0] touch(input logic [7:0] v);
+                return v;
+            endfunction
+        endinterface
+        interface U;
+            logic [7:0] s;
+            function automatic void touch(output logic [7:0] v);
+                v = s;
+            endfunction
+        endinterface
+        module M(Bus p, output logic [7:0] o);
+            T a();
+            assign o = a.touch(p.y);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o);
+            if (1) begin : g1
+                A h();
+                assign h.x = v;
+                assign o = h.x;
+            end else begin : g2
+                B h();
+                assign h.x = v[3:0];
+            end
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // `a.touch` is the input-only function of `T`.
+        "input var logic [7:0] p$y",
+        // Each generate block has its own `h`.
+        "var logic [7:0] h$x;",
+        "var logic [3:0] h$x;",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+
+    let sources = elaborate_interfaces(&[
+        (
+            "package pk; typedef logic [5:0] word_t; endpackage
+             import pk::*;
+             interface I; word_t x; modport r(input x); endinterface",
+            Path::new("interface.sv"),
+        ),
+        (
+            "module M(I.r p, output logic [5:0] o); assign o = p.x; endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(
+        sources[1].contains("module M import pk::*;"),
+        "{}",
+        sources[1]
+    );
+    assert!(
+        sources[1].contains("input var word_t p$x"),
+        "{}",
+        sources[1]
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
             logic [7:0] x;
             logic [7:0] y;
-            function automatic logic [7:0] get(input logic [7:0] k);
-                return x + k;
+            function automatic logic [7:0] peek();
+                return x;
             endfunction
-            modport r(input x);
+            function automatic logic [7:0] get(input logic [7:0] k);
+                return peek() + k;
+            endfunction
+            modport r(input x, import get);
             modport w(output x);
         endinterface
     "#;
@@ -2891,6 +2981,10 @@ fn rejects_unsupported_interface_uses() {
         (
             "module Top(output logic [7:0] o); Bus \\b.0 (); assign o = \\b.0 .x; endmodule",
             "escaped identifier `\\b.0` that is not a simple identifier in a design with interfaces",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o); assign o = p.peek(); endmodule",
+            "call of `p.peek`, which the modport of port `p` does not import",
         ),
         (
             "module F(Bus p); function automatic void h(); p.x = 1; endfunction endmodule",
