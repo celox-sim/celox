@@ -178,3 +178,30 @@ test("artifact consumers wait for their producer rather than the Rust test gate"
   assert.match(browser, /needs: \[changes, napi-wasm\]/);
   assert.match(browser, /name: napi-wasm32-wasi/);
 });
+
+test("landed commits are not re-validated by a push run", () => {
+  const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
+  assert.doesNotMatch(triggers, /^\s+push:/m);
+  assert.match(triggers, /^\s+merge_group:/m);
+  assert.match(triggers, /^\s+schedule:/m);
+});
+
+test("platform jobs run in merge groups and full runs, not on pull requests", () => {
+  const platform = [
+    "arm64-backend",
+    "napi-windows",
+    "napi-linux-arm64",
+    "js-windows",
+  ];
+  for (const name of platform) {
+    assert.match(
+      job(name),
+      /\n    if: always\(\) && github\.event_name != 'pull_request' && \(/,
+      name,
+    );
+  }
+  // Linux jobs still give pull requests their feedback.
+  for (const name of ["lint", "rust-tests", "napi-linux", "js-ubuntu", "rust"]) {
+    assert.doesNotMatch(job(name), /github\.event_name != 'pull_request'/, name);
+  }
+});

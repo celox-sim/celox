@@ -1,8 +1,8 @@
 name: CI
 
+# No push trigger: the merge queue already validated the exact tree that lands
+# on master or develop. The daily full runs keep those branches' caches warm.
 on:
-  push:
-    branches: [master, develop]
   pull_request:
   merge_group:
   # Full validation also runs without a change filter, including quiet periods.
@@ -430,7 +430,9 @@ jobs:
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    # Platform jobs run in merge groups and full runs, not on pull requests.
+    # They almost never fail alone; dispatch ci.yml on a branch to run them.
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -467,7 +469,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -503,7 +505,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -590,7 +592,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
