@@ -213,16 +213,49 @@ impl<'a> File<'a> {
             .map(|index| self.text(self.tokens[index]))
     }
 
-    /// Whether `span` has a use `.name.` or `.name[` of `name` after a
-    /// scope, such as `g.h.x` for an instance `h` in a generate block `g`.
-    fn has_qualified_use(&self, span: Span, name: &str) -> bool {
+    /// Whether `span` has a use `.name.` or `.name[` of `name` after one of
+    /// the generate block names `blocks`, such as `g.h.x` or `g[0].h.x` for
+    /// an instance `h` in a generate block `g`.
+    fn has_qualified_use(&self, span: Span, name: &str, blocks: &HashSet<String>) -> bool {
         let first = self.tokens.partition_point(|&(start, _)| start < span.0);
         let last = self.tokens.partition_point(|&(start, _)| start < span.1);
-        self.tokens[first..last].iter().any(|&token| {
-            self.identifiers.contains(&token.0)
-                && normalize_identifier(self.text(token)) == name
-                && self.previous_token(token.0) == Some(".")
-                && matches!(self.next_token(token.1), Some("." | "["))
+        (first.max(2)..last).any(|index| {
+            let token = self.tokens[index];
+            if !self.identifiers.contains(&token.0)
+                || normalize_identifier(self.text(token)) != name
+                || self.text(self.tokens[index - 1]) != "."
+                || !matches!(self.next_token(token.1), Some("." | "["))
+            {
+                return false;
+            }
+            // The qualifier before the dot, after its selects.
+            let mut qualifier = index - 2;
+            while self.text(self.tokens[qualifier]) == "]" {
+                let mut depth = 0usize;
+                loop {
+                    match self.text(self.tokens[qualifier]) {
+                        "]" => depth += 1,
+                        "[" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if qualifier == 0 {
+                        return false;
+                    }
+                    qualifier -= 1;
+                }
+                if qualifier == 0 {
+                    return false;
+                }
+                qualifier -= 1;
+            }
+            let qualifier = self.tokens[qualifier];
+            self.identifiers.contains(&qualifier.0)
+                && blocks.contains(&normalize_identifier(self.text(qualifier)))
         })
     }
 
@@ -449,6 +482,8 @@ struct InterfaceDecl {
     has_parameter_port_list: bool,
     /// Whether the declaration uses macros or other compiler directives.
     uses_macros: bool,
+    /// Whether the declaration refers to compilation-unit items of its file.
+    uses_unit_items: bool,
     parameters: Vec<InterfaceParameter>,
     items: Vec<Item>,
     members: Vec<Member>,
@@ -509,19 +544,27 @@ impl InterfaceDecl {
             .collect()
     }
 
-    /// Reject copying the interface into a module of another source file
-    /// when it uses macros, which that file may not define.
-    /// The module starts at `module_start`, and must follow the interface
-    /// and so the macro definitions before it.
-    fn check_macros(
+    /// Reject copying the interface into a module that starts at
+    /// `module_start` of `file` when the copy would lose its context: macros,
+    /// whose expansion `render` cannot rename, and compilation-unit items,
+    /// which another file or an earlier module does not see.
+    fn check_context(
         &self,
         file: &File<'_>,
         interface_file: &File<'_>,
         module_start: usize,
     ) -> Result<(), AnalyzerError> {
-        if self.uses_macros && (!std::ptr::eq(file, interface_file) || module_start < self.start) {
+        if self.uses_macros {
             return Err(unsupported(format!(
-                "macro in interface `{}`, which a module of another source file or before it uses",
+                "macro or compiler directive in interface `{}`",
+                self.name
+            )));
+        }
+        if self.uses_unit_items
+            && (!std::ptr::eq(file, interface_file) || module_start < self.start)
+        {
+            return Err(unsupported(format!(
+                "compilation-unit item in interface `{}`, which a module of another source file or before it uses",
                 self.name
             )));
         }
@@ -724,6 +767,8 @@ struct ChildBinding {
     formal: String,
     handle: String,
     context: Context,
+    /// The interfaces bound to the child's generic ports, sorted.
+    bindings: Vec<(String, String)>,
 }
 
 /// A module, its port, the interface bound to it and the bindings of the
@@ -750,7 +795,24 @@ impl<'a> Design<'a> {
             for node in &file.syntax_tree {
                 match node {
                     RefNode::InterfaceDeclarationAnsi(declaration) => {
-                        let interface = InterfaceDecl::collect(declaration, index, file)?;
+                        let mut interface = InterfaceDecl::collect(declaration, index, file)?;
+                        let unit = unit_names(file)?;
+                        let declared: HashSet<String> = declared_names(
+                            RefNode::InterfaceDeclarationAnsi(declaration),
+                            &file.syntax_tree,
+                        )?
+                        .into_iter()
+                        .collect();
+                        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
+                            if let RefNode::Identifier(identifier) = node {
+                                let identifier =
+                                    name(RefNode::Identifier(identifier), &file.syntax_tree)?;
+                                if unit.contains(&identifier) && !declared.contains(&identifier) {
+                                    interface.uses_unit_items = true;
+                                    break;
+                                }
+                            }
+                        }
                         if interfaces.contains_key(&interface.name) {
                             return Err(AnalyzerError::DuplicateModule {
                                 name: interface.name,
@@ -1096,8 +1158,12 @@ impl<'a> Design<'a> {
                 .iter()
                 .filter(|child| child.handle == port_name)
             {
-                let child_expansion =
-                    self.expansion(&child.module, &child.formal, interface_name, &[])?;
+                let child_expansion = self.expansion(
+                    &child.module,
+                    &child.formal,
+                    interface_name,
+                    &child.bindings,
+                )?;
                 for (member, direction) in child_expansion.members {
                     let Some(access) = imported.get(&member) else {
                         continue;
@@ -1168,8 +1234,12 @@ impl<'a> Design<'a> {
             .iter()
             .filter(|child| child.handle == port_name)
         {
-            let child_expansion =
-                self.expansion(&child.module, &child.formal, interface_name, &[])?;
+            let child_expansion = self.expansion(
+                &child.module,
+                &child.formal,
+                interface_name,
+                &child.bindings,
+            )?;
             for (member, direction) in child_expansion.members {
                 if direction == Direction::Output {
                     if child.context != Context::Module {
@@ -1443,9 +1513,26 @@ impl<'a> Design<'a> {
             };
             let instance_context = context(file.span(RefNode::ModuleInstantiation(instantiation))?);
             for instance in instantiation.nodes.2.contents() {
-                for (formal, actual) in
-                    connections(instance, child, file, child.has_interface_ports())?
-                {
+                let actuals = connections(instance, child, file, child.has_interface_ports())?;
+                let mut bindings = Vec::new();
+                for (formal, actual) in &actuals {
+                    if let Some(port) = child.port(formal)
+                        && port
+                            .interface
+                            .as_ref()
+                            .is_some_and(|port| port.interface.is_none())
+                        && let Connection::Explicit(Some(expression)) = actual
+                        && let Some(actual) = actual_handle(expression, file)?
+                        && let Some(interface) = interface_at(
+                            &actual.handle,
+                            file.span(RefNode::Expression(expression))?,
+                        )
+                    {
+                        bindings.push((formal.clone(), interface));
+                    }
+                }
+                bindings.sort();
+                for (formal, actual) in actuals {
                     // An implicit connection names no interface member.
                     let (Some(port), Connection::Explicit(Some(expression))) =
                         (child.port(&formal), actual)
@@ -1464,6 +1551,7 @@ impl<'a> Design<'a> {
                             formal,
                             handle: actual.handle,
                             context: instance_context,
+                            bindings: bindings.clone(),
                         });
                     }
                 }
@@ -1562,7 +1650,14 @@ impl<'a> Design<'a> {
         let mut blocks = Vec::new();
         // The generate blocks that are a single item without `begin`.
         let mut bare_blocks = HashSet::default();
+        let mut block_names = HashSet::default();
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            if let RefNode::GenerateBlockIdentifier(identifier) = node {
+                block_names.insert(name(
+                    RefNode::GenerateBlockIdentifier(identifier),
+                    &file.syntax_tree,
+                )?);
+            }
             if let RefNode::GenerateBlock(block) = node {
                 let span = file.node_span(RefNode::GenerateBlock(block));
                 blocks.extend(span);
@@ -1596,7 +1691,7 @@ impl<'a> Design<'a> {
                             arrayed: !instance.nodes.0.nodes.1.is_empty(),
                         };
                         if scope != module_span
-                            && file.has_qualified_use(module_span, &instance_name)
+                            && file.has_qualified_use(module_span, &instance_name, &block_names)
                         {
                             return Err(unsupported(format!(
                                 "hierarchical reference to interface instance `{instance_name}` through a generate block"
@@ -1745,7 +1840,17 @@ impl<'a> Design<'a> {
                 file,
             )?;
             // The instantiation disappears, so no later check sees an
-            // unknown parameter.
+            // unknown or repeated parameter.
+            let mut overridden = HashSet::default();
+            if let Some((parameter, _)) = overrides
+                .iter()
+                .find(|(parameter, _)| !overridden.insert(parameter))
+            {
+                return Err(AnalyzerError::DuplicateInterfaceParameterOverride {
+                    interface: interface.name.clone(),
+                    name: parameter.clone(),
+                });
+            }
             if let Some((parameter, _)) = overrides.iter().find(|(parameter, _)| {
                 !interface
                     .parameters
@@ -1832,6 +1937,22 @@ impl<'a> Design<'a> {
             let mut connection_texts = Vec::new();
             let mut parameter_texts = Vec::new();
             let actuals = connections(instance, &self.modules[&child_name], file, true)?;
+            // The interfaces bound to the child's generic ports, which every
+            // expansion of the child needs.
+            let mut generic_bindings = Vec::new();
+            for (formal, actual) in &actuals {
+                if let Some((_, Some(formal_port))) =
+                    child_ports.iter().find(|(name, _)| name == formal)
+                    && formal_port.interface.is_none()
+                    && let Connection::Explicit(Some(expression)) = actual
+                    && let Some(actual) = actual_handle(expression, file)?
+                    && let Some(handle) =
+                        handles.at(&actual.handle, file.span(RefNode::Expression(expression))?)
+                {
+                    generic_bindings.push((formal.clone(), handle.interface.clone()));
+                }
+            }
+            generic_bindings.sort();
             for (formal, actual) in actuals {
                 let Some((_, Some(formal_port))) =
                     child_ports.iter().find(|(name, _)| *name == formal)
@@ -1890,7 +2011,7 @@ impl<'a> Design<'a> {
                     )));
                 }
                 let child_expansion =
-                    self.expansion(&child_name, &formal, &handle.interface, &[])?;
+                    self.expansion(&child_name, &formal, &handle.interface, &generic_bindings)?;
                 for (member, direction) in &child_expansion.members {
                     if let Some(expansion) = &handle.port {
                         match expansion.direction(member) {
@@ -1988,7 +2109,7 @@ impl<'a> Design<'a> {
             let interface = self.interface(interface_name)?;
             let rename = |item: &str| Some(joined(port, item));
             let interface_file = file_of(self.files, interface);
-            interface.check_macros(file, interface_file, module_span.0)?;
+            interface.check_context(file, interface_file, module_span.0)?;
             for item in &interface.items {
                 let header = match item {
                     Item::Parameter(index) => {
@@ -2187,7 +2308,7 @@ impl<'a> Design<'a> {
         render: &dyn Fn(Span) -> String,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
-        interface.check_macros(file, interface_file, scope_start)?;
+        interface.check_context(file, interface_file, scope_start)?;
         // Helper names start with the separator, which no interface item name
         // contains, so they cannot collide with a flattened item.
         let genvars: Vec<String> = (0..dimensions.len())
@@ -2758,26 +2879,47 @@ fn package_items(
 ) -> Result<HashSet<String>, AnalyzerError> {
     let mut names = HashSet::default();
     for (_, item) in &package.nodes.6 {
-        let root = RefNode::PackageItem(item);
-        // Only the name of a subroutine; its ports and locals are its own.
-        let subroutine = unwrap_node!(root.clone(), FunctionDeclaration)
-            .and_then(|function| unwrap_node!(function, FunctionIdentifier))
-            .or_else(|| {
-                unwrap_node!(root.clone(), TaskDeclaration)
-                    .and_then(|task| unwrap_node!(task, TaskIdentifier))
-            });
-        if let Some(identifier) = subroutine {
-            names.insert(name(identifier, syntax_tree)?);
-            continue;
+        names.extend(package_item_names(item, syntax_tree)?);
+    }
+    Ok(names)
+}
+
+/// The names that the compilation-unit items of `file` declare.
+fn unit_names(file: &File<'_>) -> Result<HashSet<String>, AnalyzerError> {
+    let mut names = HashSet::default();
+    for node in &file.syntax_tree {
+        if let RefNode::DescriptionPackageItem(item) = node {
+            names.extend(package_item_names(&item.nodes.1, &file.syntax_tree)?);
         }
-        names.extend(declared_names(root.clone(), syntax_tree)?);
-        for node in root {
-            if let RefNode::EnumNameDeclaration(declaration) = node {
-                names.insert(name(
-                    RefNode::EnumIdentifier(&declaration.nodes.0),
-                    syntax_tree,
-                )?);
-            }
+    }
+    Ok(names)
+}
+
+/// The names that a package item declares.
+fn package_item_names(
+    item: &sv_parser::PackageItem,
+    syntax_tree: &SyntaxTree,
+) -> Result<HashSet<String>, AnalyzerError> {
+    let root = RefNode::PackageItem(item);
+    // Only the name of a subroutine; its ports and locals are its own.
+    let subroutine = unwrap_node!(root.clone(), FunctionDeclaration)
+        .and_then(|function| unwrap_node!(function, FunctionIdentifier))
+        .or_else(|| {
+            unwrap_node!(root.clone(), TaskDeclaration)
+                .and_then(|task| unwrap_node!(task, TaskIdentifier))
+        });
+    let mut names = HashSet::default();
+    if let Some(identifier) = subroutine {
+        names.insert(name(identifier, syntax_tree)?);
+        return Ok(names);
+    }
+    names.extend(declared_names(root.clone(), syntax_tree)?);
+    for node in root {
+        if let RefNode::EnumNameDeclaration(declaration) = node {
+            names.insert(name(
+                RefNode::EnumIdentifier(&declaration.nodes.0),
+                syntax_tree,
+            )?);
         }
     }
     Ok(names)
@@ -3008,9 +3150,7 @@ fn connections<'b>(
     match list {
         sv_parser::ListOfPortConnections::Ordered(list) => {
             let connections = list.nodes.0.contents();
-            if connections.len() == 1
-                && connections[0].nodes.1.is_none()
-                && module.ports.is_empty()
+            if connections.len() == 1 && connections[0].nodes.1.is_none() && module.ports.is_empty()
             {
                 return Ok(Vec::new());
             }
@@ -3023,11 +3163,17 @@ fn connections<'b>(
             Ok(module
                 .ports
                 .iter()
-                .zip(connections.into_iter().map(|connection| connection.nodes.1.as_ref()).chain(std::iter::repeat(None)))
+                .zip(
+                    connections
+                        .into_iter()
+                        .map(|connection| connection.nodes.1.as_ref())
+                        .chain(std::iter::repeat(None)),
+                )
                 .map(|(port, actual)| (port.name.clone(), Connection::Explicit(actual)))
                 .collect())
         }
-        sv_parser::ListOfPortConnections::Named(list) => list
+        sv_parser::ListOfPortConnections::Named(list) => {
+            let mut connections: Vec<(String, Connection<'b>)> = list
             .nodes
             .0
             .contents()
@@ -3054,7 +3200,20 @@ fn connections<'b>(
                     Some(Err(unsupported("wildcard port connection")))
                 }
             })
-            .collect(),
+            .collect::<Result<_, _>>()?;
+            // An omitted interface port is unconnected, which the caller
+            // rejects.
+            if strict {
+                for port in &module.ports {
+                    if port.interface.is_some()
+                        && !connections.iter().any(|(formal, _)| *formal == port.name)
+                    {
+                        connections.push((port.name.clone(), Connection::Explicit(None)));
+                    }
+                }
+            }
+            Ok(connections)
+        }
     }
 }
 
@@ -3173,6 +3332,7 @@ impl InterfaceDecl {
             file: file_index,
             start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
             has_parameter_port_list: header.nodes.5.is_some(),
+            uses_unit_items: false,
             uses_macros: file
                 .text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?)
                 .contains('`'),
@@ -3278,7 +3438,11 @@ impl InterfaceDecl {
                     );
                     // An undeclared target would be an implicit net of the
                     // interface, which is not renamed per instance.
-                    if let sv_parser::NetLvalue::Identifier(target) = lvalue {
+                    // With macros the text need not show the target, but
+                    // using the interface is rejected anyway.
+                    if let sv_parser::NetLvalue::Identifier(target) = lvalue
+                        && !interface.uses_macros
+                    {
                         let target_name = file.text(
                             file.span(RefNode::PsOrHierarchicalNetIdentifier(&target.nodes.0))?,
                         );

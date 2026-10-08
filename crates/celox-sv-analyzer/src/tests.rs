@@ -3266,22 +3266,38 @@ fn separates_type_names_unit_subroutines_and_macros_by_file() {
         sources[1]
     );
 
-    // Macros of an interface may be undefined in another file.
-    let interface = "`define W 8\ninterface I; logic [`W-1:0] x; endinterface";
+    // The expansion of a macro would keep the names it emits.
+    assert_eq!(
+        elaborate(
+            "`define DRIVE assign x = 1;
+             interface I; logic x; `DRIVE endinterface
+             module M(); I h(); endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "macro or compiler directive in interface `I`".to_string()
+        ))
+    );
+
+    // Compilation-unit items are visible only in their own file, after
+    // their declaration.
+    let interface = "function automatic logic source(); return 1; endfunction
+         interface I; logic x; assign x = source(); endinterface";
     assert!(
-        elaborate(&format!("{interface}\nmodule M(I p); endmodule"))
+        elaborate(&format!("{interface}\nmodule M(); I h(); endmodule"))
             .unwrap()
             .is_some()
     );
+    let message = "compilation-unit item in interface `I`, which a module of another source file or before it uses";
     assert_eq!(
         elaborate_interfaces(&[
             (interface, Path::new("interface.sv")),
-            ("module M(I p); endmodule", Path::new("module.sv")),
+            ("module M(); I h(); endmodule", Path::new("module.sv")),
         ]),
-        Err(AnalyzerError::Unsupported(
-            "macro in interface `I`, which a module of another source file or before it uses"
-                .to_string()
-        ))
+        Err(AnalyzerError::Unsupported(message.to_string()))
+    );
+    assert_eq!(
+        elaborate(&format!("module M(); I h(); endmodule\n{interface}")),
+        Err(AnalyzerError::Unsupported(message.to_string()))
     );
 }
 
@@ -3325,12 +3341,37 @@ fn resolves_sibling_generic_ports_and_struct_fields() {
         elaborated.contains("input var logic [7:0] p$x"),
         "{elaborated}"
     );
+    // A struct field `h` is not a generate-qualified instance.
+    assert!(
+        elaborate(
+            "interface I; logic x; endinterface
+             module M(output logic y);
+                 typedef struct packed { struct packed { logic x; } h; } T;
+                 T record;
+                 assign record = 0;
+                 if (1) begin : g I h(); end
+                 assign y = record.h.x;
+             endmodule"
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        elaborate(
+            "interface I #(parameter int P = 0); endinterface
+             module M(); I #(.P(1), .P(2)) h(); endmodule"
+        ),
+        Err(AnalyzerError::DuplicateInterfaceParameterOverride {
+            interface: "I".to_string(),
+            name: "P".to_string(),
+        })
+    );
     for (source, message) in [
         (
-            "module M(I p); endmodule
-             `define W 8
-             interface I; logic [`W-1:0] x; endinterface",
-            "macro in interface `I`, which a module of another source file or before it uses",
+            "interface I; logic x; endinterface interface J; endinterface
+             module C(I p, J q); endmodule
+             module M(); I a(); C c(.p(a)); endmodule",
+            "unconnected interface port `q` of instance of `C`",
         ),
         (
             "interface I; if (1) begin logic x; end logic y; assign y = genblk1.x; endinterface",

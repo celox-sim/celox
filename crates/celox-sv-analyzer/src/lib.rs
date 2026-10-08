@@ -49,6 +49,8 @@ pub enum AnalyzerError {
     DuplicateInterfaceItem { interface: String, name: String },
     #[error("Interface `{interface}` has no parameter `{name}`")]
     UnknownInterfaceParameter { interface: String, name: String },
+    #[error("Parameter `{name}` of interface `{interface}` is overridden more than once")]
+    DuplicateInterfaceParameterOverride { interface: String, name: String },
     #[error("Modport `{modport}` of interface `{interface}` lists `{name}` more than once")]
     DuplicateModportItem {
         interface: String,
