@@ -530,6 +530,7 @@
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
         "interfaces::infers_directions_of_ports_without_modport",
+        "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::runs_interface_processes_once_per_array_element"
       ]

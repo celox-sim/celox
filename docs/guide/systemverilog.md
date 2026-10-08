@@ -74,8 +74,11 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Interfaces: ports of an interface, `inout`, `ref` and expression modport
   ports, modport `export` and clocking, tasks, type parameters, enums and
   instances inside an interface, a modport named in a connection to a port
-  that does not declare one, calls of functions of an interface array, and
-  virtual interfaces.
+  that does not declare one, calls of functions of an interface array,
+  writes through a port without a modport inside a generate construct,
+  declarations that reuse the name of an interface instance or port, and
+  virtual interfaces. A design with interfaces may not use `$` in its own
+  identifiers, which the expansion reserves for generated names.
 - Behavioral and verification constructs: `initial` blocks that read design
   state or use timing, `final`, delays and delayed continuous assignments
   ([#444](https://github.com/celox-sim/celox/issues/444)), event controls other than clock edges, concurrent assertions,

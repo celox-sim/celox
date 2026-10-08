@@ -2566,6 +2566,67 @@ fn expands_interface_instances_ports_and_generic_ports() {
 }
 
 #[test]
+fn expands_interface_parameters_functions_and_grouped_ports() {
+    let elaborated = elaborate(
+        r#"
+        interface Counter;
+            parameter W = 4;
+            logic [W-1:0] state;
+            function automatic void load(input logic [W-1:0] v);
+                state = v;
+            endfunction
+            modport loader(import load);
+        endinterface
+        interface Util #(parameter int K = 2);
+            function automatic logic [7:0] scaled(input logic [7:0] v);
+                return v * K;
+            endfunction
+            modport user(import scaled);
+        endinterface
+        module Loader(Counter.loader c, input logic [7:0] v);
+            always_comb c.load(v);
+        endmodule
+        module Pair(Counter a, b, output logic [7:0] o);
+            assign o = a.state + b.state;
+        endmodule
+        module Scaler(Util.user u, input logic [7:0] v, output logic [7:0] o);
+            assign o = u.scaled(v);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o, output logic [7:0] s);
+            Counter #(.W(8)) named();
+            Counter #(6) ordered();
+            Util #(.K(3)) util();
+            Loader l(.c(named), .v(v));
+            Pair p(.a(named), .b(ordered), .o(o));
+            Scaler u(.u(util), .v(v), .o(s));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // A body `parameter` without a parameter port list can be overridden.
+        "localparam named$W = 8;",
+        "localparam ordered$W = 6;",
+        "parameter c$W = 4",
+        // A member an imported function assigns is driven through the port.
+        "output var logic [c$W-1:0] c$state",
+        "named$state = v;",
+        // A port without a header repeats the interface of the previous one.
+        "input var logic [b$W-1:0] b$state",
+        "assign o = a$state + b$state;",
+        // A port that carries only a parameter and a function disappears.
+        "Scaler #(.u$K(util$K)) u (.v(v), .o(s));",
+        "assign o = u$scaled(v);",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
@@ -2600,6 +2661,31 @@ fn rejects_unsupported_interface_uses() {
             "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
              module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
             "modport `r` selected in the connection of port `p` of `M`, which does not declare it",
+        ),
+        (
+            "module C(Bus p, input logic [7:0] q); endmodule
+             module Top(); Bus i(); C c(.p(i), .q(i)); endmodule",
+            "use of interface `i` other than as a port connection or through a member",
+        ),
+        (
+            "module Top(output logic [7:0] o); Bus h(); logic [7:0] h$x; assign o = h.x; endmodule",
+            "identifier `h$x` containing `$` in a design with interfaces, which interface elaboration reserves for generated names",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o);
+                 function automatic logic [7:0] f(input logic [7:0] p); return p; endfunction
+                 assign o = f(p.x);
+             endmodule",
+            "declaration of `p` in module `M`, which shadows an interface",
+        ),
+        (
+            "module W(Bus p); if (0) begin : g assign p.x = 0; end endmodule",
+            "write of `p.x` inside a generate construct of module `W`, whose port `p` has no modport",
+        ),
+        (
+            "module W(Bus.w p); assign p.x = 0; endmodule
+             module M(Bus p); if (1) begin : g W u(.p(p)); end endmodule",
+            "write of `p.x` inside a generate construct of module `M`, whose port `p` has no modport",
         ),
     ] {
         let source = format!("{BUS}{body}");

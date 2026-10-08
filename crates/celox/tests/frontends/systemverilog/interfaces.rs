@@ -30,4 +30,8 @@ sv_backends! {
     fn reads_undriven_interface_members_as_unknown(sim) {
         @case "interfaces::reads_undriven_interface_members_as_unknown";
     }
+
+    fn overrides_body_parameters_and_drives_members_from_imported_functions(sim) {
+        @case "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions";
+    }
 }

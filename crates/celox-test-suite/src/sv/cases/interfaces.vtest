@@ -257,3 +257,44 @@
   (modify (set a 0x5a))
   (assert_eq data 0x5a)
   (assert_eq spare (fourstate 0xf 0xf)))
+
+(case overrides_body_parameters_and_drives_members_from_imported_functions
+  (source "interface_body_parameters.sv" #"
+        interface Reg;
+            parameter W = 4;
+            logic [W-1:0] state;
+            function automatic void load(input logic [W-1:0] v);
+                state = v;
+            endfunction
+            modport loader(import load);
+        endinterface
+        interface Util #(parameter int K = 2);
+            function automatic logic [7:0] scaled(input logic [7:0] v);
+                return v * K;
+            endfunction
+            modport user(import scaled);
+        endinterface
+        module Loader(Reg.loader r, input logic [15:0] v);
+            always_comb r.load(v[r.W-1:0]);
+        endmodule
+        module Sum(Reg a, b, output logic [15:0] o);
+            assign o = a.state + b.state;
+        endmodule
+        module Scaler(Util.user u, input logic [7:0] v, output logic [7:0] o);
+            assign o = u.scaled(v);
+        endmodule
+        module Top(input logic [15:0] v, output logic [15:0] sum, output logic [7:0] scaled);
+            Reg #(.W(8)) named();
+            Reg #(12) ordered();
+            Util #(.K(3)) util();
+            Loader ln(.r(named), .v(v));
+            Loader lo(.r(ordered), .v(v));
+            Sum add(.a(named), .b(ordered), .o(sum));
+            Scaler sc(.u(util), .v(v[7:0]), .o(scaled));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x0123 0x0fff 0xffff)
+    (modify (set v value))
+    (assert_eq sum (trunc 16 (+ (trunc 8 value) (trunc 12 value))))
+    (assert_eq scaled (trunc 8 (* (trunc 8 value) 3)))))
