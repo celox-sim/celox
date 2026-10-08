@@ -365,6 +365,95 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
+    /// Evaluate the subroutine calls of a select position, left to right,
+    /// and refer to their results. A flattened select repeats an index in
+    /// its bounds and range checks, so one call is evaluated once.
+    fn hoist_const(
+        &mut self,
+        expr: &sv::ir::ConstExpr,
+        calls: &mut Vec<(sv::ir::ConstExpr, sv::ir::ConstExpr)>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if !self.m.const_calls(expr) {
+            return Ok(expr.clone());
+        }
+        Ok(match expr {
+            ConstExpr::Function { name, args }
+                if self.m.subroutines.contains_key(name)
+                    || self.m.dpi_imports.contains_key(name) =>
+            {
+                if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
+                    return Ok(result.clone());
+                }
+                let args = args
+                    .iter()
+                    .map(|arg| {
+                        expr_from_const_expr(arg)
+                            .ok_or_else(|| unsupported(format!("argument of `{name}` in a select")))
+                    })
+                    .collect::<Result<_, _>>()?;
+                let call = sv::ir::Expr::Call {
+                    name: name.clone(),
+                    args,
+                };
+                let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
+                    return Err(unsupported(format!("call of `{name}` in a select")));
+                };
+                let result = ConstExpr::Ident(result);
+                calls.push((expr.clone(), result.clone()));
+                result
+            }
+            ConstExpr::Function { name, args } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.hoist_const(arg, calls))
+                    .collect::<Result<_, _>>()?,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                bit: Box::new(self.hoist_const(bit, calls)?),
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.hoist_const(expr, calls)?),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.hoist_const(left, calls)?),
+                op: *op,
+                right: Box::new(self.hoist_const(right, calls)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: Box::new(self.hoist_const(condition, calls)?),
+                then_expr: Box::new(self.hoist_const(then_expr, calls)?),
+                else_expr: Box::new(self.hoist_const(else_expr, calls)?),
+            },
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr.clone(),
+        })
+    }
+
+    /// An assignment target whose select positions refer to the results of
+    /// their subroutine calls, evaluated now.
+    fn hoist_lvalue(
+        &mut self,
+        lvalue: &sv::ir::LValue,
+    ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
+        if !self.m.lvalue_calls(lvalue) {
+            return Ok(lvalue.clone());
+        }
+        let mut lvalue = lvalue.clone();
+        if let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue {
+            let mut calls = Vec::new();
+            *lsb = self.hoist_const(lsb, &mut calls)?;
+            *msb = self.hoist_const(msb, &mut calls)?;
+        }
+        Ok(lvalue)
+    }
+
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
         if !self.m.calls(expr) {
@@ -485,12 +574,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 msb,
                 lsb,
                 signed,
-            } => Expr::Select {
-                expr: Box::new(self.hoist(expr)?),
-                msb: msb.clone(),
-                lsb: lsb.clone(),
-                signed: *signed,
-            },
+            } => {
+                let expr = self.hoist(expr)?;
+                let mut calls = Vec::new();
+                let lsb = self.hoist_const(lsb, &mut calls)?;
+                let msb = self.hoist_const(msb, &mut calls)?;
+                Expr::Select {
+                    expr: Box::new(expr),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                }
+            }
             Expr::Concat(parts) => Expr::Concat(
                 parts
                     .iter()
@@ -671,6 +766,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
+        let lhs = self.hoist_lvalue(&lhs)?;
         let width = self.lvalue_width(&lhs)?;
         let signed = self.expr_signed(rhs);
         let mut arena = SLTNodeArena::new();
@@ -1036,10 +1132,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        // The positions of the parts are evaluated before any part is written.
         let parts: Vec<_> = parts
             .iter()
-            .map(|part| self.propagate_lvalue(part))
-            .collect();
+            .map(|part| {
+                let part = self.propagate_lvalue(part);
+                self.hoist_lvalue(&part)
+            })
+            .collect::<Result<_, _>>()?;
         let widths = parts
             .iter()
             .map(|part| self.lvalue_width(part))
@@ -1454,9 +1554,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let id = self.m.id(&canonical.var).expect("loop variable");
         let (width, signed) = (self.m.var(id).width, self.m.var(id).signed);
-        let Some((start, _)) = self.eval_const(&canonical.start)? else {
+        let start_signed = self.expr_signed(&canonical.start);
+        let Some((mut start, start_width)) = self.eval_const(&canonical.start)? else {
             return Ok(None);
         };
+        // The initializer widens to the loop variable by its own signedness.
+        if start_signed
+            && start_width > 0
+            && start_width < width
+            && start.bit(start_width as u64 - 1)
+        {
+            start |= ((BigUint::from(1u8) << width) - BigUint::from(1u8))
+                ^ ((BigUint::from(1u8) << start_width) - BigUint::from(1u8));
+        }
         let Some(condition) = condition else {
             return Ok(None);
         };

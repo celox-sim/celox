@@ -348,6 +348,18 @@ impl<'a> ProcModule<'a> {
     }
 
     /// Whether an expression calls a user subroutine or a DPI-C import.
+    pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
+        lvalue_calls(lvalue, &|name| {
+            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+        })
+    }
+
+    pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
+        const_calls(expr, &|name| {
+            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+        })
+    }
+
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
         expr_calls(expr, &|name| {
             self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
@@ -1486,12 +1498,55 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
 }
 
 /// Whether an expression calls a user subroutine.
+/// Whether a constant-expression operand, such as a run-time select index,
+/// calls a subroutine.
+pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> bool) -> bool {
+    use sv::ir::ConstExpr;
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        ConstExpr::Select { expr, bit } => {
+            const_calls(expr, is_callee) || const_calls(bit, is_callee)
+        }
+        ConstExpr::Function { name, args } => {
+            is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
+        }
+        ConstExpr::Unary { expr, .. } => const_calls(expr, is_callee),
+        ConstExpr::Binary { left, right, .. } => {
+            const_calls(left, is_callee) || const_calls(right, is_callee)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_calls(condition, is_callee)
+                || const_calls(then_expr, is_callee)
+                || const_calls(else_expr, is_callee)
+        }
+    }
+}
+
+/// Whether the select positions of an assignment target call a subroutine.
+pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> bool) -> bool {
+    match lvalue {
+        sv::ir::LValue::Ident(_) => false,
+        sv::ir::LValue::Select { msb, lsb, .. } => {
+            const_calls(msb, is_callee) || const_calls(lsb, is_callee)
+        }
+    }
+}
+
 pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
-        sv::ir::Expr::Select { expr, .. }
-        | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => expr_calls(expr, is_callee),
+        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
+            expr_calls(expr, is_callee)
+                || const_calls(msb, is_callee)
+                || const_calls(lsb, is_callee)
+        }
+        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Unary { expr, .. } => {
+            expr_calls(expr, is_callee)
+        }
         sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
             parts.iter().any(|part| expr_calls(part, is_callee))
         }

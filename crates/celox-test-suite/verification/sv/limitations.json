@@ -196,6 +196,7 @@
     ],
     "cases": {
       "icarus": [
+        "procedural::select_indices_call_functions",
         "synthesizable::function_output_and_inout_arguments_are_written_back"
       ]
     }

@@ -98,7 +98,7 @@ use dimensions::{
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
     expr_from_function_subroutine_call, expr_from_primary, expr_from_subroutine_call,
-    expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
+    expr_from_tf_call, expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{

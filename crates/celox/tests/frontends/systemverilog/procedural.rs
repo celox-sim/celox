@@ -18,4 +18,16 @@ sv_backends! {
     fn initial_blocks_define_the_initial_state(sim) {
         @case "procedural::initial_blocks_define_the_initial_state";
     }
+
+    fn loop_initializer_widens_by_its_own_signedness(sim) {
+        @case "procedural::loop_initializer_widens_by_its_own_signedness";
+    }
+
+    fn select_indices_call_functions(sim) {
+        @case "procedural::select_indices_call_functions";
+    }
+
+    fn runtime_bits_of_a_constant_element(sim) {
+        @case "procedural::runtime_bits_of_a_constant_element";
+    }
 }

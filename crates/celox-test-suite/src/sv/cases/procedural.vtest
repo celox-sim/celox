@@ -118,3 +118,79 @@
     (modify (set index i))
     (assert_eq y (+ (* i 3) 1))
     (assert_eq z 0x5a)))
+
+(case loop_initializer_widens_by_its_own_signedness
+  (source "loop_start.sv" #"
+                module Top(input logic [7:0] value, output logic [7:0] count, output logic [7:0] registered,
+                           input logic clk);
+                    always_comb begin
+                        count = 8'd0;
+                        for (int i = value[1:0]; i < 4; i++) count = count + 8'd1;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [7:0] n;
+                        n = 8'd0;
+                        for (int i = 2'b11; i < 4; i++) n = n + 8'd1;
+                        registered <= n;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 8)
+    (modify (set value value))
+    (tick clk)
+    (assert_eq count (- 4 (& value 3)))
+    (assert_eq registered 1)))
+
+(case select_indices_call_functions
+  (source "call_index.sv" #"
+                module Top(input logic [1:0] sel, input logic [1:0] value,
+                           output logic [3:0] data, output logic [7:0] seen, output logic picked);
+                    function automatic logic [1:0] pick(input logic [1:0] x, output logic [7:0] y);
+                        y = 8'd10 + x;
+                        return x;
+                    endfunction
+                    logic [3:0] source;
+                    always_comb begin
+                        data = 4'd0;
+                        seen = 8'd0;
+                        data[pick(sel, seen)] = 1'b1;
+                        source = 4'b0110;
+                        picked = source[pick(value, seen)];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (s v) (list (0 0) (1 2) (2 3) (3 1))
+    (modify (set sel s) (set value v))
+    (assert_eq data (<< 1 s))
+    (assert_eq seen (+ 10 v))
+    (assert_eq picked (& (>> 6 v) 1))))
+
+(case runtime_bits_of_a_constant_element
+  (source "element_bits.sv" #"
+                module Top(input logic idx, input logic a, input logic [7:0] b, input logic seen,
+                           output logic [7:0] element, output logic [7:0] other,
+                           output logic [1:0] mixed);
+                    logic [7:0] mem [4];
+                    logic [1:0] pairs [2];
+                    always_comb mem[2] = b;
+                    always_comb begin
+                        mem[1] = 8'h00;
+                        mem[1][idx] = a;
+                        element = mem[1];
+                        other = mem[2];
+                    end
+                    always_comb begin
+                        pairs[0] = 2'b10;
+                        pairs[1] = 2'b01;
+                        for (int i = 0; i < 2; i++) mixed[i] = pairs[i][seen];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (i v s) (list (0 1 0) (1 1 1) (1 0 0) (0 0 1))
+    (modify (set idx i) (set a v) (set b 0x5a) (set seen s))
+    (assert_eq element (<< v i))
+    (assert_eq other 0x5a)
+    (assert_eq mixed (- 2 s))))

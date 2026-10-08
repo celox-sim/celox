@@ -38,9 +38,6 @@ fn test_runtime_bounded_loop_in_function(sim) {
 }
 
 fn test_runtime_effects_nested_in_function_statements(sim) {
-    // SV frontend rejects a destination index that calls a function with `$display`
-    // (`r[traced(idx)]`): "assignment target `r@7`" (#88).
-    @ignore_on(sv);
     @case "function_bodies::test_runtime_effects_nested_in_function_statements";
 }
 

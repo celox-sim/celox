@@ -504,6 +504,36 @@ fn local_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    // The element a run-time select inside one element of an array drives.
+    let shape = module
+        .signals()
+        .iter()
+        .map(|signal| (signal.name(), signal.r#type()))
+        .chain(
+            module
+                .ports()
+                .iter()
+                .map(|port| (port.name(), port.r#type())),
+        )
+        .find(|(name, _)| *name == signal_name)
+        .and_then(|(_, r#type)| signal_type_from_sv(r#type, constants, parameter_types).ok())
+        .and_then(|info| {
+            let elements = info.array_dims.iter().product::<usize>();
+            (!info.array_dims.is_empty() && elements != 0)
+                .then(|| (info.width / elements, info.width))
+        });
+    let lvalue_range = |lvalue: &sv::ir::LValue| {
+        net_lvalue_range(lvalue, constants, parameter_types).or_else(|| {
+            let (sv::ir::LValue::Select { lsb, .. }, Some((element_width, width))) =
+                (lvalue, shape)
+            else {
+                return None;
+            };
+            let window =
+                runtime_select_window(lsb, element_width, width, constants, parameter_types)?;
+            Some((window.lsb as i128, window.msb as i128))
+        })
+    };
     let mut drivers = Vec::new();
     let mut driver_id = 0;
     let body_drivers = |drivers: &mut Vec<_>, body: &[sv::ir::Stmt], driver_id: usize| {
@@ -516,10 +546,7 @@ fn local_driver_ranges(
                 };
                 for lvalue in lvalues {
                     if lvalue.name() == signal_name {
-                        drivers.push((
-                            driver_id,
-                            net_lvalue_range(lvalue, constants, parameter_types),
-                        ));
+                        drivers.push((driver_id, lvalue_range(lvalue)));
                     }
                 }
             });
@@ -1517,8 +1544,30 @@ pub(crate) fn attach_instance_glue(
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
-    // Combinational event sites follow the flip-flop ones.
+    // Combinational event sites follow the flip-flop ones, including the
+    // events run-time loops emit.
     let site_base = module.runtime_event_sites.len() as u32;
+    if site_base != 0 {
+        let len = module.arena.len();
+        module
+            .arena
+            .remap_for_fold_effect_sites(0..len, |site_id, fatal_error_code| {
+                site_id
+                    .checked_add(site_base)
+                    .map(|site_id| Some((site_id, fatal_error_code.map(|_| i64::from(site_id)))))
+                    .ok_or(celox_slt::SLTNodeArenaEditError::SiteIdOverflow {
+                        site_id,
+                        offset: site_base,
+                    })
+            })
+            .map_err(|error| {
+                ParserError::illegal_context(
+                    "systemverilog loop runtime-event remap",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+    }
     for mut observer in comb_observers {
         observer.site_id += site_base;
         observer.activation_group += site_base;
@@ -1794,12 +1843,12 @@ fn lower_comb_processes(
             }
         }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
+        comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         comb_blocks.extend(comb.lower_process(process.body())?);
         // The sites of one process activate together.
         let base = sites.len() as u32;
         for mut observer in std::mem::take(&mut comb.observers) {
-            observer.site_id += base;
             observer.activation_group = base;
             observers.push(observer);
         }
@@ -2388,6 +2437,7 @@ fn lower_glue_parent_expr(
                 name_to_id,
                 constants,
                 parameter_types,
+                false,
             ) {
                 return lower_glue_parent_expr(
                     &rewritten,
@@ -3155,6 +3205,38 @@ struct DynamicPackedWrite {
     /// Where the selected bits sit; see [`RuntimePosition`].
     up: sv::ir::Expr,
     down: sv::ir::Expr,
+    /// For a run-time select inside a constant element of an array, the
+    /// bits of that element: only they are written.
+    window: Option<BitAccess>,
+}
+
+/// For a run-time select inside one element of an unpacked array, such as
+/// `mem[1][i]`, the bits of that element: the constant part of the flattened
+/// position names the element, and the run-time part moves within it.
+fn runtime_select_window(
+    lsb: &sv::ir::ConstExpr,
+    element_width: usize,
+    width: usize,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<BitAccess> {
+    if element_width == 0 || element_width == width {
+        return None;
+    }
+    let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
+    // A run-time element index can reach every element.
+    if dynamic_array_base_has_stride(
+        base,
+        i128::try_from(element_width).ok()?,
+        constants,
+        parameter_types,
+    ) {
+        return None;
+    }
+    let element = usize::try_from(offset).ok()? / element_width;
+    let lsb = element.checked_mul(element_width)?;
+    let msb = lsb.checked_add(element_width - 1)?;
+    (msb < width).then(|| BitAccess::new(lsb, msb))
 }
 
 fn dynamic_packed_write(
@@ -3176,6 +3258,7 @@ fn dynamic_packed_write(
     };
     let id = *name_to_id.get(name)?;
     let variable = variables.get(&id)?;
+    // Callers try the element lowering of an array first.
     let position = runtime_select_position(
         name,
         msb,
@@ -3184,14 +3267,23 @@ fn dynamic_packed_write(
         name_to_id,
         constants,
         parameter_types,
+        true,
     )?;
-    (variable.array_dims.is_empty() && position.width <= variable.width).then_some(
-        DynamicPackedWrite {
-            select_width: position.width,
-            up: position.up,
-            down: position.down,
-        },
-    )
+    let window = unpacked_element_width(variable).and_then(|element_width| {
+        runtime_select_window(
+            lsb,
+            element_width,
+            variable.width,
+            constants,
+            parameter_types,
+        )
+    });
+    (position.width <= variable.width).then_some(DynamicPackedWrite {
+        select_width: position.width,
+        up: position.up,
+        down: position.down,
+        window,
+    })
 }
 
 fn permute_reversed_lvalue_rhs_slt(
@@ -3412,6 +3504,7 @@ fn lower_expr_with_context(
                 name_to_id,
                 constants,
                 parameter_types,
+                false,
             ) {
                 return lower_expr_with_context(
                     &rewritten,
@@ -3472,6 +3565,28 @@ fn lower_expr_with_context(
                     .ok()?,
                     sources,
                 ));
+            }
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                true,
+            ) {
+                return lower_expr_with_context(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
             }
             let (inner, mut sources) = lower_expr(
                 expr,
@@ -4258,12 +4373,19 @@ fn runtime_select_position(
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    flat_arrays: bool,
 ) -> Option<RuntimePosition> {
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
-        Some(variable) => {
-            if !variable.array_dims.is_empty() {
+        Some(variable) if !variable.array_dims.is_empty() => {
+            // A select the element lowering cannot express, such as a
+            // run-time bit of a constant element, addresses the flattened
+            // bits of the array.
+            if !flat_arrays {
                 return None;
             }
+            (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
+        }
+        Some(variable) => {
             match variable.packed_ranges.as_slice() {
                 [range] => *range,
                 // The analyzer flattens the selects of several packed
@@ -4342,6 +4464,7 @@ fn runtime_select_as_shift(
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    flat_arrays: bool,
 ) -> Option<sv::ir::Expr> {
     let sv::ir::Expr::Ident(name) = expr else {
         return None;
@@ -4354,6 +4477,7 @@ fn runtime_select_as_shift(
         name_to_id,
         constants,
         parameter_types,
+        flat_arrays,
     )?;
     let shift = |value: sv::ir::Expr, op, amount: sv::ir::Expr| sv::ir::Expr::Binary {
         left: Box::new(value),

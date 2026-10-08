@@ -10,7 +10,9 @@
 
 use super::procedural::*;
 use super::*;
-use celox_slt::{RangeStore, SLTForFoldResult, SLTForUpdate, SLTLoopBound, SymbolicStore};
+use celox_slt::{
+    RangeStore, SLTForEffect, SLTForFoldResult, SLTForUpdate, SLTLoopBound, SymbolicStore,
+};
 use num_traits::{ToPrimitive, Zero};
 
 type Sources = HashSet<VarAtomBase<SourceVarId>>;
@@ -51,6 +53,14 @@ pub(super) struct Comb<'p, 'a> {
     effect_sensitivity: Sources,
     /// The depth of run-time loop folds being executed.
     folding: usize,
+    /// The depth of loop bodies being executed only to find the state they
+    /// write; their runtime events are not recorded.
+    probing: usize,
+    /// The runtime events of the innermost run-time loop being folded, in
+    /// statement order.
+    loop_effects: Option<Vec<SLTForEffect>>,
+    /// The first module-wide site number of this process's runtime events.
+    pub site_base: u32,
     /// Whether the process is a continuous assignment, which drives fixed bits.
     pub continuous: bool,
     /// Whether the process is an `initial` block, which defines initial state.
@@ -80,6 +90,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             sites: Vec::new(),
             effect_sensitivity: Sources::default(),
             folding: 0,
+            probing: 0,
+            loop_effects: None,
+            site_base: 0,
             continuous: false,
             initial: false,
         }
@@ -746,6 +759,99 @@ impl<'p, 'a> Comb<'p, 'a> {
     /// replace each by a hidden variable holding its result. Calls in an
     /// operand that short-circuit evaluation may skip run only when it is
     /// evaluated (IEEE 1800-2023 11.4.7, 11.4.11).
+    /// Evaluate the subroutine calls of a select position, left to right,
+    /// and refer to their results. A flattened select repeats an index in
+    /// its bounds and range checks, so one call is evaluated once.
+    fn hoist_const(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        expr: &sv::ir::ConstExpr,
+        calls: &mut Vec<(sv::ir::ConstExpr, sv::ir::ConstExpr)>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if !self.m.const_calls(expr) {
+            return Ok(expr.clone());
+        }
+        Ok(match expr {
+            ConstExpr::Function { name, args }
+                if self.m.subroutines.contains_key(name)
+                    || self.m.dpi_imports.contains_key(name) =>
+            {
+                if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
+                    return Ok(result.clone());
+                }
+                let args = args
+                    .iter()
+                    .map(|arg| {
+                        expr_from_const_expr(arg)
+                            .ok_or_else(|| unsupported(format!("argument of `{name}` in a select")))
+                    })
+                    .collect::<Result<_, _>>()?;
+                let call = sv::ir::Expr::Call {
+                    name: name.clone(),
+                    args,
+                };
+                let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
+                    return Err(unsupported(format!("call of `{name}` in a select")));
+                };
+                let result = ConstExpr::Ident(result);
+                calls.push((expr.clone(), result.clone()));
+                result
+            }
+            ConstExpr::Function { name, args } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.hoist_const(store, frames, arg, calls))
+                    .collect::<Result<_, _>>()?,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
+                bit: Box::new(self.hoist_const(store, frames, bit, calls)?),
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.hoist_const(store, frames, left, calls)?),
+                op: *op,
+                right: Box::new(self.hoist_const(store, frames, right, calls)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: Box::new(self.hoist_const(store, frames, condition, calls)?),
+                then_expr: Box::new(self.hoist_const(store, frames, then_expr, calls)?),
+                else_expr: Box::new(self.hoist_const(store, frames, else_expr, calls)?),
+            },
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr.clone(),
+        })
+    }
+
+    /// An assignment target whose select positions refer to the results of
+    /// their subroutine calls, evaluated now.
+    fn hoist_lvalue(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        lvalue: &sv::ir::LValue,
+    ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
+        if !self.m.lvalue_calls(lvalue) {
+            return Ok(lvalue.clone());
+        }
+        let mut lvalue = lvalue.clone();
+        if let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue {
+            let mut calls = Vec::new();
+            *lsb = self.hoist_const(store, frames, lsb, &mut calls)?;
+            *msb = self.hoist_const(store, frames, msb, &mut calls)?;
+        }
+        Ok(lvalue)
+    }
+
     fn hoist(
         &mut self,
         store: &mut Store,
@@ -871,12 +977,18 @@ impl<'p, 'a> Comb<'p, 'a> {
                 msb,
                 lsb,
                 signed,
-            } => Expr::Select {
-                expr: Box::new(self.hoist(store, frames, expr)?),
-                msb: msb.clone(),
-                lsb: lsb.clone(),
-                signed: *signed,
-            },
+            } => {
+                let expr = self.hoist(store, frames, expr)?;
+                let mut calls = Vec::new();
+                let lsb = self.hoist_const(store, frames, lsb, &mut calls)?;
+                let msb = self.hoist_const(store, frames, msb, &mut calls)?;
+                Expr::Select {
+                    expr: Box::new(expr),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                }
+            }
             Expr::Concat(parts) => Expr::Concat(
                 parts
                     .iter()
@@ -1025,6 +1137,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         offset: Offset::Packed {
                             up: write.up,
                             down: write.down,
+                            window: write.window,
                         },
                         width: write.select_width,
                     });
@@ -1045,6 +1158,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        let lhs = &self.hoist_lvalue(store, frames, lhs)?;
         let target = self.lvalue_target(store, lhs)?;
         let width = match &target {
             Target::Static { access, .. } => access.msb - access.lsb + 1,
@@ -1111,6 +1225,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 // A partial dynamic update keeps the other bits; they are not a
                 // self-dependency of the variable.
                 sources.extend(current_sources.into_iter().filter(|source| source.id != id));
+                let mut window = None;
                 let (up, down) = match offset {
                     Offset::Nothing => return Ok(()),
                     Offset::Element {
@@ -1150,7 +1265,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                         let zero = self.constant(0, wide)?;
                         (position, zero)
                     }
-                    Offset::Packed { up, down } => {
+                    Offset::Packed {
+                        up,
+                        down,
+                        window: packed_window,
+                    } => {
+                        window = packed_window;
                         let (up, up_sources) = self.eval(store, frames, &up, None)?;
                         let (down, down_sources) = self.eval(store, frames, &down, None)?;
                         sources.extend(up_sources);
@@ -1202,8 +1322,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                         })?;
                     }
                 }
-                let updated = self.slice(updated, full(var_width))?;
-                self.write(store, id, full(var_width), (updated, sources))
+                let written = window.unwrap_or(full(var_width));
+                let updated = self.slice(updated, written)?;
+                self.write(store, id, written, (updated, sources))
             }
         }
     }
@@ -1215,19 +1336,22 @@ impl<'p, 'a> Comb<'p, 'a> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        // The positions of all parts are evaluated before any part is written.
+        let mut targets = Vec::with_capacity(parts.len());
         let mut widths = Vec::with_capacity(parts.len());
         for part in parts {
-            widths.push(self.target_width(store, part)?);
+            let part = self.hoist_lvalue(store, frames, part)?;
+            widths.push(self.target_width(store, &part)?);
+            targets.push(self.lvalue_target(store, &part)?);
         }
         let total: usize = widths.iter().sum();
         let signed = self.expr_signed(rhs);
         let (node, sources) = self.eval(store, frames, rhs, Some((total, signed)))?;
         let node = coerce_node_width(self.arena, node, Some(total), signed).map_err(slt_error)?;
         let mut lsb = total;
-        for (part, width) in parts.iter().zip(widths) {
+        for (target, width) in targets.into_iter().zip(widths) {
             lsb -= width;
             let slice = self.slice(node, BitAccess::new(lsb, lsb + width - 1))?;
-            let target = self.lvalue_target(store, part)?;
             self.store_value(store, frames, target, (slice, sources.clone()), false, rhs)?;
         }
         Ok(())
@@ -1242,19 +1366,23 @@ impl<'p, 'a> Comb<'p, 'a> {
         value: Value,
         value_signed: bool,
     ) -> Result<(), sv::AnalyzerError> {
+        // The positions of all parts are evaluated, at copy-out, before any
+        // part is written.
+        let mut targets = Vec::with_capacity(lvalues.len());
         let mut widths = Vec::with_capacity(lvalues.len());
         for part in lvalues {
-            widths.push(self.target_width(store, part)?);
+            let part = self.hoist_lvalue(store, frames, part)?;
+            widths.push(self.target_width(store, &part)?);
+            targets.push(self.lvalue_target(store, &part)?);
         }
         let total: usize = widths.iter().sum();
         let node =
             coerce_node_width(self.arena, value.0, Some(total), value_signed).map_err(slt_error)?;
         let mut lsb = total;
         let placeholder = sv::ir::Expr::Literal("0".to_string());
-        for (part, width) in lvalues.iter().zip(widths) {
+        for (target, width) in targets.into_iter().zip(widths) {
             lsb -= width;
             let slice = self.slice(node, BitAccess::new(lsb, lsb + width - 1))?;
-            let target = self.lvalue_target(store, part)?;
             self.store_value(
                 store,
                 frames,
@@ -2167,9 +2295,15 @@ impl<'p, 'a> Comb<'p, 'a> {
         if written.contains(&canonical.var) {
             return Ok(false);
         }
+        // Only inspect the bounds: their runtime events belong to the
+        // evaluation that follows.
         let mut probe = store.fork();
-        let (start, _) = self.eval(&mut probe, frames, &canonical.start, None)?;
-        let (end, _) = self.loop_end(&mut probe, frames, canonical)?;
+        self.probing += 1;
+        let bounds = self
+            .eval(&mut probe, frames, &canonical.start, None)
+            .and_then(|start| Ok((start, self.loop_end(&mut probe, frames, canonical)?)));
+        self.probing -= 1;
+        let ((start, _), (end, _)) = bounds?;
         let (Some((start, _)), Some((end, _))) = (
             slt_const(self.arena, &mut self.consts, start),
             slt_const(self.arena, &mut self.consts, end),
@@ -2225,13 +2359,16 @@ impl<'p, 'a> Comb<'p, 'a> {
             let var = self.m.var(loop_var);
             (var.width, var.signed)
         };
+        // The initializer is assigned to the loop variable: it widens by its
+        // own signedness (IEEE 1800-2023 10.7, 11.8.1).
+        let start_signed = self.expr_signed(&canonical.start);
         let (start, start_sources) = self.eval(
             &mut store,
             frames,
             &canonical.start,
-            Some((loop_width, loop_signed)),
+            Some((loop_width, start_signed)),
         )?;
-        let start = coerce_node_width(self.arena, start, Some(loop_width), loop_signed)
+        let start = coerce_node_width(self.arena, start, Some(loop_width), start_signed)
             .map_err(slt_error)?;
         let end_signed = self.expr_signed(&canonical.end);
         let (mut end, end_sources) = self.loop_end(&mut store, frames, canonical)?;
@@ -2293,7 +2430,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         self.set_flag(&mut probe, continue_flag, false)?;
         let saved_unrolled = self.unrolled;
         let first_temp = self.m.next_id;
-        let probe_after = self.exec_block(probe.fork(), loop_frames, body)?;
+        self.probing += 1;
+        let probe_after = self.exec_block(probe.fork(), loop_frames, body);
+        self.probing -= 1;
+        let probe_after = probe_after?;
         self.unrolled = saved_unrolled;
         let is_state = |id: &SourceVarId| {
             *id != loop_var && *id != break_flag && *id != continue_flag && id.0 < first_temp.0
@@ -2317,7 +2457,11 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         self.set_flag(&mut iteration, break_flag, false)?;
         self.set_flag(&mut iteration, continue_flag, false)?;
-        let after = self.exec_block(iteration, loop_frames, body)?;
+        let observer_start = self.observers.len();
+        let outer_effects = self.loop_effects.replace(Vec::new());
+        let after = self.exec_block(iteration, loop_frames, body);
+        let effects = std::mem::replace(&mut self.loop_effects, outer_effects).unwrap_or_default();
+        let after = after?;
 
         let mut initials = Vec::with_capacity(carried.len());
         let mut updates = Vec::with_capacity(carried.len());
@@ -2371,6 +2515,48 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .filter(|source| !bound.contains(&source.id)),
         );
 
+        if !effects.is_empty() {
+            // A runner repeats the loop to emit its events, iteration by
+            // iteration, with the loop-carried state of each iteration.
+            let result = match carried.first() {
+                Some(id) => {
+                    SLTForFoldResult::State(VarAtomBase::new(*id, 0, self.m.var(*id).width - 1))
+                }
+                None => {
+                    let live = self.constant(1, 1)?;
+                    SLTForFoldResult::Transient {
+                        initial: live,
+                        update: live,
+                    }
+                }
+            };
+            let runner = self.alloc(SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start: start_bound.clone(),
+                end: end_bound.clone(),
+                inclusive,
+                step: canonical.step,
+                step_op: canonical.step_op,
+                reverse: canonical.decreasing,
+                result,
+                initials: initials.clone(),
+                updates: updates.clone(),
+                effects,
+                continue_cond,
+            })?;
+            match &mut self.loop_effects {
+                Some(outer) => outer.push(SLTForEffect::Runner(runner)),
+                None => {
+                    let observer = self
+                        .observers
+                        .get_mut(observer_start)
+                        .ok_or_else(|| unsupported("runtime event of a run-time loop"))?;
+                    observer.loop_runner = Some(runner);
+                }
+            }
+        }
         if carried.is_empty() {
             return Ok(store);
         }
@@ -2610,11 +2796,6 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
-        if self.folding > 0 {
-            return Err(unsupported(format!(
-                "system task `{name}` inside a combinational loop with a run-time bound"
-            )));
-        }
         let (template, values) = system_task_template(&kind, args);
         let observer_store = store.fork();
         let mut observed = Sources::default();
@@ -2670,8 +2851,28 @@ impl<'p, 'a> Comb<'p, 'a> {
             }
         };
         let guard = guard.map(|guard| self.capture(guard)).transpose()?;
+        // The first pass over a run-time loop body only finds the state it
+        // writes; the operands ran for their effects on that state.
+        if self.probing > 0 {
+            return Ok(());
+        }
         self.effect_sensitivity.extend(observed.iter().copied());
-        let site_id = self.sites.len() as u32;
+        let site_id = self.site_base + self.sites.len() as u32;
+        // Inside a run-time loop the event is emitted once per iteration by
+        // the loop's runner (see `fold_loop`).
+        let captured_in_loop = if let Some(effects) = &mut self.loop_effects {
+            effects.push(SLTForEffect::Event {
+                site_id,
+                guard,
+                emit_on_true: matches!(kind, SystemTaskKind::Print(_) | SystemTaskKind::Finish),
+                args: captured.clone(),
+                fatal_error_code: matches!(kind, SystemTaskKind::Fatal)
+                    .then_some(i64::from(site_id)),
+            });
+            true
+        } else {
+            false
+        };
         self.sites.push(RuntimeEventSite {
             kind: event_kind,
             template,
@@ -2723,7 +2924,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             written_before: Vec::new(),
             written_input_atoms: Vec::new(),
             written_inputs: Vec::new(),
-            captured_in_loop: false,
+            captured_in_loop,
         });
         Ok(())
     }
@@ -2980,8 +3181,31 @@ impl Comb<'_, '_> {
                         match bounds {
                             Some((msb, lsb)) => BitAccess::new(msb.min(lsb), msb.max(lsb)),
                             // A run-time select may write any bit; the written
-                            // value keeps the others, so it defines the whole vector.
-                            None => full(variable.width),
+                            // value keeps the others, so it defines the whole
+                            // vector, or the one element its constant part names.
+                            None => {
+                                let element = dynamic_array_element_lvalue(
+                                    lvalue,
+                                    this.m.variables,
+                                    this.m.name_to_id,
+                                    this.m.constants,
+                                    this.m.parameter_types,
+                                );
+                                element
+                                    .is_none()
+                                    .then(|| {
+                                        dynamic_packed_write(
+                                            lvalue,
+                                            this.m.variables,
+                                            this.m.name_to_id,
+                                            this.m.constants,
+                                            this.m.parameter_types,
+                                        )
+                                    })
+                                    .flatten()
+                                    .and_then(|write| write.window)
+                                    .unwrap_or(full(variable.width))
+                            }
                         }
                     }
                 };
@@ -3052,9 +3276,11 @@ enum Offset {
         access: BitAccess,
     },
     /// A run-time position in a packed vector; see [`RuntimePosition`].
+    /// With a window, only those bits are written.
     Packed {
         up: sv::ir::Expr,
         down: sv::ir::Expr,
+        window: Option<BitAccess>,
     },
 }
 
@@ -3115,12 +3341,40 @@ fn substitute_literals(
             msb,
             lsb,
             signed,
-        } => Expr::Select {
-            expr: Box::new(go(expr)),
-            msb: constant(msb, literals),
-            lsb: constant(lsb, literals),
-            signed: *signed,
-        },
+        } => {
+            fn has_ident(expr: &sv::ir::ConstExpr) -> bool {
+                use sv::ir::ConstExpr;
+                match expr {
+                    ConstExpr::Ident(_) => true,
+                    ConstExpr::Literal(_) => false,
+                    ConstExpr::Select { expr, bit } => has_ident(expr) || has_ident(bit),
+                    ConstExpr::Function { args, .. } => args.iter().any(has_ident),
+                    ConstExpr::Unary { expr, .. } => has_ident(expr),
+                    ConstExpr::Binary { left, right, .. } => has_ident(left) || has_ident(right),
+                    ConstExpr::Mux {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => has_ident(condition) || has_ident(then_expr) || has_ident(else_expr),
+                }
+            }
+            let msb = constant(msb, literals);
+            let lsb = constant(lsb, literals);
+            // A select at a run-time position reads its base variable, whose
+            // value comes from the store; a literal base cannot be selected
+            // at a run-time position.
+            let base = if matches!(**expr, Expr::Ident(_)) && (has_ident(&msb) || has_ident(&lsb)) {
+                (**expr).clone()
+            } else {
+                go(expr)
+            };
+            Expr::Select {
+                expr: Box::new(base),
+                msb,
+                lsb,
+                signed: *signed,
+            }
+        }
         Expr::Concat(parts) => Expr::Concat(parts.iter().map(go).collect()),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count: constant(count, literals),

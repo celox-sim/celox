@@ -1087,8 +1087,19 @@ fn const_expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
     syntax_tree: &SyntaxTree,
 ) -> Converted<Option<ConstExpr>> {
-    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
-        return Ok(None);
+    let system_call = match &call.nodes.0 {
+        sv_parser::SubroutineCall::SystemTfCall(system_call) => system_call,
+        // A user function call, such as in a run-time select index; the
+        // procedural lowering evaluates it before the operation. Without
+        // parentheses the name parses as a call but is an identifier.
+        sv_parser::SubroutineCall::TfCall(tf_call) if tf_call.nodes.2.is_some() => {
+            return Ok(
+                expr_from_tf_call(tf_call, syntax_tree, &PackedDimensions::default())
+                    .ok()
+                    .and_then(expr_to_const),
+            );
+        }
+        _ => return Ok(None),
     };
     let (name, args) = some!(system_tf_call_parts(system_call, syntax_tree));
     system_functions::check_call(

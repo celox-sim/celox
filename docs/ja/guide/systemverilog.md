@@ -67,8 +67,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - interface と modport、クラス、タイミング制御を持つ task。
 - 振る舞い記述・検証向けの構文：デザインの状態を読む、またはタイミング制御を持つ `initial`
   ブロック、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
-  並行アサーション、`force` / `release`。反復回数が実行時にしか決まらない組み合わせ回路の
-  ループ内のシステムタスクは拒否します。
+  並行アサーション、`force` / `release`。
 - `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、`@*` 以外のレベルセンシティブなセンシティビティリスト、
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
