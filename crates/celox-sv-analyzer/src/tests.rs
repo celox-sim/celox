@@ -3170,6 +3170,69 @@ fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
 }
 
 #[test]
+fn resolves_scoped_handles_imports_and_grouped_instances() {
+    let elaborated = elaborate(
+        r#"
+        package pa; typedef logic [7:0] word_t; endpackage
+        package pb; typedef logic [3:0] word_t; endpackage
+        interface I;
+            import pa::*;
+            word_t x;
+        endinterface
+        interface A;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endinterface
+        interface B;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endinterface
+        interface F;
+            logic [7:0] y;
+            function automatic logic [7:0] get();
+                return y;
+            endfunction
+        endinterface
+        module M(I p);
+            function automatic void f();
+                import pb::*;
+            endfunction
+            if (1) begin : g1
+                A c();
+                always_comb c.touch(p.x);
+            end else begin : g2
+                B c();
+            end
+            F a(), b();
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    // `c` in `g1` is an `A`, whose `touch` only reads `p.x`.
+    assert!(elaborated.contains("input var word_t p$x"), "{elaborated}");
+    assert!(!elaborated.contains("endfunctionvar"), "{elaborated}");
+    assert_eq!(
+        elaborate("interface I; logic x; logic x; endinterface"),
+        Err(AnalyzerError::DuplicateInterfaceItem {
+            interface: "I".to_string(),
+            name: "x".to_string(),
+        })
+    );
+    assert_eq!(
+        elaborate(
+            "interface I #(parameter int W = 1); endinterface
+             module Top; I #(.TYPO(3)) h(); endmodule"
+        ),
+        Err(AnalyzerError::UnknownInterfaceParameter {
+            interface: "I".to_string(),
+            name: "TYPO".to_string(),
+        })
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;

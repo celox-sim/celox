@@ -1180,11 +1180,15 @@ impl<'a> Design<'a> {
                 imported[name]
             )));
         }
-        for import in imported_items(
-            RefNode::ModuleDeclarationAnsi(declaration),
-            &file.syntax_tree,
-        )? {
-            add(&import, &mut imported)?;
+        // Imports in subroutines and blocks are visible only there.
+        let module_span = file.span(RefNode::ModuleDeclarationAnsi(declaration))?;
+        for (_, imports) in scoped_imports(RefNode::ModuleDeclarationAnsi(declaration), file)?
+            .into_iter()
+            .filter(|(scope, _)| *scope == module_span)
+        {
+            for import in imports {
+                add(&import, &mut imported)?;
+            }
         }
         Ok(())
     }
@@ -1219,7 +1223,7 @@ impl<'a> Design<'a> {
         }
         // The interface instances with their scopes, which hide a port of
         // their name.
-        let mut instances: Vec<(String, Span)> = Vec::new();
+        let mut instances: Vec<(String, Span, String)> = Vec::new();
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             let RefNode::ModuleInstantiation(instantiation) = node else {
                 continue;
@@ -1243,24 +1247,26 @@ impl<'a> Design<'a> {
                     RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
                     &file.syntax_tree,
                 )?;
-                instances.push((instance_name.clone(), scope));
-                handle_interfaces
-                    .entry(instance_name)
-                    .and_modify(|interface| {
-                        if interface.as_ref() != Some(&type_name) {
-                            *interface = None;
-                        }
-                    })
-                    .or_insert_with(|| Some(type_name.clone()));
+                instances.push((instance_name, scope, type_name.clone()));
             }
         }
-        let handle_interface = |handle: &str| handle_interfaces.get(handle).cloned().flatten();
-        // Whether `handle` at `span` names the port rather than an instance.
-        let is_port = |handle: &str, span: Span| {
-            !instances.iter().any(|(instance, scope)| {
-                instance == handle && scope.0 <= span.0 && span.1 <= scope.1
-            })
+        // The instance `handle` names at `span`, from the innermost scope.
+        let instance_at = |handle: &str, span: Span| {
+            instances
+                .iter()
+                .filter(|(instance, scope, _)| {
+                    instance == handle && scope.0 <= span.0 && span.1 <= scope.1
+                })
+                .min_by_key(|(_, scope, _)| scope.1 - scope.0)
+                .map(|(_, _, interface)| interface.clone())
         };
+        // The interface of `handle` at `span`, unless generic.
+        let interface_at = |handle: &str, span: Span| match instance_at(handle, span) {
+            Some(interface) => Some(interface),
+            None => handle_interfaces.get(handle).cloned().flatten(),
+        };
+        // Whether `handle` at `span` names the port rather than an instance.
+        let is_port = |handle: &str, span: Span| instance_at(handle, span).is_none();
         // The compilation-unit imports before the module, and the module's
         // own by the scope they are visible in.
         let unit: Vec<(String, Option<String>)> = unit_imports(file)?
@@ -1281,15 +1287,18 @@ impl<'a> Design<'a> {
                 RefNode::TaskDeclaration(task) => {
                     subroutines.extend(file.node_span(RefNode::TaskDeclaration(task)));
                 }
-                RefNode::TfCall(call) => written_arguments(
-                    call,
-                    &Scope::Module(module_name.to_string()),
-                    &handle_interface,
-                    file,
-                    &self.subroutines,
-                    &visible_imports(&unit, &scoped, file.span(RefNode::TfCall(call))?),
-                    &mut lvalues,
-                )?,
+                RefNode::TfCall(call) => {
+                    let span = file.span(RefNode::TfCall(call))?;
+                    written_arguments(
+                        call,
+                        &Scope::Module(module_name.to_string()),
+                        &|handle| interface_at(handle, span),
+                        file,
+                        &self.subroutines,
+                        &visible_imports(&unit, &scoped, span),
+                        &mut lvalues,
+                    )?
+                }
                 RefNode::SystemTfCall(call) => {
                     if let Some(destination) = readmem_destination(call, file)? {
                         written_expression(destination, file, &mut lvalues);
@@ -1639,6 +1648,19 @@ impl<'a> Design<'a> {
                     .collect::<Vec<_>>(),
                 file,
             )?;
+            // The instantiation disappears, so no later check sees an
+            // unknown parameter.
+            if let Some((parameter, _)) = overrides.iter().find(|(parameter, _)| {
+                !interface
+                    .parameters
+                    .iter()
+                    .any(|declared| declared.name == *parameter)
+            }) {
+                return Err(AnalyzerError::UnknownInterfaceParameter {
+                    interface: interface.name.clone(),
+                    name: parameter.clone(),
+                });
+            }
             let mut text = String::new();
             for instance in instantiation.nodes.2.contents() {
                 check_no_connections(instance, &interface.name)?;
@@ -1660,6 +1682,10 @@ impl<'a> Design<'a> {
                     .iter()
                     .map(|(parameter, value)| (parameter.clone(), render(*value, &references)))
                     .collect();
+                // Expansions may end in a keyword such as `endfunction`.
+                if !text.is_empty() {
+                    text.push_str("\n    ");
+                }
                 text.push_str(&self.instance_text(
                     interface,
                     &instance_name,
@@ -3250,7 +3276,7 @@ impl InterfaceDecl {
             RefNode::ParameterIdentifier(&assignment.nodes.0),
             &file.syntax_tree,
         )?;
-        self.names.insert(parameter_name.clone());
+        self.declare(parameter_name.clone())?;
         self.items.push(Item::Parameter(self.parameters.len()));
         self.parameters.push(InterfaceParameter {
             name: parameter_name,
@@ -3275,10 +3301,10 @@ impl InterfaceDecl {
         let header = match declaration {
             sv_parser::LocalParameterDeclaration::Param(parameter) => {
                 for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.names.insert(name(
+                    self.declare(name(
                         RefNode::ParameterIdentifier(&assignment.nodes.0),
                         &file.syntax_tree,
-                    )?);
+                    )?)?;
                 }
                 let start = file
                     .node_span(RefNode::DataTypeOrImplicit(&parameter.nodes.1))
@@ -3295,10 +3321,10 @@ impl InterfaceDecl {
             }
             sv_parser::LocalParameterDeclaration::Type(parameter) => {
                 for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.names.insert(name(
+                    self.declare(name(
                         RefNode::TypeIdentifier(&assignment.nodes.0),
                         &file.syntax_tree,
-                    )?);
+                    )?)?;
                 }
                 HeaderForm::LocalType(
                     file.span(RefNode::ListOfTypeAssignments(&parameter.nodes.2))?,
@@ -3419,10 +3445,10 @@ impl InterfaceDecl {
                     return Ok(());
                 }
                 for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.names.insert(name(
+                    self.declare(name(
                         RefNode::ParameterIdentifier(&assignment.nodes.0),
                         syntax_tree,
-                    )?);
+                    )?)?;
                 }
                 let start = file
                     .node_span(RefNode::DataTypeOrImplicit(&parameter.nodes.1))
@@ -3446,7 +3472,7 @@ impl InterfaceDecl {
                         .ok_or_else(|| unsupported("function without a name"))?,
                     syntax_tree,
                 )?;
-                self.names.insert(function_name.clone());
+                self.declare(function_name.clone())?;
                 self.functions.push(Function {
                     name: function_name,
                     span: item_span,
@@ -3535,7 +3561,7 @@ impl InterfaceDecl {
                                 kind: MemberKind::Variable,
                                 data_type,
                                 dimensions,
-                            });
+                            })?;
                         }
                     }
                     sv_parser::DataDeclaration::TypeDeclaration(declaration) => {
@@ -3552,10 +3578,10 @@ impl InterfaceDecl {
                                 self.name
                             )));
                         }
-                        self.names.insert(name(
+                        self.declare(name(
                             RefNode::TypeIdentifier(&typedef.nodes.2),
                             syntax_tree,
-                        )?);
+                        )?)?;
                         self.items.push(Item::Constant {
                             span: item_span,
                             header: HeaderForm::TypeAlias {
@@ -3622,14 +3648,26 @@ impl InterfaceDecl {
             kind,
             data_type,
             dimensions,
-        });
+        })?;
         Ok(())
     }
 
-    fn add_member(&mut self, member: Member) {
-        self.names.insert(member.name.clone());
+    fn add_member(&mut self, member: Member) -> Result<(), AnalyzerError> {
+        self.declare(member.name.clone())?;
         self.members.push(member);
         self.items.push(Item::Member(self.members.len() - 1));
+        Ok(())
+    }
+
+    /// Declare `name` in the interface scope.
+    fn declare(&mut self, name: String) -> Result<(), AnalyzerError> {
+        if !self.names.insert(name.clone()) {
+            return Err(AnalyzerError::DuplicateInterfaceItem {
+                interface: self.name.clone(),
+                name,
+            });
+        }
+        Ok(())
     }
 
     fn collect_modports(
