@@ -67,6 +67,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn apply_ff_at(&mut self, event: WasmEventRef) -> Result<(), super::SimulatorErrorCode> {
         WasmBackend::apply_ff_at(self, &event)
     }
+    fn run_process(&mut self, index: usize) -> Result<(), super::SimulatorErrorCode> {
+        WasmBackend::run_process(self, index)
+    }
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
         WasmBackend::resolve_signal(self, addr)
     }
@@ -153,6 +156,8 @@ pub struct WasmBackend {
     event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     apply_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
+    /// One function per process kernel.
+    process_funcs: Vec<TypedFunc<(), i64>>,
     event_map: HashMap<AbsoluteAddr, WasmEventRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, WasmEventRef>,
     apply_event_map: HashMap<AbsoluteAddr, WasmEventRef>,
@@ -414,6 +419,23 @@ impl WasmBackend {
             apply_funcs.entry(*addr).or_default().push(func);
         }
 
+        let process_funcs = sir
+            .sir
+            .processes
+            .iter()
+            .map(|unit| {
+                let wasm = wasm_codegen::compile_units(
+                    std::slice::from_ref(unit),
+                    &layout,
+                    options.four_state,
+                    false,
+                );
+                let module = Module::new(&engine, &wasm.bytes)
+                    .map_err(|source| wasm_codegen_error("process compilation", source))?;
+                instantiate_module(&engine, &mut store, &module, &memory, &extern_functions)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let id_to_event: Vec<WasmEventRef> =
             id_to_addr.iter().map(|addr| event_map[addr]).collect();
 
@@ -425,6 +447,7 @@ impl WasmBackend {
             event_funcs,
             eval_only_funcs,
             apply_funcs,
+            process_funcs,
             event_map,
             eval_only_event_map,
             apply_event_map,
@@ -475,6 +498,15 @@ impl WasmBackend {
             }
         }
         Ok(())
+    }
+
+    pub fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        let func = self
+            .process_funcs
+            .get(index)
+            .cloned()
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        self.run_func(&func)
     }
 
     pub fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

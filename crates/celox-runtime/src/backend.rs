@@ -62,6 +62,10 @@ pub trait SimBackend {
     /// Apply (commit) an already-evaluated FF domain.
     fn apply_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode>;
 
+    /// Run process kernel `index` until it suspends or ends. The kernel
+    /// reports how it returned in its control slots.
+    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode>;
+
     // ── signal access ───────────────────────────────────────────
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef;
     fn resolve_event(&self, addr: &AbsoluteAddr) -> Self::Event;
