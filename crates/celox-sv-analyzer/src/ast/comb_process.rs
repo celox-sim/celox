@@ -181,6 +181,15 @@ fn net_declaration_assignments(
         };
         let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("net declaration assignment".to_string()))?;
+        if let Some(target) = packed_dimensions.get(&name) {
+            check_unpacked_array_assignment(
+                expression,
+                target,
+                || "net declaration assignment".to_string(),
+                syntax_tree,
+                packed_dimensions,
+            )?;
+        }
         let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?;
         assignments.push(Assignment::new(LValue::Ident(name), rhs));
     }
@@ -201,6 +210,17 @@ fn assignments_from_continuous_assign(
             .contents()
             .into_iter()
             .map(|assignment| {
+                if let Some(target) =
+                    net_lvalue_unpacked_shape(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                {
+                    check_unpacked_array_assignment(
+                        &assignment.nodes.2,
+                        &target,
+                        || "continuous assignment".to_string(),
+                        syntax_tree,
+                        packed_dimensions,
+                    )?;
+                }
                 let lhs =
                     net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(
@@ -231,6 +251,19 @@ fn assignments_from_continuous_assign(
             .contents()
             .into_iter()
             .map(|assignment| {
+                if let Some(target) = variable_lvalue_unpacked_shape(
+                    &assignment.nodes.0,
+                    syntax_tree,
+                    packed_dimensions,
+                ) {
+                    check_unpacked_array_assignment(
+                        &assignment.nodes.2,
+                        &target,
+                        || "continuous assignment".to_string(),
+                        syntax_tree,
+                        packed_dimensions,
+                    )?;
+                }
                 let lhs =
                     variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
                 let rhs = expr_from_expression_for_lvalue(

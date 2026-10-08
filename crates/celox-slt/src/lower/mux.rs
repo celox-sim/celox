@@ -368,8 +368,12 @@ impl SLTToSIRLowerer {
             );
         }
 
+        // An SLT mux is as wide as its wider arm, while a SIR mux needs arms of
+        // its own width; widen the narrower arm as the folded and CFG paths do.
         let then_val = self.lower_inner(builder, then_expr, arena, cache, env, allow_cache);
+        let then_val = self.cast_reg_width(builder, then_val, res_width);
         let else_val = self.lower_inner(builder, else_expr, arena, cache, env, allow_cache);
+        let else_val = self.cast_reg_width(builder, else_val, res_width);
 
         // Use Mux instruction: preserves Z in 4-state, branchless select in 2-state.
         // Backends handle value and mask selection independently.

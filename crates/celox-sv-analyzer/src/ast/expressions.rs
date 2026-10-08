@@ -675,6 +675,17 @@ fn expr_from_tf_call(
                         .subroutine_param_shapes
                         .get(&name)
                         .and_then(|shapes| shapes.get(position));
+                    if let Some(shape) = shape {
+                        // Passing an argument is an assignment-like context
+                        // (IEEE 1800-2023 10.8).
+                        check_unpacked_array_assignment(
+                            expr,
+                            shape,
+                            || format!("argument {} of `{name}`", position + 1),
+                            syntax_tree,
+                            packed_dimensions,
+                        )?;
+                    }
                     let lowered_arg = match (patterns::pattern_expression(expr), shape) {
                         (Some(pattern), Some(shape)) if pattern.nodes.0.is_none() => {
                             patterns::expr_from_pattern(

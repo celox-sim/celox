@@ -5,7 +5,6 @@ mod test_utils;
 all_backends! {
 
     fn test_subbyte_arithmetic_padding_does_not_corrupt_concat(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_subbyte_arithmetic_padding_does_not_corrupt_concat";
     }
 
@@ -46,7 +45,6 @@ all_backends! {
     }
 
     fn test_dynamic_ff_array_partial_squash_preserves_head_and_branch(sim) {
-        @ignore_on(sv);
         @case "nba_dynamic_array::test_dynamic_ff_array_partial_squash_preserves_head_and_branch";
     }
 

@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 27,
+    "compile_error": 30,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -294,6 +294,30 @@
       "name": "indexed_select::out_of_range_inner_indices_stay_in_their_element",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:10: error: Array v needs an array index here.\n<case>/source_0.sv:11: error: Array v needs an array index here.\n<case>/source_0.sv:8: sorry: constant selects in always_* processes are not fully supported (the process will be sensitive to all bits in 'd[15:0]').\n<case>/source_0.sv:9: sorry: constant selects in always_* processes are not fully supported (the process will be sensitive to all bits in 'd[15:0]').\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arguments_of_equivalent_element_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: sorry: Procedural assignment of array or array slice is not yet supported.\n<case>/source_0.sv:7: sorry: Procedural assignment of array or array slice is not yet supported.\n2 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:10: error: Array narrow needs an array index here.\n<case>/source_0.sv:7: warning: always_comb process has no sensitivities.\n2 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
+      "phase": "compile",
+      "status": "compile_error"
     },
     {
       "category": "Regression",

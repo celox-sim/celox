@@ -4254,11 +4254,19 @@ fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
 }
 
 fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
+    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_converts_array_literal_view_for_wider_nested_formal";
 }
 
 fn test_ff_function_call_converts_forwarded_static_array_element(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
+    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_converts_forwarded_static_array_element";
 }
@@ -4285,6 +4293,10 @@ fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order
 }
 
 fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("assignment pattern item: an unpacked array of type `logic [3:0] [2]` is not assignment
+    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items";
 }

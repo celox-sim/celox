@@ -60,6 +60,17 @@ pub enum AnalyzerError {
     /// such as a task used as a value or a wrong number of arguments.
     #[error("invalid call of `{name}`: {detail}")]
     InvalidSystemTfCall { name: String, detail: String },
+    /// An unpacked array assigned, passed as a subroutine argument, connected
+    /// to a port, or used as an assignment pattern item where its type is not
+    /// assignment compatible with the target array (IEEE 1800-2023 7.6, 10.8).
+    #[error(
+        "{context}: an unpacked array of type `{actual}` is not assignment compatible with `{target}`"
+    )]
+    IncompatibleUnpackedArray {
+        context: String,
+        actual: typecheck::UnpackedArrayType,
+        target: typecheck::UnpackedArrayType,
+    },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

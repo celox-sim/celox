@@ -2587,6 +2587,10 @@ fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
 }
 
 fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("assignment pattern item: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type";
 }
@@ -2597,6 +2601,10 @@ fn test_comb_function_array_literal_accepts_array_returning_items(sim) {
 }
 
 fn test_comb_function_direct_array_argument_converts_each_element(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_function_direct_array_argument_converts_each_element";
 }
@@ -2607,6 +2615,10 @@ fn test_comb_function_direct_array_return_preserves_all_elements(sim) {
 }
 
 fn test_comb_statement_function_direct_array_argument_converts_each_element(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `capture`: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element";
 }

@@ -180,7 +180,8 @@ impl<'p> Item<'p> {
 }
 
 /// The items of a pattern for `count` positions, keyed by position: list
-/// items in order, `n{...}` repetitions, index keys, and a `default`.
+/// items in order, `n{...}` repetitions, index keys, and a `default`. Each
+/// item is paired with whether it comes from `default`.
 fn positional_items<'p>(
     pattern: &'p sv_parser::AssignmentPattern,
     count: usize,
@@ -335,7 +336,19 @@ pub(super) fn expr_from_pattern(
         let mut parts = items
             .into_iter()
             .map(|item| match item {
-                Item::Explicit(expr) => element(expr, &element_shape, tree, dims),
+                Item::Explicit(expr) => {
+                    // A nondefault item corresponds to its element in an
+                    // assignment-like context (IEEE 1800-2023 10.8), and the
+                    // element may itself be an unpacked array.
+                    check_unpacked_array_assignment(
+                        expr,
+                        &element_shape,
+                        || "assignment pattern item".to_string(),
+                        tree,
+                        dims,
+                    )?;
+                    element(expr, &element_shape, tree, dims)
+                }
                 Item::Default(expr) => default_element(expr, &element_shape, tree, dims),
             })
             .collect::<Converted<Vec<_>>>()?;
