@@ -11,8 +11,7 @@ pub(super) fn expr_static_width(
             .map(|r#type| r#type.width)
             .or_else(|| variable_size_function_width(&packed_dimensions.const_env, name, false))
             .or_else(|| {
-                parameter_types_from_const_env(&packed_dimensions.const_env)
-                    .get(name)
+                parameter_type_from_const_env(&packed_dimensions.const_env, name)
                     .map(|r#type| r#type.width)
             }),
         Expr::Literal(literal) => {
