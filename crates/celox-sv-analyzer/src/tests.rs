@@ -2999,6 +2999,90 @@ fn keeps_generate_branches_imports_and_uncalled_writers_in_scope() {
 }
 
 #[test]
+fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
+    let elaborated = elaborate(
+        r#"
+        package pk; typedef logic [3:0] word_t; endpackage
+        interface I;
+            import pk::*;
+            localparam int W = 8;
+            typedef logic [W-1:0] data_t;
+            logic [7:0] shape;
+            data_t data;
+            word_t w;
+            modport m(input data);
+        endinterface
+        module C(I.m p, input logic clk, output logic [7:0] o);
+            function automatic logic [7:0] f(input logic [7:0] word_t);
+                return word_t;
+            endfunction
+            always_ff @(posedge clk) o <= f(p.data);
+        endmodule
+        module M(I p, input logic clk, output logic [7:0] o);
+            if (1) begin : g
+                I p();
+                assign p.data = 1;
+            end
+            C c(.p(p), .clk, .o);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // Imports precede the parameter port list the expansion adds.
+        "module C import pk::*; #(",
+        // The write is to the instance in `g`, not to port `p` of `M`.
+        "input var p$data_t p$data",
+        ".clk, .o)",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    // A port declares the types in its header, before the member ports.
+    assert_eq!(
+        elaborate(
+            "interface I; logic [7:0] shape; typedef logic [$bits(shape)-1:0] data_t; data_t data;
+             modport m(input data); endinterface
+             module C(I.m p, output logic [7:0] o); assign o = p.data; endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "reference to member `shape` in a declaration of interface `I`, which port `p` of module `C` carries".to_string()
+        ))
+    );
+    // An imported function's member passes through but stays inaccessible.
+    assert_eq!(
+        elaborate(
+            "interface I; logic [7:0] x; logic [7:0] y;
+             function automatic logic [7:0] get(); return x; endfunction
+             modport m(input y, import get); endinterface
+             module C(I.m p, output logic [7:0] o); assign o = p.get() + p.x; endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "access of `p.x`, which the modport of port `p` does not list".to_string()
+        ))
+    );
+    for (modport, name, expected) in [
+        ("modport m(input y);", "y", "a member"),
+        ("modport m(input x, import typo);", "typo", "a function"),
+    ] {
+        assert_eq!(
+            elaborate(&format!(
+                "interface I; logic x; {modport} endinterface module Top; I h(); endmodule"
+            )),
+            Err(AnalyzerError::UnknownModportItem {
+                interface: "I".to_string(),
+                modport: "m".to_string(),
+                name: name.to_string(),
+                expected,
+            })
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;

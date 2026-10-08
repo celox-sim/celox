@@ -459,9 +459,8 @@ impl InterfaceDecl {
             .collect()
     }
 
-    /// The functions that parameter, constant and member declarations call,
-    /// which every expansion of the interface declares.
-    fn declaration_functions(&self) -> HashSet<String> {
+    /// The spans of parameter, constant and member declarations.
+    fn declaration_spans(&self) -> Vec<Span> {
         let mut spans = Vec::new();
         for item in &self.items {
             match item {
@@ -480,11 +479,26 @@ impl InterfaceDecl {
             }
         }
         spans
+    }
+
+    /// The functions that parameter, constant and member declarations call,
+    /// which every expansion of the interface declares.
+    fn declaration_functions(&self) -> HashSet<String> {
+        self.declaration_spans()
             .into_iter()
             .flat_map(|span| self.referenced(span))
             .filter(|name| self.function(name).is_some())
             .map(str::to_string)
             .collect()
+    }
+
+    /// The members that parameter, constant and member declarations refer
+    /// to.
+    fn declaration_member_references(&self) -> impl Iterator<Item = &str> {
+        self.declaration_spans()
+            .into_iter()
+            .flat_map(|span| self.referenced(span))
+            .filter(|name| self.member(name).is_some())
     }
 
     /// Whether `function`, or a function it calls, accesses a member.
@@ -559,6 +573,10 @@ struct Expansion {
     functions: Vec<String>,
     /// The functions the module may call, or `None` for all of them.
     callable: Option<HashSet<String>>,
+    /// The members the module may access, or `None` for all of them. A
+    /// modport port also carries the members that imported functions and
+    /// declarations use.
+    accessible: Option<HashSet<String>>,
 }
 
 impl Expansion {
@@ -926,6 +944,13 @@ impl<'a> Design<'a> {
             })?;
         let uses = self.module_uses(module_name, (port_name, interface_name))?;
         let interface = self.interface(interface_name)?;
+        // A port declares the interface's parameters, constants and types in
+        // the module header, before the member ports they would refer to.
+        if let Some(member) = interface.declaration_member_references().next() {
+            return Err(unsupported(format!(
+                "reference to member `{member}` in a declaration of interface `{interface_name}`, which port `{port_name}` of module `{module_name}` carries"
+            )));
+        }
         // The directions do not depend on generate conditions, loop bounds
         // or which subroutines are called, which are not evaluated here, so
         // a write that depends on them needs a modport, and an imported
@@ -958,6 +983,7 @@ impl<'a> Design<'a> {
                     }
                 }
             }
+            let accessible: HashSet<String> = listed.keys().cloned().collect();
             // An imported function runs in the interface scope, so the
             // members it accesses pass through the port whatever the modport
             // lists, but only when the module or a child calls it.
@@ -1018,6 +1044,7 @@ impl<'a> Design<'a> {
                     .collect(),
                 functions,
                 callable: Some(imports),
+                accessible: Some(accessible),
             });
         }
         // Without a modport every member is reachable. A member the module or
@@ -1082,6 +1109,7 @@ impl<'a> Design<'a> {
                 .collect(),
             functions,
             callable: None,
+            accessible: None,
         })
     }
 
@@ -1144,10 +1172,7 @@ impl<'a> Design<'a> {
         if imported.is_empty() {
             return Ok(());
         }
-        let own: Vec<String> = declared_names(
-            RefNode::ModuleDeclarationAnsi(declaration),
-            &file.syntax_tree,
-        )?;
+        let own = module_scope_names(declaration, file)?;
         if let Some(name) = own.iter().find(|name| imported.contains_key(*name)) {
             return Err(unsupported(format!(
                 "declaration of `{name}` in module `{module_name}`, which hides the package item `{}::{name}` of an interface it uses",
@@ -1185,6 +1210,15 @@ impl<'a> Design<'a> {
                 handle_interfaces.insert(port.name.clone(), interface);
             }
         }
+        let mut blocks = Vec::new();
+        for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            if let RefNode::GenerateBlock(block) = node {
+                blocks.extend(file.node_span(RefNode::GenerateBlock(block)));
+            }
+        }
+        // The interface instances with their scopes, which hide a port of
+        // their name.
+        let mut instances: Vec<(String, Span)> = Vec::new();
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             let RefNode::ModuleInstantiation(instantiation) = node else {
                 continue;
@@ -1196,11 +1230,19 @@ impl<'a> Design<'a> {
             if !self.interfaces.contains_key(&type_name) {
                 continue;
             }
+            let statement = file.span(RefNode::ModuleInstantiation(instantiation))?;
+            let scope = blocks
+                .iter()
+                .filter(|block| block.0 <= statement.0 && statement.1 <= block.1)
+                .min_by_key(|block| block.1 - block.0)
+                .copied()
+                .unwrap_or(module.span);
             for instance in instantiation.nodes.2.contents() {
                 let instance_name = name(
                     RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
                     &file.syntax_tree,
                 )?;
+                instances.push((instance_name.clone(), scope));
                 handle_interfaces
                     .entry(instance_name)
                     .and_modify(|interface| {
@@ -1212,6 +1254,12 @@ impl<'a> Design<'a> {
             }
         }
         let handle_interface = |handle: &str| handle_interfaces.get(handle).cloned().flatten();
+        // Whether `handle` at `span` names the port rather than an instance.
+        let is_port = |handle: &str, span: Span| {
+            !instances.iter().any(|(instance, scope)| {
+                instance == handle && scope.0 <= span.0 && span.1 <= scope.1
+            })
+        };
         // The imports visible in the module: compilation-unit ones before it
         // and its own.
         let mut imports: Vec<(String, Option<String>)> = unit_imports(file)?
@@ -1297,7 +1345,10 @@ impl<'a> Design<'a> {
                 for (formal, actual) in
                     connections(instance, child, file, child.has_interface_ports())?
                 {
-                    let (Some(port), Some(expression)) = (child.port(&formal), actual) else {
+                    // An implicit connection names no interface member.
+                    let (Some(port), Connection::Explicit(Some(expression))) =
+                        (child.port(&formal), actual)
+                    else {
                         continue;
                     };
                     if port.interface.is_none() {
@@ -1307,7 +1358,9 @@ impl<'a> Design<'a> {
                                     .map(|span| span.0),
                             );
                         }
-                    } else if let Some(actual) = actual_handle(expression, file)? {
+                    } else if let Some(actual) = actual_handle(expression, file)?
+                        && is_port(&actual.handle, file.span(RefNode::Expression(expression))?)
+                    {
                         uses.children.push(ChildBinding {
                             module: child_name.clone(),
                             formal,
@@ -1325,6 +1378,9 @@ impl<'a> Design<'a> {
             .map(|port| port.name.as_str())
             .collect();
         for reference in file.handle_references(module.span, |name| ports.contains(name)) {
+            if !is_port(&reference.handle, reference.span) {
+                continue;
+            }
             if let Some((item, _)) = reference.item {
                 let context = context(reference.span);
                 if unknown.contains(&reference.span.0) {
@@ -1501,7 +1557,11 @@ impl<'a> Design<'a> {
             let span = (reference.span.0, item_span.1);
             let text = if interface.member(&item).is_some() {
                 if let Some(expansion) = &handle.port
-                    && expansion.direction(&item).is_none()
+                    && (expansion.direction(&item).is_none()
+                        || expansion
+                            .accessible
+                            .as_ref()
+                            .is_some_and(|accessible| !accessible.contains(&item)))
                 {
                     return Err(unsupported(format!(
                         "access of `{}.{item}`, which the modport of port `{}` does not list",
@@ -1655,13 +1715,19 @@ impl<'a> Design<'a> {
                     child_ports.iter().find(|(name, _)| *name == formal)
                 else {
                     connection_texts.push(match actual {
-                        Some(expression) => format!(
+                        Connection::Explicit(Some(expression)) => format!(
                             ".{formal}({})",
                             render(file.span(RefNode::Expression(expression))?, &references)
                         ),
-                        None => format!(".{formal}()"),
+                        Connection::Explicit(None) => format!(".{formal}()"),
+                        Connection::Implicit => format!(".{formal}"),
                     });
                     continue;
+                };
+                // `connections` gives no implicit connection to an
+                // interface port.
+                let Connection::Explicit(actual) = actual else {
+                    unreachable!("implicit connection to interface port `{formal}`");
                 };
                 let expression = actual.ok_or_else(|| {
                     unsupported(format!(
@@ -1924,6 +1990,16 @@ impl<'a> Design<'a> {
             });
             consumed.push(list_span);
         }
+        // Imports go before a parameter port list, which is inserted at the
+        // same offset when the module has none, and insertions there keep
+        // their order.
+        if !header_imports.is_empty() {
+            let (_, end) = file.span(RefNode::ModuleIdentifier(&header.nodes.3))?;
+            edits.push(Edit {
+                span: (end, end),
+                text: format!(" {}", header_imports.join(" ")),
+            });
+        }
         if !header_parameters.is_empty() {
             let text = header_parameters.join(",\n    ");
             match &header.nodes.5 {
@@ -1950,13 +2026,6 @@ impl<'a> Design<'a> {
                     });
                 }
             }
-        }
-        if !header_imports.is_empty() {
-            let (_, end) = file.span(RefNode::ModuleIdentifier(&header.nodes.3))?;
-            edits.push(Edit {
-                span: (end, end),
-                text: format!(" {}", header_imports.join(" ")),
-            });
         }
         if !functions_text.is_empty() {
             let (_, end) = file.span(RefNode::Symbol(&header.nodes.7))?;
@@ -2156,6 +2225,14 @@ fn declared_names(
     root: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<Vec<String>, AnalyzerError> {
+    declared_identifiers(root)
+        .into_iter()
+        .map(|identifier| name(identifier, syntax_tree))
+        .collect()
+}
+
+/// The identifiers of the declarations under `root`.
+fn declared_identifiers(root: RefNode<'_>) -> Vec<RefNode<'_>> {
     let mut names = Vec::new();
     for node in root {
         let identifier = match node {
@@ -2176,7 +2253,7 @@ fn declared_names(
             },
             RefNode::ForVariableDeclaration(declaration) => {
                 for (identifier, _, _) in declaration.nodes.2.contents() {
-                    names.push(name(RefNode::VariableIdentifier(identifier), syntax_tree)?);
+                    names.push(RefNode::VariableIdentifier(identifier));
                 }
                 continue;
             }
@@ -2195,7 +2272,58 @@ fn declared_names(
             }
             _ => continue,
         };
-        names.push(name(identifier, syntax_tree)?);
+        names.push(identifier);
+    }
+    names
+}
+
+/// The names that `declaration` declares outside subroutines and procedural
+/// blocks. Generate blocks count, since expanded interface instances declare
+/// their items there.
+fn module_scope_names(
+    declaration: &sv_parser::ModuleDeclarationAnsi,
+    file: &File<'_>,
+) -> Result<Vec<String>, AnalyzerError> {
+    let root = RefNode::ModuleDeclarationAnsi(declaration);
+    let mut nested = Vec::new();
+    for node in root.clone() {
+        let span = match node {
+            // A subroutine scope starts after its name, which the module
+            // declares.
+            RefNode::FunctionDeclaration(function) => {
+                let span = file.span(RefNode::FunctionDeclaration(function))?;
+                let start =
+                    unwrap_node!(RefNode::FunctionDeclaration(function), FunctionIdentifier)
+                        .and_then(|identifier| file.node_span(identifier))
+                        .map_or(span.0, |identifier| identifier.1);
+                (start, span.1)
+            }
+            RefNode::TaskDeclaration(task) => {
+                let span = file.span(RefNode::TaskDeclaration(task))?;
+                let start = unwrap_node!(RefNode::TaskDeclaration(task), TaskIdentifier)
+                    .and_then(|identifier| file.node_span(identifier))
+                    .map_or(span.0, |identifier| identifier.1);
+                (start, span.1)
+            }
+            RefNode::SeqBlock(_) | RefNode::ParBlock(_) | RefNode::LoopStatement(_) => {
+                match file.node_span(node) {
+                    Some(span) => span,
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        nested.push(span);
+    }
+    let mut names = Vec::new();
+    for identifier in declared_identifiers(root) {
+        let span = file.span(identifier.clone())?;
+        if !nested
+            .iter()
+            .any(|scope| scope.0 <= span.0 && span.1 <= scope.1)
+        {
+            names.push(name(identifier, &file.syntax_tree)?);
+        }
     }
     Ok(names)
 }
@@ -2613,12 +2741,15 @@ fn actual_handle(
 /// The port connections of `instance` of `module` as `(formal, actual)`.
 /// Implicit and wildcard named connections, which cannot name an interface
 /// item, are rejected when `strict`, and skipped otherwise.
+/// The connections of `instance` to `module` as `(formal, actual)`. An
+/// implicit named connection `.x` to an ordinary port is `(x, Implicit)`;
+/// unless `strict`, implicit connections are skipped instead.
 fn connections<'b>(
     instance: &'b sv_parser::HierarchicalInstance,
     module: &ModuleDecl,
     file: &File<'_>,
     strict: bool,
-) -> Result<Vec<(String, Option<&'b sv_parser::Expression>)>, AnalyzerError> {
+) -> Result<Vec<(String, Connection<'b>)>, AnalyzerError> {
     let Some(list) = &instance.nodes.1.nodes.1 else {
         return Ok(Vec::new());
     };
@@ -2641,7 +2772,7 @@ fn connections<'b>(
                 .ports
                 .iter()
                 .zip(connections.into_iter().map(|connection| connection.nodes.1.as_ref()).chain(std::iter::repeat(None)))
-                .map(|(port, actual)| (port.name.clone(), actual))
+                .map(|(port, actual)| (port.name.clone(), Connection::Explicit(actual)))
                 .collect())
         }
         sv_parser::ListOfPortConnections::Named(list) => list
@@ -2656,8 +2787,11 @@ fn connections<'b>(
                         Err(error) => return Some(Err(error)),
                     };
                     match &connection.nodes.3 {
-                        Some(actual) => Some(Ok((formal, actual.nodes.1.as_ref()))),
+                        Some(actual) => Some(Ok((formal, Connection::Explicit(actual.nodes.1.as_ref())))),
                         None if !strict => None,
+                        None if module.port(&formal).is_some_and(|port| port.interface.is_none()) => {
+                            Some(Ok((formal, Connection::Implicit)))
+                        }
                         None => Some(Err(unsupported(format!(
                             "implicit named port connection `.{formal}` to a module with interface ports"
                         )))),
@@ -2670,6 +2804,15 @@ fn connections<'b>(
             })
             .collect(),
     }
+}
+
+/// The actual of a port connection.
+#[derive(Clone, Copy)]
+enum Connection<'b> {
+    /// `.x(expression)`, or `.x()` and positional gaps without one.
+    Explicit(Option<&'b sv_parser::Expression>),
+    /// `.x`, connecting the signal of the port's name.
+    Implicit,
 }
 
 /// The parameter value assignments of an instantiation as `(name, value span)`.
@@ -2799,6 +2942,25 @@ impl InterfaceDecl {
         }
         for item in &declaration.nodes.2 {
             interface.collect_item(item, file)?;
+        }
+        for (modport, items) in &interface.modports {
+            for item in items {
+                let (name, expected) = match item {
+                    ModportItem::Member(_, member) if interface.member(member).is_none() => {
+                        (member, "a member")
+                    }
+                    ModportItem::Import(function) if interface.function(function).is_none() => {
+                        (function, "a function")
+                    }
+                    _ => continue,
+                };
+                return Err(AnalyzerError::UnknownModportItem {
+                    interface: interface_name,
+                    modport: modport.clone(),
+                    name: name.clone(),
+                    expected,
+                });
+            }
         }
         // Declarations in nested scopes must not shadow interface-scope names,
         // which are renamed without regard to scopes.

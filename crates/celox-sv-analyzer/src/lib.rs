@@ -45,6 +45,15 @@ pub enum AnalyzerError {
     DuplicateModule { name: String },
     #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
     DuplicateModport { interface: String, name: String },
+    #[error(
+        "Modport `{modport}` of interface `{interface}` names `{name}`, which is not {expected}"
+    )]
+    UnknownModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+        expected: &'static str,
+    },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]

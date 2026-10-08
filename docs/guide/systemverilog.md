@@ -79,7 +79,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   imported function that writes members, inside a generate construct or a
   function or task, connections of a member of such a port to a module that
   is not declared with an ANSI header, calls from the logic of an interface instance array of a
-  function that accesses members, declarations that reuse the name of an
+  function that accesses members, member references in the parameter,
+  constant, type or member declarations of an interface used through a port,
+  declarations that reuse the name of an
   interface instance or port, package items of one name reaching a module
   from two packages through the imports of its interfaces (or hidden by a
   declaration of the module), and virtual interfaces. A design with
