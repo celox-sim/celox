@@ -86,6 +86,7 @@ libc.workspace = true
 
 [dev-dependencies]
 celox-test-suite = { workspace = true, features = ["emit"] }
+celox-sv-analyzer = { workspace = true }
 insta      = "1.46"
 libc.workspace = true
 criterion  = "0.8"
@@ -128,6 +129,11 @@ bench = false
 [[bench]]
 name = "tiered"
 harness = false
+
+[[example]]
+name = "sv_tests"
+path = "examples/sv_tests.rs"
+required-features = ["systemverilog"]
 
 [[example]]
 name = "frontend_binary"
