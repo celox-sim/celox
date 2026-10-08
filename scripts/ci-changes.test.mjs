@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { dirname, relative } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -143,13 +145,20 @@ const MASTER_GROUP = {
   MERGE_GROUP_BASE_REF: "refs/heads/master",
 };
 
-function runClassifier(base, head, env) {
-  const root = fileURLToPath(new URL("../", import.meta.url));
+const classifier = fileURLToPath(new URL("./ci-changes.mjs", import.meta.url));
+
+// The classifier diffs base..head in the repository at cwd.
+function runClassifier(
+  base,
+  head,
+  env,
+  cwd = fileURLToPath(new URL("../", import.meta.url)),
+) {
   const output = execFileSync(
     process.execPath,
-    ["scripts/ci-changes.mjs", base, head],
+    [classifier, base, head],
     {
-      cwd: root,
+      cwd,
       env: {
         ...process.env,
         FULL_VALIDATION: "",
@@ -222,32 +231,37 @@ test("merge groups with an unknown diff are treated as releases", () => {
   );
 });
 
-test("a merge group that changes the release manifest is a release", () => {
-  const root = fileURLToPath(new URL("../", import.meta.url));
-  const release = execFileSync(
-    "git",
-    ["log", "-1", "--format=%H", "--", ".release-please-manifest.json"],
-    { cwd: root, encoding: "utf8" },
-  ).trim();
-  assert.ok(release, "history must contain a release manifest change");
-  const base = `${release}~1`;
-  const baseSha = execFileSync("git", ["rev-parse", base], {
-    cwd: root,
-    encoding: "utf8",
-  }).trim();
+// CI checks out a single commit, so build the history this test needs.
+test("a merge group that changes the release manifest is a release", (t) => {
+  const repository = mkdtempSync(join(tmpdir(), "celox-ci-changes-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  const commitManifest = (version) => {
+    writeFileSync(
+      join(repository, ".release-please-manifest.json"),
+      `{".": "${version}"}\n`,
+    );
+    git("add", ".release-please-manifest.json");
+    git("commit", "--quiet", "-m", `release ${version}`);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  git("config", "user.name", "test");
+  git("config", "user.email", "test@example.com");
+  git("config", "commit.gpgsign", "false");
+  const base = commitManifest("0.1.0");
+  const release = commitManifest("0.2.0");
+  const classify = (env) =>
+    runClassifier(base, release, env, repository).release;
+
+  assert.equal(classify(MASTER_GROUP), true);
+  assert.equal(classify({ GITHUB_EVENT_NAME: "pull_request" }), false);
   assert.equal(
-    runClassifier(baseSha, release, MASTER_GROUP).release,
-    true,
-  );
-  assert.equal(
-    runClassifier(baseSha, release, { GITHUB_EVENT_NAME: "pull_request" }).release,
-    false,
-  );
-  assert.equal(
-    runClassifier(baseSha, release, {
+    classify({
       GITHUB_EVENT_NAME: "merge_group",
       MERGE_GROUP_BASE_REF: "refs/heads/develop",
-    }).release,
+    }),
     false,
   );
 });
