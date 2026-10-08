@@ -2,6 +2,18 @@
 #![cfg(any(feature = "verilator", feature = "icarus"))]
 use std::path::PathBuf;
 
+/// The emitted sources a retained diagnostic names.
+fn logged_sources(log: &str) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = log
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .filter(|word| word.starts_with("<case>/") && word.ends_with(".sv"))
+        .map(PathBuf::from)
+        .collect();
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
 #[cfg(feature = "icarus")]
 mod icarus {
     use super::*;
@@ -33,6 +45,36 @@ mod icarus {
             checked += 1;
         }
         assert_eq!(checked, 8);
+    }
+
+    #[test]
+    fn retained_systemverilog_negative_diagnostics_are_source_rejections() {
+        let report: serde_json::Value =
+            serde_json::from_str(include_str!("../verification/sv/icarus.json")).unwrap();
+        let mut checked = 0;
+        for case in report["cases"].as_array().unwrap() {
+            if case["status"] != "rejected" {
+                continue;
+            }
+            let (status, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
+            let code = status
+                .strip_prefix("Icarus build exit status: ")
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let sources = logged_sources(log);
+            assert!(
+                is_source_rejection(Some(code), log, &sources),
+                "{}",
+                case["name"]
+            );
+            assert!(!is_source_rejection(Some(code), log, &["other.sv".into()]));
+            checked += 1;
+        }
+        assert_eq!(checked, 6);
     }
 
     #[test]
@@ -98,5 +140,28 @@ mod verilator {
             checked += 1;
         }
         assert_eq!(checked, 1);
+    }
+
+    #[test]
+    fn retained_systemverilog_negative_diagnostics_are_source_rejections() {
+        let report: serde_json::Value =
+            serde_json::from_str(include_str!("../verification/sv/verilator.json")).unwrap();
+        let mut checked = 0;
+        for case in report["cases"].as_array().unwrap() {
+            if case["status"] != "rejected" {
+                continue;
+            }
+            let (_, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
+            let sources = logged_sources(log);
+            assert!(
+                is_source_rejection(Some(1), log, &sources),
+                "{}",
+                case["name"]
+            );
+            assert!(!is_source_rejection(Some(1), log, &["other.sv".into()]));
+            assert!(!is_source_rejection(None, log, &sources));
+            checked += 1;
+        }
+        assert_eq!(checked, 6);
     }
 }

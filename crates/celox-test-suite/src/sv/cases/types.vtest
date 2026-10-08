@@ -134,3 +134,146 @@
   (eval)
   (expand (name expected) ((y0 0xfffa) (y1 1) (y2 0xfffb) (y3 1) (y4 2) (y5 7))
     (assert_eq {name} {expected} "{name}")))
+
+(case passes_unpacked_arrays_of_equivalent_element_types
+  ; An unpacked array assignment or port connection needs equivalent
+  ; element types and equal element counts, not equal bounds; elements
+  ; correspond left to right (IEEE 1800-2023 6.22.2, 7.6, 23.3.3).
+  ; `logic [0:7]` and the packed structure are equivalent to `logic [7:0]`.
+  (source "equivalent_unpacked_arrays.sv" #"
+                module Child(input logic [7:0] x [1:0], output logic [7:0] left, right);
+                    assign left = x[1];
+                    assign right = x[0];
+                endmodule
+                module Top(input logic [15:0] d, output logic [7:0] left, right,
+                           output logic [7:0] s_left, s_right, c_left);
+                    typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+                    logic [0:7] v [2:3];
+                    pair_t s [2];
+                    logic [7:0] c [2];
+                    assign v[2] = d[15:8];
+                    assign v[3] = d[7:0];
+                    assign s[0] = d[7:0];
+                    assign s[1] = d[15:8];
+                    assign c = v;
+                    assign c_left = c[0];
+                    Child uv(.x(v), .left(left), .right(right));
+                    Child us(.x(s), .left(s_left), .right(s_right));
+                endmodule
+            "#)
+  (top Top)
+  (modify (set d 0x12c4))
+  (assert_eq left 0x12)
+  (assert_eq right 0xc4)
+  (assert_eq s_left 0xc4)
+  (assert_eq s_right 0x12)
+  (assert_eq c_left 0x12))
+
+(case passes_unpacked_arguments_of_equivalent_element_types
+  ; Passing an argument is an assignment-like context (IEEE 1800-2023
+  ; 10.8): bounds and the packed range direction of the elements do not
+  ; matter (6.22.2, 7.6).
+  (source "equivalent_unpacked_arguments.sv" #"
+                module Top(input logic [15:0] d, output logic [7:0] left, right);
+                    function automatic logic [7:0] pick(input logic [7:0] x [1:0], input logic first);
+                        return first ? x[1] : x[0];
+                    endfunction
+                    logic [0:7] v [2:3];
+                    always_comb begin
+                        v[2] = d[15:8];
+                        v[3] = d[7:0];
+                        left = pick(v, 1'b1);
+                        right = pick(v, 1'b0);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set d 0x12c4))
+  (assert_eq left 0x12)
+  (assert_eq right 0xc4))
+
+(case rejects_unpacked_argument_of_a_wider_element_type
+  ; Passing an argument is an assignment-like context, and an unpacked
+  ; array needs an equivalent element type (IEEE 1800-2023 7.6, 10.8).
+  (source "wider_unpacked_argument.sv" #"
+                module Top(output logic signed [7:0] q);
+                    function automatic logic signed [7:0] pick(input logic signed [7:0] x [2]);
+                        return x[0];
+                    endfunction
+                    logic signed [3:0] narrow [2];
+                    always_comb begin
+                        narrow[0] = 4'sh8;
+                        narrow[1] = 4'sh1;
+                        q = pick(narrow);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case rejects_unpacked_assignment_of_a_different_state_count
+  ; `bit [7:0]` and `logic [7:0]` are not equivalent (IEEE 1800-2023
+  ; 6.22.2, 7.6).
+  (source "two_state_unpacked_assignment.sv" #"
+                module Top(input logic [7:0] a, output logic [7:0] q);
+                    bit [7:0] two [2];
+                    logic [7:0] four [2];
+                    assign two[0] = a;
+                    assign two[1] = a;
+                    assign four = two;
+                    assign q = four[0];
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case rejects_unpacked_assignment_of_a_different_element_count
+  ; A fixed-size target needs as many elements as the source (IEEE
+  ; 1800-2023 7.6).
+  (source "unpacked_assignment_count.sv" #"
+                module Top(input logic [7:0] a, output logic [7:0] q);
+                    logic [7:0] three [3];
+                    logic [7:0] two [2];
+                    assign three[0] = a;
+                    assign three[1] = a;
+                    assign three[2] = a;
+                    assign two = three;
+                    assign q = two[0];
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case rejects_unpacked_port_connection_of_a_narrower_element_type
+  ; A port connection is an assignment-like context (IEEE 1800-2023 7.6,
+  ; 10.8, 23.3.3).
+  (source "narrow_unpacked_port.sv" #"
+                module Child(input logic [7:0] x [2], output logic [7:0] y);
+                    assign y = x[0];
+                endmodule
+                module Top(input logic [3:0] a, output logic [7:0] q);
+                    logic [3:0] narrow [2];
+                    assign narrow[0] = a;
+                    assign narrow[1] = a;
+                    Child u(.x(narrow), .y(q));
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case rejects_assignment_pattern_item_of_a_narrower_array_type
+  ; Each nondefault item of an assignment pattern is in an assignment-like
+  ; context with its element, here an unpacked array (IEEE 1800-2023 7.6,
+  ; 10.8).
+  (source "narrow_pattern_item.sv" #"
+                module Top(input logic [3:0] a, output logic [7:0] q);
+                    logic [3:0] row [2];
+                    logic [7:0] grid [2][2];
+                    assign row[0] = a;
+                    assign row[1] = a;
+                    assign grid = '{row, row};
+                    assign q = grid[0][0];
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))

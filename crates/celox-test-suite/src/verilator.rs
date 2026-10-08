@@ -137,6 +137,13 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
             let reviewed = source_diagnostic(error, sources).is_some_and(|diagnostic| {
                 diagnostic
                     == "Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)"
+                    // IEEE 1800-2023 6.22.2 and 7.6: unpacked arrays of
+                    // nonequivalent element types or different sizes.
+                    || diagnostic
+                        == "Illegal assignment: Array element types are not equivalent (IEEE 1800-2023 6.22.2)"
+                    || diagnostic
+                        == "Assignment between 2-state and 4-state types requires equivalent element types (IEEE 1800-2023 6.22.2, 7.6)"
+                    || diagnostic.starts_with("Illegal assignment: Unmatched array sizes in dimension ")
                     // IEEE 1800-2023 23.3.3.5: an instance array connection width.
                     || (diagnostic.starts_with("Input port connection '")
                         && diagnostic.contains("' as part of a module instance array requires "))
@@ -151,9 +158,10 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
             rejected = true;
             source_context = true;
         } else if let Some(warning) = line.strip_prefix("%Warning-WIDTHEXPAND: ") {
-            if !source_diagnostic(warning, sources)
-                .is_some_and(|text| text.starts_with("Operator ASSIGN expects "))
-            {
+            if !source_diagnostic(warning, sources).is_some_and(|text| {
+                text.starts_with("Operator ASSIGN expects ")
+                    || text.starts_with("Input port connection '")
+            }) {
                 return false;
             }
             source_context = true;
@@ -186,6 +194,10 @@ fn is_diagnostic_context(line: &str) -> bool {
         ": ... note: In instance '",
         ": ... Left-hand data type: '",
         ": ... Right-hand data type: '",
+        ": ... Left-hand type: '",
+        ": ... Right-hand type: '",
+        ": ... Pin data type: '",
+        ": ... Expression data type: '",
         "... See the manual at https://verilator.org/verilator_doc.html?",
         "... For warning description see https://verilator.org/warn/WIDTHEXPAND?",
         "... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.",

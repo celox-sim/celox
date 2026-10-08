@@ -162,6 +162,8 @@ module Top (
 
 fn test_comb_callee_observer_snapshots_formal_before_later_actual_writeback(sim) {
     @omit_veryl;
+    // SV frontend applies `inner`'s output writeback before reading the earlier argument
+    // (`first=11`, expected `first=1`); SV leaves this order to the implementation.
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -278,6 +280,8 @@ module Top (
 
 fn test_comb_output_destination_observer_uses_return_aware_loop_value(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index:
+    // "select index `observe_index(tmp)`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -374,7 +378,6 @@ module Top (
 
 fn test_comb_condition_runtime_effect_respects_short_circuit(sim) {
     @omit_veryl;
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     and_enable: input logic,
@@ -470,6 +473,8 @@ module Top (
 
 fn test_comb_runtime_effect_inside_assignment_destination_is_collected(sim) {
     @omit_veryl;
+    // SV frontend rejects a destination index that calls a function with an output argument:
+    // "assignment target `data`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -580,6 +585,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_loop_bound_is_collected(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -793,6 +799,8 @@ module Top {
 }
 
 fn test_veryl_adapter_modify_rechecks_constant_initial_fatal(sim) {
+    // Only the Veryl reference adapter evaluates on `modify`; Celox backends, the SV arm
+    // included, defer evaluation, so `modify` returns Ok.
     @ignore_on(native, cranelift, wasm, interp, sv);
     @build Simulator::builder(r#"
 module Top (
@@ -1767,6 +1775,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_reactivates_after_assign_chain(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -2081,6 +2090,7 @@ module Top (
 
 fn test_comb_capture_before_dynamic_for_backedge_keeps_loop_state(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -2406,6 +2416,7 @@ module Top (
 
 fn test_return_before_dynamic_loop_suppresses_loop_effects(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -2569,6 +2580,8 @@ module Top (
 }
 
 fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
+    // SV arm: Veryl emits `'{default: a, b}`, mixing positional items with `default:`, which is
+    // not legal SV; the SV parser rejects it.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_function_packed_array_literal_preserves_source_order";
 }
@@ -2582,11 +2595,15 @@ fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
 }
 
 fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element";
 }
 
 fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("assignment pattern item: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type";
 }
@@ -2597,6 +2614,10 @@ fn test_comb_function_array_literal_accepts_array_returning_items(sim) {
 }
 
 fn test_comb_function_direct_array_argument_converts_each_element(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_function_direct_array_argument_converts_each_element";
 }
@@ -2607,6 +2628,10 @@ fn test_comb_function_direct_array_return_preserves_all_elements(sim) {
 }
 
 fn test_comb_statement_function_direct_array_argument_converts_each_element(sim) {
+    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+    // ("argument 1 of `capture`: an unpacked array of type `logic signed [3:0] [2]` is not
+    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
     @ignore_on(veryl, sv);
     @case "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element";
 }
@@ -2634,17 +2659,20 @@ module Top (
 }
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
+    // SV frontend rejects named function arguments: "named arguments of `add`" (#88).
     @ignore_on(sv);
     @case "comb_observer::test_named_function_inputs_evaluate_in_source_order";
 }
 
 fn test_named_function_outputs_apply_in_source_order(sim) {
+    // SV frontend rejects named function arguments: "named arguments of `write_outputs`" (#88).
     @ignore_on(sv);
     @case "comb_observer::test_named_function_outputs_apply_in_source_order";
 }
 
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -3462,6 +3490,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_runs_each_iteration(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -3515,6 +3544,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_remaps_site_after_prior_comb_event(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -3575,6 +3605,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_preserves_repeated_identical_events(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -3612,6 +3643,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_with_multiple_updates_emits_once_per_iteration(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -3666,6 +3698,7 @@ module Top (
 
 fn test_comb_display_preserves_order_around_dynamic_for(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4109,6 +4142,8 @@ module Top (
 
 fn test_comb_display_function_output_dynamic_actual_excludes_only_prefix(sim) {
     @omit_veryl;
+    // SV frontend rejects a run-time select `mem[1][idx]` as an output argument:
+    // "assignment target `mem`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4338,6 +4373,8 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_runtime_effect_in_function_output_destination_is_detected(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index:
+    // "select index `choose_index(index, seen)`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) {
@@ -4433,6 +4470,8 @@ fn test_comb_function_loop_skips_conditions_after_break(sim) {
 
 fn test_comb_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index: "select index `observe(first)`"
+    // (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4486,6 +4525,8 @@ module Top (
 
 fn test_comb_outputless_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index: "select index `observe(first)`"
+    // (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4537,6 +4578,7 @@ module Top (
 
 fn test_comb_return_aware_function_loop_collects_bound_effects(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic<8>, out: output logic<8>) {
@@ -4575,6 +4617,8 @@ module Top (value: input logic<8>, out: output logic<8>) {
 
 fn test_comb_variable_indices_observe_prior_index_output_write(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index:
+    // "select index `set_index(value, seen)`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic, out: output logic) {
@@ -4609,6 +4653,7 @@ module Top (value: input logic, out: output logic) {
 
 fn test_comb_function_loop_bound_write_is_guarded_after_return(sim) {
     @omit_veryl;
+    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4658,6 +4703,8 @@ module Top (
 
 fn test_comb_concat_destination_observes_prior_destination_write(sim) {
     @omit_veryl;
+    // SV frontend rejects `{data[observe(tmp)], tmp} = ...`, whose index calls a function:
+    // "assignment target `data`" (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {
@@ -4685,6 +4732,8 @@ module Top (trigger: input logic, out: output logic<2>) {
 
 fn test_comb_function_output_concat_observes_prior_destination_write(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index: "select index `observe(tmp)`"
+    // (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {

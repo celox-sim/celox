@@ -68,10 +68,14 @@ impl Item<'_> {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
         local.parameter_values = self.parameter_literals(&dimensions.parameter_values);
-        local.functions = Arc::new(self.functions(&dimensions.functions));
-        local.function_return_types =
-            self.function_aliases(dimensions.function_return_types.clone());
-        let mut signedness = (*dimensions.expression_signedness).clone();
+        // Ordinary module items keep the module's function bindings. Rewriting
+        // every function body for every item costs O(items * function size).
+        if !self.shadowed.is_empty() || !self.names.is_empty() {
+            local.functions = Arc::new(self.functions(&dimensions.functions));
+            local.function_return_types =
+                self.function_aliases(dimensions.function_return_types.clone());
+        }
+        let mut signedness = dimensions.expression_signedness.clone();
         for name in &self.shadowed {
             let protected = format!("{OUTER_BINDING}{name}");
             if let Some(value) = dimensions.get(name) {
@@ -101,7 +105,7 @@ impl Item<'_> {
                 signedness.insert(name.clone(), value.signed);
             }
         }
-        local.expression_signedness = Arc::new(signedness);
+        local.expression_signedness = signedness;
         local
     }
 
@@ -347,7 +351,7 @@ impl<'a> Elaborator<'a, '_> {
                     if scope.shadowed.contains(name) {
                         return None;
                     }
-                    let signedness = parameter_types_from_const_env(&scope.env)
+                    let signedness: HashMap<_, _> = parameter_types_from_const_env(&scope.env)
                         .into_iter()
                         .map(|(name, ty)| (name, ty.signed))
                         .collect();

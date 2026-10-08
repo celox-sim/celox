@@ -82,7 +82,6 @@ all_backends! {
     }
 
     fn test_direct_ff_size_packed_multidimensional_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_type_system_function";
     }
 

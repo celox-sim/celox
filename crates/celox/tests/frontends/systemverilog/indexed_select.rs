@@ -19,6 +19,10 @@ sv_backends! {
         @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
     }
 
+    fn runtime_index_reads_single_bit_unpacked_elements(sim) {
+        @case "indexed_select::runtime_index_reads_single_bit_unpacked_elements";
+    }
+
     fn indexed_select_parameterized_generate_and_ff(sim) {
         @case "indexed_select::indexed_select_parameterized_generate_and_ff";
     }

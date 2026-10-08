@@ -7,7 +7,7 @@ pub(super) fn instances_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    interfaces: &ModuleInterfaces,
+    interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
@@ -48,7 +48,7 @@ fn instances_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    interfaces: &ModuleInterfaces,
+    interfaces: &InterfaceLookup<'_>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::Module(module) = item {
@@ -71,7 +71,7 @@ fn instances_from_module_instantiation(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
-    interfaces: &ModuleInterfaces,
+    interfaces: &InterfaceLookup<'_>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let module_name = identifier_text(
@@ -331,19 +331,23 @@ fn port_connections_from_hierarchical_instance(
 
 // Child port directions are resolved by the frontend adapter. Defer its net
 // driver check for selected/concatenated connections as well as whole nets.
-pub(super) fn connection_references_net(expr: &Expr, name: &str) -> bool {
+pub(super) fn collect_connected_nets<'a>(expr: &'a Expr, names: &mut HashSet<&'a str>) {
     match expr {
-        Expr::Ident(actual) => actual == name,
+        Expr::Ident(actual) => {
+            names.insert(actual);
+        }
         Expr::Select { expr, .. }
         | Expr::Resize { expr, .. }
         | Expr::Unary {
             op: UnaryOp::ToTwoState,
             expr,
-        } => connection_references_net(expr, name),
-        Expr::Concat(parts) => parts
-            .iter()
-            .any(|part| connection_references_net(part, name)),
-        _ => false,
+        } => collect_connected_nets(expr, names),
+        Expr::Concat(parts) => {
+            for part in parts {
+                collect_connected_nets(part, names);
+            }
+        }
+        _ => {}
     }
 }
 

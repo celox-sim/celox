@@ -956,6 +956,17 @@
       "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
+      "name": "indexed_select::runtime_index_reads_single_bit_unpacked_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "indexed_select::runtime_indexed_base_may_select_a_parameter_bit",
       "phase": "execute",
       "status": "passed",
@@ -1674,9 +1685,43 @@
     },
     {
       "category": "Regression",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_syntax",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
       "name": "review_regressions::folds_compound_four_state_case_labels",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -1881,6 +1926,40 @@
       "name": "review_regressions::resolves_generate_local_alias_casts_for_all_processes",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::run_time_for_condition_uses_the_relational_operand_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_type_size_queries",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -2358,11 +2437,124 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_subroutine_ports",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case.",
+        "upstream": []
+      },
+      "name": "types::passes_unpacked_arguments_of_equivalent_element_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "types::passes_unpacked_arrays_of_equivalent_element_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "types::preserves_integer_atom_state_kinds",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported (\"Procedural assignment of array or array slice\"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8).",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_patterns",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported (\"Procedural assignment of array or array slice\"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8).",
+        "upstream": []
+      },
+      "name": "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_subroutine_ports",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case.",
+        "upstream": []
+      },
+      "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8: error: Unpacked dimensions are not compatible in array assignment.\n1 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_element_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: error: Element types are not compatible in array assignment.\n1 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_assignment_of_a_different_state_count",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: error: Element types are not compatible in array assignment.\n<case>/source_0.sv:9:      : Port 1 (x) of Child is connected to narrow\n1 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "types::rejects_unpacked_port_connection_of_a_narrower_element_type",
+      "phase": "compile",
+      "status": "rejected",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -2393,10 +2585,10 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 35,
+    "ignored": 40,
     "mismatch": 0,
-    "passed": 141,
-    "rejected": 3,
+    "passed": 145,
+    "rejected": 6,
     "runtime_error": 0,
     "unexpected_accept": 0,
     "unsupported": 0

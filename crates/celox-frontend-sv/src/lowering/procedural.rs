@@ -402,6 +402,27 @@ impl<'a> ProcModule<'a> {
         )
     }
 
+    /// The width at which `left` and `right` are compared: the larger of
+    /// their self-determined widths (IEEE 1800-2023 11.6.1 and 11.8.2), with
+    /// each user function call typed by its declared return type.
+    pub fn comparison_width(&self, left: &sv::ir::Expr, right: &sv::ir::Expr) -> Option<usize> {
+        let typed = |expr: &sv::ir::Expr| {
+            if self.calls(expr) {
+                self.typed_calls(expr)
+            } else {
+                expr.clone()
+            }
+        };
+        sv_comparison_operand_width(
+            &typed(left),
+            &typed(right),
+            self.variables,
+            self.name_to_id,
+            self.constants,
+            self.parameter_types,
+        )
+    }
+
     /// `expr` with each user function call replaced by a literal of its
     /// return type.
     fn typed_calls(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {

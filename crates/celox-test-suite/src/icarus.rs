@@ -143,6 +143,10 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                 "Bit select expressions must be a constant integral value."
                     | "Indexed part select base expression must be a constant integral value in this context."
                     | "Output port expression must support a continuous assignment."
+                    // IEEE 1800-2023 6.22.2 and 7.6: unpacked arrays of
+                    // nonequivalent element types or different sizes.
+                    | "Element types are not compatible in array assignment."
+                    | "Unpacked dimensions are not compatible in array assignment."
             ) || (error.starts_with("A reference to a net or variable (`")
                 && error.ends_with("') is not allowed in a constant expression."))
                 || (error.starts_with("Array ") && error.ends_with(" needs an array index here."))
