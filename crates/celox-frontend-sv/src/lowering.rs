@@ -1156,6 +1156,7 @@ fn lower_module_with_overrides(
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
             reset_clock_map,
+            processes: Vec::new(),
         },
         variables,
         port_order,

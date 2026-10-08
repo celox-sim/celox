@@ -73,6 +73,7 @@ mod tests {
             eval_only_ffs: crate::HashMap::default(),
             apply_ffs: crate::HashMap::default(),
             parallel: None,
+            processes: Vec::new(),
         };
         let design = celox_design::ElaboratedDesign::default();
         let runtime_schema = celox_design::RuntimeSchema::default();

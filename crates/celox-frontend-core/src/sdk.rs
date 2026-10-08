@@ -1189,6 +1189,7 @@ pub fn lower_frontend_artifact(
         comb_boundaries: HashMap::default(),
         arena,
         reset_clock_map,
+        processes: Vec::new(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

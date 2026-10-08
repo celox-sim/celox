@@ -10,9 +10,9 @@ use crate::{
 };
 use celox_design::{
     BitAccess, DomainKind, ElaboratedDesign, EventTopology, ExternFunction, InitialStateValue,
-    InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
-    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
-    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata,
+    InstanceId, ModuleId, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr,
+    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema,
+    STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase, VariableMetadata,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -368,6 +368,7 @@ pub fn schedule_symbolic_rtl(
         runtime_event_sites,
         extern_functions,
         next_runtime_error_code,
+        processes,
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -936,6 +937,10 @@ pub fn schedule_symbolic_rtl(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
+    let (process_kernels, process_slots): (Vec<_>, Vec<_>) = processes
+        .into_iter()
+        .map(|process| (process.kernel, process.slots))
+        .unzip();
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
@@ -943,6 +948,7 @@ pub fn schedule_symbolic_rtl(
         apply_ffs,
         eval_comb,
         parallel: parallel_sir,
+        processes: process_kernels,
     };
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
@@ -1048,6 +1054,7 @@ pub fn schedule_symbolic_rtl(
         .chain(sir.eval_comb_apply_ffs.values().flatten())
         .chain(sir.eval_only_ffs.values().flatten())
         .chain(sir.apply_ffs.values().flatten())
+        .chain(&sir.processes)
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -1082,6 +1089,10 @@ pub fn schedule_symbolic_rtl(
         }
     }
 
+    let process_slots = process_slots
+        .into_iter()
+        .map(|slots| slots.map(project))
+        .collect();
     let state_to_source = source_to_state
         .iter()
         .map(|(source, state)| (*state, *source))
@@ -1113,6 +1124,7 @@ pub fn schedule_symbolic_rtl(
             testbench_read_roots: Default::default(),
             rtl_writes,
             comb_writes: Default::default(),
+            processes: process_slots,
         },
     };
 
@@ -1679,10 +1691,12 @@ fn relocate_units(
         Vec<RuntimeEventSite>,
         Vec<ExternFunction>,
         i64,
+        Vec<RelocatedProcess>,
     ),
     ParserError,
 > {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
+    let mut processes = Vec::new();
     let mut eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
     let mut eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
@@ -2003,6 +2017,29 @@ fn relocate_units(
             }
         }
 
+        for (index, process) in sim_module.processes.iter().enumerate() {
+            processes.push((
+                (*id, index),
+                RelocatedProcess {
+                    kernel: relocate_executation_unit_with_errors(
+                        &process.kernel,
+                        &|addr| RegionedAbsoluteAddr {
+                            region: addr.region,
+                            instance_id: *id,
+                            var_id: addr.var_id,
+                        },
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                        &extern_function_map,
+                    ),
+                    slots: process.slots.map(|var_id| AbsoluteAddr {
+                        instance_id: *id,
+                        var_id,
+                    }),
+                },
+            ));
+        }
+
         for (trigger_set, eu) in &sim_module.apply_ff_blocks {
             let clock_addr = AbsoluteAddr {
                 instance_id: *id,
@@ -2090,7 +2127,19 @@ fn relocate_units(
         runtime_event_sites,
         extern_functions,
         next_runtime_error_code,
+        {
+            // Instances are numbered in elaboration order, so this is the
+            // order processes start in at time zero.
+            processes.sort_unstable_by_key(|(key, _)| *key);
+            processes.into_iter().map(|(_, process)| process).collect()
+        },
     ))
+}
+
+/// A process kernel placed in one instance.
+struct RelocatedProcess {
+    kernel: ExecutionUnit<RegionedAbsoluteAddr>,
+    slots: ProcessSlots<AbsoluteAddr>,
 }
 
 fn build_comb_observer_capture_paths(

@@ -234,6 +234,7 @@ pub(crate) fn redirect_final_alias_accesses(
         .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
         .chain(sir.eval_only_ffs.values_mut().flatten())
         .chain(sir.apply_ffs.values_mut().flatten())
+        .chain(sir.processes.iter_mut())
         .chain(
             sir.parallel
                 .iter_mut()
@@ -882,7 +883,10 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> HashSet<AbsoluteAdd
                 .apply_ffs
                 .values()
                 .flat_map(|units| units.iter()),
-        );
+        )
+        // A process kernel reads and writes state at times the
+        // combinational schedule does not see, like an FF domain does.
+        .chain(&program.sir.processes);
     for eu in units {
         for block in eu.blocks.values() {
             for inst in &block.instructions {
