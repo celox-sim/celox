@@ -133,7 +133,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if let Some(value) = entry.shadowed_constant {
                 self.dims.const_env.insert(entry.source.clone(), value);
             }
-            let signedness = Arc::make_mut(&mut self.dims.expression_signedness);
+            let signedness = &mut self.dims.expression_signedness;
             match entry.shadowed_signedness {
                 Some(signed) => {
                     signedness.insert(entry.source, signed);
@@ -153,7 +153,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .dims
             .insert(source.to_string(), dimensions_from_type(&r#type));
         let shadowed_constant = self.dims.const_env.remove(source);
-        let shadowed_signedness = Arc::make_mut(&mut self.dims.expression_signedness)
+        let shadowed_signedness = self
+            .dims
+            .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
         self.state.locals.push(LocalVariable {
             name: unique.clone(),

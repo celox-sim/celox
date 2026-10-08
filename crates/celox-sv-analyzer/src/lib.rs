@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
+mod parsed;
 pub mod procedural;
 pub mod symbol;
 pub mod syntax;
@@ -24,6 +25,7 @@ pub mod typecheck;
 pub use ast::packages::PackageSource;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
+pub use parsed::ParsedSource;
 
 /// Internal marker used to defer division-by-zero state handling until the
 /// simulator's two-state/four-state mode is known.
@@ -179,18 +181,11 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
     parameter_overrides: &HashMap<String, ir::ConstExpr>,
     interfaces: &ModuleInterfaces,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let parameter_overrides = parameter_overrides
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone().into()))
-        .collect();
-    let source = ast::Source::from_syntax_module_with_parameter_expr_overrides(
-        &syntax_tree,
+    ParsedSource::parse(code, path)?.analyze_module_with_parameter_expr_overrides(
         module_name,
-        &parameter_overrides,
-        &interfaces.clone().into_iter().collect(),
-    )?;
-    analyze::analyze_source(source)
+        parameter_overrides,
+        interfaces,
+    )
 }
 
 /// The positional interface (ports and overridable parameters) of every
