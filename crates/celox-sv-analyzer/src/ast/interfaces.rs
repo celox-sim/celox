@@ -782,7 +782,7 @@ impl<'a> Design<'a> {
         // assigned as well.
         for interface in interfaces.values_mut() {
             let file = &files[interface.file];
-            let imports: Vec<(String, Option<String>)> = interface
+            let unit: Vec<(String, Option<String>)> = interface
                 .items
                 .iter()
                 .flat_map(|item| match item {
@@ -804,6 +804,7 @@ impl<'a> Design<'a> {
                 {
                     continue;
                 }
+                let scoped = scoped_imports(RefNode::InterfaceDeclarationAnsi(declaration), file)?;
                 for node in RefNode::InterfaceDeclarationAnsi(declaration) {
                     if let RefNode::TfCall(call) = node {
                         written_arguments(
@@ -812,7 +813,7 @@ impl<'a> Design<'a> {
                             &|_| None,
                             file,
                             &subroutines,
-                            &imports,
+                            &visible_imports(&unit, &scoped, file.span(RefNode::TfCall(call))?),
                             &mut interface.lvalues,
                         )?;
                     }
@@ -1260,17 +1261,14 @@ impl<'a> Design<'a> {
                 instance == handle && scope.0 <= span.0 && span.1 <= scope.1
             })
         };
-        // The imports visible in the module: compilation-unit ones before it
-        // and its own.
-        let mut imports: Vec<(String, Option<String>)> = unit_imports(file)?
+        // The compilation-unit imports before the module, and the module's
+        // own by the scope they are visible in.
+        let unit: Vec<(String, Option<String>)> = unit_imports(file)?
             .into_iter()
             .filter(|(span, _)| span.1 <= module.span.0)
             .flat_map(|(_, imports)| imports)
             .collect();
-        imports.extend(imported_items(
-            RefNode::ModuleDeclarationAnsi(declaration),
-            &file.syntax_tree,
-        )?);
+        let scoped = scoped_imports(RefNode::ModuleDeclarationAnsi(declaration), file)?;
         // An assignment target starts where its lvalue starts.
         let mut lvalues = HashSet::default();
         let mut generates = Vec::new();
@@ -1289,9 +1287,14 @@ impl<'a> Design<'a> {
                     &handle_interface,
                     file,
                     &self.subroutines,
-                    &imports,
+                    &visible_imports(&unit, &scoped, file.span(RefNode::TfCall(call))?),
                     &mut lvalues,
                 )?,
+                RefNode::SystemTfCall(call) => {
+                    if let Some(destination) = readmem_destination(call, file)? {
+                        written_expression(destination, file, &mut lvalues);
+                    }
+                }
                 RefNode::VariableLvalue(lvalue) => {
                     lvalues.extend(
                         file.node_span(RefNode::VariableLvalue(lvalue))
@@ -1353,10 +1356,7 @@ impl<'a> Design<'a> {
                     };
                     if port.interface.is_none() {
                         if port.writes {
-                            lvalues.extend(
-                                file.node_span(RefNode::Expression(expression))
-                                    .map(|span| span.0),
-                            );
+                            written_expression(expression, file, &mut lvalues);
                         }
                     } else if let Some(actual) = actual_handle(expression, file)?
                         && is_port(&actual.handle, file.span(RefNode::Expression(expression))?)
@@ -2446,13 +2446,121 @@ fn written_arguments(
             )));
         }
         if first {
-            writes.extend(
-                file.node_span(RefNode::Expression(actual))
-                    .map(|span| span.0),
-            );
+            written_expression(actual, file, writes);
         }
     }
     Ok(())
+}
+
+/// The package imports under `root`, each with the scope it is visible in:
+/// the innermost subroutine or block around it, or `root`.
+fn scoped_imports(
+    root: RefNode<'_>,
+    file: &File<'_>,
+) -> Result<Vec<(Span, Vec<(String, Option<String>)>)>, AnalyzerError> {
+    let root_span = file.span(root.clone())?;
+    let mut scopes = Vec::new();
+    let mut imports = Vec::new();
+    for node in root {
+        match node {
+            RefNode::FunctionDeclaration(_)
+            | RefNode::TaskDeclaration(_)
+            | RefNode::SeqBlock(_)
+            | RefNode::ParBlock(_)
+            | RefNode::GenerateBlock(_) => scopes.extend(file.node_span(node)),
+            RefNode::PackageImportDeclaration(import) => imports.push((
+                file.span(RefNode::PackageImportDeclaration(import))?,
+                imported_items(RefNode::PackageImportDeclaration(import), &file.syntax_tree)?,
+            )),
+            _ => {}
+        }
+    }
+    Ok(imports
+        .into_iter()
+        .map(|(span, imported)| {
+            let scope = scopes
+                .iter()
+                .filter(|scope| scope.0 <= span.0 && span.1 <= scope.1)
+                .min_by_key(|scope| scope.1 - scope.0)
+                .copied()
+                .unwrap_or(root_span);
+            (scope, imported)
+        })
+        .collect())
+}
+
+/// The imports visible at `span`: `outer` ones and the `scoped` ones whose
+/// scope contains it.
+fn visible_imports(
+    outer: &[(String, Option<String>)],
+    scoped: &[(Span, Vec<(String, Option<String>)>)],
+    span: Span,
+) -> Vec<(String, Option<String>)> {
+    let mut imports = outer.to_vec();
+    for (scope, imported) in scoped {
+        if scope.0 <= span.0 && span.1 <= scope.1 {
+            imports.extend(imported.iter().cloned());
+        }
+    }
+    imports
+}
+
+/// Record the start of `expression`, and of each name in it outside a
+/// select, as an assignment target, for a concatenation of members.
+fn written_expression(
+    expression: &sv_parser::Expression,
+    file: &File<'_>,
+    writes: &mut HashSet<usize>,
+) {
+    let root = RefNode::Expression(expression);
+    writes.extend(file.node_span(root.clone()).map(|span| span.0));
+    let mut selects = Vec::new();
+    for node in root.clone() {
+        if matches!(
+            node,
+            RefNode::BitSelect(_)
+                | RefNode::PartSelectRange(_)
+                | RefNode::ConstantBitSelect(_)
+                | RefNode::ConstantPartSelectRange(_)
+        ) {
+            selects.extend(file.node_span(node));
+        }
+    }
+    for node in root {
+        if let RefNode::PrimaryHierarchical(primary) = node
+            && let Some(span) = file.node_span(RefNode::PrimaryHierarchical(primary))
+            && !selects
+                .iter()
+                .any(|select| select.0 <= span.0 && span.1 <= select.1)
+        {
+            writes.insert(span.0);
+        }
+    }
+}
+
+/// The destination of a `$readmemh` or `$readmemb` call.
+fn readmem_destination<'b>(
+    call: &'b sv_parser::SystemTfCall,
+    file: &File<'_>,
+) -> Result<Option<&'b sv_parser::Expression>, AnalyzerError> {
+    let (identifier, arguments): (_, Vec<&Option<sv_parser::Expression>>) = match call {
+        sv_parser::SystemTfCall::ArgOptionl(call) => (
+            &call.nodes.0,
+            match call.nodes.1.as_ref().map(|paren| &paren.nodes.1) {
+                Some(sv_parser::ListOfArguments::Ordered(list)) => list.nodes.0.contents(),
+                _ => return Ok(None),
+            },
+        ),
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            (&call.nodes.0, call.nodes.1.nodes.1.0.contents())
+        }
+        sv_parser::SystemTfCall::ArgDataType(_) => return Ok(None),
+    };
+    let name = file.text(file.span(RefNode::SystemTfIdentifier(identifier))?);
+    if name != "$readmemh" && name != "$readmemb" {
+        return Ok(None);
+    }
+    Ok(arguments.get(1).and_then(|argument| argument.as_ref()))
 }
 
 /// The compilation-unit package imports of `file` and what they import.

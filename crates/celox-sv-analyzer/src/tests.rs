@@ -3083,6 +3083,64 @@ fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
 }
 
 #[test]
+fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
+    let elaborated = elaborate(
+        r#"
+        package pa;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endpackage
+        package pb;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endpackage
+        interface I;
+            logic [7:0] mem [4];
+            logic [7:0] hi;
+            logic [7:0] lo;
+            logic [1:0] idx;
+            logic [7:0] x;
+        endinterface
+        module Out(output logic [15:0] o);
+            assign o = 16'h1234;
+        endmodule
+        module L(I p);
+            initial $readmemh("data.hex", p.mem);
+        endmodule
+        module C(I p);
+            Out u(.o({p.hi, p.lo}));
+        endmodule
+        module S(I p);
+            import pa::*;
+            function automatic void g();
+                import pb::*;
+            endfunction
+            always_comb touch(p.x);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    let module = |name: &str| {
+        let start = elaborated.find(&format!("module {name}(")).unwrap();
+        let end = start + elaborated[start..].find("endmodule").unwrap();
+        elaborated[start..end].to_string()
+    };
+    let (l, c, s) = (module("L"), module("C"), module("S"));
+    for (text, expected) in [
+        (&l, "output var logic [7:0] p$mem[4]"),
+        (&c, "output var logic [7:0] p$hi"),
+        (&c, "output var logic [7:0] p$lo"),
+        (&c, "input var logic [1:0] p$idx"),
+        // `pb::touch` is imported only inside `g`.
+        (&s, "input var logic [7:0] p$x"),
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
