@@ -125,6 +125,15 @@ fn exact_iteration_chunks(
 ) -> bool {
     let trip_count = candidate.unrolled.iterations.len();
     if trip_count < 2
+        || candidate.unrolled.iterations.iter().any(|iteration| {
+            module
+                .variables
+                .get(&iteration.loop_var)
+                .is_none_or(|variable| {
+                    variable.kind != veryl_analyzer::ir::VarKind::Const
+                        || variable.value.first().and_then(Value::to_usize) != Some(iteration.value)
+                })
+        })
         || statements.is_empty()
         || !statements.len().is_multiple_of(trip_count)
         || statements
@@ -4229,6 +4238,7 @@ mod tests {
             Analyzer::analyze_post_pass2(&ir).is_empty(),
             "post-pass2 must succeed"
         );
+        crate::lower_constant_loops(&mut ir);
         let provenance = loop_sources.match_unrolled(&ir);
         let top = resource_table::insert_str("Top");
         let module = ir
