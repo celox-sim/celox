@@ -7467,6 +7467,22 @@ sv_backends! {
     fn lowers_parameter_casts_in_loop_generate(sim) {
         @case "review_regressions::lowers_parameter_casts_in_loop_generate";
     }
+
+    fn default_pattern_fills_each_element_of_unpacked_subarrays(sim) {
+        @case "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays";
+    }
+
+    fn int_parameters_are_signed_in_comparisons_and_loop_bounds(sim) {
+        @case "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds";
+    }
+
+    fn run_time_for_condition_uses_the_relational_operand_context(sim) {
+        @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
+    }
+
+    fn size_of_a_type_uses_the_dimension_argument(sim) {
+        @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

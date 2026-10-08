@@ -94,6 +94,91 @@ fn element(
     })
 }
 
+/// The value a `default:` key gives an element of `shape`. An unpacked
+/// subarray whose type the value does not match is not set as a whole: the
+/// default applies recursively to each of its elements (IEEE 1800-2023
+/// 10.9.1), each evaluated in the context of that element's type.
+fn default_element(
+    expr: &sv_parser::Expression,
+    shape: &VariableDimensions,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let Some((dimension, rest)) = shape.unpacked.split_first() else {
+        return element(expr, shape, tree, dims);
+    };
+    if pattern_expression(expr).is_some() || unpacked_rank(expr, tree, dims) >= shape.unpacked.len()
+    {
+        return element(expr, shape, tree, dims);
+    }
+    let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+    let subarray = VariableDimensions {
+        unpacked: rest.to_vec(),
+        ..shape.clone()
+    };
+    let value = default_element(expr, &subarray, tree, dims)?;
+    Ok(match count {
+        1 => value,
+        _ => Expr::Concat(vec![value; count]),
+    })
+}
+
+/// The number of unpacked dimensions of the self-determined type of `expr`:
+/// those of a variable that its selects leave unselected.
+fn unpacked_rank(
+    expr: &sv_parser::Expression,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> usize {
+    let sv_parser::Expression::Primary(primary) = expr else {
+        return 0;
+    };
+    match &**primary {
+        sv_parser::Primary::MintypmaxExpression(paren) => match &paren.nodes.0.nodes.1 {
+            sv_parser::MintypmaxExpression::Expression(expr) => unpacked_rank(expr, tree, dims),
+            sv_parser::MintypmaxExpression::Ternary(_) => 0,
+        },
+        sv_parser::Primary::Hierarchical(hierarchical) => {
+            let select = &hierarchical.nodes.2;
+            if select.nodes.0.is_some() {
+                // A member of a packed structure.
+                return 0;
+            }
+            let unpacked =
+                identifier_text(RefNode::HierarchicalIdentifier(&hierarchical.nodes.1), tree)
+                    .and_then(|name| dims.get(&name))
+                    .map_or(0, |shape| shape.unpacked.len());
+            let indices = select.nodes.1.nodes.0.len();
+            match &select.nodes.2 {
+                // A slice keeps the dimension it selects from.
+                Some(_) if indices < unpacked => unpacked - indices,
+                Some(_) => 0,
+                None => unpacked.saturating_sub(indices),
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The item of a pattern at one position.
+#[derive(Clone, Copy)]
+enum Item<'p> {
+    /// A list, repetition or index-keyed item: the value of the element.
+    Explicit(&'p sv_parser::Expression),
+    /// A `default:` value, which applies to each element of an unmatched
+    /// subarray rather than to the subarray as a whole (IEEE 1800-2023
+    /// 10.9.1).
+    Default(&'p sv_parser::Expression),
+}
+
+impl<'p> Item<'p> {
+    fn expression(self) -> &'p sv_parser::Expression {
+        match self {
+            Self::Explicit(expr) | Self::Default(expr) => expr,
+        }
+    }
+}
+
 /// The items of a pattern for `count` positions, keyed by position: list
 /// items in order, `n{...}` repetitions, index keys, and a `default`.
 fn positional_items<'p>(
@@ -102,7 +187,7 @@ fn positional_items<'p>(
     index_offset: impl Fn(i128) -> Option<usize>,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Converted<Vec<&'p sv_parser::Expression>> {
+) -> Converted<Vec<Item<'p>>> {
     let item_count = |items: usize| {
         unsupported(format!(
             "assignment pattern with {items} items for {count} elements"
@@ -114,7 +199,7 @@ fn positional_items<'p>(
             if items.len() != count {
                 return Err(item_count(items.len()));
             }
-            Ok(items)
+            Ok(items.into_iter().map(Item::Explicit).collect())
         }
         sv_parser::AssignmentPattern::Repeat(repeat) => {
             let (times, items) = &repeat.nodes.0.nodes.1;
@@ -128,14 +213,16 @@ fn positional_items<'p>(
             .and_then(|times| usize::try_from(times).ok())
             .ok_or_else(|| unsupported("assignment pattern repetition count"))?;
             let items = items.nodes.1.contents();
-            let repeated: Vec<_> = (0..times).flat_map(|_| items.iter().copied()).collect();
+            let repeated: Vec<_> = (0..times)
+                .flat_map(|_| items.iter().copied().map(Item::Explicit))
+                .collect();
             if repeated.len() != count {
                 return Err(item_count(repeated.len()));
             }
             Ok(repeated)
         }
         sv_parser::AssignmentPattern::Array(array) => {
-            let mut slots: Vec<Option<&sv_parser::Expression>> = vec![None; count];
+            let mut slots: Vec<Option<Item>> = vec![None; count];
             let mut default = None;
             for (key, _, value) in array.nodes.0.nodes.1.contents() {
                 match key {
@@ -155,10 +242,12 @@ fn positional_items<'p>(
                                     "assignment pattern index {index} outside the target"
                                 ))
                             })?;
-                        *slot = Some(value);
+                        *slot = Some(Item::Explicit(value));
                     }
                     sv_parser::ArrayPatternKey::AssignmentPatternKey(key) => match &**key {
-                        sv_parser::AssignmentPatternKey::Default(_) => default = Some(value),
+                        sv_parser::AssignmentPatternKey::Default(_) => {
+                            default = Some(Item::Default(value));
+                        }
                         sv_parser::AssignmentPatternKey::SimpleType(_) => {
                             return Err(unsupported("assignment pattern type key"));
                         }
@@ -191,7 +280,7 @@ fn positional_items<'p>(
             }
             let default =
                 default.ok_or_else(|| unsupported("array assignment pattern without a default"))?;
-            Ok(vec![default; count])
+            Ok(vec![Item::Default(default); count])
         }
     }
 }
@@ -245,7 +334,10 @@ pub(super) fn expr_from_pattern(
         )?;
         let mut parts = items
             .into_iter()
-            .map(|item| element(item, &element_shape, tree, dims))
+            .map(|item| match item {
+                Item::Explicit(expr) => element(expr, &element_shape, tree, dims),
+                Item::Default(expr) => default_element(expr, &element_shape, tree, dims),
+            })
             .collect::<Converted<Vec<_>>>()?;
         parts.reverse();
         return Ok(match <[Expr; 1]>::try_from(parts) {
@@ -288,7 +380,7 @@ pub(super) fn expr_from_pattern(
         )?;
         let parts = items
             .into_iter()
-            .map(|item| element(item, &element_shape, tree, dims))
+            .map(|item| element(item.expression(), &element_shape, tree, dims))
             .collect::<Converted<Vec<_>>>()?;
         return Ok(Expr::Concat(parts));
     }
@@ -317,7 +409,7 @@ pub(super) fn expr_from_pattern(
     )?;
     let parts = items
         .into_iter()
-        .map(|item| element(item, &bit, tree, dims))
+        .map(|item| element(item.expression(), &bit, tree, dims))
         .collect::<Converted<Vec<_>>>()?;
     Ok(match <[Expr; 1]>::try_from(parts) {
         Ok([part]) => part,

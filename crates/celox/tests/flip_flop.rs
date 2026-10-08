@@ -4276,7 +4276,7 @@ fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
 }
 
 fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "flip_flop::test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape";
 }
 

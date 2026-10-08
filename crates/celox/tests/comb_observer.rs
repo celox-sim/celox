@@ -2582,7 +2582,7 @@ fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
 }
 
 fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element";
 }
 

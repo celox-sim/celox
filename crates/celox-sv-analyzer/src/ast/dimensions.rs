@@ -24,10 +24,21 @@ pub(super) fn size_system_function_call_type(
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
 ) -> Option<ExprType> {
-    let (name, r#type) = match call {
+    // The dimension argument of `$size(x, n)`, a constant expression.
+    let dimension_argument = |dimension: &sv_parser::Expression| {
+        const_expr_from_expr(dimension, syntax_tree)
+            .ok()
+            .flatten()
+            .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))
+    };
+    let (name, r#type, dimension) = match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
             let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
-            let data_type = &call.nodes.1.nodes.1.0;
+            let (data_type, dimension) = &call.nodes.1.nodes.1;
+            let dimension = match dimension {
+                Some((_, dimension)) => Some(dimension_argument(dimension)?),
+                None => None,
+            };
             let r#type = match data_type {
                 sv_parser::DataType::Type(data_type) => {
                     let name =
@@ -41,7 +52,7 @@ pub(super) fn size_system_function_call_type(
                     type_aliases,
                 ),
             }?;
-            (name, r#type)
+            (name, r#type, dimension)
         }
         // sv-parser classifies an unqualified typedef argument as an
         // expression because its grammar cannot know whether the identifier
@@ -58,11 +69,13 @@ pub(super) fn size_system_function_call_type(
                     ConstExpr::Ident(identifier) => identifier,
                     _ => return None,
                 };
-                let dimension = const_expr_from_expr(dimension, syntax_tree)
-                    .ok()
-                    .flatten()
-                    .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))?;
-                let variable = dimensions?.get(&identifier)?;
+                let dimension = dimension_argument(dimension)?;
+                let Some(variable) = dimensions.and_then(|dimensions| dimensions.get(&identifier))
+                else {
+                    // A type name that sv-parser parsed as an expression.
+                    let r#type = type_aliases.get(&identifier)?.clone();
+                    return type_dimension_size(&r#type, Some(dimension), const_env);
+                };
                 let widths: Vec<&ConstExpr> = variable
                     .unpacked
                     .iter()
@@ -146,7 +159,7 @@ pub(super) fn size_system_function_call_type(
             if let ConstExpr::Ident(alias) = &argument
                 && let Some(r#type) = type_aliases.get(alias)
             {
-                (name, r#type.clone())
+                (name, r#type.clone(), None)
             } else {
                 if let ConstExpr::Ident(identifier) = &argument
                     && let Some(width) =
@@ -167,50 +180,65 @@ pub(super) fn size_system_function_call_type(
         }
         sv_parser::SystemTfCall::ArgOptionl(_) => return None,
     };
-    // $bits covers every unpacked and packed dimension; $size covers only
-    // the outermost dimension, which is unpacked when one is present.
-    let first_dimension_only = name == "$size";
-    if name != "$bits" && !first_dimension_only {
+    // $bits covers every unpacked and packed dimension; $size covers one
+    // dimension, by default the outermost one.
+    if name == "$size" {
+        return type_dimension_size(&r#type, dimension, const_env);
+    }
+    if name != "$bits" || dimension.is_some() {
         return None;
     }
-    if !first_dimension_only {
-        let unpacked_width = r#type
-            .unpacked_ranges()
-            .iter()
-            .try_fold(1usize, |width, range| {
-                let left = eval_ast_const_expr(range.left(), const_env)?;
-                let right = eval_ast_const_expr(range.right(), const_env)?;
-                width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
-            })?;
-        let packed_width = r#type
-            .packed_ranges()
-            .iter()
-            .try_fold(1usize, |width, range| {
-                let left = eval_ast_const_expr(range.left(), const_env)?;
-                let right = eval_ast_const_expr(range.right(), const_env)?;
-                width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
-            })?;
-        return Some(ExprType {
-            width: unpacked_width.checked_mul(packed_width)?.max(1),
-            signed: r#type.is_signed(),
-        });
-    }
-    let range = r#type
+    let unpacked_width = r#type
         .unpacked_ranges()
-        .first()
+        .iter()
+        .try_fold(1usize, |width, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+        })?;
+    let packed_width = r#type
+        .packed_ranges()
+        .iter()
+        .try_fold(1usize, |width, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+        })?;
+    Some(ExprType {
+        width: unpacked_width.checked_mul(packed_width)?.max(1),
+        signed: r#type.is_signed(),
+    })
+}
+
+/// `$size` of a type: the number of elements of dimension `dimension`
+/// (default 1), numbered from the slowest varying dimension, unpacked
+/// dimensions first (IEEE 1800-2023 20.7).
+fn type_dimension_size(
+    r#type: &Type,
+    dimension: Option<i128>,
+    const_env: &HashMap<String, i128>,
+) -> Option<ExprType> {
+    let dimension = usize::try_from(dimension.unwrap_or(1))
+        .ok()?
+        .checked_sub(1)?;
+    let mut ranges = r#type
+        .unpacked_ranges()
+        .iter()
         .map(|range| (range.left(), range.right()))
-        .or_else(|| {
+        .chain(
             r#type
                 .packed_ranges()
-                .first()
-                .map(|range| (range.left(), range.right()))
-        });
-    let Some((left, right)) = range else {
+                .iter()
+                .map(|range| (range.left(), range.right())),
+        )
+        .peekable();
+    if ranges.peek().is_none() && dimension == 0 {
         return Some(ExprType {
             width: 1,
             signed: r#type.is_signed(),
         });
-    };
+    }
+    let (left, right) = ranges.nth(dimension)?;
     let left = eval_ast_const_expr(left, const_env)?;
     let right = eval_ast_const_expr(right, const_env)?;
     let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;

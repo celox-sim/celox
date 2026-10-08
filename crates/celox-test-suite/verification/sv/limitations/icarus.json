@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 25,
+    "compile_error": 27,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -294,6 +294,22 @@
       "name": "indexed_select::out_of_range_inner_indices_stay_in_their_element",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:5: error: Type names are not valid expressions here.\n<case>/source_0.sv:5: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:5:               : Expression is: <type>\n<case>/source_0.sv:5:               : Expression type: 10PETypename\n<case>/source_0.sv:5: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:7: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:8: error: Type names are not valid expressions here.\n<case>/source_0.sv:8: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:8:               : Expression is: <type>\n<case>/source_0.sv:8:               : Expression type: 10PETypename\n<case>/source_0.sv:8: error:",
+      "expectation": "Simulation",
+      "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

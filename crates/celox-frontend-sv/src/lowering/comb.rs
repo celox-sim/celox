@@ -2169,7 +2169,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         let mut probe = store.fork();
         let (start, _) = self.eval(&mut probe, frames, &canonical.start, None)?;
-        let (end, _) = self.eval(&mut probe, frames, &canonical.end, None)?;
+        let (end, _) = self.loop_end(&mut probe, frames, canonical)?;
         let (Some((start, _)), Some((end, _))) = (
             slt_const(self.arena, &mut self.consts, start),
             slt_const(self.arena, &mut self.consts, end),
@@ -2185,6 +2185,25 @@ impl<'p, 'a> Comb<'p, 'a> {
             0.0
         };
         Ok(trips > (MAX_UNROLLED_ITERATIONS - self.unrolled.min(MAX_UNROLLED_ITERATIONS)) as f64)
+    }
+
+    /// The bound of a counted loop. It is an operand of the relational loop
+    /// condition, so it is evaluated at the width of the comparison with the
+    /// loop variable, and signed only when both operands are (IEEE 1800-2023
+    /// 11.6.1, 11.8.1 and 11.8.2).
+    fn loop_end(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        canonical: &CanonicalLoop,
+    ) -> Result<Value, sv::AnalyzerError> {
+        let var = sv::ir::Expr::Ident(canonical.var.clone());
+        let signed = self.expr_signed(&var) && self.expr_signed(&canonical.end);
+        let context = self
+            .m
+            .comparison_width(&var, &canonical.end)
+            .map(|width| (width, signed));
+        self.eval(store, frames, &canonical.end, context)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2215,7 +2234,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         let start = coerce_node_width(self.arena, start, Some(loop_width), loop_signed)
             .map_err(slt_error)?;
         let end_signed = self.expr_signed(&canonical.end);
-        let (mut end, end_sources) = self.eval(&mut store, frames, &canonical.end, None)?;
+        let (mut end, end_sources) = self.loop_end(&mut store, frames, canonical)?;
         let mut inclusive = matches!(
             canonical.compare,
             sv::ir::BinaryOp::Le | sv::ir::BinaryOp::Ge

@@ -4960,7 +4960,10 @@ fn sv_glue_expr_is_signed(
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
-                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+                sv::ir::UnaryOp::Plus
+                    | sv::ir::UnaryOp::Minus
+                    | sv::ir::UnaryOp::BitNot
+                    | sv::ir::UnaryOp::ToTwoState
             ) && sv_glue_expr_is_signed(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
@@ -5019,7 +5022,10 @@ fn sv_expr_is_signed_with_parameters(
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
-                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+                sv::ir::UnaryOp::Plus
+                    | sv::ir::UnaryOp::Minus
+                    | sv::ir::UnaryOp::BitNot
+                    | sv::ir::UnaryOp::ToTwoState
             ) && sv_expr_is_signed_with_parameters(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
