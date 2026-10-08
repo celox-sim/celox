@@ -16,7 +16,6 @@ all_backends! {
         @case "veryl_context_regressions::wide_logical_operand_keeps_result_type";
     }
     fn constant_ternary_keeps_both_arm_types(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::constant_ternary_keeps_both_arm_types";
     }
     fn signed_cast_of_folded_constant_sign_extends(sim) {
@@ -41,7 +40,6 @@ all_backends! {
         @case "veryl_context_regressions::folded_const_select_keeps_its_sign";
     }
     fn runtime_for_bound_keeps_its_type(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_keeps_its_type";
     }
     fn case_compares_each_label_as_an_if_does(sim) {
@@ -51,11 +49,11 @@ all_backends! {
         @case "veryl_context_regressions::runtime_case_target_uses_comparison_context";
     }
     fn runtime_for_bound_arithmetic_uses_int_context(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
     }
     fn dynamic_param_array_read_uses_its_elements(sim) {
-        // SV frontend rejects the emitted unpacked array parameter as unsupported_simulator_parser.
+        // SV frontend rejects the unpacked-array parameter override `#(.Q('{-3, -5}))`:
+        // "parameter override expression" (#88).
         @ignore_on(sv);
         @case "veryl_context_regressions::dynamic_param_array_read_uses_its_elements";
     }
@@ -69,7 +67,6 @@ all_backends! {
 
 all_backends! {
     fn ff_loop_bound_keeps_its_type(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
             module Top #(
                 param UNSIGNED_END: u32 = 2,

@@ -133,7 +133,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if let Some(value) = entry.shadowed_constant {
                 self.dims.const_env.insert(entry.source.clone(), value);
             }
-            let signedness = Arc::make_mut(&mut self.dims.expression_signedness);
+            let signedness = &mut self.dims.expression_signedness;
             match entry.shadowed_signedness {
                 Some(signed) => {
                     signedness.insert(entry.source, signed);
@@ -153,7 +153,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .dims
             .insert(source.to_string(), dimensions_from_type(&r#type));
         let shadowed_constant = self.dims.const_env.remove(source);
-        let shadowed_signedness = Arc::make_mut(&mut self.dims.expression_signedness)
+        let shadowed_signedness = self
+            .dims
+            .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
@@ -345,6 +347,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 rhs: self.expr(rhs)?,
                 nonblocking,
             });
+        }
+        if op == "="
+            && let Some(target) = variable_lvalue_unpacked_shape(lvalue, self.tree, &self.dims)
+        {
+            check_unpacked_array_assignment(
+                rhs,
+                &target,
+                || "assignment".to_string(),
+                self.tree,
+                &self.dims,
+            )?;
         }
         let (written, lhs) = self.lvalue(lvalue)?;
         let mut rhs = if op == "=" {
@@ -817,13 +830,25 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         position: usize,
         arg: &sv_parser::Expression,
     ) -> Result<Expr, AnalyzerError> {
+        let shape = self
+            .dims
+            .subroutine_param_shapes
+            .get(name)
+            .and_then(|shapes| shapes.get(position));
+        if let Some(shape) = shape {
+            // Passing an argument in any direction is an assignment-like
+            // context (IEEE 1800-2023 10.8).
+            check_unpacked_array_assignment(
+                arg,
+                shape,
+                || format!("argument {} of `{name}`", position + 1),
+                self.tree,
+                &self.dims,
+            )?;
+        }
         if let Some(pattern) =
             patterns::pattern_expression(arg).filter(|pattern| pattern.nodes.0.is_none())
-            && let Some(shape) = self
-                .dims
-                .subroutine_param_shapes
-                .get(name)
-                .and_then(|shapes| shapes.get(position))
+            && let Some(shape) = shape
         {
             let mut lowered =
                 patterns::expr_from_pattern(&pattern.nodes.1, shape, self.tree, &self.dims)?;

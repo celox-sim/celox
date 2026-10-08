@@ -19,7 +19,8 @@ all_backends! {
         @case "veryl_language::parameter_expression_type_cast_widths";
     }
     fn packed_union_members_alias(sim) {
-        // SV frontend issue #64: unsupported packed struct/union types.
+        // SV frontend does not support packed unions:
+        // "unpacked struct, union, or unsupported packed struct member" (#440).
         @ignore_on(sv);
         @case "veryl_language::packed_union_members_alias";
     }
@@ -39,7 +40,8 @@ all_backends! {
         @case "veryl_regressions::wide_ternary_narrow_branch_no_spill";
     }
     fn nested_array_index_const_array(sim) {
-        // SV frontend issue #64 rejects the constant-array assignment expression.
+        // SV frontend rejects `mem[A[idx]]` (index read from an unpacked-array localparam):
+        // "combinational expression assigned to `nested`" (#88).
         @ignore_on(sv);
         @case "veryl_regressions::nested_array_index_const_array";
     }

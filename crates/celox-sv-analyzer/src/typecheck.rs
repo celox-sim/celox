@@ -14,6 +14,45 @@ pub struct IntegralLiteral {
     pub mask: BigUint,
 }
 
+/// The type of a fixed-size unpacked array of an integral element type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpackedArrayType {
+    /// The element count of each unpacked dimension, slowest varying first.
+    pub dims: Vec<usize>,
+    /// The width of the integral element type.
+    pub element_width: usize,
+    pub signed: bool,
+    pub four_state: bool,
+}
+
+impl UnpackedArrayType {
+    /// Whether a value of this type can be assigned to an array of `target`
+    /// (IEEE 1800-2023 7.6): the element types are equivalent, which for
+    /// integral types means the same width, state count and signedness
+    /// (6.22.2), and every dimension has the same element count; the bounds
+    /// themselves do not matter.
+    pub fn is_assignment_compatible_with(&self, target: &Self) -> bool {
+        self == target
+    }
+}
+
+impl std::fmt::Display for UnpackedArrayType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.four_state { "logic" } else { "bit" })?;
+        if self.signed {
+            f.write_str(" signed")?;
+        }
+        if self.element_width > 1 {
+            write!(f, " [{}:0]", self.element_width - 1)?;
+        }
+        f.write_str(" ")?;
+        for count in &self.dims {
+            write!(f, "[{count}]")?;
+        }
+        Ok(())
+    }
+}
+
 /// Width and signedness of the supported bit vector system functions (20.9).
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
     if arity != 1 {

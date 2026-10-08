@@ -8,7 +8,6 @@ all_backends! {
     }
 
     fn parent_context_and_self_determined_boundaries_match_between_comb_and_ff(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::parent_context_and_self_determined_boundaries_match_between_comb_and_ff";
     }
 

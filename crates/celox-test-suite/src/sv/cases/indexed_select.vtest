@@ -741,3 +741,23 @@
       (modify (set i value) (set j j))
       (assert_eq b (? (< j 4) (bit value j) (fourstate 1 1)) "b")
       (assert_eq v (? (< j 4) (<< 1 j) 0) "v"))))
+
+(case runtime_index_reads_single_bit_unpacked_elements
+  ; A run-time index selects one element of an unpacked array of 1-bit
+  ; elements; `[32]` declares `[0:31]` (IEEE 1800-2023 7.4.2, 7.4.6).
+  (source "single_bit_unpacked_index.sv" #"
+                module Top(input logic clk, input logic [4:0] p, input logic [31:0] d,
+                           output logic q, output logic q_ff);
+                    logic v [32];
+                    always_comb for (int i = 0; i < 32; i++) v[i] = d[i];
+                    always_comb q = v[p];
+                    always_ff @(posedge clk) q_ff <= v[p];
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0xa5c30f81 0x5a3cf07e)
+    (for p (range 0 32)
+      (modify (set d value) (set p p))
+      (assert_eq q (bit value p) "q")
+      (tick clk)
+      (assert_eq q_ff (bit value p) "q_ff"))))

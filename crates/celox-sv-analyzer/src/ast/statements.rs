@@ -10,13 +10,9 @@ pub(super) fn coerce_procedural_assignment_rhs(
     let Some(target_type) = lvalue_expr_type(lhs, packed_dimensions) else {
         return rhs;
     };
-    let identifier_signedness = packed_dimensions
-        .iter()
-        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
-        .collect();
     let Some(source_signed) = expr_signedness_with_return_types(
         &rhs,
-        &identifier_signedness,
+        packed_dimensions,
         &HashMap::default(),
         &packed_dimensions.function_return_types,
     ) else {
