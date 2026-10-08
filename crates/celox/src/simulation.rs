@@ -550,3 +550,158 @@ impl<B: SimBackend> Simulation<B> {
         }
     }
 }
+
+#[cfg(all(test, feature = "host-runtime"))]
+mod process_tests {
+    use celox_frontend_sdk::{
+        BinaryOp, Constant, Edge, ExprId, FrontendArtifact, ModuleBuilder, Statement, UnaryOp,
+        ValueType,
+    };
+
+    use super::Simulation;
+    use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+    fn constant(module: &mut ModuleBuilder, value: u64, width: usize) -> ExprId {
+        module.constant(Constant::two_state(value, width).unwrap())
+    }
+
+    /// `forever #5 clk = ~clk;` drives a counter, and a second process counts
+    /// `steps` one-unit delays into `ticks` before finishing the simulation.
+    fn design(four_state: bool, steps: usize) -> FrontendArtifact {
+        let bit = ValueType::new(1, false, four_state).unwrap();
+        let word = ValueType::new(16, false, four_state).unwrap();
+        let mut module = ModuleBuilder::new("Processes").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let count = module.output("count", word).unwrap();
+        let ticks = module.output("ticks", word).unwrap();
+        for signal in [clk, count, ticks] {
+            let width = if signal == clk { 1 } else { 16 };
+            module
+                .set_initial(signal, Constant::two_state(0u8, width).unwrap())
+                .unwrap();
+        }
+        let count_expr = module.read(count).unwrap();
+        let one = constant(&mut module, 1, 16);
+        let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
+        let count_target = module.whole(count).unwrap();
+        module
+            .register(count_target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+
+        let five = constant(&mut module, 5, 8);
+        let clk_expr = module.read(clk).unwrap();
+        let toggled = module.unary(UnaryOp::BitNot, clk_expr, bit).unwrap();
+        let clk_target = module.whole(clk).unwrap();
+        module
+            .process(vec![Statement::Forever {
+                body: vec![
+                    Statement::Delay { amount: five },
+                    Statement::Assign {
+                        target: clk_target,
+                        value: toggled,
+                    },
+                ],
+            }])
+            .unwrap();
+
+        // Straight-line suspensions, so a long body needs the two-level
+        // resume dispatch.
+        let unit = constant(&mut module, 1, 8);
+        let ticks_expr = module.read(ticks).unwrap();
+        let incremented = module.binary(BinaryOp::Add, ticks_expr, one, word).unwrap();
+        let ticks_target = module.whole(ticks).unwrap();
+        let mut body = Vec::new();
+        for _ in 0..steps {
+            body.push(Statement::Delay { amount: unit });
+            body.push(Statement::Assign {
+                target: ticks_target,
+                value: incremented,
+            });
+        }
+        body.push(Statement::Finish);
+        module.process(body).unwrap();
+        module.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>, steps: u64) {
+        let count = sim.signal("count");
+        let ticks = sim.signal("ticks");
+        // Rising edges at 5, 15 and 25.
+        sim.run_until(30).unwrap();
+        assert!(!sim.is_finished());
+        assert_eq!(sim.get(count), 3u16.into());
+        assert_eq!(sim.get(ticks), 30u16.into());
+        sim.run_until(u64::MAX - 1).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), steps);
+        assert_eq!(sim.get(ticks), steps.into());
+        assert_eq!(sim.get(count), ((steps + 5) / 10).into());
+    }
+
+    fn builder(four_state: bool, steps: usize) -> SimulatorBuilder<'static, Simulator> {
+        Simulator::from_frontend(design(four_state, steps))
+            .four_state(four_state)
+            .emit_triggers()
+    }
+
+    fn check_all_backends(four_state: bool, steps: usize) {
+        check(
+            Simulation::new(builder(four_state, steps).build_interpreter().unwrap()),
+            steps as u64,
+        );
+        check(
+            Simulation::new(builder(four_state, steps).build_cranelift().unwrap()),
+            steps as u64,
+        );
+        check(
+            Simulation::new(builder(four_state, steps).build_wasm().unwrap()),
+            steps as u64,
+        );
+        check(
+            Simulation::new(builder(four_state, steps).build_tiered().unwrap()),
+            steps as u64,
+        );
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        {
+            check(
+                Simulation::new(builder(four_state, steps).build_native().unwrap()),
+                steps as u64,
+            );
+            let image = builder(four_state, steps)
+                .compile_native()
+                .unwrap()
+                .into_program_image();
+            let image = crate::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            check(
+                Simulation::new(
+                    Simulator::from_sources(Vec::new(), "Processes")
+                        .emit_triggers()
+                        .build_native_from_image(image)
+                        .unwrap(),
+                ),
+                steps as u64,
+            );
+        }
+    }
+
+    #[test]
+    fn processes_run_on_every_backend() {
+        check_all_backends(false, 37);
+    }
+
+    #[test]
+    fn four_state_processes_run_on_every_backend() {
+        check_all_backends(true, 37);
+    }
+
+    #[test]
+    fn long_processes_dispatch_through_two_switch_levels() {
+        check_all_backends(false, 300);
+    }
+}

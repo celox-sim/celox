@@ -1,13 +1,13 @@
 //! Projection from the stable frontend SDK into Celox symbolic internals.
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
-    RegionedVarAddrBase, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata,
-    WORKING_REGION,
+    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId,
+    PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase,
+    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
 };
 use celox_frontend_sdk::{
     ActiveLevel, Direction, Edge, ExprId, ExprNode, FrontendArtifact, SignalId, SignalSlice,
-    ValueType,
+    Statement, ValueType,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -16,8 +16,9 @@ use celox_sir::{
 use celox_slt::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena};
 use thiserror::Error;
 
+use crate::process::{PROCESS_RESUME_WIDTH, ProcessKernelBuilder, ProcessKernelError};
 use crate::symbolic::artifact::{
-    ExternalHierarchy, ExternalModule, SimModule, SymbolicRtl, SymbolicVariable,
+    ExternalHierarchy, ExternalModule, SimModule, SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use crate::symbolic::width::coerce_node_width;
 use crate::{HashMap, HashSet, SourceVarId, VariableKind};
@@ -56,6 +57,12 @@ pub enum FrontendArtifactError {
     },
     #[error("frontend SDK expression is invalid: {0}")]
     InvalidExpression(#[from] celox_slt::SLTNodeFactsError),
+    #[error(transparent)]
+    Process(#[from] ProcessKernelError),
+    #[error(
+        "frontend artifact `{module}` has processes, which do not run inside a Veryl native testbench"
+    )]
+    ProcessesInTestbench { module: String },
 }
 
 fn source_id(id: SignalId) -> SourceVarId {
@@ -1022,6 +1029,168 @@ fn lower_registers(
     Ok(())
 }
 
+/// Lower `statements` at the kernel's open block. Returns whether control
+/// can continue after them; if not, no block is left open.
+fn lower_statements(
+    artifact: &FrontendArtifact,
+    kernel: &mut ProcessKernelBuilder,
+    statements: &[Statement],
+) -> Result<bool, FrontendArtifactError> {
+    for statement in statements {
+        // Registers do not live across statements: a suspension in between
+        // returns to the runtime, and each read must see the current state.
+        let mut cache = HashMap::default();
+        match statement {
+            Statement::Assign { target, value } => {
+                let target_type = signal_slice_type(artifact, *target)?;
+                let builder = kernel.builder();
+                let value =
+                    coerce_sir_expression(artifact, *value, target_type, builder, &mut cache)?;
+                builder.emit(SIRInstruction::Store(
+                    RegionedSourceAddr {
+                        region: STABLE_REGION,
+                        var_id: source_id(target.signal()),
+                    },
+                    SIROffset::Static(target.lsb()),
+                    target.width(),
+                    value,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+            Statement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let builder = kernel.builder();
+                let condition = lower_sir_expression(artifact, *condition, builder, &mut cache)?;
+                let then_block = builder.new_block();
+                let else_block = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: condition,
+                    true_block: (then_block, Vec::new()),
+                    false_block: (else_block, Vec::new()),
+                });
+                let mut join = None;
+                for (block, body) in [(then_block, then_body), (else_block, else_body)] {
+                    kernel.builder().switch_to_block(block);
+                    if lower_statements(artifact, kernel, body)? {
+                        let builder = kernel.builder();
+                        let target = *join.get_or_insert_with(|| builder.new_block());
+                        builder.seal_block(SIRTerminator::Jump(target, Vec::new()));
+                    }
+                }
+                match join {
+                    Some(join) => kernel.builder().switch_to_block(join),
+                    None => return Ok(false),
+                }
+            }
+            Statement::While { condition, body } => {
+                let builder = kernel.builder();
+                let header = builder.new_block();
+                builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
+                builder.switch_to_block(header);
+                let condition = lower_sir_expression(artifact, *condition, builder, &mut cache)?;
+                let body_block = builder.new_block();
+                let exit = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: condition,
+                    true_block: (body_block, Vec::new()),
+                    false_block: (exit, Vec::new()),
+                });
+                builder.switch_to_block(body_block);
+                if lower_statements(artifact, kernel, body)? {
+                    kernel
+                        .builder()
+                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                }
+                kernel.builder().switch_to_block(exit);
+            }
+            Statement::Forever { body } => {
+                let builder = kernel.builder();
+                let header = builder.new_block();
+                builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
+                builder.switch_to_block(header);
+                if lower_statements(artifact, kernel, body)? {
+                    kernel
+                        .builder()
+                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                }
+                return Ok(false);
+            }
+            Statement::Delay { amount } => {
+                let amount = coerce_sir_expression(
+                    artifact,
+                    *amount,
+                    ValueType::bits(PROCESS_DELAY_WIDTH)?,
+                    kernel.builder(),
+                    &mut cache,
+                )?;
+                kernel.delay(amount)?;
+            }
+            Statement::Finish => {
+                kernel.finish();
+                return Ok(false);
+            }
+            _ => return Err(FrontendArtifactError::UnsupportedOperation),
+        }
+    }
+    Ok(true)
+}
+
+/// Declare the control slots of every process after the artifact's signals
+/// and lower each process body to a kernel.
+fn lower_processes(
+    artifact: &FrontendArtifact,
+    variables: &mut HashMap<SourceVarId, SymbolicVariable>,
+) -> Result<Vec<SymbolicProcess>, FrontendArtifactError> {
+    let mut next_id = artifact.signals().len() as u32;
+    let mut declare = |path: Vec<String>, width: usize| {
+        let id = SourceVarId(next_id);
+        next_id += 1;
+        variables.insert(
+            id,
+            SymbolicVariable {
+                path,
+                kind: VariableKind::Variable,
+                signed: false,
+                metadata: VariableMetadata {
+                    width,
+                    is_4state: false,
+                    kind: DomainKind::Other,
+                    type_kind: PortTypeKind::Bit,
+                    array_dims: Vec::new(),
+                },
+                packed_dims: vec![width],
+                source: None,
+                // Control slots are not signals of the design.
+                module_affiliated: false,
+            },
+        );
+        id
+    };
+    artifact
+        .processes()
+        .iter()
+        .enumerate()
+        .map(|(index, process)| {
+            let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
+            let slots = ProcessSlots {
+                resume: declare(name("resume"), PROCESS_RESUME_WIDTH),
+                status: declare(name("status"), PROCESS_STATUS_WIDTH),
+                delay: declare(name("delay"), PROCESS_DELAY_WIDTH),
+            };
+            let mut kernel = ProcessKernelBuilder::new(slots);
+            lower_statements(artifact, &mut kernel, process.body())?;
+            Ok(SymbolicProcess {
+                kernel: kernel.build(),
+                slots,
+            })
+        })
+        .collect()
+}
+
 fn set_role(
     roles: &mut HashMap<SignalId, (DomainKind, PortTypeKind)>,
     artifact: &FrontendArtifact,
@@ -1072,7 +1241,7 @@ pub fn lower_frontend_artifact(
         }
     }
 
-    let variables = artifact
+    let mut variables: HashMap<SourceVarId, SymbolicVariable> = artifact
         .signals()
         .iter()
         .map(|signal| {
@@ -1111,6 +1280,8 @@ pub fn lower_frontend_artifact(
             )
         })
         .collect();
+
+    let processes = lower_processes(artifact, &mut variables)?;
 
     let mut arena = SLTNodeArena::new();
     let mut node_cache = HashMap::default();
@@ -1189,7 +1360,7 @@ pub fn lower_frontend_artifact(
         comb_boundaries: HashMap::default(),
         arena,
         reset_clock_map,
-        processes: Vec::new(),
+        processes,
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

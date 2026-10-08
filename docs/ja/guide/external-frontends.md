@@ -120,13 +120,54 @@ in-memory の Rust value として渡します。`fromFrontendArtifact` は呼�
 Celox artifact JSON も parse しません。build 可能な addon と load test は
 `examples/my-frontend-napi` にあります。
 
+## process と delay
+
+`initial` block のような手続き的な process は `ModuleBuilder::process` で
+追加できます。process は時刻 0 に開始し、文を順に実行します。
+
+| 文 | 動作 |
+|---|---|
+| `Assign` | blocking 代入。後続の文は新しい値を読み、他の logic は process が suspend した後に新しい値を見ます。 |
+| `If` | 条件で分岐します。不定 bit を含む条件は偽として扱います。 |
+| `While` / `Forever` | 条件が成り立つ間、または永久に body を繰り返します。 |
+| `Delay` | 指定した時間単位だけ suspend します。量は 64 bit 以下です。 |
+| `Finish` | simulation を終了します。 |
+
+```rust
+// forever #5 clk = ~clk;
+let half_period = module.constant(Constant::two_state(5u8, 8)?);
+let clk_expr = module.read(clk)?;
+let toggled = module.unary(UnaryOp::BitNot, clk_expr, bit)?;
+module.process(vec![Statement::Forever {
+    body: vec![
+        Statement::Delay { amount: half_period },
+        Statement::Assign { target: module.whole(clk)?, value: toggled },
+    ],
+}])?;
+```
+
+process は時刻付きの `Simulation` でだけ実行されます。各 process は再開可能な
+kernel に compile され、delay が満了すると simulation の scheduler が再開
+します。同じ時刻に再開する process は宣言順に実行されます。0 の delay は、
+その時刻の他の process の後に再び実行されます。process が見るのは前の時刻で
+settle した state です。process が起こした clock や reset の edge は、
+schedule された event と同様にその時刻の register を trigger します。
+
+process が書けるのは、continuous assignment や register が駆動していない
+output と internal signal です。同じ signal を複数の process が書いても
+構いません。checkpoint は suspend 中の process を保存しますが、process を
+持つ simulation の state file にはまだ対応していません。process を持つ
+artifact は Veryl native testbench から instantiate できません。
+
 ## artifact format の制限
 
 format version 1 が受け取るのは平坦化済みの1 module です。型付き signal、
 constant、組み合わせ式と代入、edge-triggered register、非同期 reset、同期
-enable、初期値を扱えます。hierarchy、memory、latch、custom primitive、
-bidirectional signal は SDK builder を呼ぶ前に frontend 側で lower して
-ください。
+enable、初期値を扱えます。format version 2 で process が加わりました。
+process を持たない artifact は builder が version 1 として書き出すので、
+version 1 しか読まない consumer もそのまま受け取れます。hierarchy、memory、
+latch、custom primitive、bidirectional signal は SDK builder を呼ぶ前に
+frontend 側で lower してください。
 
 Celox は compile 前に artifact を再検証します。artifact は SDK builder で
 生成し、Rust の値を直接 `Simulator::from_frontend` に渡してください。
