@@ -228,34 +228,44 @@ impl<'a> File<'a> {
             {
                 return false;
             }
-            // The qualifier before the dot, after its selects.
+            // Every qualifier before the dot, after its selects, back to the
+            // first, must name a generate block.
             let mut qualifier = index - 2;
-            while self.text(self.tokens[qualifier]) == "]" {
-                let mut depth = 0usize;
-                loop {
-                    match self.text(self.tokens[qualifier]) {
-                        "]" => depth += 1,
-                        "[" => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
+            loop {
+                while self.text(self.tokens[qualifier]) == "]" {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.text(self.tokens[qualifier]) {
+                            "]" => depth += 1,
+                            "[" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
+                        if qualifier == 0 {
+                            return false;
+                        }
+                        qualifier -= 1;
                     }
                     if qualifier == 0 {
                         return false;
                     }
                     qualifier -= 1;
                 }
-                if qualifier == 0 {
+                let token = self.tokens[qualifier];
+                if !self.identifiers.contains(&token.0)
+                    || !blocks.contains(&normalize_identifier(self.text(token)))
+                {
                     return false;
                 }
-                qualifier -= 1;
+                if qualifier < 2 || self.text(self.tokens[qualifier - 1]) != "." {
+                    return true;
+                }
+                qualifier -= 2;
             }
-            let qualifier = self.tokens[qualifier];
-            self.identifiers.contains(&qualifier.0)
-                && blocks.contains(&normalize_identifier(self.text(qualifier)))
         })
     }
 
@@ -424,12 +434,11 @@ enum HeaderForm {
     LocalType(Span),
     /// A package import, inserted in the module header, and what it imports:
     /// `(package, item)`, with no item for a wildcard import. A
-    /// compilation-unit import before the interface (`unit`) is only copied
-    /// into other files, where it is not visible.
+    /// compilation-unit import before the interface is copied as well, as
+    /// packages are inlined only for imports inside a module.
     Import {
         span: Span,
         imports: Vec<(String, Option<String>)>,
-        unit: bool,
     },
 }
 
@@ -805,6 +814,14 @@ impl<'a> Design<'a> {
                         .collect();
                         for node in RefNode::InterfaceDeclarationAnsi(declaration) {
                             if let RefNode::Identifier(identifier) = node {
+                                let span = file.span(RefNode::Identifier(identifier))?;
+                                // A qualified name does not resolve to the
+                                // compilation unit.
+                                if matches!(file.previous_token(span.0), Some("." | "::"))
+                                    || file.next_token(span.1) == Some("::")
+                                {
+                                    continue;
+                                }
                                 let identifier =
                                     name(RefNode::Identifier(identifier), &file.syntax_tree)?;
                                 if unit.contains(&identifier) && !declared.contains(&identifier) {
@@ -907,7 +924,6 @@ impl<'a> Design<'a> {
                         header: HeaderForm::Import {
                             span: *span,
                             imports: imports.clone(),
-                            unit: true,
                         },
                     })
                     .collect();
@@ -2149,11 +2165,6 @@ impl<'a> Design<'a> {
                         "localparam type {}",
                         interface.render(interface_file, *span, &rename)
                     )),
-                    // A compilation-unit import before the module is
-                    // already visible in it.
-                    HeaderForm::Import {
-                        unit: true, span, ..
-                    } if interface.file == module.file && span.1 <= module.span.0 => {}
                     HeaderForm::Import { span, .. } => {
                         let import = interface_file.text(*span).to_string();
                         if !header_imports.contains(&import) {
@@ -2358,13 +2369,6 @@ impl<'a> Design<'a> {
                         joined(instance, &parameter.name)
                     ));
                 }
-                Item::Constant {
-                    header:
-                        HeaderForm::Import {
-                            unit: true, span, ..
-                        },
-                    ..
-                } if std::ptr::eq(file, interface_file) && span.1 <= scope_start => {}
                 Item::Constant { span, .. } => {
                     // A localparam of the parameter port list has no `;`.
                     let mut constant = interface.render(interface_file, *span, &plain);
@@ -2826,6 +2830,47 @@ fn readmem_destination<'b>(
         return Ok(None);
     }
     Ok(arguments.get(1).and_then(|argument| argument.as_ref()))
+}
+
+/// Whether `code` has a backtick outside comments and string literals, for
+/// a macro or compiler directive.
+fn has_directive(code: &str) -> bool {
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '`' => return true,
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = ' ';
+                for c in chars.by_ref() {
+                    if previous == '*' && c == '/' {
+                        break;
+                    }
+                    previous = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The compilation-unit package imports of `file` and what they import.
@@ -3333,9 +3378,9 @@ impl InterfaceDecl {
             start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
             has_parameter_port_list: header.nodes.5.is_some(),
             uses_unit_items: false,
-            uses_macros: file
-                .text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?)
-                .contains('`'),
+            uses_macros: has_directive(
+                file.text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?),
+            ),
             parameters: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
@@ -3895,7 +3940,6 @@ impl InterfaceDecl {
                                     RefNode::PackageImportDeclaration(import),
                                     syntax_tree,
                                 )?,
-                                unit: false,
                             },
                         });
                     }

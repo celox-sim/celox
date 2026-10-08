@@ -3396,6 +3396,59 @@ fn resolves_sibling_generic_ports_and_struct_fields() {
 }
 
 #[test]
+fn keeps_qualified_names_comments_and_preceding_imports() {
+    // A qualified package function, a backtick in a comment and a struct
+    // field chain through a generate block name are no unit items, macros or
+    // generate-qualified instances.
+    let sources = elaborate_interfaces(&[
+        (
+            "package pk;
+                 typedef logic [3:0] word_t;
+                 function automatic logic source(); return 1; endfunction
+             endpackage
+             function automatic logic source(); return 0; endfunction
+             interface I;
+                 // don't use `FOO here
+                 logic x;
+                 assign x = pk::source();
+             endinterface",
+            Path::new("interface.sv"),
+        ),
+        (
+            "module M(output logic y);
+                 typedef struct packed {
+                     struct packed { struct packed { logic x; } h; } g;
+                 } T;
+                 T record;
+                 assign record = 0;
+                 I a();
+                 if (1) begin : g I h(); end
+                 assign y = record.g.h.x;
+             endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(sources[1].contains("pk::source()"), "{}", sources[1]);
+
+    // A compilation-unit import before the interface and the module is
+    // copied, as packages are inlined only for imports in a module.
+    let elaborated = elaborate(
+        "package pk; typedef logic [3:0] word_t; endpackage
+         import pk::*;
+         interface I; word_t x; endinterface
+         module M(I p, output logic [3:0] o); assign o = p.x; endmodule",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("module M import pk::*;"),
+        "{elaborated}"
+    );
+}
+
+#[test]
 fn rejects_unsupported_interface_uses() {
     const BUS: &str = r#"
         interface Bus;
