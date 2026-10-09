@@ -138,7 +138,18 @@ test("full validation overrides even an empty valid diff", () => {
           return [name, value === "true"];
         }),
     ),
-    { ...all, heliodor_arm64: true, release: false },
+    {
+      ...all,
+      heliodor_arm64: true,
+      release: false,
+      // The whole Rust workspace, with no package scope or filter.
+      rust_full: true,
+      rust_packages: false,
+      rust_features: false,
+      rust_filter: false,
+      rust_libraries: false,
+      rust_library_features: false,
+    },
   );
 });
 
@@ -172,6 +183,7 @@ function runClassifier(
       encoding: "utf8",
     },
   );
+  // The Rust test scope is text, checked by ci-rust-scope.test.mjs.
   return Object.fromEntries(
     output
       .trim()
@@ -179,7 +191,8 @@ function runClassifier(
       .map((line) => {
         const [name, value] = line.split("=");
         return [name, value === "true"];
-      }),
+      })
+      .filter(([name]) => !name.startsWith("rust_")),
   );
 }
 
