@@ -84,11 +84,16 @@ python3 scripts/compare-vcd-verilator.py
 The [VCD benchmark methodology and results](../internals/vcd-performance.md#verilator-comparison)
 cover idle, sparse, and dense recording, with tracing disabled and enabled.
 
-The CodSpeed workflow runs benchmarks on pull requests and `master`. Merge queue
-events preserve the workflow check without running CodSpeed because CodSpeed does
-not support the `merge_group` event. Pull requests are compared with the `master`
-baseline using deterministic CPU simulation, while the local command only checks
-that the benchmark suite runs.
+The CodSpeed workflow runs daily on the default branch at 02:17 UTC (11:17 JST)
+and supports manual dispatch on any branch. Pull requests, merge groups, and
+pushes do not run it. Deterministic CPU simulation results are uploaded to
+CodSpeed for comparison with earlier measurements using the repository's CodSpeed
+regression thresholds. On `master` and `develop`, execution failures or a failed
+performance analysis open or update the issue `CodSpeed is failing on <branch>`;
+the next successful execution and analysis close it. Missing or incomplete
+analysis is reported as a failure, rather than treated as healthy. The issue
+includes the run link and, for regressions, the performance comparison and
+benchmark details. The local command only checks that the benchmark suite runs.
 
 Local measurements are most useful for comparing two revisions on the same
 machine. CI history is better for long-term trends than for small one-off deltas.
