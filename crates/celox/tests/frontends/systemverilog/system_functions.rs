@@ -9,6 +9,10 @@ sv_backends! {
         @case "system_functions::display_field_widths_expand_to_the_value";
     }
 
+    fn display_unknown_bits_as_ieee_specifies(sim) {
+        @case "system_functions::display_unknown_bits_as_ieee_specifies";
+    }
+
     fn countones_preserves_argument_and_return_types(sim) {
         @case "system_functions::countones_preserves_argument_and_return_types";
     }

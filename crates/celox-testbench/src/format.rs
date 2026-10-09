@@ -212,17 +212,69 @@ pub fn format_sized_display_arg(
     };
     match bits_per_digit {
         Some(bits_per_digit) => {
+            let text = if has_mask(arg) {
+                unknown_digits(arg, bits_per_digit)
+            } else {
+                text
+            };
             let minimal = text.trim_start_matches('0');
             let minimal = if minimal.is_empty() { "0" } else { minimal };
             let width = field_width.unwrap_or_else(|| arg.width.div_ceil(bits_per_digit).max(1));
             pad(minimal.to_string(), '0', width)
         }
         None if matches!(spec, 'd' | 'i') => {
+            let text = match unknown_group(arg, 0, arg.width) {
+                Some(digit) => digit.to_string(),
+                None => text,
+            };
             let width = field_width.unwrap_or_else(|| decimal_digits(arg));
             pad(text, ' ', width)
         }
         None => pad(text, ' ', field_width.unwrap_or(0)),
     }
+}
+
+/// The character IEEE 1800-2023 21.2.1.3 displays for the bits `start..end`
+/// when any of them is unknown: lowercase when all of them are X (or all Z),
+/// uppercase when only some are, and X over Z when both appear.
+fn unknown_group(arg: &DisplayFormatArg<'_>, start: usize, end: usize) -> Option<char> {
+    let mask = arg.mask?;
+    let (mut x, mut z) = (0, 0);
+    for bit_idx in start..end {
+        if bit(mask, bit_idx) {
+            if bit(arg.value, bit_idx) {
+                x += 1;
+            } else {
+                z += 1;
+            }
+        }
+    }
+    let bits = end - start;
+    match (x, z) {
+        (0, 0) => None,
+        (x, _) if x == bits => Some('x'),
+        (0, z) if z == bits => Some('z'),
+        (0, _) => Some('Z'),
+        _ => Some('X'),
+    }
+}
+
+/// Hexadecimal, octal, or binary digits of a value with unknown bits.
+fn unknown_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
+    let digits = arg.width.div_ceil(bits_per_digit).max(1);
+    (0..digits)
+        .rev()
+        .map(|digit_idx| {
+            let start = digit_idx * bits_per_digit;
+            let end = (start + bits_per_digit).min(arg.width);
+            unknown_group(arg, start, end).unwrap_or_else(|| {
+                let digit = (start..end)
+                    .filter(|&bit_idx| bit(arg.value, bit_idx))
+                    .fold(0, |digit, bit_idx| digit | 1 << (bit_idx - start));
+                char::from_digit(digit, 1 << bits_per_digit).unwrap()
+            })
+        })
+        .collect()
 }
 
 fn pad(text: String, fill: char, width: usize) -> String {
@@ -266,6 +318,36 @@ mod tests {
         assert_eq!(sized(0xab, 8, false, 'H', None), "ab");
     }
 
+    fn four_state(payload: u32, mask: u32, width: usize, spec: char) -> String {
+        let (value, mask) = (BigUint::from(payload), BigUint::from(mask));
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width,
+            signed: false,
+            is_string: false,
+        };
+        format_sized_display_arg(&arg, spec, None)
+    }
+
+    #[test]
+    fn displays_unknown_bits_as_ieee_1800_2023_21_2_1_3_shows() {
+        // X is payload 1 / mask 1, Z is payload 0 / mask 1.
+        assert_eq!(four_state(1, 1, 1, 'd'), "x");
+        // 14'bx01010
+        assert_eq!(four_state(0x3fea, 0x3fe0, 14, 'h'), "xxXa");
+        // 12'b001xxx101x01 as %h and %o
+        assert_eq!(four_state(0x3ed, 0x1c4, 12, 'h'), "XXX");
+        assert_eq!(four_state(0x3ed, 0x1c4, 12, 'o'), "1x5X");
+        assert_eq!(four_state(0b1000, 0b1100, 4, 'b'), "xz00");
+        assert_eq!(four_state(0, 0xff, 8, 'h'), "zz");
+        assert_eq!(four_state(0, 0x0f, 8, 'h'), "0z");
+        assert_eq!(four_state(0x01, 0x03, 8, 'h'), "0X");
+        assert_eq!(four_state(0, 0xff, 8, 'd'), "  z");
+        assert_eq!(four_state(0, 0x01, 8, 'd'), "  Z");
+        assert_eq!(four_state(0x01, 0x03, 8, 'd'), "  X");
+    }
+
     #[test]
     fn sizing_keeps_unknown_digits() {
         let value = BigUint::from(0u8);
@@ -277,7 +359,7 @@ mod tests {
             signed: false,
             is_string: false,
         };
-        assert_eq!(format_sized_display_arg(&arg, 'h', None), "0x0");
-        assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), "x0");
+        assert_eq!(format_sized_display_arg(&arg, 'h', None), "0z0");
+        assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), "z0");
     }
 }
