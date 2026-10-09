@@ -40,6 +40,38 @@ pub(super) struct ScopeSymbols {
 
 thread_local! {
     static IMPORTED: RefCell<Arc<ScopeSymbols>> = RefCell::new(Arc::default());
+    static PACKAGE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Restores the previously analyzed package when dropped.
+pub(super) struct InPackage {
+    previous: Option<String>,
+}
+
+impl Drop for InPackage {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        PACKAGE.with(|current| *current.borrow_mut() = previous);
+    }
+}
+
+/// Analyze the package `name` until the guard is dropped: inside it, `p::x`
+/// with `p` the package names its own item `x`.
+pub(super) fn enter_package(name: &str) -> InPackage {
+    let previous = PACKAGE.with(|current| current.borrow_mut().replace(name.to_string()));
+    InPackage { previous }
+}
+
+/// The name a reference to item `name` of `package` has in the scope being
+/// analyzed: `package::name`, or `name` inside the package itself.
+pub(super) fn qualified_name(package: &str, name: &str) -> String {
+    PACKAGE.with(|current| {
+        if current.borrow().as_deref() == Some(package) {
+            name.to_string()
+        } else {
+            format!("{package}::{name}")
+        }
+    })
 }
 
 /// Restores the previously imported symbols when dropped.

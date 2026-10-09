@@ -210,6 +210,7 @@ fn analyze_package(
     tree: &SyntaxTree,
     packages: &Packages,
 ) -> Result<Package, AnalyzerError> {
+    let _package = scope::enter_package(name);
     let imported = imports::imported_symbols(node.clone(), tree, packages)?;
     let aliases = imported.aliases.clone();
     let module = Module::from_module_node_with_parameter_overrides(

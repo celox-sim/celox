@@ -438,9 +438,9 @@ fn class_type_name(class_type: &sv_parser::ClassType, syntax_tree: &SyntaxTree) 
     let base = reference_name(RefNode::PsClassIdentifier(&class_type.nodes.0), syntax_tree)?;
     match class_type.nodes.2.as_slice() {
         [] => Some(base),
-        [(_, member, None)] if class_type.nodes.1.is_none() => Some(format!(
-            "{base}::{}",
-            identifier_text(RefNode::ClassIdentifier(member), syntax_tree)?
+        [(_, member, None)] if class_type.nodes.1.is_none() => Some(scope::qualified_name(
+            &base,
+            &identifier_text(RefNode::ClassIdentifier(member), syntax_tree)?,
         )),
         _ => None,
     }

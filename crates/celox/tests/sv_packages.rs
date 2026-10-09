@@ -212,6 +212,27 @@ fn qualified_references_name_declared_items() {
 }
 
 #[test]
+fn a_package_names_its_own_items_through_its_scope() {
+    assert_eq!(
+        output(
+            "package p;
+               localparam int A = 3;
+               localparam int B = p::A + 1;
+               typedef logic [p::B-1:0] word_t;
+               function automatic p::word_t twice(p::word_t x); return x << 1; endfunction
+             endpackage
+             module Top(output logic [7:0] y); assign y = 8'(p::twice(4'(p::B))) + 8'($bits(p::word_t)); endmodule"
+        ),
+        8 + 4
+    );
+    let detail = error(
+        "package p; localparam int A = p::Missing; endpackage
+         module Top(output logic [7:0] y); assign y = 8'(p::A); endmodule",
+    );
+    assert!(detail.contains("no item `Missing`"), "{detail}");
+}
+
+#[test]
 fn ambiguous_wildcard_references_are_errors() {
     let detail = error(
         "package p; localparam int T = 1; endpackage

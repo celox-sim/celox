@@ -2520,6 +2520,28 @@ fn rejects_package_variables_and_nets() {
 }
 
 #[test]
+fn package_functions_give_shapes_to_instance_connections() {
+    // The untyped assignment pattern takes the type of the package
+    // function's formal argument.
+    let code = "package p;
+                  function automatic int sum(input int v [2]); return v[0] + v[1]; endfunction
+                endpackage
+                module Child(input int x); endmodule
+                module Top; Child c(.x(p::sum('{1, 2}))); endmodule";
+    let ir = analyze_source(code, Path::new("shapes.sv")).unwrap();
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let connection = &top.instances()[0].port_connections()[0];
+    assert!(
+        matches!(connection.actual_expr(), Some(ir::Expr::Call { name, .. }) if name == "p::sum"),
+        "{connection:?}"
+    );
+}
+
+#[test]
 fn imports_a_dpi_function_declared_in_a_package() {
     let code = "package p; import \"DPI-C\" function int twice(input int x); endpackage\n\
                 module Top(input int a, output int y); import p::*; assign y = twice(a); endmodule\n";

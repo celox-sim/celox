@@ -321,8 +321,17 @@ pub(super) fn imported_symbols(
         RefNode::PackageDeclaration(_) => scope_name_from_node(node.clone(), tree).ok(),
         _ => None,
     };
+    let mut own_names = None;
     for (package, name) in &imports.qualified {
         if own.as_ref() == Some(package) {
+            // The package names one of its own items.
+            let own_names = own_names.get_or_insert_with(|| scope_names(node.clone(), tree));
+            if !own_names.contains(name) {
+                return Err(AnalyzerError::UnknownPackageItem {
+                    package: package.clone(),
+                    name: name.clone(),
+                });
+            }
             continue;
         }
         let Some(package_symbols) = packages.get(package) else {

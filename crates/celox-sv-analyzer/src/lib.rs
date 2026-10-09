@@ -288,7 +288,18 @@ pub fn analyze_source_module_with_packages(
 ) -> Result<Ir, AnalyzerError> {
     let overrides = parameter_overrides
         .iter()
-        .map(|(name, value)| (name.clone(), ir::ConstExpr::Literal(value.to_string())))
+        .map(|(name, value)| {
+            let literal = ir::ConstExpr::Literal(value.unsigned_abs().to_string());
+            let value = if *value < 0 {
+                ir::ConstExpr::Unary {
+                    op: ir::UnaryOp::Minus,
+                    expr: Box::new(literal),
+                }
+            } else {
+                literal
+            };
+            (name.clone(), value)
+        })
         .collect();
     ParsedSource::parse(code, path)?.analyze_module(
         module_name,

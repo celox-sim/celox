@@ -626,6 +626,25 @@ impl Module {
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
         packed_dimensions.extend(parameter_packed_dimensions(&parameters));
+        // Instance connections may call subroutines, of the module or of the
+        // packages it uses, with untyped assignment patterns.
+        let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for (name, params) in &imported.subroutine_params {
+            subroutine_params
+                .entry(name.clone())
+                .or_insert_with(|| params.clone());
+        }
+        for (name, shapes) in &imported.subroutine_shapes {
+            subroutine_shapes
+                .entry(name.clone())
+                .or_insert_with(|| shapes.clone());
+        }
+        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         let mut instances = instances_from_module_node(
             node.clone(),
             syntax_tree,
@@ -752,23 +771,6 @@ impl Module {
                 });
             }
         }
-        let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
-        for (name, params) in &imported.subroutine_params {
-            subroutine_params
-                .entry(name.clone())
-                .or_insert_with(|| params.clone());
-        }
-        for (name, shapes) in &imported.subroutine_shapes {
-            subroutine_shapes
-                .entry(name.clone())
-                .or_insert_with(|| shapes.clone());
-        }
-        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         // Bodies now have the active module's declarations and function types.
         // Declaration-time queries still use syntax discovery while metadata
         // is incomplete; generated/procedural scopes overlay this complete base.

@@ -406,7 +406,7 @@ pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opt
                 }
                 let name = identifier_text(child, syntax_tree)?;
                 return Some(match package {
-                    Some(package) => format!("{package}::{name}"),
+                    Some(package) => scope::qualified_name(&package, &name),
                     None => name,
                 });
             }
