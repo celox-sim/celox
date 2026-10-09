@@ -1645,6 +1645,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
+            sizing: DisplaySizing::Ieee,
             scope: None,
             arg_widths,
             arg_signed,

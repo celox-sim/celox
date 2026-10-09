@@ -63,10 +63,22 @@ pub enum RuntimeEventKind {
     Finish,
 }
 
+/// How a runtime event site sizes its formatted arguments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplaySizing {
+    /// Each argument takes its minimum width, as Veryl prints it.
+    #[default]
+    Minimal,
+    /// Automatic sizing and field widths of IEEE 1800-2023 21.2.1.2.
+    Ieee,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeEventSite {
     pub kind: RuntimeEventKind,
     pub template: Option<String>,
+    #[serde(default)]
+    pub sizing: DisplaySizing,
     /// Fully elaborated module-instance scope that emitted this event.
     pub scope: Option<String>,
     pub arg_widths: Vec<usize>,
@@ -760,6 +772,7 @@ mod tests {
         runtime.runtime_event_sites.push(RuntimeEventSite {
             kind: RuntimeEventKind::AssertFatal,
             template: Some("failed".to_string()),
+            sizing: DisplaySizing::Minimal,
             scope: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),

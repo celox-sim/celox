@@ -240,3 +240,50 @@ fn value_functions_called_as_statements_evaluate_their_operands_once() {
         }],
     );
 }
+
+#[test]
+fn display_arguments_are_sized_as_ieee_specifies() {
+    // IEEE 1800-2023 21.2.1.2: radices keep leading zeros up to the
+    // argument's largest value, decimals pad with spaces, a field width
+    // overrides both, and `%0` displays the minimum width.
+    let source = r#"
+        module Top(input logic clk, input logic [11:0] a, input logic signed [7:0] s);
+            always_ff @(posedge clk) begin
+                $display(":%h:%0h:%3h:%x:", a, a, a, 32'h5);
+                $display(":%b:%0b:%o:%0o:", a, a, a, a);
+                $display(":%d:%0d:%3d:%d:", a, a, a, s);
+                $display(":%3h:%3d:%5s:", 32'h1234, 32'd1234, "ab");
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("sizing.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let s = sim.signal("s");
+    sim.modify(|io| {
+        io.set(a, 10u16);
+        io.set(s, 0xfeu8);
+    })
+    .unwrap();
+    sim.drain_runtime_events();
+    sim.tick(clk).unwrap();
+    let messages = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        [
+            ":00a:a:00a:00000005:",
+            ":000000001010:1010:0012:12:",
+            ":  10:10: 10:  -2:",
+            ":1234:1234:   ab:",
+        ],
+    );
+}

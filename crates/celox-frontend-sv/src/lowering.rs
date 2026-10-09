@@ -10,10 +10,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
-    InitialStateValue, ModuleId, PortTypeKind, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
+    InitialStateData, InitialStateValue, ModuleId, PortTypeKind, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp,
+    VarAtomBase, WORKING_REGION,
 };
 use celox_frontend_core::symbolic::artifact::{
     ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,

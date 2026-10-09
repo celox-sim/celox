@@ -170,3 +170,110 @@ pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> Str
         }
     }
 }
+
+/// Number of characters the largest value of `arg` takes in decimal.
+fn decimal_digits(arg: &DisplayFormatArg<'_>) -> usize {
+    if arg.width == 0 {
+        return 1;
+    }
+    if arg.signed {
+        // The most negative value, with its sign, is the widest.
+        ((BigUint::from(1u8) << (arg.width - 1)).to_string().len()) + 1
+    } else {
+        ((BigUint::from(1u8) << arg.width) - BigUint::from(1u8))
+            .to_string()
+            .len()
+    }
+}
+
+/// Formats `arg` with the sizing of IEEE 1800-2023 21.2.1.2. Without a
+/// `field_width`, hexadecimal, octal, and binary values take as many digits
+/// as the largest value of the argument's width, with leading zeros, and
+/// decimal values as many characters, with leading spaces. With one, the
+/// value is padded to that width (`0` displays it in the minimum width), and
+/// a wider value is never truncated.
+pub fn format_sized_display_arg(
+    arg: &DisplayFormatArg<'_>,
+    spec: char,
+    field_width: Option<usize>,
+) -> String {
+    let text = format_display_arg(arg, Some(spec));
+    if arg.is_string {
+        return pad(text, ' ', field_width.unwrap_or(0));
+    }
+    let bits_per_digit = match spec {
+        'b' | 'B' => Some(1),
+        'o' | 'O' => Some(3),
+        'x' | 'X' | 'h' | 'H' => Some(4),
+        _ => None,
+    };
+    match bits_per_digit {
+        Some(bits_per_digit) => {
+            let minimal = text.trim_start_matches('0');
+            let minimal = if minimal.is_empty() { "0" } else { minimal };
+            let width = field_width.unwrap_or_else(|| arg.width.div_ceil(bits_per_digit).max(1));
+            pad(minimal.to_string(), '0', width)
+        }
+        None if matches!(spec, 'd' | 'D' | 'i' | 'I') => {
+            let width = field_width.unwrap_or_else(|| decimal_digits(arg));
+            pad(text, ' ', width)
+        }
+        None => pad(text, ' ', field_width.unwrap_or(0)),
+    }
+}
+
+fn pad(text: String, fill: char, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text;
+    }
+    let mut out: String = std::iter::repeat_n(fill, width - len).collect();
+    out.push_str(&text);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sized(value: u32, width: usize, signed: bool, spec: char, field: Option<usize>) -> String {
+        let value = BigUint::from(value);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width,
+            signed,
+            is_string: false,
+        };
+        format_sized_display_arg(&arg, spec, field)
+    }
+
+    #[test]
+    fn sizes_values_as_ieee_1800_2023_21_2_1_2_shows() {
+        assert_eq!(sized(10, 32, false, 'd', None), "        10");
+        assert_eq!(sized(10, 32, false, 'd', Some(0)), "10");
+        assert_eq!(sized(10, 32, false, 'h', None), "0000000a");
+        assert_eq!(sized(10, 32, false, 'h', Some(0)), "a");
+        assert_eq!(sized(5, 32, false, 'd', Some(3)), "  5");
+        assert_eq!(sized(1234, 32, false, 'd', Some(3)), "1234");
+        assert_eq!(sized(5, 32, false, 'h', Some(3)), "005");
+        assert_eq!(sized(0x1234, 32, false, 'h', Some(3)), "1234");
+        assert_eq!(sized(0, 8, false, 'b', Some(0)), "0");
+        assert_eq!(sized(0x80, 8, true, 'd', None), "-128");
+    }
+
+    #[test]
+    fn sizing_keeps_unknown_digits() {
+        let value = BigUint::from(0u8);
+        let mask = BigUint::from(0xf0u8);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width: 12,
+            signed: false,
+            is_string: false,
+        };
+        assert_eq!(format_sized_display_arg(&arg, 'h', None), "0x0");
+        assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), "x0");
+    }
+}

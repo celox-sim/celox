@@ -3067,6 +3067,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         self.sites.push(RuntimeEventSite {
             kind: event_kind,
             template,
+            sizing: DisplaySizing::Ieee,
             scope: None,
             arg_widths,
             arg_signed,
