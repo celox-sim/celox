@@ -146,6 +146,24 @@ test("concurrent publishers preserve results and compare by measurement time", (
     assert.deepEqual(parsed.entries["Rust Benchmarks"], original.entries["Rust Benchmarks"]);
     assert.equal(git("-C", seed, "show", "FETCH_HEAD:index.html"), "docs stay intact");
     publishResult("nonexistent-remote", { benches: [] });
+    // The regular benchmark writer races a Heliodor publisher now that their
+    // measurement queues are independent. Retry without losing either history.
+    const rust = { date: 30, benches: [{ name: "rust", value: 7, unit: "ns" }] };
+    let regularAttempts = 0;
+    publishResult(remote, rust, {
+      historyName: "Rust Benchmarks",
+      beforePush(attempt) {
+        regularAttempts++;
+        if (attempt === 0) publishResult(remote, { ...first, date: 25 });
+      },
+    });
+    assert.equal(regularAttempts, 2);
+    git("-C", seed, "fetch", "--quiet", remote, "gh-pages");
+    const combined = JSON.parse(git("-C", seed, "show", "FETCH_HEAD:dev/bench/data.js").slice(
+      "window.BENCHMARK_DATA = ".length,
+    ));
+    assert.deepEqual(combined.entries["Rust Benchmarks"], [...original.entries["Rust Benchmarks"], rust]);
+    assert.deepEqual(combined.entries["Heliodor Benchmarks"], [first, second, { ...first, date: 25 }]);
     // Exercise the real CI entry point, including conversion and commit data.
     git("-C", seed, "remote", "add", "origin", remote);
     const input = join(directory, "results.tsv");
@@ -174,6 +192,40 @@ test("concurrent publishers preserve results and compare by measurement time", (
     const latest = published.entries["Heliodor Benchmarks"].at(-1);
     assert.equal(latest.benches.length, 2);
     assert.ok(latest.benches.every((bench) => bench.name.startsWith("heliodor-veryl-cc-aarch64/")));
+    const files = ["rust", "verilator", "typescript"].map(name => {
+      const file = join(directory, `${name}.json`);
+      writeFileSync(file, JSON.stringify([{ name, value: 12, unit: "ns/op" }]));
+      return file;
+    });
+    const publishBench = (env = {}) => execFileSync(process.execPath, [
+      fileURLToPath(new URL("./publish-bench.mjs", import.meta.url)), ...files,
+    ], {
+      cwd: seed,
+      stdio: "pipe",
+      env: {
+        ...process.env, GITHUB_REF: "refs/heads/master", GITHUB_EVENT_NAME: "schedule",
+        GITHUB_SERVER_URL: "https://github.com", GITHUB_REPOSITORY: "fixture/repo", ...env,
+      },
+    });
+    publishBench();
+    git("-C", seed, "fetch", "--quiet", remote, "gh-pages");
+    const regularPublished = JSON.parse(git("-C", seed, "show", "FETCH_HEAD:dev/bench/data.js").slice(
+      "window.BENCHMARK_DATA = ".length,
+    ));
+    for (const [index, name] of ["Rust Benchmarks", "Verilator Benchmarks", "TypeScript Benchmarks"].entries()) {
+      const sample = regularPublished.entries[name].at(-1);
+      assert.deepEqual(sample.benches, JSON.parse(readFileSync(files[index], "utf8")));
+      assert.equal(sample.commit.id, git("-C", seed, "rev-parse", "HEAD").trim());
+      assert.equal(sample.tool, "customSmallerIsBetter");
+    }
+    assert.deepEqual(regularPublished.entries["Heliodor Benchmarks"].at(-1), latest);
+    const publishedTip = git("-C", seed, "rev-parse", "FETCH_HEAD");
+    assert.throws(() => publishBench({ GITHUB_REF: "refs/heads/develop" }));
+    assert.throws(() => publishBench({ GITHUB_EVENT_NAME: "pull_request" }));
+    writeFileSync(files[2], "[]");
+    assert.throws(() => publishBench());
+    git("-C", seed, "fetch", "--quiet", remote, "gh-pages");
+    assert.equal(git("-C", seed, "rev-parse", "FETCH_HEAD"), publishedTip);
     assert.equal(latest.commit.author.name, "Fixture");
     assert.equal(latest.commit.committer.email, "fixture@example.invalid");
     assert.equal(latest.commit.id, git("-C", seed, "rev-parse", "HEAD").trim());

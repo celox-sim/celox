@@ -117,8 +117,9 @@ Use cached runs to study execution, and disable caching when comparing build or
 end-to-end performance. The fixed CI `gate` always disables this cache.
 
 The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
-`veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
-backends. All pinned jobs use `scripts/heliodor-revision`. Each successful
+`veryl-cc-tiered` on x86-64 for develop's daily pinned Linux boot compatibility
+check. The daily master suite measures the same four backends on both
+architectures. All pinned jobs use `scripts/heliodor-revision`. Each successful
 suite backend publishes immediately, without waiting for other backends,
 workloads, or architectures. Failed runs remain failures in CI.
 
@@ -131,7 +132,8 @@ Published results appear in the **Heliodor Linux** section of the
 
 ## Expanded Linux suite
 
-Nightly and non-profiling manual runs also measure the following workloads on
+The master daily run at 02:37 UTC (11:37 JST) and non-profiling manual selections
+measure the following workloads on
 x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backends:
 
 | Guest Linux kernel | Hart counts |
@@ -190,6 +192,12 @@ The dashboard shows the current suite, with each kernel and hart count labeled
 separately. Each chart uses the compilation, execution, and tiered timing
 definitions described above. These large jobs do not run on pull requests.
 
+Develop's daily dispatch at 02:43 UTC (11:43 JST) runs the pinned Linux boot gate
+and the upstream HEAD compatibility check. Explicit workload, backend, or
+architecture selections still run the requested suite on develop. PRs test the
+Heliodor scripts when those scripts or workflows change. Measurements use daily
+and manual execution, with one latest pending run per branch or selection.
+
 For example, to run the Linux 6.6 four-hart workload locally:
 
 ```bash
@@ -201,7 +209,8 @@ bash scripts/run-heliodor-bench.sh run
 ```
 
 For a focused manual rerun, set `suite_test`, `suite_runner`, and/or `suite_arch`
-in the workflow dispatch inputs. Empty inputs select the complete suite. Filtered
+in the workflow dispatch inputs. Empty inputs select the complete suite on
+master and other branches; develop defaults to the boot compatibility checks. Filtered
 runs skip the gate. Successful results from manual runs on `master` publish
 individually; runs on other branches do not publish. For example:
 
