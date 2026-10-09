@@ -477,6 +477,11 @@ impl Backend for ObservedBackend {
             .tick(event)
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
+    fn take_output(&mut self) -> Result<String> {
+        self.backend
+            .take_output()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
 }
 
 /// How a runner builds a case for a tool: a design for the process
@@ -526,7 +531,13 @@ fn run_script(
         );
     }
     match backend.run_testbench() {
-        Ok(()) => ("passed", "execute", String::new()),
+        Ok(()) => {
+            let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
+            match crate::script::sv::check_output(&String::from_utf8_lossy(&log)) {
+                Ok(()) => ("passed", "execute", String::new()),
+                Err(detail) => ("mismatch", "execute", detail),
+            }
+        }
         Err(error) => {
             let log = std::fs::read_to_string(directory.join("protocol.log")).unwrap_or_default();
             let assertions: Vec<&str> = log

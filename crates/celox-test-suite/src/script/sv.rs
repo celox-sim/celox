@@ -82,6 +82,47 @@ pub struct DesignInfo {
 /// The name of the generated testbench module.
 pub const TESTBENCH_TOP: &str = "celox_suite_tb";
 
+/// Starts the line a generated testbench prints for `expect_output`, after a
+/// newline of its own: the hex-encoded expected text, then its location.
+const OUTPUT_MARKER: &str = "@suite output ";
+
+fn hex_encode(text: &str) -> String {
+    text.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Check the design output in a generated testbench's stdout: the text
+/// before each `expect_output` marker, since the previous one, must equal the
+/// text the marker encodes. Text after the last marker, such as a
+/// simulator's `$finish` report, is not design output the script checks.
+pub fn check_output(log: &str) -> Result<(), String> {
+    let separator = format!("\n{OUTPUT_MARKER}");
+    let mut rest = log;
+    while let Some(at) = rest.find(&separator) {
+        let output = &rest[..at];
+        let marker = &rest[at + separator.len()..];
+        let end = marker.find('\n').ok_or("unterminated output marker")?;
+        let (hex, location) = marker[..end]
+            .split_once(' ')
+            .ok_or("output marker without a location")?;
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| {
+                hex.get(i..i + 2)
+                    .and_then(|d| u8::from_str_radix(d, 16).ok())
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or("malformed output marker")?;
+        let expected = String::from_utf8_lossy(&bytes);
+        if output != expected {
+            return Err(format!(
+                "{location}: expect_output: expected {expected:?}, got {output:?}"
+            ));
+        }
+        rest = &marker[end + 1..];
+    }
+    Ok(())
+}
+
 /// Why a case has no generated testbench.
 #[derive(Debug)]
 pub struct Unsupported(pub String);
@@ -187,7 +228,7 @@ fn walk_stmt(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
                 walk_stmt(otherwise, visit);
             }
         }
-        StmtKind::Eval | StmtKind::RunTestbench => {}
+        StmtKind::Eval | StmtKind::RunTestbench | StmtKind::ExpectOutput(_) => {}
     }
 }
 
@@ -736,6 +777,16 @@ impl Generator<'_> {
                     self.where_(pos)
                 )));
             }
+            StmtKind::ExpectOutput(text) => {
+                // HDL cannot read back its own output, so the harness checks
+                // it: the marker closes the output so far, which must equal
+                // the hex-encoded text (see `check_output`).
+                self.line(format!(
+                    "$write(\"\\n{OUTPUT_MARKER}{} {}\\n\");",
+                    hex_encode(text),
+                    sv_string(&literal_text(&self.where_(pos))).trim_matches('"')
+                ));
+            }
         }
         Ok(())
     }
@@ -902,6 +953,18 @@ mod tests {
         info.parameters = vec![("N".into(), 4), ("P".into(), 205)];
         let text = testbench(&case("(eval)"), &info).unwrap();
         assert!(text.contains("Top #(.N(4), .P(205)) dut ("));
+    }
+
+    #[test]
+    fn checks_the_output_before_each_marker() {
+        let text = testbench(&case(r#"(tick clk) (expect_output "a\nb")"#), &design()).unwrap();
+        assert!(text.contains(r#"$write("\n@suite output 610a62 g::t at"#));
+        let log = "a\nb\n@suite output 610a62 here\n\n@suite output  there\nfinish\n";
+        assert_eq!(check_output(log), Ok(()));
+        assert_eq!(
+            check_output("a\n@suite output 610a62 here\n"),
+            Err(r#"here: expect_output: expected "a\nb", got "a""#.into())
+        );
     }
 
     #[test]

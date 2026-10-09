@@ -204,3 +204,42 @@
     (assert_eq unknown_wide (!= mask 0) "unknown_wide")
     (assert_eq unknown_bit (bit mask 0) "unknown_bit")
     (assert_eq unknown_partial (!= (slice mask 128 0) 0) "unknown_partial")))
+
+; IEEE 1800-2023 21.2.1.2: radices keep leading zeros up to the argument's
+; largest value, decimals pad with spaces, a field width overrides both, and
+; `%0` displays the minimum width. Table 21-1 gives `%H` the meaning of `%h`.
+(case display_arguments_are_sized_as_ieee_specifies
+  (source "sizing.sv" #"
+                module Top(input logic clk, input logic [11:0] a,
+                           input logic signed [7:0] s);
+                    always_ff @(posedge clk) begin
+                        $display(":%h:%0h:%3h:%x:", a, a, a, 32'h5);
+                        $display(":%b:%0b:%o:%0o:", a, a, a, a);
+                        $display(":%d:%0d:%3d:%d:", a, a, a, s);
+                        $write(":%3d:%5s:", 32'd1234, "ab");
+                        $write("|%H|\n", a);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set s (trunc 8 -2)))
+  (expect_output "")
+  (tick clk)
+  (expect_output #":00a:a:00a:00000005:
+:000000001010:1010:0012:12:
+:  10:10: 10:  -2:
+:1234:   ab:|00a|
+"#))
+
+; IEEE 1800-2023 21.2.1.2: a value wider than its field width expands the
+; field without leading zeros (`%3h` of 32'h1234 displays 1234).
+(case display_field_widths_expand_to_the_value
+  (source "field.sv" #"
+                module Top(input logic clk, input logic [31:0] a);
+                    always_ff @(posedge clk) $display(":%3h:%2o:", a, a);
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0x1234))
+  (tick clk)
+  (expect_output ":1234:11064:\n"))

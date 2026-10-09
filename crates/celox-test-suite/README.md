@@ -275,7 +275,10 @@ assertions against the external simulator**, or verify compilation rejection.
 Each script becomes a self-checking SystemVerilog testbench
 (`script::sv::testbench`) that drives the design, ticks its clocks and checks
 every assertion inside the simulator; a failed assertion prints an
-`@suite assert` line and ends the run with `$fatal`. Cases that run the design's
+`@suite assert` line and ends the run with `$fatal`. HDL cannot read its own
+output, so for `(expect_output TEXT)` the testbench prints a marker carrying
+TEXT, and the runner checks that the design's output since the previous marker
+equals it (`script::sv::check_output`). Cases that run the design's
 own native testbench use the process adapters. No expected outputs are recorded
 from Celox. The SystemVerilog suite runs the same way with `verify-sv-verilator`
 and `verify-sv-icarus`: its sources are compiled as written, and port shapes and
