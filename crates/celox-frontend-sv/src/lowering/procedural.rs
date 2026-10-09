@@ -1596,3 +1596,105 @@ pub(super) fn stmt_may_jump(stmt: &sv::ir::Stmt, in_loop: bool) -> bool {
         _ => false,
     }
 }
+
+/// The user subroutine calls an expression makes, outermost first, with their
+/// arguments.
+pub(super) fn collect_calls(
+    expr: &sv::ir::Expr,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    match expr {
+        sv::ir::Expr::Call { name, args } => {
+            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
+            for arg in args {
+                collect_calls(arg, calls);
+            }
+        }
+        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
+        sv::ir::Expr::Select { expr, .. }
+        | sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary { expr, .. } => collect_calls(expr, calls),
+        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
+            parts.iter().for_each(|part| collect_calls(part, calls))
+        }
+        sv::ir::Expr::Binary { left, right, .. } => {
+            collect_calls(left, calls);
+            collect_calls(right, calls);
+        }
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_calls(condition, calls);
+            collect_calls(then_expr, calls);
+            collect_calls(else_expr, calls);
+        }
+        sv::ir::Expr::Inside { expr, items } => {
+            collect_calls(expr, calls);
+            for item in items {
+                item.exprs()
+                    .into_iter()
+                    .for_each(|operand| collect_calls(operand, calls));
+            }
+        }
+    }
+}
+
+/// The calls a statement makes in its own expressions (not in the statements
+/// it contains), including a call statement itself.
+pub(super) fn stmt_calls(
+    stmt: &sv::ir::Stmt,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
+    match stmt {
+        sv::ir::Stmt::Call { name, args } => {
+            calls.push((name.clone(), args.clone()));
+            exprs.extend(args.iter().flatten());
+        }
+        sv::ir::Stmt::Assign { rhs, .. }
+        | sv::ir::Stmt::AssignConcat { rhs, .. }
+        | sv::ir::Stmt::Eval(rhs) => exprs.push(rhs),
+        sv::ir::Stmt::If { condition, .. } => exprs.push(condition),
+        sv::ir::Stmt::Case {
+            selector, items, ..
+        } => {
+            exprs.push(selector);
+            for item in items {
+                for label in &item.labels {
+                    match label {
+                        sv::ir::CaseLabel::Value(value) => exprs.push(value),
+                        sv::ir::CaseLabel::Range { low, high } => {
+                            exprs.push(low);
+                            exprs.push(high);
+                        }
+                    }
+                }
+            }
+        }
+        sv::ir::Stmt::Loop {
+            kind, condition, ..
+        } => {
+            if let sv::ir::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs.extend(condition);
+        }
+        sv::ir::Stmt::Return(Some(value)) => exprs.push(value),
+        sv::ir::Stmt::Local {
+            init: Some(init), ..
+        } => exprs.push(init),
+        sv::ir::Stmt::SystemTask { args, .. } => {
+            for arg in args {
+                if let sv::ir::SystemTaskArg::Expr(expr) = arg {
+                    exprs.push(expr);
+                }
+            }
+        }
+        _ => {}
+    }
+    for expr in exprs {
+        collect_calls(expr, calls);
+    }
+}

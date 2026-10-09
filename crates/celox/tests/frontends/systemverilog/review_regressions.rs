@@ -340,6 +340,79 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 }
 
 #[test]
+fn rejects_variables_also_written_through_output_arguments() {
+    // A called subroutine writes its output actual for the calling process
+    // (IEEE 1800-2023 9.2.2.2), so `q` has two always_ff drivers.
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output logic [1:0] x,
+                   output wire [3:0] y);
+            function automatic logic [1:0] pick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            logic [3:0] q;
+            always_ff @(posedge clk) x <= pick(q, q);
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_variables_also_written_by_called_subroutine_bodies() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output wire [3:0] y);
+            logic [3:0] q;
+            task automatic bump();
+                q = q + 4'd1;
+            endtask
+            always_ff @(posedge clk) bump();
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn accepts_a_variable_written_only_through_one_process_calls() {
+    let source = r#"
+        module Top(input logic clk, output logic [1:0] x, output wire [3:0] y);
+            function automatic logic [1:0] pick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            logic [3:0] q;
+            initial q = 4'd0;
+            always_ff @(posedge clk) x <= pick(q, q);
+            assign y = q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("one_writer.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let y = sim.signal("y");
+    let clk = sim.event("clk");
+    for count in 1u8..=3 {
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(y), count);
+    }
+}
+
+#[test]
 fn rejects_child_outputs_that_multiply_drive_a_variable() {
     let error = cranelift_build_error(
         r#"

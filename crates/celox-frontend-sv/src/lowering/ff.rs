@@ -152,44 +152,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         // Calls: output arguments and the subroutine bodies.
         let mut calls = Vec::new();
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                let mut exprs = Vec::new();
-                match stmt {
-                    sv::ir::Stmt::Call { name, args } => {
-                        calls.push((name.clone(), args.clone()));
-                        exprs.extend(args.iter().flatten().cloned());
-                    }
-                    sv::ir::Stmt::Assign { rhs, .. }
-                    | sv::ir::Stmt::AssignConcat { rhs, .. }
-                    | sv::ir::Stmt::Eval(rhs) => exprs.push(rhs.clone()),
-                    sv::ir::Stmt::If { condition, .. } => exprs.push(condition.clone()),
-                    sv::ir::Stmt::Case {
-                        selector, items, ..
-                    } => {
-                        exprs.push(selector.clone());
-                        for item in items {
-                            for label in &item.labels {
-                                match label {
-                                    sv::ir::CaseLabel::Value(value) => exprs.push(value.clone()),
-                                    sv::ir::CaseLabel::Range { low, high } => {
-                                        exprs.push(low.clone());
-                                        exprs.push(high.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    sv::ir::Stmt::Loop { condition, .. } => exprs.extend(condition.clone()),
-                    sv::ir::Stmt::Return(Some(value)) => exprs.push(value.clone()),
-                    sv::ir::Stmt::Local {
-                        init: Some(init), ..
-                    } => exprs.push(init.clone()),
-                    _ => {}
-                }
-                for expr in exprs {
-                    collect_calls(&expr, &mut calls);
-                }
-            });
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         for (name, args) in calls {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -1855,45 +1818,6 @@ pub(super) fn prune_unreachable_blocks<A>(unit: &mut ExecutionUnit<A>) {
         }
     }
     unit.blocks.retain(|id, _| reachable.contains(id));
-}
-
-fn collect_calls(expr: &sv::ir::Expr, calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>) {
-    match expr {
-        sv::ir::Expr::Call { name, args } => {
-            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
-            for arg in args {
-                collect_calls(arg, calls);
-            }
-        }
-        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
-        sv::ir::Expr::Select { expr, .. }
-        | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => collect_calls(expr, calls),
-        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().for_each(|part| collect_calls(part, calls))
-        }
-        sv::ir::Expr::Binary { left, right, .. } => {
-            collect_calls(left, calls);
-            collect_calls(right, calls);
-        }
-        sv::ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_calls(condition, calls);
-            collect_calls(then_expr, calls);
-            collect_calls(else_expr, calls);
-        }
-        sv::ir::Expr::Inside { expr, items } => {
-            collect_calls(expr, calls);
-            for item in items {
-                item.exprs()
-                    .into_iter()
-                    .for_each(|operand| collect_calls(operand, calls));
-            }
-        }
-    }
 }
 
 fn substitute_overlay_const(
