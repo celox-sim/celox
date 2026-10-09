@@ -823,19 +823,39 @@ mod host {
         }
 
         fn eval_comb_for_runtime_event_drain(&mut self) {
-            let start_seq = self.runtime_event_write_seq();
-            let result = self.eval_comb_checked();
-            if result.is_err() {
-                let events = self.peek_backend_runtime_events_from(start_seq);
-                // A fatal assertion is already represented in the records being
-                // drained. Preserve other evaluation failures, including loops.
-                if self.fatal_comb_capture_error(&events).is_some() {
-                    self.dirty = false;
-                    return;
-                }
-            }
-            result.unwrap();
+            let (result, events) = self.eval_comb_capturing_events();
+            self.check_comb_backend_result(result, &events).unwrap();
             self.dirty = false;
+        }
+
+        fn check_comb_backend_result(
+            &self,
+            result: Result<(), RuntimeErrorCode>,
+            events: &[RawRuntimeEvent],
+        ) -> Result<(), RuntimeErrorCode> {
+            // Generated fatal captures return their event site ID as the error
+            // code. Compare that raw identity before decorating the error.
+            match result {
+                Err(RuntimeErrorCode::DetectedTrueLoopCode(code))
+                    if events.iter().any(|event| {
+                        let RawRuntimeEvent::Event { site_id, .. } = event else {
+                            return false;
+                        };
+                        *site_id as i64 == code
+                            && self
+                                .program
+                                .runtime_schema
+                                .runtime_event_sites
+                                .get(*site_id)
+                                .is_some_and(|site| {
+                                    matches!(site.kind, RuntimeEventKind::AssertFatal)
+                                })
+                    }) =>
+                {
+                    Ok(())
+                }
+                other => other.map_err(|error| self.decorate_runtime_error(error)),
+            }
         }
 
         fn collect_formatted_runtime_events(
@@ -1086,23 +1106,27 @@ mod host {
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
-            if self.program.runtime_schema.runtime_event_sites.is_empty() {
-                return self
-                    .backend
-                    .eval_comb()
-                    .map_err(|e| self.decorate_runtime_error(e));
+            let (result, events) = self.eval_comb_capturing_events();
+            // Check the original backend code before formatting fatal records:
+            // another parallel lane may have reported a loop or internal error.
+            self.check_comb_backend_result(result, &events)?;
+            if let Some(error) = self.fatal_comb_capture_error(&events) {
+                return Err(error);
             }
+            Ok(())
+        }
+
+        fn eval_comb_capturing_events(
+            &mut self,
+        ) -> (Result<(), RuntimeErrorCode>, Vec<RawRuntimeEvent>) {
+            if self.program.runtime_schema.runtime_event_sites.is_empty() {
+                return (self.backend.eval_comb(), Vec::new());
+            }
+            let runtime_event_start_seq = self.runtime_event_write_seq();
             if self.program.runtime_schema.comb_observers.is_empty() {
-                let runtime_event_start_seq = self.runtime_event_write_seq();
-                let eval_result = self
-                    .backend
-                    .eval_comb()
-                    .map_err(|e| self.decorate_runtime_error(e));
-                let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
-                if let Some(err) = self.fatal_comb_capture_error(&runtime_events) {
-                    return Err(err);
-                }
-                return eval_result;
+                let result = self.backend.eval_comb();
+                let events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
+                return (result, events);
             }
 
             let before = self.snapshot_all_comb_observers();
@@ -1130,14 +1154,9 @@ mod host {
                 }
             }
             self.backend.set_comb_capture_event_enabled(&active_sites);
-            let runtime_event_start_seq = self.runtime_event_write_seq();
-            let eval_result = self
-                .backend
-                .eval_comb()
-                .map_err(|e| self.decorate_runtime_error(e));
+            let eval_result = self.backend.eval_comb();
             let after = self.snapshot_all_comb_observers();
             let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
-            let fatal_error = self.fatal_comb_capture_error(&runtime_events);
             self.backend.set_comb_capture_event_enabled(&vec![
                 false;
                 self.program
@@ -1147,10 +1166,7 @@ mod host {
             ]);
             self.comb_observer_snapshots = after;
             self.comb_observer_initial_eval = false;
-            if let Some(err) = fatal_error {
-                return Err(err);
-            }
-            eval_result
+            (eval_result, runtime_events)
         }
 
         pub(super) fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
@@ -1814,6 +1830,63 @@ mod host {
         /// Consume the simulator and return the inner native backend.
         pub fn into_backend(self) -> NativeBackend {
             self.backend
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn comb_fatal_records_do_not_mask_unrelated_backend_errors() {
+            let mut sim = Simulator::builder(
+                r#"module Top {
+                    always_comb {
+                        $display("before");
+                        $assert(1'd0, "fatal");
+                    }
+                }"#,
+                "Top",
+            )
+            .build_interpreter()
+            .unwrap();
+            let (result, events) = sim.eval_comb_capturing_events();
+            assert!(matches!(
+                result,
+                Err(RuntimeErrorCode::DetectedTrueLoopCode(1))
+            ));
+            assert!(sim.check_comb_backend_result(result, &events).is_ok());
+
+            // These are the raw outcomes another parallel lane can report while
+            // the fatal assertion's record is present in the shared buffer.
+            for error in [
+                RuntimeErrorCode::InternalError,
+                RuntimeErrorCode::DetectedTrueLoop,
+                RuntimeErrorCode::DetectedTrueLoopCode(2000),
+                RuntimeErrorCode::Runtime {
+                    message: "fatal".to_string(),
+                    signals: Vec::new(),
+                },
+            ] {
+                let expected = sim.decorate_runtime_error(error.clone());
+                assert_eq!(
+                    sim.check_comb_backend_result(Err(error), &events),
+                    Err(expected)
+                );
+            }
+            // A matching code alone is insufficient without a newly emitted
+            // fatal record, and a display site is never a fatal error.
+            assert!(
+                sim.check_comb_backend_result(Err(RuntimeErrorCode::DetectedTrueLoopCode(1)), &[],)
+                    .is_err()
+            );
+            assert!(
+                sim.check_comb_backend_result(
+                    Err(RuntimeErrorCode::DetectedTrueLoopCode(0)),
+                    &events,
+                )
+                .is_err()
+            );
         }
     }
 }
