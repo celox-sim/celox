@@ -296,3 +296,125 @@ a=0a b=00a
 a=0a  10
 0a|
 "#))
+
+; IEEE 1800-2023 11.7: signing casts retain the operand width and bits.
+(case signed_casts_in_parameters
+  (four_state)
+  (source "signed_parameters.sv" #"
+    module Top(output logic [31:0] signed_value, unsigned_value, nested,
+               output logic [15:0] unknown, output logic [7:0] generated);
+      localparam int P = $signed(8'hff);
+      localparam U = $unsigned(8'shff);
+      localparam N = $signed($unsigned(8'sh80));
+      localparam logic signed [15:0] X = $signed(8'bx001_0101);
+      assign signed_value = P;
+      assign unsigned_value = U;
+      assign nested = N;
+      assign unknown = X;
+      if (P == -1 && U == 255 && N == -128 && $bits(U) == 8) begin
+        assign generated = 8'ha5;
+      end else begin
+        assign generated = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signed_value 0xffffffff)
+  (assert_eq unsigned_value 255)
+  (assert_eq nested 0xffffff80)
+  (assert_eq unknown (fourstate 0xff95 0xff80))
+  (assert_eq generated 0xa5))
+
+; IEEE 1800-2023 20.7: unpacked dimensions precede packed dimensions,
+; bounds retain declaration direction, and integer return values are signed.
+(case array_queries_preserve_bounds_and_dimensions
+  (source "array_queries.sv" #"
+    module Top(output logic [31:0] result, selected, shadowed, parameter_value);
+      typedef logic [0:3][3:0] word_t;
+      word_t mem [-2:1][8:6];
+      localparam logic [9:6] BOUND = 0;
+      localparam int BL = $left(BOUND);
+      localparam int P = $left(mem) + $right(mem, 2) + $low(word_t, 2)
+                       + $high(word_t) + $dimensions(mem) + $unpacked_dimensions(mem);
+      function automatic int query(input logic [11:8] mem);
+        return $left(mem) + $right(mem) + $dimensions(mem);
+      endfunction
+      assign result = $left(mem) + $right(mem, 2) + $low(mem, 3)
+                    + $high(mem, 4) + $dimensions(mem) + $unpacked_dimensions(mem)
+                    + $increment(mem) + $increment(mem, 2) + $increment(word_t)
+                    + $dimensions(int) + $left(int) + $unpacked_dimensions(int);
+      assign selected = $left(mem[0]) + $right(mem[0][7]) + $dimensions(mem[0][7]);
+      assign shadowed = query(0);
+      assign parameter_value = P + BL + $left(BOUND[8:7]);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 44)
+  (assert_eq selected 13)
+  (assert_eq shadowed 20)
+  (assert_eq parameter_value 23))
+
+(case array_queries_handle_runtime_dimensions
+  (four_state)
+  (source "runtime_queries.sv" #"
+    module Top(input logic [31:0] dimension, output integer l, r, lo, hi, inc);
+      logic [7:4] mem [2:5];
+      assign l = $left(mem, dimension);
+      assign r = $right(mem, dimension);
+      assign lo = $low(mem, dimension);
+      assign hi = $high(mem, dimension);
+      assign inc = $increment(mem, dimension);
+    endmodule
+  "#)
+  (top Top)
+  (for (d l r lo hi inc) (list (1 2 5 2 5 0xffffffff) (2 7 4 4 7 1))
+    (modify (set dimension d))
+    (assert_eq l l) (assert_eq r r) (assert_eq lo lo) (assert_eq hi hi) (assert_eq inc inc))
+  (for d (list 0 3 0x08000001 0xffffffff (fourstate 0xffffffff 0xffffffff))
+    (modify (set dimension d))
+    (expand name (l r lo hi inc)
+      (assert_eq {name} (fourstate 0xffffffff 0xffffffff)))))
+
+; IEEE 1800-2023 16.3: cover executes its pass action only for true.
+(case immediate_cover_executes_pass_statement
+  (source "cover_action.sv" #"
+    module Top(input bit clk, input logic condition, output logic [7:0] comb, registered);
+      always_comb begin
+        comb = 0;
+        cover (condition) comb = 8'ha5;
+      end
+      always_ff @(posedge clk) begin
+        registered <= 0;
+        cover (condition) registered <= 8'h5a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (condition c r) (list (0 0 0) (1 0xa5 0x5a) (0 0 0) (1 0xa5 0x5a))
+    (modify (set condition condition))
+    (tick clk)
+    (assert_eq comb c)
+    (assert_eq registered r)))
+
+(case immediate_cover_handles_unknown_conditions
+  (four_state)
+  (source "cover_action.sv" #"
+    module Top(input bit clk, input logic condition, output logic [7:0] comb, registered);
+      always_comb begin
+        comb = 0;
+        cover (condition) comb = 8'ha5;
+      end
+      always_ff @(posedge clk) begin
+        registered <= 0;
+        cover (condition) registered <= 8'h5a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (condition c r) (list ((fourstate 1 1) 0 0) ((fourstate 0 1) 0 0))
+    (modify (set condition condition))
+    (tick clk)
+    (assert_eq comb c)
+    (assert_eq registered r)))

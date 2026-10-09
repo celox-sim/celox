@@ -445,11 +445,10 @@ fn bind_parameter(
     true
 }
 
-/// Record the packed dimensions of a parameter whose selects need them: an
-/// array of several dimensions, or of a signed named type.
+/// Record packed bounds for parameter selects and array queries.
 fn insert_parameter_dimension_markers(env: &mut HashMap<String, i128>, parameter: &Parameter) {
     let name = parameter.name();
-    if parameter.packed_ranges.len() < 2 && parameter.signed_element_depth.is_none() {
+    if parameter.packed_ranges.is_empty() {
         return;
     }
     let Some(bounds) = parameter
@@ -1070,7 +1069,13 @@ pub(super) fn infer_const_expr_type(
             width: 1,
             signed: false,
         }),
-        ConstExpr::Function { name, .. } => match name.as_str() {
+        ConstExpr::Function { name, args, .. } => match name.as_str() {
+            "$signed" | "$unsigned" => {
+                let [arg] = args.as_slice() else { return None };
+                let mut ty = infer_const_expr_type(arg, parameter_types)?;
+                ty.signed = name == "$signed";
+                Some(ty)
+            }
             "$clog2" | "$countones" => Some(ExprType {
                 width: 32,
                 signed: true,

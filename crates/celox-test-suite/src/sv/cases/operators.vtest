@@ -1246,3 +1246,24 @@
     (assert_eq ff_or_hit or_effect)
     (assert_eq ff_and_result and_value)
     (assert_eq ff_or_result or_value)))
+
+; Runtime arithmetic right shifts copy an unknown sign into every fill bit,
+; also for counts beyond the vector width.
+(case wide_arithmetic_shift_preserves_unknown_sign
+  (four_state)
+  (source "unknown_sign_shift.sv" #"
+    module Top(input logic signed [127:0] a128, input logic [31:0] amount,
+               output logic signed [127:0] y128);
+      assign y128 = a128 >>> amount;
+    endmodule
+  "#)
+  (top Top)
+  (for amount (list 0 1 32 63 64 65 127 128 255 0xffffffff)
+    (for sign_value (list 0 1)
+      (modify
+        (set amount amount)
+        (set a128 (fourstate (| (<< sign_value 127) 5) (<< 1 127))))
+      (expand (width name) ((128 y128))
+        (let all (- (<< 1 {width}) 1))
+        (let fill (^ all (>> all (min (+ amount 1) {width}))))
+        (assert_eq {name} (fourstate (| (? sign_value fill 0) (>> 5 (min amount {width}))) fill))))))

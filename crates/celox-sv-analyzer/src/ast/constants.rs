@@ -341,9 +341,8 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => Expr::Call {
-            name,
-            args: args
+        Expr::Call { name, args } => {
+            let args: Vec<_> = args
                 .into_iter()
                 .map(|arg| {
                     substitute_expr_constants_with_parameter_literals(
@@ -352,8 +351,22 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                         parameter_literals,
                     )
                 })
-                .collect(),
-        },
+                .collect();
+            if matches!(name.as_str(), "$signed" | "$unsigned")
+                && let [arg] = args.as_slice()
+                && let Some(constant) = expr_to_const(arg.clone())
+                && let Some(ty) =
+                    infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
+            {
+                Expr::Resize {
+                    expr: Box::new(arg.clone()),
+                    width: ty.width,
+                    signed: name == "$signed",
+                }
+            } else {
+                Expr::Call { name, args }
+            }
+        }
     }
 }
 
@@ -930,6 +943,25 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if matches!(
+                        name,
+                        "$left"
+                            | "$right"
+                            | "$low"
+                            | "$high"
+                            | "$increment"
+                            | "$dimensions"
+                            | "$unpacked_dimensions"
+                    ) {
+                        return Ok(dimensions::array_query_call(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                        .and_then(expr_to_const));
+                    }
                 }
                 if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
                 {

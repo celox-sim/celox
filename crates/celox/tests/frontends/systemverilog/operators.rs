@@ -1,4 +1,5 @@
 sv_backends! {
+    fn wide_arithmetic_shift_preserves_unknown_sign(sim) { @case "operators::wide_arithmetic_shift_preserves_unknown_sign"; }
     fn simulates_systemverilog_top_comb_assign(sim) {
         @case "operators::simulates_systemverilog_top_comb_assign";
     }

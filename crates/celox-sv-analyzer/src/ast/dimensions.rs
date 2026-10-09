@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod queries;
+pub(super) use queries::array_query_call;
+
 pub(super) fn size_system_function_expr_type(
     primary: &sv_parser::ConstantPrimary,
     syntax_tree: &SyntaxTree,

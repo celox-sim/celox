@@ -1317,6 +1317,7 @@ pub(super) fn lower_wide_binary_mask(
                     lm_chunks.iter().map(|&v| (v, 64usize)).collect();
                 let dir = match op {
                     BinaryOp::Shl => ShiftDir::Left,
+                    BinaryOp::Sar => ShiftDir::ArithRight,
                     _ => ShiftDir::Right,
                 };
                 let shifted_mask_chunks = lower_wide_runtime_shift_chunks(

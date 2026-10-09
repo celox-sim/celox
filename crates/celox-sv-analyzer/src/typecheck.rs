@@ -791,6 +791,12 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
         ConstExpr::Function { name, args, .. } => {
+            if matches!(name.as_str(), "$signed" | "$unsigned") {
+                let [arg] = args.as_slice() else { return None };
+                let mut literal = self_determined_integral_literal(arg)?;
+                literal.signed = name == "$signed";
+                return Some(literal);
+            }
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
                 "$clog2" | "$countones" => (32, "s"),
@@ -1089,6 +1095,10 @@ fn eval_const_function(
         return None;
     };
     match name {
+        "$signed" | "$unsigned" => {
+            let literal = self_determined_integral_literal(arg)?;
+            integral_literal_as_i128(&literal, name == "$signed")
+        }
         "$clog2" => clog2(eval_const_expr(arg, constants)?),
         "$isunknown" => {
             if let Some(literal) = self_determined_integral_literal(arg) {
