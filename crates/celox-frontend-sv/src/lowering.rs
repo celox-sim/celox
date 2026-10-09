@@ -4511,7 +4511,9 @@ fn runtime_select_position(
                     parameter_types,
                 )
             });
-            whole_array = element.is_none();
+            // A single element spans the whole array.
+            whole_array =
+                element.is_none() && unpacked_element_width(variable) != Some(variable.width);
             window = element.filter(|_| element_window);
             match window {
                 Some(window) => (
@@ -4540,9 +4542,10 @@ fn runtime_select_position(
         return None;
     }
     let width = runtime_select_width(msb, lsb, name_to_id, constants, parameter_types)?;
-    // Only a bit select is moved past the whole array when out of range; a
-    // wider select could reach a neighbouring element.
-    if whole_array && width != 1 {
+    // Only a bit select (the same position for both bounds) is moved past
+    // the whole array when out of range; a part-select, even of one bit,
+    // could reach a neighbouring element.
+    if whole_array && (width != 1 || msb != lsb) {
         return None;
     }
     let index = expr_from_const_expr(lsb)?;
