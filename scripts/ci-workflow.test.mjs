@@ -161,9 +161,12 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(external, /suite: \[veryl, sv\]/);
   assert.match(external, /tool: \[verilator, icarus\]/);
   assert.match(external, /--test oracles -- --ignored/);
+  // The check reads the complete results, with run counts and reuse flags;
+  // a retained --report copy omits them.
+  assert.match(external, /--output "\$RUNNER_TEMP\/external-suite\/logs"/);
   assert.match(
     external,
-    /--report "\$RUNNER_TEMP\/external-suite\/report\.json"/,
+    /"\$RUNNER_TEMP\/external-suite\/logs\/results\.json" "\$VERIFY_BASELINE"/,
   );
   assert.match(external, /if: always\(\)/);
   assert.match(
