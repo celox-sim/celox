@@ -4487,6 +4487,7 @@ fn runtime_select_position(
     element_window: bool,
 ) -> Option<RuntimePosition> {
     let mut window = None;
+    let mut whole_array = false;
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
         Some(variable) if !variable.array_dims.is_empty() => {
             // A select the element lowering cannot express, such as a
@@ -4495,10 +4496,10 @@ fn runtime_select_position(
             if !flat_arrays {
                 return None;
             }
-            // The analyzer moves a select whose inner index is out of range
-            // past the whole array, so a flattened position never reaches a
-            // neighbouring element. Within a constant element, the position
-            // can be measured within it.
+            // The analyzer moves a bit select whose inner index is out of
+            // range past the whole array, so its flattened position never
+            // reaches a neighbouring element. Within a constant element, the
+            // position can be measured within it.
             window = element_window
                 .then(|| {
                     runtime_select_window(
@@ -4515,7 +4516,10 @@ fn runtime_select_position(
                     i128::try_from(window.msb).ok()?,
                     i128::try_from(window.lsb).ok()?,
                 ),
-                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
+                None => {
+                    whole_array = true;
+                    (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
+                }
             }
         }
         Some(variable) => {
@@ -4537,6 +4541,11 @@ fn runtime_select_position(
         return None;
     }
     let width = runtime_select_width(msb, lsb, name_to_id, constants, parameter_types)?;
+    // Only a bit select is moved past the whole array when out of range; a
+    // wider select could reach a neighbouring element.
+    if whole_array && width != 1 {
+        return None;
+    }
     let index = expr_from_const_expr(lsb)?;
     // An index such as `i - 1` wraps when it should be negative. Widen it with
     // its sign so that "hangs over the bottom" can be tested as a comparison.
