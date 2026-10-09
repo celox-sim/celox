@@ -488,7 +488,7 @@ pub(super) fn reject_silently_ignored_constructs(
         for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
             let dimensions = item.dimensions(&indexed_dimensions);
             reject_silently_ignored_constructs(
-                RefNode::ModuleOrGenerateItem(item.node),
+                item.node.node(),
                 syntax_tree,
                 &dimensions.const_env,
                 type_aliases,

@@ -1,6 +1,22 @@
 use super::*;
 
 sv_backends! {
+    fn display_arguments_are_sized_as_ieee_specifies(sim) {
+        @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
+    }
+
+    fn display_field_widths_expand_to_the_value(sim) {
+        @case "system_functions::display_field_widths_expand_to_the_value";
+    }
+
+    fn display_unknown_bits_as_ieee_specifies(sim) {
+        @case "system_functions::display_unknown_bits_as_ieee_specifies";
+    }
+
+    fn display_tasks_default_to_their_radix(sim) {
+        @case "system_functions::display_tasks_default_to_their_radix";
+    }
+
     fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
         @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
     }

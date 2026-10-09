@@ -1001,6 +1001,17 @@
       "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
+      "name": "indexed_select::runtime_index_expressions_wrap_at_their_own_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "indexed_select::runtime_index_reads_single_bit_unpacked_elements",
       "phase": "execute",
       "status": "passed",
@@ -1091,6 +1102,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "indexed_select::runtime_inner_bits_of_unpacked_elements_feed_child_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "indexed_select::signed_index_expressions_wrap_at_their_own_width",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
@@ -2974,6 +2996,62 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "system_functions::countones_preserves_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_arguments_are_sized_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_display_field_width",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value.",
+        "upstream": []
+      },
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_tasks_default_to_their_radix",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_unknown_bits_as_ieee_specifies",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

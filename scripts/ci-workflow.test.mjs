@@ -204,8 +204,22 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   const lint = job("lint");
   assert.match(
     lint,
-    /name: Check CI runtime dependency exclusions\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs/,
+    /name: Check CI runtime dependency exclusions and test scopes\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs scripts\/ci-rust-scope\.test\.mjs/,
   );
+});
+
+test("pull requests scope the Rust tests and every other run keeps the workspace", () => {
+  const rust = job("rust-tests");
+  // Anything but an explicit scope, including a failed detection, runs all.
+  assert.match(
+    rust,
+    /name: Run workspace tests with CI features\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+  );
+  assert.match(
+    rust,
+    /name: Run the tests this pull request can affect\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+  );
+  assert.match(job("changes"), /rust_filter: \$\{\{ steps\.classify\.outputs\.rust_filter \}\}/);
 });
 
 test("artifact consumers wait for their producer rather than the Rust test gate", () => {

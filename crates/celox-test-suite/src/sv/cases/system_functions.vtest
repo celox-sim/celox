@@ -394,3 +394,95 @@
   (assert_eq scoped 2)
   (assert_eq extended 5)
   (assert_eq via_function 4))
+
+; IEEE 1800-2023 21.2.1.2: radices keep leading zeros up to the argument's
+; largest value, decimals pad with spaces, a field width overrides both, and
+; `%0` displays the minimum width. Table 21-1 gives `%H` the meaning of `%h`.
+(case display_arguments_are_sized_as_ieee_specifies
+  (source "sizing.sv" #"
+                module Top(input logic clk, input logic [11:0] a,
+                           input logic signed [7:0] s);
+                    always_ff @(posedge clk) begin
+                        $display(":%h:%0h:%3h:%x:", a, a, a, 32'h5);
+                        $display(":%b:%0b:%o:%0o:", a, a, a, a);
+                        $display(":%d:%0d:%3d:%d:", a, a, a, s);
+                        $write(":%3d:%5s:", 32'd1234, "ab");
+                        $write("|%H|\n", a);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set s (trunc 8 -2)))
+  (expect_output "")
+  (tick clk)
+  (expect_output #":00a:a:00a:00000005:
+:000000001010:1010:0012:12:
+:  10:10: 10:  -2:
+:1234:   ab:|00a|
+"#))
+
+; IEEE 1800-2023 21.2.1.2: a value wider than its field width expands the
+; field without leading zeros (`%3h` of 32'h1234 displays 1234).
+(case display_field_widths_expand_to_the_value
+  (source "field.sv" #"
+                module Top(input logic clk, input logic [31:0] a);
+                    always_ff @(posedge clk) $display(":%3h:%2o:", a, a);
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0x1234))
+  (tick clk)
+  (expect_output ":1234:11064:\n"))
+
+; IEEE 1800-2023 21.2.1.3: a digit whose bits are all X (or all Z) displays
+; as x (z), one with only some unknown bits as X (Z, unless some are X), and
+; a decimal value with unknown bits as one such character.
+(case display_unknown_bits_as_ieee_specifies
+  (four_state)
+  (source "unknown.sv" #"
+                module Top(input logic clk, input logic [11:0] a,
+                           input logic [7:0] b, input logic [7:0] c);
+                    always_ff @(posedge clk) begin
+                        $display(":%h:%o:%b:%d:", a, a, a, a);
+                        $display(":%h:%h:%d:%d:%0h:", b, c, b, c, c);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 12'b001xxx101x01) (set b 8'bzzzzzzzz) (set c 8'b0000000z))
+  (tick clk)
+  (expect_output #":XXX:1x5X:001xxx101x01:   X:
+:zz:0Z:  z:  Z:Z:
+"#))
+
+; IEEE 1800-2023 21.2.1.1: an argument without a format specification of its
+; own is displayed, with automatic sizing, in the task's radix: decimal for
+; $display and $write, and binary, octal or hexadecimal for their b, o and h
+; variants. Consecutive arguments are not separated.
+(case display_tasks_default_to_their_radix
+  (source "radix.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           input logic [11:0] b);
+                    always_ff @(posedge clk) begin
+                        $display(a, b);
+                        $displayh(a, b);
+                        $displayb(a);
+                        $displayo(b);
+                        $displayh("a=", a, " b=", b);
+                        $display("a=%h", a, b);
+                        $writeh(a);
+                        $write("|\n");
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set b 10))
+  (tick clk)
+  (expect_output #" 10  10
+0a00a
+00001010
+0012
+a=0a b=00a
+a=0a  10
+0a|
+"#))

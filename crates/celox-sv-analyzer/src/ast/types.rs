@@ -46,8 +46,8 @@ pub(super) fn type_aliases_from_module_node_with_env(
             }
         }
     }
-    for item in module_scope_items(node) {
-        let Some(declaration) = package_or_generate_declaration_from_module_item(item) else {
+    for item in scope_items(node) {
+        let Some(declaration) = item.declaration() else {
             continue;
         };
         match declaration {

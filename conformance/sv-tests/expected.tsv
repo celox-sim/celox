@@ -590,8 +590,8 @@ chapter-7/arrays/multidimensional/multi.sv	pass
 chapter-7/arrays/multidimensional/subarrays.sv	pass
 chapter-7/arrays/packed/basic.sv	pass
 chapter-7/arrays/packed/equality.sv	pass
-chapter-7/arrays/packed/onebit.sv	fail
-chapter-7/arrays/packed/operations.sv	fail
+chapter-7/arrays/packed/onebit.sv	pass
+chapter-7/arrays/packed/operations.sv	pass
 chapter-7/arrays/packed/querying-functions/dimensions.sv	fail
 chapter-7/arrays/packed/querying-functions/high.sv	fail
 chapter-7/arrays/packed/querying-functions/increment.sv	fail
@@ -600,11 +600,11 @@ chapter-7/arrays/packed/querying-functions/low.sv	fail
 chapter-7/arrays/packed/querying-functions/right.sv	fail
 chapter-7/arrays/packed/querying-functions/size.sv	pass
 chapter-7/arrays/packed/querying-functions/unpacked-dimensions.sv	fail
-chapter-7/arrays/packed/slice-equality.sv	fail
-chapter-7/arrays/packed/slice.sv	fail
+chapter-7/arrays/packed/slice-equality.sv	pass
+chapter-7/arrays/packed/slice.sv	pass
 chapter-7/arrays/packed/treat-as-integer.sv	pass
 chapter-7/arrays/packed/variable-slice-zero.sv	pass
-chapter-7/arrays/packed/variable-slice.sv	fail
+chapter-7/arrays/packed/variable-slice.sv	pass
 chapter-7/arrays/unpacked/assignments.sv	pass
 chapter-7/arrays/unpacked/basic.sv	pass
 chapter-7/arrays/unpacked/equality.sv	pass

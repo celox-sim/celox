@@ -23,6 +23,7 @@
 //! | `(if EXPR STMT [STMT])`, `(do STMT...)` | Conditionals and blocks. |
 //! | `(expand NAME (ITEM...) STMT...)` | Repeat the statements with `{NAME}` replaced by each item's text (in names and messages); `(expand (A B) ((a1 b1) ...) ...)` binds several. |
 //! | `(run_testbench)` | Run the design's native testbench to `$finish`. |
+//! | `(expect_output TEXT)` | The design printed exactly TEXT with `$display`/`$write` since the start or the previous `expect_output`. |
 //!
 //! A signal is `name` at the top or `inst.name`, `inst[2].name` below it.
 //!

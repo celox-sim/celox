@@ -32,14 +32,10 @@ rather than from the error the test describes.
 
 ## Known simulation failures
 
-Running `initial` blocks exposes output and lifetime limitations that a
-successful elaboration does not exercise. The following cases are retained as
-`fail`; they still run and their `:assert:` expressions are checked:
+Running `initial` blocks exposes lifetime limitations that a successful
+elaboration does not exercise. The following case is retained as `fail`;
+it still runs and its `:assert:` expressions are checked:
 
-- `chapter-7/arrays/packed/{onebit,operations,slice-equality,slice,variable-slice}.sv`:
-  `%h` and `%b` omit the leading zeros required by the expressions' widths.
-  For example, the output contains `'0'` where the corpus checks for `'00'`.
-  IEEE 1800-2023 §21.2.1.2 describes display sizing and radix padding.
 - `chapter-13/13.3.1--task-static.sv`: the task-local counter is initialized on
   every call, so the later `(1 != 1)` assertions fail. Static task storage is
   described in IEEE 1800-2023 §13.3.1, with variable lifetime and initialization

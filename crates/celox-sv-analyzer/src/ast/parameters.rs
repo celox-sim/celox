@@ -620,28 +620,27 @@ pub(super) fn enum_member_constants_from_module_node(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
-    if !module_non_port_items(node.clone()).into_iter().any(|item| {
-        let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
-            package_or_generate_declaration_from_non_port_item(item)
-        else {
-            return false;
-        };
-        let sv_parser::DataDeclaration::TypeDeclaration(declaration) = &**data else {
-            return false;
-        };
-        matches!(&**declaration, sv_parser::TypeDeclaration::DataType(declaration)
+    if !scope_declarations(node.clone())
+        .into_iter()
+        .any(|declaration| {
+            let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = declaration
+            else {
+                return false;
+            };
+            let sv_parser::DataDeclaration::TypeDeclaration(declaration) = &**data else {
+                return false;
+            };
+            matches!(&**declaration, sv_parser::TypeDeclaration::DataType(declaration)
             if matches!(declaration.nodes.1, sv_parser::DataType::Enum(_)))
-    }) {
+        })
+    {
         return Ok(EnumMemberConstants::default());
     }
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
     let mut resolved_type_aliases = type_aliases.clone();
     let mut parameters = Vec::new();
-    for item in module_non_port_items(node.clone()) {
-        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
-            continue;
-        };
+    for declaration in scope_declarations(node.clone()) {
         let data = match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
                 parameters_from_ref_node(

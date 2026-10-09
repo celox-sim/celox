@@ -211,6 +211,7 @@ pub(super) fn lvalue_from_select(
             ))
             .ok_or_else(|| unsupported(format!("index of assignment target `{name}`")))
         })
+        .map(|index| index.map(|index| self_determined_index(index, packed_dimensions)))
         .collect::<Converted<Vec<_>>>()?;
     // Struct members cannot use the raw-vector fallback: an invalid index
     // would otherwise become a different bit or the entire member.
@@ -386,6 +387,7 @@ pub(super) fn lvalue_from_constant_select(
                 .ok_or_else(|| unsupported(format!("index of `{name}`")))
             }
         })
+        .map(|index| index.map(|index| self_determined_index(index, packed_dimensions)))
         .collect::<Converted<Vec<_>>>()?;
     // Struct members cannot use the raw-vector fallback: an invalid index
     // would otherwise become a different bit or the entire member.
@@ -552,7 +554,10 @@ pub(super) fn expr_select_from_select(
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
-        .map(|bit_select| bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions))
+        .map(|bit_select| {
+            bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions)
+                .map(|index| self_determined_index(index, packed_dimensions))
+        })
         .collect::<Converted<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
         // A start index that is only known at run time keeps symbolic bounds in
@@ -737,7 +742,10 @@ fn dynamic_indexed_shape(
     let sv_parser::PartSelectRange::IndexedRange(range) = range else {
         return Ok(None);
     };
-    let start = indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?;
+    let start = self_determined_index(
+        indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?,
+        dimensions,
+    );
     if eval_ast_const_expr(&start, &dimensions.const_env).is_some() {
         return Ok(None);
     }
@@ -1863,4 +1871,150 @@ fn selected_constant_concatenation(
         lsb,
         signed: false,
     })
+}
+
+/// The bit length and signedness of an expression evaluated in a
+/// self-determined context (IEEE 1800-2023 Table 11-21), or `None` when an
+/// operand's type is not known here.
+fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Option<(usize, bool)> {
+    let const_env = &dimensions.const_env;
+    match expr {
+        ConstExpr::Literal(value) => {
+            let literal = typecheck::parse_integral_literal(value)?;
+            Some((literal.width, literal.signed))
+        }
+        ConstExpr::Ident(name) => {
+            let variable = dimensions.get(name)?;
+            if !variable.unpacked.is_empty() {
+                return None;
+            }
+            let mut width = 1usize;
+            for dimension in &variable.packed {
+                let size =
+                    usize::try_from(eval_ast_const_expr(&dimension.width, const_env)?).ok()?;
+                width = width.checked_mul(size)?;
+            }
+            Some((width, variable.signed))
+        }
+        ConstExpr::Select { .. } => Some((1, false)),
+        ConstExpr::Function { .. } => None,
+        ConstExpr::Unary { op, expr } => match op {
+            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot | UnaryOp::ToTwoState => {
+                self_determined_type(expr, dimensions)
+            }
+            UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor => {
+                Some((1, false))
+            }
+        },
+        ConstExpr::Binary { left, op, right } => match op {
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor => {
+                let (left_width, left_signed) = self_determined_type(left, dimensions)?;
+                let (right_width, right_signed) = self_determined_type(right, dimensions)?;
+                Some((left_width.max(right_width), left_signed && right_signed))
+            }
+            BinaryOp::Pow | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
+                self_determined_type(left, dimensions)
+            }
+            _ => Some((1, false)),
+        },
+        ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let (then_width, then_signed) = self_determined_type(then_expr, dimensions)?;
+            let (else_width, else_signed) = self_determined_type(else_expr, dimensions)?;
+            Some((then_width.max(else_width), then_signed && else_signed))
+        }
+    }
+}
+
+/// A select index as the value it has in its self-determined context
+/// (IEEE 1800-2023 11.5.1): the flattening adds it to offsets at the width of
+/// unsized literals, where `j + 2'd1` would not wrap.
+fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+    if matches!(
+        index,
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) | ConstExpr::Select { .. }
+    ) {
+        return index;
+    }
+    let Some((width, signed)) = self_determined_type(&index, dimensions) else {
+        return index;
+    };
+    if width == 0 || width >= 32 {
+        return index;
+    }
+    let literal = |value: i128| ConstExpr::Literal(value.to_string());
+    let binary = |left: ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    if !signed {
+        return binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
+    }
+    // A signed index is computed with its operands sign-extended to the
+    // offsets' width, which leaves its low bits as they are except under a
+    // logical right shift: shift in zeros from the operand's own width.
+    let index = zero_extend_logical_shifts(index, dimensions);
+    let masked = binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
+    // Sign-extend from the top bit: (x ^ s) - s.
+    let sign = literal(1 << (width - 1));
+    binary(
+        binary(masked, BinaryOp::BitXor, sign.clone()),
+        BinaryOp::Sub,
+        sign,
+    )
+}
+
+/// `expr` with the left operand of each logical right shift reduced to its own
+/// width, so that a wider signed context does not shift its sign bits in.
+fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+    let go = |expr: Box<ConstExpr>| Box::new(zero_extend_logical_shifts(*expr, dimensions));
+    match expr {
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Shr,
+            right,
+        } => {
+            let left = zero_extend_logical_shifts(*left, dimensions);
+            let left = match self_determined_type(&left, dimensions) {
+                Some((width, true)) if width < 32 => ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::BitAnd,
+                    right: Box::new(ConstExpr::Literal(((1i128 << width) - 1).to_string())),
+                },
+                _ => left,
+            };
+            ConstExpr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Shr,
+                right,
+            }
+        }
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op,
+            right: go(right),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary { op, expr: go(expr) },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition,
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+        expr => expr,
+    }
 }

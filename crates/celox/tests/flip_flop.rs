@@ -3360,7 +3360,12 @@ fn test_ff_runtime_events_format_verilog_radices(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bin=00101010 hex=2a HEX=2A".to_string(),
+            // %H means %h in SystemVerilog (IEEE 1800-2023 Table 21-1).
+            message: match FRONTEND {
+                test_utils::Frontend::Veryl => "bin=00101010 hex=2a HEX=2A",
+                test_utils::Frontend::Sv => "bin=00101010 hex=2a HEX=2a",
+            }
+            .to_string(),
         }],
     );
 }
@@ -3388,11 +3393,20 @@ fn test_ff_runtime_events_preserve_four_state_args(sim) {
     assert_eq!(
         events,
         vec![
+            // The SV frontend follows IEEE 1800-2023 21.2.1.3 for Z bits.
             celox::RuntimeEvent::Display {
-                message: "a=1x10 hex=x dec=x".to_string(),
+                message: match FRONTEND {
+                    test_utils::Frontend::Veryl => "a=1x10 hex=x dec=x",
+                    test_utils::Frontend::Sv => "a=1z10 hex=Z dec=Z",
+                }
+                .to_string(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "bad=1x10".to_string(),
+                message: match FRONTEND {
+                    test_utils::Frontend::Veryl => "bad=1x10",
+                    test_utils::Frontend::Sv => "bad=1z10",
+                }
+                .to_string(),
             },
         ],
     );
@@ -3464,7 +3478,13 @@ fn test_ff_runtime_events_support_wide_four_state_args(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=123456789abcdef0123x dec=x".to_string(),
+            // The SV frontend follows IEEE 1800-2023 21.2.1.3 for a digit
+            // with only some unknown bits.
+            message: match FRONTEND {
+                test_utils::Frontend::Veryl => "a=123456789abcdef0123x dec=x",
+                test_utils::Frontend::Sv => "a=123456789abcdef0123X dec=X",
+            }
+            .to_string(),
         }],
     );
 }

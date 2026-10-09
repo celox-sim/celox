@@ -4016,7 +4016,12 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=1010xxxx".to_string(),
+            // The SV frontend displays Z bits as z (IEEE 1800-2023 21.2.1.3).
+            message: match FRONTEND {
+                test_utils::Frontend::Veryl => "a=1010xxxx",
+                test_utils::Frontend::Sv => "a=1010zzzz",
+            }
+            .to_string(),
         }],
     );
 }
@@ -4114,7 +4119,12 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=0001xxxx".to_string(),
+            // The SV frontend displays Z bits as z (IEEE 1800-2023 21.2.1.3).
+            message: match FRONTEND {
+                test_utils::Frontend::Veryl => "lo=0001xxxx",
+                test_utils::Frontend::Sv => "lo=0001zzzz",
+            }
+            .to_string(),
         }],
     );
 }

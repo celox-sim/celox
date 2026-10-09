@@ -8,7 +8,7 @@ use crate::{
 };
 use bit_set::BitSet;
 use celox_design::{
-    BinaryOp, BitAccess, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
+    BinaryOp, BitAccess, DisplaySizing, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
     SPARSE_WORKING_REGION, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use celox_sir::{
@@ -550,6 +550,7 @@ impl<'a> FfParser<'a> {
         let site = RuntimeEventSite {
             kind,
             template,
+            sizing: DisplaySizing::Minimal,
             scope: None,
             arg_widths: value_args
                 .iter()

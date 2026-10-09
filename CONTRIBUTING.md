@@ -72,6 +72,19 @@ Each change is validated where it matters rather than repeatedly:
   are skipped there, which their required checks accept, and run in the merge
   group instead. They rarely fail when the Linux jobs pass. Dispatch `ci.yml` on
   a branch to run them before queueing.
+- Pull requests run only the Rust tests their changes can affect
+  (`scripts/ci-rust-scope.mjs`):
+    - A library change runs its package and every package that depends on it.
+    - A change to one integration test file runs only that test binary.
+    - A backend or frontend crate that only one variant of celox's
+      `all_backends!` tests uses runs only that variant, plus the tests that
+      are not generated per variant. For example, `celox-backend-x86` runs
+      `native` and `native_parallel`, and `celox-frontend-sv` runs `sv` and the
+      `systemverilog` binary.
+    - Manifests, the lockfile, the toolchain, shared test data and CI changes
+      run the whole workspace.
+
+  Merge groups and the daily run always run the whole workspace.
 - The merge group validates the exact tree that lands, so pushes to `master` and
   `develop` do not run CI again. Daily full runs keep those branches' build
   caches current for pull requests.
