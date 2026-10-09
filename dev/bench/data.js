@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791519270076,
+  "lastUpdate": 1791519292432,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -363113,6 +363113,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_linux_boot_execution",
             "unit": "ms",
             "value": 126263.571434
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "9c9aa36dff16525d12cf4e7ec1bbe91b18900132",
+          "message": "ci: run Rust tests with nextest and optimize dev dependencies (#1047)",
+          "timestamp": "2026-10-05T08:00:50Z",
+          "url": "https://github.com/celox-sim/celox/commit/9c9aa36dff16525d12cf4e7ec1bbe91b18900132"
+        },
+        "date": 1791519292432,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_compilation",
+            "unit": "ms",
+            "value": 48020.404468
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 287072.164921
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 287044.044543
           }
         ]
       }
