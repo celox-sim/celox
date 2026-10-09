@@ -30,6 +30,17 @@ are evaluated with `python3`.
 A rejection that the test expects may come from an unsupported construct
 rather than from the error the test describes.
 
+## Known simulation failures
+
+Running `initial` blocks exposes lifetime limitations that a successful
+elaboration does not exercise. The following case is retained as `fail`;
+it still runs and its `:assert:` expressions are checked:
+
+- `chapter-13/13.3.1--task-static.sv`: the task-local counter is initialized on
+  every call, so the later `(1 != 1)` assertions fail. Static task storage is
+  described in IEEE 1800-2023 §13.3.1, with variable lifetime and initialization
+  rules in §6.21.
+
 ## Running locally
 
 ```bash

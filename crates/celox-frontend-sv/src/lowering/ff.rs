@@ -11,6 +11,7 @@
 
 use super::procedural::*;
 use super::*;
+use celox_frontend_core::process::ProcessKernelBuilder;
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
@@ -45,6 +46,10 @@ pub(super) struct Ff<'p, 'a> {
     /// Read-modify-write views of a variable's working value: alias -> var.
     aliases: HashMap<SourceVarId, SourceVarId>,
     next_alias: u32,
+    /// The kernel of a process being lowered. Its builder is `b` while the
+    /// body is lowered, and the process reads and writes stable state
+    /// directly.
+    kernel: Option<ProcessKernelBuilder>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -83,7 +88,28 @@ impl<'p, 'a> Ff<'p, 'a> {
             unrolled: 0,
             aliases: HashMap::default(),
             next_alias: u32::MAX,
+            kernel: None,
         }
+    }
+
+    /// Where a write of `id`, and a read of a value the process wrote, go:
+    /// the working region, or stable state in a process kernel.
+    fn target(&self, id: SourceVarId) -> Addr {
+        if self.kernel.is_some() {
+            stable(id)
+        } else {
+            working(id)
+        }
+    }
+
+    /// Run `f` on the kernel with its builder in place.
+    fn with_kernel<T>(&mut self, f: impl FnOnce(&mut ProcessKernelBuilder) -> T) -> T {
+        let mut kernel = self.kernel.take().expect("lowering a process kernel");
+        std::mem::swap(&mut self.b, kernel.builder());
+        let result = f(&mut kernel);
+        std::mem::swap(&mut self.b, kernel.builder());
+        self.kernel = Some(kernel);
+        result
     }
 
     /// Record a written lvalue: its constant bit range, or the whole variable.
@@ -209,8 +235,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let aliases = &self.aliases;
         let working_set = &self.working;
         let variables = &*self.m.variables;
+        let direct = self.kernel.is_some();
         let map = |id: &SourceVarId| -> Addr {
-            if let Some(var) = aliases.get(id) {
+            if direct {
+                stable(*aliases.get(id).unwrap_or(id))
+            } else if let Some(var) = aliases.get(id) {
                 working(*var)
             } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
                 working(*id)
@@ -903,8 +932,9 @@ impl<'p, 'a> Ff<'p, 'a> {
     // ---------------------------------------------------------------- stores
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        let target = self.target(id);
         self.b.emit(SIRInstruction::Store(
-            working(id),
+            target,
             offset,
             width,
             value,
@@ -1292,9 +1322,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                     dynamic_bit_offset: None,
                 };
                 let old = self.b.alloc_logic(packed_element_width);
+                let target = self.target(id);
                 self.b.emit(SIRInstruction::Load(
                     old,
-                    working(id),
+                    target,
                     offset.clone(),
                     packed_element_width,
                 ));
@@ -1318,9 +1349,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             dynamic_bit_offset: None,
         };
         let old = self.b.alloc_logic(target_width);
+        let target = self.target(id);
         self.b.emit(SIRInstruction::Load(
             old,
-            working(id),
+            target,
             offset.clone(),
             target_width,
         ));
@@ -1561,6 +1593,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
+        // A process ends the simulation itself; the rest of its body does not
+        // run.
+        if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
+            self.with_kernel(ProcessKernelBuilder::finish);
+            return Ok(false);
+        }
         let (template, values) = system_task_template(&kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -1739,22 +1777,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(&canonical.var)
                 .is_some_and(|id| self.m.is_hidden(id))
-            && let Some(values) = self.unrolled_values(&canonical, condition, step, body)?
+            && let Some((values, last)) = self.unrolled_values(&canonical, condition, step, body)?
         {
-            return self.unroll(&canonical, &values, body);
+            return self.unroll(&canonical, &values, last, body);
         }
         self.runtime_loop(kind, init, condition, step, body)
     }
 
     /// The loop-variable values of a counted loop with constant bounds, when
-    /// it is small enough to unroll.
+    /// it is small enough to unroll, and the value that ends it.
     fn unrolled_values(
         &mut self,
         canonical: &CanonicalLoop,
         condition: Option<&sv::ir::Expr>,
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
-    ) -> Result<Option<Vec<(String, i128)>>, sv::AnalyzerError> {
+    ) -> Result<Option<(Vec<(String, i128)>, i128)>, sv::AnalyzerError> {
         let mut written = HashSet::default();
         written_names(body, &mut written);
         if written.contains(&canonical.var) {
@@ -1799,7 +1837,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 break None;
             };
             if proceed.is_zero() {
-                break Some(values);
+                break Some((values, numeric));
             }
             values.push(literal);
             if values.len() + self.unrolled > MAX_UNROLLED_ITERATIONS {
@@ -1821,14 +1859,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         canonical: &CanonicalLoop,
         values: &[(String, i128)],
+        last: i128,
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
         self.unrolled += values.len();
+        // The loop variable may be declared outside the loop, which then reads
+        // its value: the one `break` left, or the one that ended the loop.
+        let id = self.m.id(&canonical.var).expect("loop variable");
         let exit = self.b.new_block();
         let saved = self.overlay.remove(&canonical.var);
         let mut reachable = true;
         for literal in values {
             let next = self.b.new_block();
+            self.store_constant(id, literal.1);
             self.overlay.insert(canonical.var.clone(), literal.clone());
             self.loops.push(LoopBlocks {
                 break_block: exit,
@@ -1847,10 +1890,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.overlay.insert(canonical.var.clone(), saved);
         }
         let _ = reachable;
+        self.store_constant(id, last);
         self.jump(exit);
         self.b.switch_to_block(exit);
-        // The loop variable keeps no value after the loop: it is scoped to it.
         Ok(true)
+    }
+
+    /// Store `value`, truncated to the variable's width, into `id`.
+    fn store_constant(&mut self, id: SourceVarId, value: i128) {
+        let width = self.m.var(id).width;
+        let modulus = num_bigint::BigInt::from(1u8) << width;
+        let value = ((num_bigint::BigInt::from(value) % &modulus) + &modulus) % &modulus;
+        let register = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(
+            register,
+            SIRValue::new(value.to_biguint().expect("a non-negative value")),
+        ));
+        let offset = sv_memory_offset(self.m.var(id), 0, width);
+        self.store(id, offset, width, register);
     }
 
     fn runtime_loop(
@@ -2131,6 +2188,48 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut apply = SIRBuilder::new();
         emit_ff_commits(&mut apply, &targets);
         Ok((eval, seal_builder(apply), targets))
+    }
+}
+
+impl Ff<'_, '_> {
+    /// Lower an `initial` body into a process kernel that runs it from time
+    /// zero, reading and writing stable state directly.
+    pub fn lower_initial_kernel(
+        mut self,
+        body: &[sv::ir::Stmt],
+        slots: ProcessSlots<SourceVarId>,
+    ) -> Result<ExecutionUnit<Addr>, sv::AnalyzerError> {
+        // A nonblocking update would take effect in a later region of the
+        // time step, after the process has run on.
+        for stmt in body {
+            let mut nonblocking = false;
+            stmt.walk(&mut |stmt| {
+                nonblocking |= matches!(
+                    stmt,
+                    sv::ir::Stmt::Assign {
+                        nonblocking: true,
+                        ..
+                    } | sv::ir::Stmt::AssignConcat {
+                        nonblocking: true,
+                        ..
+                    }
+                );
+            });
+            if nonblocking {
+                return Err(unsupported(
+                    "nonblocking assignment in an initial block that runs as a process",
+                ));
+            }
+        }
+        let mut kernel = ProcessKernelBuilder::new(slots);
+        std::mem::swap(&mut self.b, kernel.builder());
+        self.kernel = Some(kernel);
+        self.exec_block(body)?;
+        let mut kernel = self.kernel.take().expect("lowering a process kernel");
+        std::mem::swap(&mut self.b, kernel.builder());
+        let mut unit = kernel.build();
+        prune_unreachable_blocks(&mut unit);
+        Ok(unit)
     }
 }
 
