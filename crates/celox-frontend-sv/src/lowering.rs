@@ -113,8 +113,8 @@ struct AnalyzedSvModule {
     /// The positional interface of every module in all sources, used to bind
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
-    /// The packages declared in all sources, inlined into the modules that use them.
-    packages: std::sync::Arc<HashMap<String, sv::PackageSource>>,
+    /// The packages declared in all sources, analyzed once.
+    packages: std::sync::Arc<sv::Packages>,
 }
 
 #[derive(Clone)]
@@ -202,13 +202,8 @@ fn analyze_sources(
         interfaces.extend(source.module_interfaces().clone());
     }
     let interfaces = std::sync::Arc::new(interfaces);
-    let mut packages = HashMap::default();
-    for (source, _, _) in &sources {
-        for package in source.packages()? {
-            packages.insert(package.name.clone(), package);
-        }
-    }
-    let packages = std::sync::Arc::new(packages);
+    let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
+    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -1087,8 +1082,9 @@ fn lower_module_with_overrides(
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
     let parameter_types = module
-        .parameters()
+        .imported_parameters()
         .iter()
+        .chain(module.parameters())
         .filter_map(|parameter| {
             Some((
                 parameter.name().to_string(),
@@ -5826,6 +5822,12 @@ fn module_constants_with_overrides(
         })
         .collect();
     let mut constants = HashMap::default();
+    // The package parameters a module uses come before its own.
+    for parameter in module.imported_parameters() {
+        if let Some(value) = parameter.resolved_value() {
+            constants.insert(parameter.name().to_string(), value);
+        }
+    }
     for parameter in module.parameters() {
         let value = if let Some(override_value) = override_values.get(parameter.name()) {
             sv::typecheck::eval_const_expr(override_value, &constants)

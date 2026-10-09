@@ -199,12 +199,17 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Wildcard comparisons.** `casez`, `casex`, `inside` and `==?` honor the
   `?`, `x` and `z` bits of a constant pattern in both two-state and four-state
   simulation.
-- **Packages** are inlined into each module that uses them. Names resolve by
-  their plain identifier, so a package item and a module item with the same
-  name are reported as a duplicate declaration. Package variables and nets
-  are rejected, since each module would get its own copy instead of sharing
-  one object; `const` variables are accepted. Resolving packages as scopes is
-  tracked in [#1146](https://github.com/celox-sim/celox/issues/1146).
+- **Packages** are analyzed once each, as scopes of their own, and names
+  resolve as IEEE 1800-2023 26.3 describes. `p::x` names the item of package
+  `p`, so items of one name in several packages, or in a package and a
+  module, do not clash. `import p::x;` makes only `x` visible. With
+  `import p::*;`, a name the scope declares itself hides the package's, and
+  a name that two wildcard-imported packages declare is an error only when a
+  reference uses it. Names in a package function resolve in the package.
+  Package variables and nets are rejected until they can be shared between
+  modules ([#1146](https://github.com/celox-sim/celox/issues/1146)); `const`
+  variables are accepted. Package `export` declarations and compilation-unit (`$unit`) declarations
+  are not supported.
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An

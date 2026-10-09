@@ -396,17 +396,22 @@ fn expr_from_primary_with_types(
             ) {
                 let value = packed_structs::variable_member(
                     node,
+                    hierarchical
+                        .nodes
+                        .0
+                        .is_some()
+                        .then(|| {
+                            reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
+                        })
+                        .flatten(),
                     &hierarchical.nodes.2,
                     syntax_tree,
                     packed_dimensions,
                 )?;
                 return Ok(expr_from_lvalue(&value, packed_dimensions));
             }
-            let name = identifier_text(
-                RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-                syntax_tree,
-            )
-            .ok_or_else(|| unsupported("hierarchical identifier"))?;
+            let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
+                .ok_or_else(|| unsupported("hierarchical identifier"))?;
             let base = Expr::Ident(name);
             let select = &hierarchical.nodes.2;
             if select.nodes.1.nodes.0.is_empty() && select.nodes.2.is_none() {
@@ -651,7 +656,7 @@ pub(super) fn expr_from_tf_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let name = identifier_text(
+    let name = reference_name(
         RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
         syntax_tree,
     )

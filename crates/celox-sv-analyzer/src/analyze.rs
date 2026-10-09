@@ -17,8 +17,22 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let mut parameter_types = HashMap::default();
         let mut parameter_table = ParameterTable::default();
         let mut parameters = Vec::new();
-        for parameter in module.parameters() {
-            parameter_table.insert(module, parameter)?;
+        // Package parameters come first: the module's parameters may use them.
+        let mut imported_parameters = Vec::new();
+        for (imported, parameter) in module
+            .imported_parameters()
+            .iter()
+            .map(|parameter| (true, parameter))
+            .chain(
+                module
+                    .parameters()
+                    .iter()
+                    .map(|parameter| (false, parameter)),
+            )
+        {
+            if !imported {
+                parameter_table.insert(module, parameter)?;
+            }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let resolved_value = parameter.resolved_value(&constants, &parameter_types);
             if let Some(resolved_value) = resolved_value {
@@ -28,7 +42,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             if let Some(r#type) = resolved_type {
                 parameter_types.insert(parameter.name().to_string(), r#type);
             }
-            parameters.push(ir::Parameter::new(
+            let parameter = ir::Parameter::new(
                 parameter.name().to_string(),
                 value,
                 resolved_value,
@@ -36,7 +50,12 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 resolved_type.map(|r#type| r#type.signed),
                 parameter.declared_width(),
                 parameter.declared_signed(),
-            ));
+            );
+            if imported {
+                imported_parameters.push(parameter);
+            } else {
+                parameters.push(parameter);
+            }
         }
 
         let mut port_table = PortTable::default();
@@ -140,7 +159,8 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
                     .collect(),
             )
-            .with_dpi_imports(module.dpi_imports().to_vec()),
+            .with_dpi_imports(module.dpi_imports().to_vec())
+            .with_imported_parameters(imported_parameters),
         );
     }
 
