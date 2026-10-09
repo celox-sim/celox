@@ -86,6 +86,7 @@ chapter-11/11.7--unsigned_func.sv	pass
 chapter-11/11.9--tagged_union.sv	fail
 chapter-11/11.9--tagged_union_member_access-sim.sv	fail
 chapter-11/11.9--tagged_union_member_access.sv	fail
+chapter-11/11.9--tagged_union_member_access_inv.sv	pass
 chapter-11/simple/11.4.11--simple_cond_op-sim.sv	pass
 chapter-11/simple/11.4.12--simple_concat_op-sim.sv	pass
 chapter-11/simple/11.4.12.1--simple_repl_op-sim.sv	pass
@@ -148,8 +149,10 @@ chapter-15/15.4--mailbox-non-blocking.sv	fail
 chapter-15/15.5.1--named-event-trigger-blocking.sv	fail
 chapter-15/15.5.1--named-event-trigger-non-blocking.sv	fail
 chapter-15/15.5.2--named-event-wait.sv	fail
+chapter-16/16.10--property-local-var-fail.sv	pass
 chapter-16/16.10--property-local-var-uvm.sv	fail
 chapter-16/16.10--property-local-var.sv	fail
+chapter-16/16.10--sequence-local-var-fail.sv	pass
 chapter-16/16.10--sequence-local-var-uvm.sv	fail
 chapter-16/16.10--sequence-local-var.sv	fail
 chapter-16/16.11--sequence-subroutine-uvm.sv	fail
@@ -165,6 +168,7 @@ chapter-16/16.12--property.sv	fail
 chapter-16/16.13--sequence-multiclock-uvm.sv	fail
 chapter-16/16.14--assume-property-uvm.sv	fail
 chapter-16/16.14--assume-property.sv	fail
+chapter-16/16.15--property-disable-iff-fail.sv	pass
 chapter-16/16.15--property-disable-iff.sv	fail
 chapter-16/16.15--property-iff-uvm.sv	fail
 chapter-16/16.17--expect-uvm.sv	fail
