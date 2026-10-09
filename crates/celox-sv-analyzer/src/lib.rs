@@ -156,9 +156,11 @@ pub fn elaborate_interfaces(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax(&syntax_tree)?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax(&syntax_tree)?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Parse and analyze a SystemVerilog source with parameter overrides applied
@@ -169,13 +171,15 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax_with_module_parameter_overrides(
-        &syntax_tree,
-        module_name,
-        parameter_overrides,
-    )?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax_with_module_parameter_overrides(
+            &syntax_tree,
+            module_name,
+            parameter_overrides,
+        )?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Return the module names declared in a SystemVerilog source without
@@ -202,13 +206,15 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax_module_with_parameter_overrides(
-        &syntax_tree,
-        module_name,
-        parameter_overrides,
-    )?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax_module_with_parameter_overrides(
+            &syntax_tree,
+            module_name,
+            parameter_overrides,
+        )?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Analyze only one module from a source file while preserving the literal
@@ -236,8 +242,10 @@ pub fn source_module_interfaces(
     code: &str,
     path: &Path,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::Source::module_interfaces_from_syntax(&syntax_tree)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        ast::Source::module_interfaces_from_syntax(&syntax_tree)
+    })
 }
 
 #[cfg(test)]
@@ -246,8 +254,10 @@ mod tests;
 /// The packages declared in a source, rewritten so that their items can be
 /// inlined into the modules that use them.
 pub fn source_packages(code: &str, path: &Path) -> Result<Vec<PackageSource>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::packages::source_packages(code, &syntax_tree)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        ast::packages::source_packages(code, &syntax_tree)
+    })
 }
 
 /// The source of `module_name` with the packages it uses inlined, or `None`

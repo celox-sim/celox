@@ -23,7 +23,7 @@ pub struct ParsedSource {
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
         let tree = syntax::parse_source(code, path)?;
-        let index = ast::module_index::ModuleIndex::new(&tree)?;
+        let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))?;
         Ok(Self {
             code: code.to_string(),
             path: path.to_path_buf(),
@@ -41,7 +41,7 @@ impl ParsedSource {
     }
 
     pub fn packages(&self) -> Result<Vec<PackageSource>, AnalyzerError> {
-        ast::packages::source_packages(&self.code, &self.tree)
+        ast::with_call_sites(|| ast::packages::source_packages(&self.code, &self.tree))
     }
 
     /// Analyze a module, rewriting its type parameters and package imports
@@ -93,14 +93,16 @@ impl ParsedSource {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        let source = ast::Source::from_indexed_syntax_module(
-            &self.tree,
-            &self.index,
-            module_name,
-            &overrides,
-            interfaces,
-        )?;
-        analyze::analyze_source(source)
+        ast::with_call_sites(|| {
+            let source = ast::Source::from_indexed_syntax_module(
+                &self.tree,
+                &self.index,
+                module_name,
+                &overrides,
+                interfaces,
+            )?;
+            analyze::analyze_source(source)
+        })
     }
 }
 

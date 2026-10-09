@@ -1328,12 +1328,24 @@ pub enum ConstExpr {
     },
 }
 
+thread_local! {
+    static NEXT_CALL_SITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Run one analysis step with call sites numbered from zero, so that
+/// analyzing the same source always gives the same sites.
+pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
+    let saved = NEXT_CALL_SITE.with(|next| next.replace(0));
+    let result = f();
+    NEXT_CALL_SITE.with(|next| next.set(saved));
+    result
+}
+
 impl ConstExpr {
     /// A call of `name`; a user subroutine call gets a site of its own.
     fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        static NEXT_SITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let site = (!name.starts_with('$'))
-            .then(|| NEXT_SITE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
         ConstExpr::Function { name, args, site }
     }
 }
