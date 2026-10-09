@@ -48,7 +48,8 @@ mod host {
         },
     };
     use celox_testbench::{
-        DisplayFormatArg, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
+        DisplayFormatArg, FieldSpec, format_sized_display_arg, format_veryl_display_arg,
+        pad_veryl_field,
     };
     use num_bigint::BigUint;
 
@@ -308,7 +309,7 @@ mod host {
         arg: &RuntimeEventArgValue,
         spec: char,
         sizing: DisplaySizing,
-        field_width: Option<usize>,
+        field: FieldSpec,
     ) -> String {
         let value = runtime_event_words_to_biguint(&arg.values, arg.width);
         let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
@@ -320,8 +321,8 @@ mod host {
             is_string: arg.is_string,
         };
         match sizing {
-            DisplaySizing::Minimal => format_display_arg(&arg, Some(spec)),
-            DisplaySizing::Ieee => format_sized_display_arg(&arg, spec, field_width),
+            DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
+            DisplaySizing::Ieee => format_sized_display_arg(&arg, spec, field.width),
         }
     }
 
@@ -332,6 +333,12 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
+                // Veryl prints arguments without a format string in hexadecimal.
+                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                    if site.sizing == DisplaySizing::Veryl =>
+                {
+                    'x'
+                }
                 RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish => {
                     'd'
                 }
@@ -344,7 +351,9 @@ mod host {
             };
             return args
                 .iter()
-                .map(|arg| runtime_event_format_arg(arg, default_spec, site.sizing, None))
+                .map(|arg| {
+                    runtime_event_format_arg(arg, default_spec, site.sizing, FieldSpec::default())
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
         };
@@ -361,17 +370,7 @@ mod host {
                 out.push('%');
                 continue;
             }
-            let mut field_width = None;
-            while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
-                chars.next();
-                field_width = Some(
-                    field_width
-                        .unwrap_or(0usize)
-                        .saturating_mul(10)
-                        .saturating_add(digit as usize)
-                        .min(MAX_FIELD_WIDTH),
-                );
-            }
+            let field = FieldSpec::parse(&mut chars, site.sizing == DisplaySizing::Veryl);
             let spec = chars.next().unwrap_or('d');
             match spec {
                 'x' | 'h' | 'X' | 'H' | 'b' | 'B' | 'o' | 'O' | 'c' | 'C' | 's' | 'S' => {
@@ -379,12 +378,7 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(
-                        arg,
-                        spec,
-                        site.sizing,
-                        field_width,
-                    ));
+                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
                 'd' | 'D' | 'i' | 'I' => {
@@ -392,17 +386,22 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(
-                        arg,
-                        spec,
-                        site.sizing,
-                        field_width,
-                    ));
+                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
-                't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),
-                'm' | 'M' => {
-                    out.push_str(ctx.scope.or(site.scope.as_deref()).unwrap_or("<hierarchy>"))
+                't' | 'T' | 'm' | 'M' => {
+                    let text = if matches!(spec, 't' | 'T') {
+                        ctx.tb_time.unwrap_or(0).to_string()
+                    } else {
+                        ctx.scope
+                            .or(site.scope.as_deref())
+                            .unwrap_or("<hierarchy>")
+                            .to_string()
+                    };
+                    out.push_str(&match site.sizing {
+                        DisplaySizing::Veryl => pad_veryl_field(text, spec, field),
+                        DisplaySizing::Ieee => text,
+                    });
                 }
                 other => {
                     out.push('%');

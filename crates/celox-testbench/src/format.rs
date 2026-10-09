@@ -216,7 +216,7 @@ pub fn format_sized_display_arg(
     match bits_per_digit {
         Some(bits_per_digit) => {
             let text = if has_mask(arg) {
-                unknown_digits(arg, bits_per_digit)
+                radix_digits(arg, bits_per_digit)
             } else {
                 text
             };
@@ -262,8 +262,9 @@ fn unknown_group(arg: &DisplayFormatArg<'_>, start: usize, end: usize) -> Option
     }
 }
 
-/// Hexadecimal, octal, or binary digits of a value with unknown bits.
-fn unknown_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
+/// Hexadecimal, octal, or binary digits of a value, one for each group of
+/// its bits, unknown ones included.
+fn radix_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
     let digits = arg.width.div_ceil(bits_per_digit).max(1);
     (0..digits)
         .rev()
@@ -284,6 +285,103 @@ fn unknown_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
 /// field would only be an allocation the source sizes by typing. Veryl's
 /// simulator caps its field widths the same way.
 pub const MAX_FIELD_WIDTH: usize = 1 << 16;
+
+/// The flags and field width between `%` and a conversion character.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FieldSpec {
+    pub width: Option<usize>,
+    /// `-`, which Veryl reads as C does: pad on the right.
+    pub left_justify: bool,
+    /// A leading `0` digit, which Veryl reads as C's flag: pad numbers with
+    /// zeros.
+    pub zero_pad: bool,
+}
+
+impl FieldSpec {
+    /// Read the flags and width that follow a `%`. `-` is a flag only with
+    /// `c_flags` (Veryl); otherwise it is left as the conversion character.
+    pub fn parse(
+        chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+        c_flags: bool,
+    ) -> Self {
+        let left_justify = c_flags && chars.next_if_eq(&'-').is_some();
+        let zero_pad = chars.peek() == Some(&'0');
+        let mut width = None;
+        while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
+            chars.next();
+            width = Some(
+                width
+                    .unwrap_or(0usize)
+                    .saturating_mul(10)
+                    .saturating_add(digit as usize)
+                    .min(MAX_FIELD_WIDTH),
+            );
+        }
+        Self {
+            width,
+            left_justify,
+            zero_pad,
+        }
+    }
+}
+
+/// Formats `arg` as Veryl's simulator does. Hexadecimal, octal, and binary
+/// values take a digit for each group of the argument's bits, and decimal
+/// values their minimum width. With `%0`, radices drop their leading zeros.
+/// A field width then pads as [`pad_veryl_field`] does.
+pub fn format_veryl_display_arg(
+    arg: &DisplayFormatArg<'_>,
+    spec: char,
+    field: FieldSpec,
+) -> String {
+    let spec = spec.to_ascii_lowercase();
+    let bits_per_digit = match spec {
+        'b' => Some(1),
+        'o' => Some(3),
+        'x' | 'h' => Some(4),
+        _ => None,
+    };
+    let body = match bits_per_digit {
+        _ if arg.is_string => format_display_arg(arg, Some(spec)),
+        Some(bits_per_digit) => {
+            let digits = radix_digits(arg, bits_per_digit);
+            if field.width == Some(0) {
+                let minimal = digits.trim_start_matches('0');
+                if minimal.is_empty() { "0" } else { minimal }.to_string()
+            } else {
+                digits
+            }
+        }
+        // Veryl prints a lowercase x for a decimal value with any unknown bit.
+        None if matches!(spec, 'd' | 'i') && has_mask(arg) => "x".to_string(),
+        None => format_display_arg(arg, Some(spec)),
+    };
+    pad_veryl_field(body, spec, field)
+}
+
+/// Pads a converted value to its field width as Veryl's simulator does: on
+/// the left with spaces, on the right with `-`, or with zeros behind the sign
+/// for a number with a leading `0`. A longer value is never truncated.
+pub fn pad_veryl_field(mut body: String, spec: char, field: FieldSpec) -> String {
+    let Some(width) = field.width else {
+        return body;
+    };
+    let len = body.chars().count();
+    if len >= width {
+        return body;
+    }
+    let count = width - len;
+    let numeric = matches!(spec.to_ascii_lowercase(), 'd' | 'i' | 'h' | 'x' | 'o' | 'b');
+    if field.left_justify {
+        body.push_str(&" ".repeat(count));
+    } else if field.zero_pad && numeric {
+        let at = usize::from(body.starts_with('-'));
+        body.insert_str(at, &"0".repeat(count));
+    } else {
+        body.insert_str(0, &" ".repeat(count));
+    }
+    body
+}
 
 fn pad(text: String, fill: char, width: usize) -> String {
     let len = text.chars().count();
@@ -368,6 +466,55 @@ mod tests {
         assert_eq!(four_state(0, 0xff, 8, 'd'), "  z");
         assert_eq!(four_state(0, 0x01, 8, 'd'), "  Z");
         assert_eq!(four_state(0x01, 0x03, 8, 'd'), "  X");
+    }
+
+    fn veryl(payload: u32, mask: u32, width: usize, signed: bool, spec: &str) -> String {
+        let (value, mask) = (BigUint::from(payload), BigUint::from(mask));
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width,
+            signed,
+            is_string: false,
+        };
+        let mut chars = spec.chars().peekable();
+        let field = FieldSpec::parse(&mut chars, true);
+        format_veryl_display_arg(&arg, chars.next().unwrap(), field)
+    }
+
+    #[test]
+    fn formats_as_veryls_simulator() {
+        // The cases of Veryl's display_format_tests.
+        assert_eq!(veryl(10, 0, 8, false, "0d"), "10");
+        assert_eq!(veryl(11, 0, 8, false, "d"), "11");
+        assert_eq!(veryl(12, 0, 32, false, "h"), "0000000c");
+        assert_eq!(veryl(12, 0, 32, false, "0h"), "c");
+        assert_eq!(veryl(7, 0, 8, false, "5d"), "    7");
+        assert_eq!(veryl(7, 0, 8, false, "-5d"), "7    ");
+        assert_eq!(veryl(9, 0, 32, false, "2h"), "00000009");
+        assert_eq!(veryl(7, 0, 8, false, "05d"), "00007");
+        assert_eq!(veryl(0xc, 0, 8, false, "04h"), "000c");
+        assert_eq!(veryl(0xf9, 0, 8, true, "05d"), "-0007");
+        assert_eq!(veryl(7, 0, 8, false, "-05d"), "7    ");
+        assert_eq!(veryl(0x41, 0, 8, false, "05c"), "    A");
+        // Uppercase specifiers print lowercase digits, and unknown digits
+        // follow the IEEE rules; a decimal value with any is a lowercase x.
+        assert_eq!(veryl(0xab, 0, 8, false, "H"), "ab");
+        assert_eq!(veryl(0x01, 0x03, 8, false, "h"), "0X");
+        assert_eq!(veryl(0b1000, 0b1100, 4, false, "b"), "xz00");
+        assert_eq!(veryl(0, 0x01, 8, false, "d"), "x");
+    }
+
+    #[test]
+    fn caps_field_widths() {
+        let mut chars = "99999999999999999999d".chars().peekable();
+        assert_eq!(
+            FieldSpec::parse(&mut chars, true).width,
+            Some(MAX_FIELD_WIDTH)
+        );
+        assert_eq!(chars.next(), Some('d'));
+        let mut chars = "-5d".chars().peekable();
+        assert_eq!(FieldSpec::parse(&mut chars, false), FieldSpec::default());
     }
 
     #[test]
