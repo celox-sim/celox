@@ -86,17 +86,24 @@ pub const TESTBENCH_TOP: &str = "celox_suite_tb";
 /// newline of its own: the hex-encoded expected text, then its location.
 const OUTPUT_MARKER: &str = "@suite output ";
 
+/// The line a generated testbench prints, after a newline of its own, once
+/// the whole script has run.
+const END_MARKER: &str = "@suite end";
+
 fn hex_encode(text: &str) -> String {
     text.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Check the design output in a generated testbench's stdout: the text
-/// before each `expect_output` marker, since the previous one, must equal the
-/// text the marker encodes. Text after the last marker, such as a
-/// simulator's `$finish` report, is not design output the script checks.
+/// Check a generated testbench's stdout. The script must have run to its
+/// end: a design's `$finish` can end some simulators' runs early without a
+/// failure. Before that, the text before each `expect_output` marker, since
+/// the previous one, must equal the text the marker encodes.
 pub fn check_output(log: &str) -> Result<(), String> {
+    let Some(end) = log.find(&format!("\n{END_MARKER}\n")) else {
+        return Err("the simulation ended before the script did".into());
+    };
     let separator = format!("\n{OUTPUT_MARKER}");
-    let mut rest = log;
+    let mut rest = &log[..end];
     while let Some(at) = rest.find(&separator) {
         let output = &rest[..at];
         let marker = &rest[at + separator.len()..];
@@ -894,6 +901,7 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
   initial begin"#
     );
     out.push_str(&body);
+    let _ = writeln!(out, "    $write(\"\\n{END_MARKER}\\n\");");
     out.push_str("`ifdef CELOX_SUITE_ICARUS\n    $celox_suite_finish;\n`endif\n    $finish;\n  end\nendmodule\n");
     Ok(out)
 }
@@ -959,11 +967,17 @@ mod tests {
     fn checks_the_output_before_each_marker() {
         let text = testbench(&case(r#"(tick clk) (expect_output "a\nb")"#), &design()).unwrap();
         assert!(text.contains(r#"$write("\n@suite output 610a62 g::t at"#));
-        let log = "a\nb\n@suite output 610a62 here\n\n@suite output  there\nfinish\n";
+        assert!(text.contains(r#"$write("\n@suite end\n");"#));
+        let log = "a\nb\n@suite output 610a62 here\n\n@suite output  there\n\n@suite end\nfinish\n";
         assert_eq!(check_output(log), Ok(()));
         assert_eq!(
-            check_output("a\n@suite output 610a62 here\n"),
+            check_output("a\n@suite output 610a62 here\n\n@suite end\n"),
             Err(r#"here: expect_output: expected "a\nb", got "a""#.into())
+        );
+        // A design's $finish ended the run before the script did.
+        assert_eq!(
+            check_output("a\nb\n@suite output 610a62 here\n"),
+            Err("the simulation ended before the script did".into())
         );
     }
 

@@ -1637,7 +1637,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         let event_kind = match &kind {
-            SystemTaskKind::Print(kind) => *kind,
+            SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,

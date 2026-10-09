@@ -47,7 +47,9 @@ mod host {
             RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
         },
     };
-    use celox_testbench::{DisplayFormatArg, format_display_arg, format_sized_display_arg};
+    use celox_testbench::{
+        DisplayFormatArg, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
+    };
     use num_bigint::BigUint;
 
     /// Hierarchical instance tree with resolved signals.
@@ -362,7 +364,13 @@ mod host {
             let mut field_width = None;
             while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
                 chars.next();
-                field_width = Some(field_width.unwrap_or(0) * 10 + digit as usize);
+                field_width = Some(
+                    field_width
+                        .unwrap_or(0usize)
+                        .saturating_mul(10)
+                        .saturating_add(digit as usize)
+                        .min(MAX_FIELD_WIDTH),
+                );
             }
             let spec = chars.next().unwrap_or('d');
             match spec {

@@ -13,6 +13,10 @@ sv_backends! {
         @case "system_functions::display_unknown_bits_as_ieee_specifies";
     }
 
+    fn display_tasks_default_to_their_radix(sim) {
+        @case "system_functions::display_tasks_default_to_their_radix";
+    }
+
     fn countones_preserves_argument_and_return_types(sim) {
         @case "system_functions::countones_preserves_argument_and_return_types";
     }

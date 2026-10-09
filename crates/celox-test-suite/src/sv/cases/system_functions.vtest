@@ -264,3 +264,35 @@
   (expect_output #":XXX:1x5X:001xxx101x01:   X:
 :zz:0Z:  z:  Z:Z:
 "#))
+
+; IEEE 1800-2023 21.2.1.1: an argument without a format specification of its
+; own is displayed, with automatic sizing, in the task's radix: decimal for
+; $display and $write, and binary, octal or hexadecimal for their b, o and h
+; variants. Consecutive arguments are not separated.
+(case display_tasks_default_to_their_radix
+  (source "radix.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           input logic [11:0] b);
+                    always_ff @(posedge clk) begin
+                        $display(a, b);
+                        $displayh(a, b);
+                        $displayb(a);
+                        $displayo(b);
+                        $displayh("a=", a, " b=", b);
+                        $display("a=%h", a, b);
+                        $writeh(a);
+                        $write("|\n");
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set b 10))
+  (tick clk)
+  (expect_output #" 10  10
+0a00a
+00001010
+0012
+a=0a b=00a
+a=0a  10
+0a|
+"#))

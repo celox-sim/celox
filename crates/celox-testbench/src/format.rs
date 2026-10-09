@@ -202,7 +202,10 @@ pub fn format_sized_display_arg(
     let spec = spec.to_ascii_lowercase();
     let text = format_display_arg(arg, Some(spec));
     if arg.is_string {
-        return pad(text, ' ', field_width.unwrap_or(0));
+        // A string is a sequence of 8-bit character codes (IEEE 1800-2023
+        // 21.2.1.7), so a multibyte UTF-8 character fills several columns.
+        let len = text.len();
+        return pad_counted(text, ' ', field_width.unwrap_or(0), len);
     }
     let bits_per_digit = match spec {
         'b' => Some(1),
@@ -277,8 +280,17 @@ fn unknown_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
         .collect()
 }
 
+/// Ceiling on a field width: the digits come from source text, and a wider
+/// field would only be an allocation the source sizes by typing. Veryl's
+/// simulator caps its field widths the same way.
+pub const MAX_FIELD_WIDTH: usize = 1 << 16;
+
 fn pad(text: String, fill: char, width: usize) -> String {
     let len = text.chars().count();
+    pad_counted(text, fill, width, len)
+}
+
+fn pad_counted(text: String, fill: char, width: usize, len: usize) -> String {
     if len >= width {
         return text;
     }
@@ -316,6 +328,16 @@ mod tests {
         assert_eq!(sized(0, 8, false, 'b', Some(0)), "0");
         assert_eq!(sized(0x80, 8, true, 'd', None), "-128");
         assert_eq!(sized(0xab, 8, false, 'H', None), "ab");
+        // 16'hc3a9 is two 8-bit codes, one UTF-8 character.
+        let value = BigUint::from(0xc3a9u32);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 16,
+            signed: false,
+            is_string: true,
+        };
+        assert_eq!(format_sized_display_arg(&arg, 's', Some(3)), " \u{e9}");
     }
 
     fn four_state(payload: u32, mask: u32, width: usize, spec: char) -> String {

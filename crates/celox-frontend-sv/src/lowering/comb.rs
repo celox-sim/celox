@@ -3022,15 +3022,15 @@ impl<'p, 'a> Comb<'p, 'a> {
             captured.push(self.capture(node)?);
         }
         let event_kind = match &kind {
-            SystemTaskKind::Print(kind) => *kind,
+            SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
         };
         let condition = self.path_condition()?;
         let guard = match (&kind, condition) {
-            (SystemTaskKind::Print(_) | SystemTaskKind::Finish, None) => None,
-            (SystemTaskKind::Print(_) | SystemTaskKind::Finish, Some((node, sources))) => {
+            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
+            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
                 observed.extend(sources);
                 Some(node)
             }
@@ -3055,7 +3055,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             effects.push(SLTForEffect::Event {
                 site_id,
                 guard,
-                emit_on_true: matches!(kind, SystemTaskKind::Print(_) | SystemTaskKind::Finish),
+                emit_on_true: matches!(kind, SystemTaskKind::Print(..) | SystemTaskKind::Finish),
                 args: captured.clone(),
                 fatal_error_code: matches!(kind, SystemTaskKind::Fatal)
                     .then_some(i64::from(site_id)),
