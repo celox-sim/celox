@@ -340,6 +340,130 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 }
 
 #[test]
+fn rejects_variables_also_written_through_output_arguments() {
+    // A called subroutine writes its output actual for the calling process
+    // (IEEE 1800-2023 9.2.2.2), so `q` has two always_ff drivers.
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output logic [1:0] x,
+                   output wire [3:0] y);
+            function automatic logic [1:0] pick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            logic [3:0] q;
+            always_ff @(posedge clk) x <= pick(q, q);
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_variables_also_written_by_called_subroutine_bodies() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output wire [3:0] y);
+            logic [3:0] q;
+            task automatic bump();
+                q = q + 4'd1;
+            endtask
+            always_ff @(posedge clk) bump();
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_variables_also_written_by_calls_in_target_indices() {
+    // The index of `x[...]` calls `pick`, which writes `q` through an output.
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output logic [3:0] x,
+                   output wire [3:0] y);
+            logic [3:0] q;
+            function automatic logic [1:0] pick(output logic [3:0] o);
+                o = 4'd5;
+                return 2'd1;
+            endfunction
+            always_ff @(posedge clk) x[pick(q)] <= 1'b1;
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_variables_also_written_by_default_argument_calls() {
+    // `f()` evaluates the default of its omitted argument, which writes `q`.
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output logic [1:0] x,
+                   output wire [3:0] y);
+            logic [3:0] q;
+            function automatic logic side_effect(output logic [3:0] o);
+                o = 4'd5;
+                return 1'b1;
+            endfunction
+            function automatic logic [1:0] f(input logic a = side_effect(q));
+                return {1'b0, a};
+            endfunction
+            always_ff @(posedge clk) x <= f();
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn accepts_a_variable_written_only_through_one_process_calls() {
+    let source = r#"
+        module Top(input logic clk, output logic [1:0] x, output wire [3:0] y);
+            function automatic logic [1:0] pick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            logic [3:0] q;
+            initial q = 4'd0;
+            always_ff @(posedge clk) x <= pick(q, q);
+            assign y = q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("one_writer.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let y = sim.signal("y");
+    let clk = sim.event("clk");
+    for count in 1u8..=3 {
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(y), count);
+    }
+}
+
+#[test]
 fn rejects_child_outputs_that_multiply_drive_a_variable() {
     let error = cranelift_build_error(
         r#"
@@ -8236,5 +8360,161 @@ fn reports_incompatible_unpacked_arrays_in_each_assignment_like_context() {
             }) => assert_eq!(detail, expected),
             _ => panic!("expected an illegal-context error, got {error:?}"),
         }
+    }
+}
+
+#[test]
+fn runs_both_ff_select_index_arms_for_an_unknown_condition() {
+    // An ambiguous condition evaluates both arms (IEEE 1800-2023 11.4.11).
+    let source = r#"
+        module Top(input bit clk, input logic c, output logic [3:0] count);
+            function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            always_ff @(posedge clk) begin
+                logic [3:0] calls;
+                logic [3:0] bits;
+                calls = 4'd0;
+                bits = 4'd0;
+                bits[c ? tick(calls, calls) : tick(calls, calls)] = 1'b1;
+                count <= calls;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_mux_x.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let c = sim.signal("c");
+    let count = sim.signal("count");
+    let clk = sim.event("clk");
+    for (payload, mask, calls) in [(1u8, 0u8, 1u8), (0, 0, 1), (0, 1, 2)] {
+        sim.modify(|io| io.set_four_state(c, BigUint::from(payload), BigUint::from(mask)))
+            .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(count),
+            (BigUint::from(calls), BigUint::default()),
+            "c = {payload}/{mask}"
+        );
+    }
+}
+
+#[test]
+fn runs_one_select_index_arm_for_a_true_condition_with_unknown_bits() {
+    // 2'b1x is true: only the first arm runs; 2'b0x is ambiguous: both run
+    // (IEEE 1800-2023 11.4.11).
+    let source = r#"
+        module Top(input logic [1:0] c, output logic [3:0] first, output logic [3:0] second);
+            function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            always_comb begin
+                logic [3:0] a;
+                logic [3:0] b;
+                logic [3:0] bits;
+                a = 4'd0;
+                b = 4'd0;
+                bits = 4'd0;
+                bits[c ? tick(a, a) : tick(b, b)] = 1'b1;
+                first = a;
+                second = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("comb_mux_x.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let c = sim.signal("c");
+    let first = sim.signal("first");
+    let second = sim.signal("second");
+    for (payload, mask, a, b) in [
+        (0b10u8, 0b01u8, 1u8, 0u8),
+        (0b00, 0b01, 1, 1),
+        (0b00, 0b00, 0, 1),
+    ] {
+        sim.modify(|io| io.set_four_state(c, BigUint::from(payload), BigUint::from(mask)))
+            .unwrap();
+        let known = |value: u8| (BigUint::from(value), BigUint::default());
+        assert_eq!(
+            sim.get_four_state(first),
+            known(a),
+            "c = {payload:b}/{mask:b}"
+        );
+        assert_eq!(
+            sim.get_four_state(second),
+            known(b),
+            "c = {payload:b}/{mask:b}"
+        );
+    }
+}
+
+#[test]
+fn reemits_run_time_loop_events_when_only_the_bound_changes() {
+    let source = r#"
+        module Top(input logic [2:0] count, input logic a, output logic y);
+            always_comb begin
+                for (int i = 0; i < count; i++) $display("tick %0d", i);
+                y = a;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("loop_bound.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let count = sim.signal("count");
+    let ticks = |n: usize| {
+        (0..n)
+            .map(|i| celox::RuntimeEvent::Display {
+                message: format!("tick {i}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(count, 2u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), ticks(2));
+    sim.modify(|io| io.set(count, 3u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), ticks(3));
+}
+
+#[test]
+fn commits_ff_output_actuals_whose_index_calls_a_function() {
+    // `outer` writes `state[inner(k)]` from an always_ff select index; the
+    // write is committed with the process.
+    let source = r#"
+        module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
+                   output logic [3:0] bits);
+            function automatic logic [1:0] inner(input logic [1:0] x);
+                return x;
+            endfunction
+            function automatic logic [1:0] outer(output logic y);
+                y = 1'b1;
+                return 2'd2;
+            endfunction
+            logic [3:0] state;
+            always_ff @(posedge clk) begin
+                state <= 4'd0;
+                bits[outer(state[inner(k)])] <= 1'b1;
+            end
+            assign st = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_nested.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let k = sim.signal("k");
+    let st = sim.signal("st");
+    let bits = sim.signal("bits");
+    let clk = sim.event("clk");
+    for index in [1u8, 3, 0] {
+        sim.modify(|io| io.set(k, index)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(st), 1 << index, "k = {index}");
+        assert_eq!(sim.get_as::<u8>(bits), 4);
     }
 }

@@ -19,6 +19,46 @@ sv_backends! {
         @case "procedural::initial_blocks_define_the_initial_state";
     }
 
+    fn loop_initializer_widens_by_its_own_signedness(sim) {
+        @case "procedural::loop_initializer_widens_by_its_own_signedness";
+    }
+
+    fn select_indices_call_functions(sim) {
+        @case "procedural::select_indices_call_functions";
+    }
+
+    fn runtime_bits_of_a_constant_element(sim) {
+        @case "procedural::runtime_bits_of_a_constant_element";
+    }
+
+    fn select_index_calls_run_as_written(sim) {
+        @case "procedural::select_index_calls_run_as_written";
+    }
+
+    fn select_index_call_skipped_by_logical_and(sim) {
+        @case "procedural::select_index_call_skipped_by_logical_and";
+    }
+
+    fn concatenated_targets_fix_their_positions_first(sim) {
+        @case "procedural::concatenated_targets_fix_their_positions_first";
+    }
+
+    fn ff_select_index_calls_write_state_and_run_once(sim) {
+        @case "procedural::ff_select_index_calls_write_state_and_run_once";
+    }
+
+    fn function_bodies_run_their_index_calls_each_time(sim) {
+        @case "procedural::function_bodies_run_their_index_calls_each_time";
+    }
+
+    fn ff_processes_write_bits_of_separate_array_elements(sim) {
+        @case "procedural::ff_processes_write_bits_of_separate_array_elements";
+    }
+
+    fn runtime_bits_stay_within_their_element(sim) {
+        @case "procedural::runtime_bits_stay_within_their_element";
+    }
+
     fn declaration_initializers_define_the_initial_state(sim) {
         @case "procedural::declaration_initializers_define_the_initial_state";
     }

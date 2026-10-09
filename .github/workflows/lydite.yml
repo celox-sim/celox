@@ -5,8 +5,10 @@ name: lydite
 # linted, and unit-tested by ci.yml; this workflow runs lydite's own gates.
 
 on:
+  # Pull requests run these gates before they merge into master, so a push to
+  # master would only repeat them. The weekly run catches drift between merges.
   push:
-    branches: [master, develop]
+    branches: [develop]
     paths:
       - "crates/lydite*/**"
       - "lydite/**"

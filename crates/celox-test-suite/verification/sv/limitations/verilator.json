@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 2,
+    "mismatch": 3,
     "emission_error": 0,
     "compile_error": 5,
     "runtime_error": 1,
@@ -78,6 +78,14 @@
       "name": "types::rejects_unpacked_argument_of_a_wider_element_type",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "procedural::select_index_call_skipped_by_logical_and at 280:5: assert_eq count: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_call_skipped_by_logical_and",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

@@ -96,8 +96,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Behavioral and verification constructs: `initial` blocks that read design
   state or use timing, `final`, delays and delayed continuous assignments
   ([#444](https://github.com/celox-sim/celox/issues/444)), event controls other than clock edges, concurrent assertions,
-  `force` / `release`. System tasks inside a combinational loop whose trip
-  count is only known at run time are rejected.
+  `force` / `release`.
 - `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)), level-sensitive sensitivity lists other than `@*`,
   and incomplete combinational assignments that would infer a latch.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports

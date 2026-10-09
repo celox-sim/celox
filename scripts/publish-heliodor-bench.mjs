@@ -27,9 +27,9 @@ export function comparisonHistory(source, metrics) {
   return data;
 }
 
-export function appendResult(source, entry) {
+export function appendResult(source, entry, historyName = "Heliodor Benchmarks") {
   const data = readData(source);
-  const history = (data.entries["Heliodor Benchmarks"] ??= []);
+  const history = (data.entries[historyName] ??= []);
   history.push(entry);
   data.lastUpdate = Math.max(data.lastUpdate ?? 0, entry.date);
   return prefix + JSON.stringify(data, null, 2) + "\n";
@@ -37,7 +37,9 @@ export function appendResult(source, entry) {
 
 // Multiple matrix jobs publish independently. A rejected fast-forward push is
 // retried against the new branch tip, preserving every other job's results.
-export function publishResult(remote, entry, { beforePush = () => {} } = {}) {
+export function publishResult(remote, entry, {
+  beforePush = () => {}, historyName = "Heliodor Benchmarks",
+} = {}) {
   if (!entry.benches.length) return;
   const directory = mkdtempSync(join(tmpdir(), "heliodor-publish-"));
   const git = (...args) =>
@@ -68,7 +70,7 @@ export function publishResult(remote, entry, { beforePush = () => {} } = {}) {
       git("checkout", "--quiet", "-B", "publish", "FETCH_HEAD");
       const path = join(directory, dataPath);
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, appendResult(readFileSync(path, "utf8"), entry));
+      writeFileSync(path, appendResult(readFileSync(path, "utf8"), entry, historyName));
       git("add", dataPath);
       git(
         "-c",
@@ -76,7 +78,7 @@ export function publishResult(remote, entry, { beforePush = () => {} } = {}) {
         "commit",
         "--quiet",
         "-m",
-        "chore(bench): publish completed Heliodor result",
+        "chore(bench): publish completed benchmark result",
       );
       beforePush(attempt);
       try {

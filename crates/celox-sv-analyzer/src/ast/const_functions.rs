@@ -370,6 +370,7 @@ impl Frame {
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,
+                site: None,
             },
             Expr::Select { expr, msb, lsb, .. } => {
                 let value = self.eval(expr)?;

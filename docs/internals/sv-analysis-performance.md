@@ -209,7 +209,7 @@ pnpm docs:build
 The type-query follow-up also validates the suite catalogue, including the
 retained-report integration tests, and the new shared case with both available
 independent simulators. Add each new case's observed results to both retained
-reports under `crates/celox-test-suite/verification/sv` and recompute their counts:
+reports under `crates/celox-test-suite/verification/sv`:
 
 ```sh
 cargo test --locked -p celox-test-suite --features verilator,icarus

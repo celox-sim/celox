@@ -744,8 +744,9 @@ fn replace_oob_const_selects_with_unknown(
                 }
             }
         }
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| replace_oob_const_selects_with_unknown(arg, const_env))
@@ -815,7 +816,7 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             lsb: *bit,
             signed: false,
         },
-        ConstExpr::Function { name, args } => Expr::Call {
+        ConstExpr::Function { name, args, .. } => Expr::Call {
             name,
             args: args.into_iter().map(const_expr_to_expr).collect(),
         },
@@ -885,8 +886,9 @@ pub(super) fn substitute_typed_parameter_literals(
                 parameter_types,
             )),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| substitute_typed_parameter_literals(arg, constants, parameter_types))

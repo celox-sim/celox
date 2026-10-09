@@ -98,9 +98,31 @@ impl<'p, 'a> Ff<'p, 'a> {
             return;
         }
         let variable = self.m.var(id);
-        let whole = BitAccess::new(0, variable.width - 1);
+        // A run-time bit select within one array element writes only that
+        // element (see `write`); a run-time element may be any of them.
+        let element_write = dynamic_array_element_lvalue(
+            lvalue,
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+        )
+        .is_some();
+        let whole = (!element_write)
+            .then(|| {
+                dynamic_packed_write(
+                    lvalue,
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
+            })
+            .flatten()
+            .and_then(|write| write.window)
+            .unwrap_or(BitAccess::new(0, variable.width - 1));
         let access = match lvalue {
-            sv::ir::LValue::Ident(_) => whole,
+            sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
             sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
                 msb,
                 self.m.constants,
@@ -149,52 +171,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         for (lvalue, blocking) in writes {
             self.record_target(&lvalue, blocking);
         }
-        // Calls: output arguments and the subroutine bodies.
+        // Calls: output arguments and the subroutine bodies, including the
+        // calls in the select positions of assignment targets.
         let mut calls = Vec::new();
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                let mut exprs = Vec::new();
-                match stmt {
-                    sv::ir::Stmt::Call { name, args } => {
-                        calls.push((name.clone(), args.clone()));
-                        exprs.extend(args.iter().flatten().cloned());
-                    }
-                    sv::ir::Stmt::Assign { rhs, .. }
-                    | sv::ir::Stmt::AssignConcat { rhs, .. }
-                    | sv::ir::Stmt::Eval(rhs) => exprs.push(rhs.clone()),
-                    sv::ir::Stmt::If { condition, .. } => exprs.push(condition.clone()),
-                    sv::ir::Stmt::Case {
-                        selector, items, ..
-                    } => {
-                        exprs.push(selector.clone());
-                        for item in items {
-                            for label in &item.labels {
-                                match label {
-                                    sv::ir::CaseLabel::Value(value) => exprs.push(value.clone()),
-                                    sv::ir::CaseLabel::Range { low, high } => {
-                                        exprs.push(low.clone());
-                                        exprs.push(high.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    sv::ir::Stmt::Loop { condition, .. } => exprs.extend(condition.clone()),
-                    sv::ir::Stmt::Return(Some(value)) => exprs.push(value.clone()),
-                    sv::ir::Stmt::Local {
-                        init: Some(init), ..
-                    } => exprs.push(init.clone()),
-                    _ => {}
-                }
-                for expr in exprs {
-                    collect_calls(&expr, &mut calls);
-                }
-            });
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
-        for (name, args) in calls {
+        while let Some((name, args)) = calls.pop() {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
+            default_calls(&subroutine, &args, &mut calls);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
@@ -363,6 +350,325 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.m.expr_signed(expr)
     }
 
+    /// Run `f` where the right operand of `&&` or `||` is evaluated: it is
+    /// skipped only when the left one is known false (`&&`) or known true
+    /// (`||`) (IEEE 1800-2023 11.4.7), so an unknown left operand evaluates
+    /// it.
+    fn short_circuit<T>(
+        &mut self,
+        op: sv::ir::BinaryOp,
+        left: &sv::ir::Expr,
+        f: impl FnOnce(&mut Self) -> Result<T, sv::AnalyzerError>,
+    ) -> Result<T, sv::AnalyzerError> {
+        let taken = self.b.new_block();
+        let join = self.b.new_block();
+        let (cond, true_block, false_block) = if op == sv::ir::BinaryOp::LogicAnd {
+            (self.eval_not_false(left)?, taken, join)
+        } else {
+            (self.eval_truth(left)?.0, join, taken)
+        };
+        self.b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (true_block, Vec::new()),
+            false_block: (false_block, Vec::new()),
+        });
+        self.b.switch_to_block(taken);
+        let result = f(self)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
+        Ok(result)
+    }
+
+    /// Run `f` in a block entered only where `cond` holds.
+    fn when<T>(
+        &mut self,
+        cond: RegisterId,
+        f: impl FnOnce(&mut Self) -> Result<T, sv::AnalyzerError>,
+    ) -> Result<T, sv::AnalyzerError> {
+        let taken = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (taken, Vec::new()),
+            false_block: (join, Vec::new()),
+        });
+        self.b.switch_to_block(taken);
+        let result = f(self)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
+        Ok(result)
+    }
+
+    /// Run `then_f` and `else_f` where the arms of a conditional operator
+    /// are evaluated; an ambiguous condition evaluates both (IEEE 1800-2023
+    /// 11.4.11).
+    fn mux_arms<A, B>(
+        &mut self,
+        condition: &sv::ir::Expr,
+        then_f: impl FnOnce(&mut Self) -> Result<A, sv::AnalyzerError>,
+        else_f: impl FnOnce(&mut Self) -> Result<B, sv::AnalyzerError>,
+    ) -> Result<(A, B), sv::AnalyzerError> {
+        if self.m.four_state {
+            let mut arena = SLTNodeArena::new();
+            let mut consts = ConstCache::default();
+            let node = self.expr_slt(condition, None, &mut arena)?;
+            let truth = slt_truth(&mut arena, node)?;
+            let unknown = slt_truth_unknown(&mut arena, &mut consts, node)?;
+            let then_cond = slt_or(&mut arena, &mut consts, truth, unknown)?;
+            let not_truth = slt_not(&mut arena, &mut consts, truth)?;
+            let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
+            let then_cond = self.lower_slt(&arena, then_cond)?;
+            let else_cond = self.lower_slt(&arena, else_cond)?;
+            let then_result = self.when(then_cond, then_f)?;
+            let else_result = self.when(else_cond, else_f)?;
+            return Ok((then_result, else_result));
+        }
+        let (truth, _) = self.eval_truth(condition)?;
+        let then_block = self.b.new_block();
+        let else_block = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: truth,
+            true_block: (then_block, Vec::new()),
+            false_block: (else_block, Vec::new()),
+        });
+        self.b.switch_to_block(then_block);
+        let then_result = then_f(self)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(else_block);
+        let else_result = else_f(self)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
+        Ok((then_result, else_result))
+    }
+
+    /// Evaluate the subroutine calls of a select position, left to right,
+    /// and refer to their results. A flattened select repeats an index in
+    /// its bounds and range checks; the copies of one call share its site,
+    /// so the call is evaluated once.
+    fn hoist_const(
+        &mut self,
+        expr: &sv::ir::ConstExpr,
+        calls: &mut Vec<(sv::ir::ConstExpr, sv::ir::ConstExpr)>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if !self.m.const_calls(expr) {
+            return Ok(expr.clone());
+        }
+        let operand = |expr: &ConstExpr| {
+            expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
+        };
+        Ok(match expr {
+            ConstExpr::Function { name, args, .. }
+                if self.m.subroutines.contains_key(name)
+                    || self.m.dpi_imports.contains_key(name) =>
+            {
+                if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
+                    return Ok(result.clone());
+                }
+                let mut lowered = Vec::with_capacity(args.len());
+                for arg in args {
+                    let arg = self.hoist_const(arg, calls)?;
+                    lowered.push(
+                        expr_from_const_expr(&arg).ok_or_else(|| {
+                            unsupported(format!("argument of `{name}` in a select"))
+                        })?,
+                    );
+                }
+                let call = sv::ir::Expr::Call {
+                    name: name.clone(),
+                    args: lowered,
+                };
+                let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
+                    return Err(unsupported(format!("call of `{name}` in a select")));
+                };
+                let result = ConstExpr::Ident(result);
+                calls.push((expr.clone(), result.clone()));
+                result
+            }
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.hoist_const(arg, calls))
+                    .collect::<Result<_, _>>()?,
+                site: *site,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                bit: Box::new(self.hoist_const(bit, calls)?),
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.hoist_const(expr, calls)?),
+            },
+            ConstExpr::Binary { left, op, right }
+                if matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr)
+                    && self.m.const_calls(right) =>
+            {
+                let left = self.hoist_const(left, calls)?;
+                let right = self
+                    .short_circuit(*op, &operand(&left)?, |this| this.hoist_const(right, calls))?;
+                ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: *op,
+                    right: Box::new(right),
+                }
+            }
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.hoist_const(left, calls)?),
+                op: *op,
+                right: Box::new(self.hoist_const(right, calls)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let condition = self.hoist_const(condition, calls)?;
+                let (then_expr, else_expr) =
+                    if self.m.const_calls(then_expr) || self.m.const_calls(else_expr) {
+                        // A part of both arms is a copy the flattening of a
+                        // select made, which runs whichever arm is taken.
+                        for shared in self.m.shared_calls(then_expr, else_expr) {
+                            self.hoist_const(shared, calls)?;
+                        }
+                        // `calls` is shared by both arms, which run one after
+                        // the other.
+                        let calls = std::cell::RefCell::new(calls);
+                        self.mux_arms(
+                            &operand(&condition)?,
+                            |this| this.hoist_const(then_expr, &mut calls.borrow_mut()),
+                            |this| this.hoist_const(else_expr, &mut calls.borrow_mut()),
+                        )?
+                    } else {
+                        ((**then_expr).clone(), (**else_expr).clone())
+                    };
+                ConstExpr::Mux {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                }
+            }
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr.clone(),
+        })
+    }
+
+    /// An assignment target whose select positions refer to the results of
+    /// their subroutine calls, evaluated now.
+    fn hoist_lvalue(
+        &mut self,
+        lvalue: &sv::ir::LValue,
+    ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
+        if !self.m.lvalue_calls(lvalue) {
+            return Ok(lvalue.clone());
+        }
+        let mut lvalue = lvalue.clone();
+        if let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue {
+            let mut calls = Vec::new();
+            *lsb = self.hoist_const(lsb, &mut calls)?;
+            *msb = self.hoist_const(msb, &mut calls)?;
+        }
+        Ok(lvalue)
+    }
+
+    /// `lvalue` with the variables its select positions read replaced by
+    /// copies of their current values, so a later write to one does not move
+    /// the target.
+    fn freeze_lvalue(
+        &mut self,
+        mut lvalue: sv::ir::LValue,
+    ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
+        let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
+            return Ok(lvalue);
+        };
+        let mut copies = HashMap::default();
+        *lsb = self.freeze_const(lsb, &mut copies)?;
+        *msb = self.freeze_const(msb, &mut copies)?;
+        Ok(lvalue)
+    }
+
+    /// `expr` with each variable it reads, and each bit it reads from an
+    /// unpacked array, replaced by a copy of its current value.
+    fn freeze_const(
+        &mut self,
+        expr: &sv::ir::ConstExpr,
+        copies: &mut HashMap<sv::ir::ConstExpr, sv::ir::ConstExpr>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if let Some(copy) = copies.get(expr) {
+            return Ok(copy.clone());
+        }
+        let array = |this: &Self, name: &str| {
+            this.m
+                .id(name)
+                .map(|id| !this.m.var(id).array_dims.is_empty())
+        };
+        let frozen = match expr {
+            ConstExpr::Ident(name) if array(self, name) == Some(false) => {
+                let id = self.m.id(name).expect("a variable");
+                let variable = self.m.var(id);
+                let (width, signed, is_4state) =
+                    (variable.width, variable.signed, variable.is_4state);
+                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
+                self.store(temp, SIROffset::Static(0), width, value);
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
+            {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let bit = self.freeze_const(bit, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb: bit.clone(),
+                    lsb: bit,
+                    signed: false,
+                };
+                let value = self.eval(&read, Some((1, false)))?;
+                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
+                self.store(temp, SIROffset::Static(0), 1, value);
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                bit: Box::new(self.freeze_const(bit, copies)?),
+            },
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.freeze_const(arg, copies))
+                    .collect::<Result<_, _>>()?,
+                site: *site,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.freeze_const(expr, copies)?),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.freeze_const(left, copies)?),
+                op: *op,
+                right: Box::new(self.freeze_const(right, copies)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: Box::new(self.freeze_const(condition, copies)?),
+                then_expr: Box::new(self.freeze_const(then_expr, copies)?),
+                else_expr: Box::new(self.freeze_const(else_expr, copies)?),
+            },
+        };
+        copies.insert(expr.clone(), frozen.clone());
+        Ok(frozen)
+    }
+
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
@@ -420,25 +726,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     && self.m.calls(right) =>
             {
                 let left = self.hoist(left)?;
-                // The right operand is skipped only when the left one is
-                // known false (`&&`) or known true (`||`) (IEEE 1800-2023
-                // 11.4.7), so an unknown left operand evaluates it.
-                let taken = self.b.new_block();
-                let join = self.b.new_block();
-                let (cond, true_block, false_block) = if *op == sv::ir::BinaryOp::LogicAnd {
-                    (self.eval_not_false(&left)?, taken, join)
-                } else {
-                    (self.eval_truth(&left)?.0, join, taken)
-                };
-                self.b.seal_block(SIRTerminator::Branch {
-                    cond,
-                    true_block: (true_block, Vec::new()),
-                    false_block: (false_block, Vec::new()),
-                });
-                self.b.switch_to_block(taken);
-                let right = self.hoist(right)?;
-                self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
-                self.b.switch_to_block(join);
+                let right = self.short_circuit(*op, &left, |this| this.hoist(right))?;
                 Expr::Binary {
                     left: Box::new(left),
                     op: *op,
@@ -451,22 +739,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 else_expr,
             } if self.m.calls(then_expr) || self.m.calls(else_expr) => {
                 let condition = self.hoist(condition)?;
-                let (truth, _) = self.eval_truth(&condition)?;
-                let then_block = self.b.new_block();
-                let else_block = self.b.new_block();
-                let join = self.b.new_block();
-                self.b.seal_block(SIRTerminator::Branch {
-                    cond: truth,
-                    true_block: (then_block, Vec::new()),
-                    false_block: (else_block, Vec::new()),
-                });
-                self.b.switch_to_block(then_block);
-                let then_expr = self.hoist(then_expr)?;
-                self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
-                self.b.switch_to_block(else_block);
-                let else_expr = self.hoist(else_expr)?;
-                self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
-                self.b.switch_to_block(join);
+                let (then_expr, else_expr) = self.mux_arms(
+                    &condition,
+                    |this| this.hoist(then_expr),
+                    |this| this.hoist(else_expr),
+                )?;
                 Expr::Mux {
                     condition: Box::new(condition),
                     then_expr: Box::new(then_expr),
@@ -485,12 +762,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 msb,
                 lsb,
                 signed,
-            } => Expr::Select {
-                expr: Box::new(self.hoist(expr)?),
-                msb: msb.clone(),
-                lsb: lsb.clone(),
-                signed: *signed,
-            },
+            } => {
+                let expr = self.hoist(expr)?;
+                let mut calls = Vec::new();
+                let lsb = self.hoist_const(lsb, &mut calls)?;
+                let msb = self.hoist_const(msb, &mut calls)?;
+                Expr::Select {
+                    expr: Box::new(expr),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                }
+            }
             Expr::Concat(parts) => Expr::Concat(
                 parts
                     .iter()
@@ -671,6 +954,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
+        let lhs = self.hoist_lvalue(&lhs)?;
         let width = self.lvalue_width(&lhs)?;
         let signed = self.expr_signed(rhs);
         let mut arena = SLTNodeArena::new();
@@ -819,13 +1103,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                         Some(false),
                     )
                     .ok_or_else(|| unsupported("dynamic assignment position"))?;
+                    // A select within one array element reads and writes only
+                    // that element, which is all its process commits.
+                    let window = write
+                        .window
+                        .unwrap_or_else(|| BitAccess::new(0, var_width - 1));
                     let alias = self.alias(id);
                     let current = arena
                         .alloc(SLTNode::Input {
                             variable: alias,
                             signed: false,
                             index: Vec::new(),
-                            access: BitAccess::new(0, var_width - 1),
+                            access: window,
                         })
                         .map_err(slt_error)?;
                     let wide = var_width
@@ -842,6 +1131,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                     };
                     let value = coerce(arena, node)?;
                     let current = coerce(arena, current)?;
+                    let current = if window.lsb == 0 {
+                        current
+                    } else {
+                        let bottom = slt_constant(arena, BigUint::from(window.lsb), wide, false)?;
+                        arena
+                            .alloc(SLTNode::Binary(current, BinaryOp::Shl, bottom))
+                            .map_err(slt_error)?
+                    };
                     let up = coerce(arena, up)?;
                     let down = coerce(arena, down)?;
                     let place = |arena: &mut SLTNodeArena<SourceVarId>,
@@ -895,18 +1192,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                                 .map_err(slt_error)?;
                         }
                     }
-                    let updated = if wide == var_width {
+                    let window_width = window.msb - window.lsb + 1;
+                    let updated = if window.lsb == 0 && window_width == wide {
                         updated
                     } else {
                         arena
                             .alloc(SLTNode::Slice {
                                 expr: updated,
-                                access: BitAccess::new(0, var_width - 1),
+                                access: window,
                             })
                             .map_err(slt_error)?
                     };
                     let value = self.lower_slt(arena, updated)?;
-                    self.store(id, SIROffset::Static(0), var_width, value);
+                    let offset = sv_memory_offset(self.m.var(id), window.lsb, window_width);
+                    self.store(id, offset, window_width, value);
                     return Ok(());
                 }
                 Err(unsupported(format!("assignment target `{}`", lhs.name())))
@@ -1036,10 +1335,18 @@ impl<'p, 'a> Ff<'p, 'a> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
-        let parts: Vec<_> = parts
-            .iter()
-            .map(|part| self.propagate_lvalue(part))
-            .collect();
+        // The positions of the parts are evaluated before any part is written.
+        let mut evaluated = Vec::with_capacity(parts.len());
+        for part in parts {
+            let part = self.propagate_lvalue(part);
+            let part = self.hoist_lvalue(&part)?;
+            evaluated.push(if parts.len() > 1 {
+                self.freeze_lvalue(part)?
+            } else {
+                part
+            });
+        }
+        let parts = evaluated;
         let widths = parts
             .iter()
             .map(|part| self.lvalue_width(part))
@@ -1454,9 +1761,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let id = self.m.id(&canonical.var).expect("loop variable");
         let (width, signed) = (self.m.var(id).width, self.m.var(id).signed);
-        let Some((start, _)) = self.eval_const(&canonical.start)? else {
+        let start_signed = self.expr_signed(&canonical.start);
+        let Some((mut start, start_width)) = self.eval_const(&canonical.start)? else {
             return Ok(None);
         };
+        // The initializer widens to the loop variable by its own signedness.
+        if start_signed
+            && start_width > 0
+            && start_width < width
+            && start.bit(start_width as u64 - 1)
+        {
+            start |= ((BigUint::from(1u8) << width) - BigUint::from(1u8))
+                ^ ((BigUint::from(1u8) << start_width) - BigUint::from(1u8));
+        }
         let Some(condition) = condition else {
             return Ok(None);
         };
@@ -1857,45 +2174,6 @@ pub(super) fn prune_unreachable_blocks<A>(unit: &mut ExecutionUnit<A>) {
     unit.blocks.retain(|id, _| reachable.contains(id));
 }
 
-fn collect_calls(expr: &sv::ir::Expr, calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>) {
-    match expr {
-        sv::ir::Expr::Call { name, args } => {
-            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
-            for arg in args {
-                collect_calls(arg, calls);
-            }
-        }
-        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
-        sv::ir::Expr::Select { expr, .. }
-        | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => collect_calls(expr, calls),
-        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().for_each(|part| collect_calls(part, calls))
-        }
-        sv::ir::Expr::Binary { left, right, .. } => {
-            collect_calls(left, calls);
-            collect_calls(right, calls);
-        }
-        sv::ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_calls(condition, calls);
-            collect_calls(then_expr, calls);
-            collect_calls(else_expr, calls);
-        }
-        sv::ir::Expr::Inside { expr, items } => {
-            collect_calls(expr, calls);
-            for item in items {
-                item.exprs()
-                    .into_iter()
-                    .for_each(|operand| collect_calls(operand, calls));
-            }
-        }
-    }
-}
-
 fn substitute_overlay_const(
     expr: &sv::ir::ConstExpr,
     overlay: &HashMap<String, (String, i128)>,
@@ -1912,8 +2190,9 @@ fn substitute_overlay_const(
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name: name.clone(),
+            site: *site,
             args: args.iter().map(go).collect(),
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {

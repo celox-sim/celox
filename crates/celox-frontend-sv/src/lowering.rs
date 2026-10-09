@@ -524,31 +524,80 @@ fn validate_variable_driver_ranges(
     Ok(())
 }
 
-/// Records the ranges of `signal_name` that the assignments of `body` write.
+/// Records the ranges of `signal_name` that `body` writes: by assignments,
+/// and through the output arguments and bodies of the subroutines it calls,
+/// which write for the calling process (IEEE 1800-2023 9.2.2.2).
 fn body_driver_ranges(
     drivers: &mut Vec<(usize, Option<(i128, i128)>)>,
     body: &[sv::ir::Stmt],
     driver_id: usize,
-    signal_name: &str,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
+    scan: &DriverScan<'_>,
 ) {
-    for stmt in body {
-        stmt.walk(&mut |stmt| {
-            let lvalues: Vec<&sv::ir::LValue> = match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => vec![lhs],
-                sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().collect(),
-                _ => Vec::new(),
+    let mut visited = HashSet::default();
+    scan.body(drivers, body, driver_id, &mut visited, 0);
+}
+
+/// What `body_driver_ranges` looks for and in which module.
+struct DriverScan<'a> {
+    signal_name: &'a str,
+    subroutines: &'a [sv::ir::Subroutine],
+    /// The bits an assignment target drives, when they are known.
+    range: &'a dyn Fn(&sv::ir::LValue) -> Option<(i128, i128)>,
+}
+
+impl DriverScan<'_> {
+    fn body(
+        &self,
+        drivers: &mut Vec<(usize, Option<(i128, i128)>)>,
+        body: &[sv::ir::Stmt],
+        driver_id: usize,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) {
+        // Deeper calls are rejected when the processes are lowered.
+        if depth > procedural::MAX_CALL_DEPTH {
+            return;
+        }
+        let record = |drivers: &mut Vec<_>, lvalue: &sv::ir::LValue| {
+            if lvalue.name() == self.signal_name {
+                drivers.push((driver_id, (self.range)(lvalue)));
+            }
+        };
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => record(drivers, lhs),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        parts.iter().for_each(|part| record(drivers, part))
+                    }
+                    _ => {}
+                }
+                procedural::stmt_calls(stmt, &mut calls);
+            });
+        }
+        while let Some((name, args)) = calls.pop() {
+            let Some(subroutine) = self
+                .subroutines
+                .iter()
+                .find(|subroutine| subroutine.name == name)
+            else {
+                continue;
             };
-            for lvalue in lvalues {
-                if lvalue.name() == signal_name {
-                    drivers.push((
-                        driver_id,
-                        net_lvalue_range(lvalue, constants, parameter_types),
-                    ));
+            procedural::default_calls(subroutine, &args, &mut calls);
+            for (param, arg) in subroutine.params.iter().zip(&args) {
+                if param.direction.is_written()
+                    && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
+                {
+                    lvalues.iter().for_each(|lvalue| record(drivers, lvalue));
                 }
             }
-        });
+            // A subroutine body writes a module variable for each caller;
+            // its own formals and locals have module-unique names.
+            if visited.insert(name) {
+                self.body(drivers, &subroutine.body, driver_id, visited, depth + 1);
+            }
+        }
     }
 }
 
@@ -569,30 +618,51 @@ fn local_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    // The element a run-time select inside one element of an array drives.
+    let shape = module
+        .signals()
+        .iter()
+        .map(|signal| (signal.name(), signal.r#type()))
+        .chain(
+            module
+                .ports()
+                .iter()
+                .map(|port| (port.name(), port.r#type())),
+        )
+        .find(|(name, _)| *name == signal_name)
+        .and_then(|(_, r#type)| signal_type_from_sv(r#type, constants, parameter_types).ok())
+        .and_then(|info| {
+            let elements = info.array_dims.iter().product::<usize>();
+            (!info.array_dims.is_empty() && elements != 0)
+                .then(|| (info.width / elements, info.width))
+        });
+    let lvalue_range = |lvalue: &sv::ir::LValue| {
+        net_lvalue_range(lvalue, constants, parameter_types).or_else(|| {
+            let (sv::ir::LValue::Select { lsb, .. }, Some((element_width, width))) =
+                (lvalue, shape)
+            else {
+                return None;
+            };
+            let window =
+                runtime_select_window(lsb, element_width, width, constants, parameter_types)?;
+            Some((window.lsb as i128, window.msb as i128))
+        })
+    };
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &lvalue_range,
+    };
     let mut drivers = Vec::new();
     let mut driver_id = 0;
     for process in module.comb_processes() {
         if condition_is_active(process.condition(), constants, parameter_types) {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                constants,
-                parameter_types,
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
         driver_id += 1;
     }
     for process in module.ff_processes() {
-        body_driver_ranges(
-            &mut drivers,
-            process.body(),
-            driver_id,
-            signal_name,
-            constants,
-            parameter_types,
-        );
+        body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         driver_id += 1;
     }
     drivers
@@ -605,19 +675,18 @@ fn continuous_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    let range = |lvalue: &sv::ir::LValue| net_lvalue_range(lvalue, constants, parameter_types);
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &range,
+    };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.comb_processes().iter().enumerate() {
         if process.kind() == sv::ir::CombProcessKind::ContinuousAssign
             && condition_is_active(process.condition(), constants, parameter_types)
         {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                constants,
-                parameter_types,
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
     drivers
@@ -631,17 +700,16 @@ fn initial_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    let range = |lvalue: &sv::ir::LValue| net_lvalue_range(lvalue, constants, parameter_types);
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &range,
+    };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.initial_processes().iter().enumerate() {
         if condition_is_active(process.condition(), constants, parameter_types) {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                constants,
-                parameter_types,
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
     drivers
@@ -1623,8 +1691,30 @@ pub(crate) fn attach_instance_glue(
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
-    // Combinational event sites follow the flip-flop ones.
+    // Combinational event sites follow the flip-flop ones, including the
+    // events run-time loops emit.
     let site_base = module.runtime_event_sites.len() as u32;
+    if site_base != 0 {
+        let len = module.arena.len();
+        module
+            .arena
+            .remap_for_fold_effect_sites(0..len, |site_id, fatal_error_code| {
+                site_id
+                    .checked_add(site_base)
+                    .map(|site_id| Some((site_id, fatal_error_code.map(|_| i64::from(site_id)))))
+                    .ok_or(celox_slt::SLTNodeArenaEditError::SiteIdOverflow {
+                        site_id,
+                        offset: site_base,
+                    })
+            })
+            .map_err(|error| {
+                ParserError::illegal_context(
+                    "systemverilog loop runtime-event remap",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+    }
     for mut observer in comb_observers {
         observer.site_id += site_base;
         observer.activation_group += site_base;
@@ -1900,12 +1990,12 @@ fn lower_comb_processes(
             }
         }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
+        comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         comb_blocks.extend(comb.lower_process(process.body())?);
         // The sites of one process activate together.
         let base = sites.len() as u32;
         for mut observer in std::mem::take(&mut comb.observers) {
-            observer.site_id += base;
             observer.activation_group = base;
             observers.push(observer);
         }
@@ -2494,6 +2584,7 @@ fn lower_glue_parent_expr(
                 name_to_id,
                 constants,
                 parameter_types,
+                false,
             ) {
                 return lower_glue_parent_expr(
                     &rewritten,
@@ -2562,6 +2653,30 @@ fn lower_glue_parent_expr(
                     sources,
                     source_ids,
                 ));
+            }
+            // As in `lower_expr_with_context`: a run-time bit the element
+            // lowering cannot express is read from the flattened array.
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                true,
+            ) {
+                return lower_glue_parent_expr(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
             }
             let (inner, sources, source_ids) = lower_glue_parent_expr(
                 expr,
@@ -3261,6 +3376,40 @@ struct DynamicPackedWrite {
     /// Where the selected bits sit; see [`RuntimePosition`].
     up: sv::ir::Expr,
     down: sv::ir::Expr,
+    /// For a run-time select inside a constant element of an array, the
+    /// bits of that element: only they are written.
+    window: Option<BitAccess>,
+}
+
+/// For a run-time select inside one element of an unpacked array, such as
+/// `mem[1][i]`, the bits of that element: the constant part of the flattened
+/// position names the element, and the run-time part moves within it.
+fn runtime_select_window(
+    lsb: &sv::ir::ConstExpr,
+    element_width: usize,
+    width: usize,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<BitAccess> {
+    // One-bit elements have no bits within an element, and their run-time
+    // index has no stride to recognize.
+    if element_width <= 1 || element_width == width {
+        return None;
+    }
+    let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
+    // A run-time element index can reach every element.
+    if dynamic_array_base_steps_elements(
+        base,
+        i128::try_from(element_width).ok()?,
+        constants,
+        parameter_types,
+    ) {
+        return None;
+    }
+    let element = usize::try_from(offset).ok()? / element_width;
+    let lsb = element.checked_mul(element_width)?;
+    let msb = lsb.checked_add(element_width - 1)?;
+    (msb < width).then(|| BitAccess::new(lsb, msb))
 }
 
 fn dynamic_packed_write(
@@ -3282,6 +3431,7 @@ fn dynamic_packed_write(
     };
     let id = *name_to_id.get(name)?;
     let variable = variables.get(&id)?;
+    // Callers try the element lowering of an array first.
     let position = runtime_select_position(
         name,
         msb,
@@ -3290,14 +3440,24 @@ fn dynamic_packed_write(
         name_to_id,
         constants,
         parameter_types,
+        true,
+        false,
     )?;
-    (variable.array_dims.is_empty() && position.width <= variable.width).then_some(
-        DynamicPackedWrite {
-            select_width: position.width,
-            up: position.up,
-            down: position.down,
-        },
-    )
+    let window = unpacked_element_width(variable).and_then(|element_width| {
+        runtime_select_window(
+            lsb,
+            element_width,
+            variable.width,
+            constants,
+            parameter_types,
+        )
+    });
+    (position.width <= variable.width).then_some(DynamicPackedWrite {
+        select_width: position.width,
+        up: position.up,
+        down: position.down,
+        window,
+    })
 }
 
 fn permute_reversed_lvalue_rhs_slt(
@@ -3518,6 +3678,7 @@ fn lower_expr_with_context(
                 name_to_id,
                 constants,
                 parameter_types,
+                false,
             ) {
                 return lower_expr_with_context(
                     &rewritten,
@@ -3578,6 +3739,28 @@ fn lower_expr_with_context(
                     .ok()?,
                     sources,
                 ));
+            }
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                true,
+            ) {
+                return lower_expr_with_context(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
             }
             let (inner, mut sources) = lower_expr(
                 expr,
@@ -4351,11 +4534,17 @@ struct RuntimePosition {
     vector_width: usize,
     up: sv::ir::Expr,
     down: sv::ir::Expr,
+    /// The bits of the array element the select stays within, when the
+    /// position is measured from its bottom rather than from bit 0.
+    window: Option<BitAccess>,
 }
 
 /// The select width and runtime position of the `lsb` index for a packed
 /// select of `name` whose bounds depend on a runtime value. A variable keeps
-/// its declared range; a parameter is a zero-based vector.
+/// its declared range; a parameter is a zero-based vector. With
+/// `element_window`, a select within one array element is measured within
+/// that element, so a position outside it selects no bits.
+#[allow(clippy::too_many_arguments)]
 fn runtime_select_position(
     name: &str,
     msb: &sv::ir::ConstExpr,
@@ -4364,12 +4553,47 @@ fn runtime_select_position(
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    flat_arrays: bool,
+    element_window: bool,
 ) -> Option<RuntimePosition> {
+    let mut window = None;
+    let mut whole_array = false;
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
-        Some(variable) => {
-            if !variable.array_dims.is_empty() {
+        Some(variable) if !variable.array_dims.is_empty() => {
+            // A select the element lowering cannot express, such as a
+            // run-time bit of a constant element, addresses the flattened
+            // bits of the array.
+            if !flat_arrays {
                 return None;
             }
+            // The analyzer moves a bit select whose inner index is out of
+            // range past the whole array, so its flattened position never
+            // reaches a neighbouring element. Within a constant element, the
+            // position can be measured within it.
+            // A write stays in its constant element through its own window
+            // (see `dynamic_packed_write`).
+            let element = unpacked_element_width(variable).and_then(|element_width| {
+                runtime_select_window(
+                    lsb,
+                    element_width,
+                    variable.width,
+                    constants,
+                    parameter_types,
+                )
+            });
+            // A single element spans the whole array.
+            whole_array =
+                element.is_none() && unpacked_element_width(variable) != Some(variable.width);
+            window = element.filter(|_| element_window);
+            match window {
+                Some(window) => (
+                    i128::try_from(window.msb).ok()?,
+                    i128::try_from(window.lsb).ok()?,
+                ),
+                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
+            }
+        }
+        Some(variable) => {
             match variable.packed_ranges.as_slice() {
                 [range] => *range,
                 // The analyzer flattens the selects of several packed
@@ -4388,6 +4612,12 @@ fn runtime_select_position(
         return None;
     }
     let width = runtime_select_width(msb, lsb, name_to_id, constants, parameter_types)?;
+    // Only a bit select (the same position for both bounds) is moved past
+    // the whole array when out of range; a part-select, even of one bit,
+    // could reach a neighbouring element.
+    if whole_array && (width != 1 || msb != lsb) {
+        return None;
+    }
     let index = expr_from_const_expr(lsb)?;
     // An index such as `i - 1` wraps when it should be negative. Widen it with
     // its sign so that "hangs over the bottom" can be tested as a comparison.
@@ -4432,6 +4662,7 @@ fn runtime_select_position(
         vector_width: usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
         up: select(hangs_over.clone(), zero(), above),
         down: select(hangs_over, below, zero()),
+        window,
     })
 }
 
@@ -4448,6 +4679,7 @@ fn runtime_select_as_shift(
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    flat_arrays: bool,
 ) -> Option<sv::ir::Expr> {
     let sv::ir::Expr::Ident(name) = expr else {
         return None;
@@ -4460,6 +4692,8 @@ fn runtime_select_as_shift(
         name_to_id,
         constants,
         parameter_types,
+        flat_arrays,
+        flat_arrays,
     )?;
     let shift = |value: sv::ir::Expr, op, amount: sv::ir::Expr| sv::ir::Expr::Binary {
         left: Box::new(value),
@@ -4478,7 +4712,17 @@ fn runtime_select_as_shift(
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed: false,
     };
-    let moved = move_down(expr.clone());
+    // Within an array element, only the element's bits can be selected.
+    let vector = match position.window {
+        Some(window) => sv::ir::Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: sv::ir::ConstExpr::Literal(window.msb.to_string()),
+            lsb: sv::ir::ConstExpr::Literal(window.lsb.to_string()),
+            signed: false,
+        },
+        None => expr.clone(),
+    };
+    let moved = move_down(vector);
     // Shifting fills the missing bits with 0, which is what a two-state
     // vector (or a parameter) reads.
     let four_state = name_to_id
@@ -4628,46 +4872,67 @@ fn split_dynamic_array_offset<'a>(
     Some((expr, 0))
 }
 
+/// Whether some run-time term of the base steps by whole elements, as a
+/// run-time element index does.
+fn dynamic_array_base_steps_elements(
+    expr: &sv::ir::ConstExpr,
+    element_width: i128,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    let steps =
+        |expr| dynamic_array_base_steps_elements(expr, element_width, constants, parameter_types);
+    let constant =
+        |expr| sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types);
+    match expr {
+        sv::ir::ConstExpr::Binary { left, op, right } => {
+            if *op == sv::ir::BinaryOp::Mul {
+                let (left_value, right_value) = (constant(left), constant(right));
+                if left_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                    && right_value.is_none()
+                    || right_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                        && left_value.is_none()
+                {
+                    return true;
+                }
+            }
+            steps(left) || steps(right)
+        }
+        sv::ir::ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => steps(then_expr) || steps(else_expr),
+        _ => false,
+    }
+}
+
 fn dynamic_array_base_has_stride(
     expr: &sv::ir::ConstExpr,
     element_width: i128,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> bool {
+    // Every value of the base must be a multiple of the element width: a
+    // run-time term without the stride, such as an inner bit index, moves
+    // within an element.
+    if let Some(value) = sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+    {
+        return value % element_width == 0;
+    }
+    let has_stride =
+        |expr| dynamic_array_base_has_stride(expr, element_width, constants, parameter_types);
     match expr {
-        sv::ir::ConstExpr::Binary { left, op, right } => {
-            if *op == sv::ir::BinaryOp::Mul {
-                let left_value =
-                    sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types);
-                let right_value =
-                    sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types);
-                if left_value.is_some_and(|value| value > 0 && value % element_width == 0)
-                    && right_value.is_none()
-                {
-                    return true;
-                }
-                if right_value.is_some_and(|value| value > 0 && value % element_width == 0)
-                    && left_value.is_none()
-                {
-                    return true;
-                }
-            }
-            dynamic_array_base_has_stride(left, element_width, constants, parameter_types)
-                || dynamic_array_base_has_stride(right, element_width, constants, parameter_types)
-        }
+        sv::ir::ConstExpr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Mul => has_stride(left) || has_stride(right),
+            sv::ir::BinaryOp::Add | sv::ir::BinaryOp::Sub => has_stride(left) && has_stride(right),
+            _ => false,
+        },
         sv::ir::ConstExpr::Mux {
             then_expr,
             else_expr,
             ..
-        } => {
-            dynamic_array_base_has_stride(then_expr, element_width, constants, parameter_types)
-                || dynamic_array_base_has_stride(
-                    else_expr,
-                    element_width,
-                    constants,
-                    parameter_types,
-                )
-        }
+        } => has_stride(then_expr) && has_stride(else_expr),
         _ => false,
     }
 }
