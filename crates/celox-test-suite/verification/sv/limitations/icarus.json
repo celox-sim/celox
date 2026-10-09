@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 45,
+    "compile_error": 46,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -452,6 +452,14 @@
       "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Function celox_suite_tb.dut.bump port after is not an input port.\n<case>/source_0.sv:6:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "procedural::concatenated_targets_fix_their_positions_first",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::ff_select_index_calls_write_state_and_run_once",
       "phase": "compile",
       "status": "compile_error"
     }

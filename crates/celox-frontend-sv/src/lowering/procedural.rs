@@ -1460,82 +1460,37 @@ pub(super) fn canonical_for_loop(
     })
 }
 
-/// The identifiers a constant expression reads.
-pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-    match expr {
-        sv::ir::ConstExpr::Ident(name) => {
-            names.insert(name.clone());
-        }
-        sv::ir::ConstExpr::Literal(_) => {}
-        sv::ir::ConstExpr::Select { expr, bit } => {
-            const_idents(expr, names);
-            const_idents(bit, names);
-        }
-        sv::ir::ConstExpr::Function { args, .. } => {
-            args.iter().for_each(|arg| const_idents(arg, names))
-        }
-        sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
-        sv::ir::ConstExpr::Binary { left, right, .. } => {
-            const_idents(left, names);
-            const_idents(right, names);
-        }
-        sv::ir::ConstExpr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            const_idents(condition, names);
-            const_idents(then_expr, names);
-            const_idents(else_expr, names);
-        }
-    }
-}
-
-/// `expr` with the identifiers in `values` replaced.
-pub(super) fn substitute_const_idents(
-    expr: &sv::ir::ConstExpr,
-    values: &HashMap<String, sv::ir::ConstExpr>,
-) -> sv::ir::ConstExpr {
-    use sv::ir::ConstExpr;
-    let go = |expr: &ConstExpr| Box::new(substitute_const_idents(expr, values));
-    match expr {
-        ConstExpr::Ident(name) => values.get(name).cloned().unwrap_or_else(|| expr.clone()),
-        ConstExpr::Literal(_) => expr.clone(),
-        ConstExpr::Select { expr, bit } => ConstExpr::Select {
-            expr: go(expr),
-            bit: go(bit),
-        },
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|arg| substitute_const_idents(arg, values))
-                .collect(),
-            site: *site,
-        },
-        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
-            op: *op,
-            expr: go(expr),
-        },
-        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-            left: go(left),
-            op: *op,
-            right: go(right),
-        },
-        ConstExpr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => ConstExpr::Mux {
-            condition: go(condition),
-            then_expr: go(then_expr),
-            else_expr: go(else_expr),
-        },
-    }
-}
-
 /// The identifiers an expression reads.
 pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
+    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+        match expr {
+            sv::ir::ConstExpr::Ident(name) => {
+                names.insert(name.clone());
+            }
+            sv::ir::ConstExpr::Literal(_) => {}
+            sv::ir::ConstExpr::Select { expr, bit } => {
+                const_idents(expr, names);
+                const_idents(bit, names);
+            }
+            sv::ir::ConstExpr::Function { args, .. } => {
+                args.iter().for_each(|arg| const_idents(arg, names))
+            }
+            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+            sv::ir::ConstExpr::Binary { left, right, .. } => {
+                const_idents(left, names);
+                const_idents(right, names);
+            }
+            sv::ir::ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                const_idents(condition, names);
+                const_idents(then_expr, names);
+                const_idents(else_expr, names);
+            }
+        }
+    }
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());

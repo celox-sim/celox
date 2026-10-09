@@ -197,6 +197,7 @@
     "cases": {
       "icarus": [
         "procedural::concatenated_targets_fix_their_positions_first",
+        "procedural::ff_select_index_calls_write_state_and_run_once",
         "procedural::select_index_call_skipped_by_logical_and",
         "procedural::select_index_calls_run_as_written",
         "procedural::select_indices_call_functions",

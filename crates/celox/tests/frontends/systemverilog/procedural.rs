@@ -43,6 +43,14 @@ sv_backends! {
         @case "procedural::concatenated_targets_fix_their_positions_first";
     }
 
+    fn ff_select_index_calls_write_state_and_run_once(sim) {
+        @case "procedural::ff_select_index_calls_write_state_and_run_once";
+    }
+
+    fn ff_processes_write_bits_of_separate_array_elements(sim) {
+        @case "procedural::ff_processes_write_bits_of_separate_array_elements";
+    }
+
     fn runtime_bits_stay_within_their_element(sim) {
         @case "procedural::runtime_bits_stay_within_their_element";
     }

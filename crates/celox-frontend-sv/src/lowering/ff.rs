@@ -98,9 +98,31 @@ impl<'p, 'a> Ff<'p, 'a> {
             return;
         }
         let variable = self.m.var(id);
-        let whole = BitAccess::new(0, variable.width - 1);
+        // A run-time bit select within one array element writes only that
+        // element (see `write`); a run-time element may be any of them.
+        let element_write = dynamic_array_element_lvalue(
+            lvalue,
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+        )
+        .is_some();
+        let whole = (!element_write)
+            .then(|| {
+                dynamic_packed_write(
+                    lvalue,
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
+            })
+            .flatten()
+            .and_then(|write| write.window)
+            .unwrap_or(BitAccess::new(0, variable.width - 1));
         let access = match lvalue {
-            sv::ir::LValue::Ident(_) => whole,
+            sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
             sv::ir::LValue::Select { msb, lsb, .. } => sv::typecheck::eval_const_expr_with_types(
                 msb,
                 self.m.constants,
@@ -146,11 +168,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 _ => {}
             });
         }
+        // Calls: output arguments and the subroutine bodies, including the
+        // calls in the select positions of assignment targets.
+        let mut calls = Vec::new();
+        for (lvalue, _) in &writes {
+            if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
+                collect_const_calls(msb, &mut calls);
+                collect_const_calls(lsb, &mut calls);
+            }
+        }
         for (lvalue, blocking) in writes {
             self.record_target(&lvalue, blocking);
         }
-        // Calls: output arguments and the subroutine bodies.
-        let mut calls = Vec::new();
         for stmt in stmts {
             stmt.walk(&mut |stmt| {
                 let mut exprs = Vec::new();
@@ -595,29 +624,91 @@ impl<'p, 'a> Ff<'p, 'a> {
         let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
             return Ok(lvalue);
         };
-        let mut names = HashSet::default();
-        const_idents(msb, &mut names);
-        const_idents(lsb, &mut names);
-        let mut names: Vec<String> = names.into_iter().collect();
-        names.sort();
         let mut copies = HashMap::default();
-        for read in names {
-            let Some(id) = self.m.id(&read) else {
-                continue;
-            };
-            let variable = self.m.var(id);
-            if !variable.array_dims.is_empty() {
-                continue;
-            }
-            let (width, signed, is_4state) = (variable.width, variable.signed, variable.is_4state);
-            let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
-            let value = self.eval(&sv::ir::Expr::Ident(read.clone()), Some((width, signed)))?;
-            self.store(temp, SIROffset::Static(0), width, value);
-            copies.insert(read, sv::ir::ConstExpr::Ident(temp_name));
-        }
-        *msb = substitute_const_idents(msb, &copies);
-        *lsb = substitute_const_idents(lsb, &copies);
+        *lsb = self.freeze_const(lsb, &mut copies)?;
+        *msb = self.freeze_const(msb, &mut copies)?;
         Ok(lvalue)
+    }
+
+    /// `expr` with each variable it reads, and each bit it reads from an
+    /// unpacked array, replaced by a copy of its current value.
+    fn freeze_const(
+        &mut self,
+        expr: &sv::ir::ConstExpr,
+        copies: &mut HashMap<sv::ir::ConstExpr, sv::ir::ConstExpr>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if let Some(copy) = copies.get(expr) {
+            return Ok(copy.clone());
+        }
+        let array = |this: &Self, name: &str| {
+            this.m
+                .id(name)
+                .map(|id| !this.m.var(id).array_dims.is_empty())
+        };
+        let frozen = match expr {
+            ConstExpr::Ident(name) if array(self, name) == Some(false) => {
+                let id = self.m.id(name).expect("a variable");
+                let variable = self.m.var(id);
+                let (width, signed, is_4state) =
+                    (variable.width, variable.signed, variable.is_4state);
+                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
+                self.store(temp, SIROffset::Static(0), width, value);
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
+            {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let bit = self.freeze_const(bit, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb: bit.clone(),
+                    lsb: bit,
+                    signed: false,
+                };
+                let value = self.eval(&read, Some((1, false)))?;
+                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
+                self.store(temp, SIROffset::Static(0), 1, value);
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                bit: Box::new(self.freeze_const(bit, copies)?),
+            },
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.freeze_const(arg, copies))
+                    .collect::<Result<_, _>>()?,
+                site: *site,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.freeze_const(expr, copies)?),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.freeze_const(left, copies)?),
+                op: *op,
+                right: Box::new(self.freeze_const(right, copies)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: Box::new(self.freeze_const(condition, copies)?),
+                then_expr: Box::new(self.freeze_const(then_expr, copies)?),
+                else_expr: Box::new(self.freeze_const(else_expr, copies)?),
+            },
+        };
+        copies.insert(expr.clone(), frozen.clone());
+        Ok(frozen)
     }
 
     /// Execute the user subroutine calls of an expression and replace each by
@@ -1054,13 +1145,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                         Some(false),
                     )
                     .ok_or_else(|| unsupported("dynamic assignment position"))?;
+                    // A select within one array element reads and writes only
+                    // that element, which is all its process commits.
+                    let window = write
+                        .window
+                        .unwrap_or_else(|| BitAccess::new(0, var_width - 1));
                     let alias = self.alias(id);
                     let current = arena
                         .alloc(SLTNode::Input {
                             variable: alias,
                             signed: false,
                             index: Vec::new(),
-                            access: BitAccess::new(0, var_width - 1),
+                            access: window,
                         })
                         .map_err(slt_error)?;
                     let wide = var_width
@@ -1077,6 +1173,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                     };
                     let value = coerce(arena, node)?;
                     let current = coerce(arena, current)?;
+                    let current = if window.lsb == 0 {
+                        current
+                    } else {
+                        let bottom = slt_constant(arena, BigUint::from(window.lsb), wide, false)?;
+                        arena
+                            .alloc(SLTNode::Binary(current, BinaryOp::Shl, bottom))
+                            .map_err(slt_error)?
+                    };
                     let up = coerce(arena, up)?;
                     let down = coerce(arena, down)?;
                     let place = |arena: &mut SLTNodeArena<SourceVarId>,
@@ -1130,11 +1234,6 @@ impl<'p, 'a> Ff<'p, 'a> {
                                 .map_err(slt_error)?;
                         }
                     }
-                    // A select within one array element writes only that
-                    // element, even at a position outside it.
-                    let window = write
-                        .window
-                        .unwrap_or_else(|| BitAccess::new(0, var_width - 1));
                     let window_width = window.msb - window.lsb + 1;
                     let updated = if window.lsb == 0 && window_width == wide {
                         updated
@@ -2126,10 +2225,17 @@ fn collect_calls(expr: &sv::ir::Expr, calls: &mut Vec<(String, Vec<Option<sv::ir
             }
         }
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
-        sv::ir::Expr::Select { expr, .. }
-        | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => collect_calls(expr, calls),
-        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
+        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
+            collect_calls(expr, calls);
+            collect_const_calls(msb, calls);
+            collect_const_calls(lsb, calls);
+        }
+        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Unary { expr, .. } => {
+            collect_calls(expr, calls)
+        }
+        sv::ir::Expr::Concat(parts) => parts.iter().for_each(|part| collect_calls(part, calls)),
+        sv::ir::Expr::RepeatConcat { count, parts } => {
+            collect_const_calls(count, calls);
             parts.iter().for_each(|part| collect_calls(part, calls))
         }
         sv::ir::Expr::Binary { left, right, .. } => {
@@ -2152,6 +2258,43 @@ fn collect_calls(expr: &sv::ir::Expr, calls: &mut Vec<(String, Vec<Option<sv::ir
                     .into_iter()
                     .for_each(|operand| collect_calls(operand, calls));
             }
+        }
+    }
+}
+
+/// The calls of a constant-expression operand, such as a run-time select
+/// position.
+fn collect_const_calls(
+    expr: &sv::ir::ConstExpr,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    use sv::ir::ConstExpr;
+    match expr {
+        ConstExpr::Function { name, args, .. } => {
+            calls.push((
+                name.clone(),
+                args.iter().map(expr_from_const_expr).collect(),
+            ));
+            args.iter().for_each(|arg| collect_const_calls(arg, calls));
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Select { expr, bit } => {
+            collect_const_calls(expr, calls);
+            collect_const_calls(bit, calls);
+        }
+        ConstExpr::Unary { expr, .. } => collect_const_calls(expr, calls),
+        ConstExpr::Binary { left, right, .. } => {
+            collect_const_calls(left, calls);
+            collect_const_calls(right, calls);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_const_calls(condition, calls);
+            collect_const_calls(then_expr, calls);
+            collect_const_calls(else_expr, calls);
         }
     }
 }

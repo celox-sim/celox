@@ -3220,7 +3220,9 @@ fn runtime_select_window(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<BitAccess> {
-    if element_width == 0 || element_width == width {
+    // One-bit elements have no bits within an element, and their run-time
+    // index has no stride to recognize.
+    if element_width <= 1 || element_width == width {
         return None;
     }
     let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;

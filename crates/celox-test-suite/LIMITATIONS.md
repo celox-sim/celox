@@ -359,7 +359,7 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 | `sv_icarus_internal_error` | compile | icarus | 3 | Icarus 13.0 crashes on these designs: a segmentation fault while compiling, or a vvp assertion (vthread.cc of_DISABLE_FLOW) while running. Verilator passes these cases. |
 | `sv_icarus_generate_function_scope` | execute | icarus | 1 | Icarus 13.0 evaluates a size query in a generate block with a function from another scope and reaches a $fatal in an active branch. Verilator agrees with the expected value. |
 | `sv_icarus_unknown_generate_condition` | compile | icarus | 1 | Icarus 13.0 rejects a loop-generate condition with unknown bits; Verilator accepts it, and Celox treats an unknown condition as false, as for if-generate (IEEE 1800-2023 12.4, 27.5). |
-| `sv_icarus_function_outputs` | compile | icarus | 5 | Icarus 13.0 rejects output and inout function arguments (function port is not an input port). |
+| `sv_icarus_function_outputs` | compile | icarus | 6 | Icarus 13.0 rejects output and inout function arguments (function port is not an input port). |
 | `sv_icarus_instance_array_unpacked_port` | compile | icarus | 4 | Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases. |
 | `sv_icarus_instance_array_fill_literal` | compile | icarus | 1 | Icarus 13.0 accepts a one-bit '0 connected to a wider port of an instance array, which IEEE 1800-2023 23.3.3.5 makes an error. Verilator rejects it. |
 | `sv_icarus_inside` | compile | icarus | 1 | Icarus 13.0 does not support inside expressions ("sorry: inside expressions not supported yet"). Verilator passes the case. |

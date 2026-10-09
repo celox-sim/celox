@@ -970,34 +970,101 @@ impl<'p, 'a> Comb<'p, 'a> {
     fn freeze_lvalue(
         &mut self,
         store: &mut Store,
+        frames: &[Frame],
         mut lvalue: sv::ir::LValue,
     ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
         let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
             return Ok(lvalue);
         };
-        let mut names = HashSet::default();
-        const_idents(msb, &mut names);
-        const_idents(lsb, &mut names);
-        let mut names: Vec<String> = names.into_iter().collect();
-        names.sort();
         let mut copies = HashMap::default();
-        for read in names {
-            let Some(id) = self.m.id(&read) else {
-                continue;
-            };
-            let variable = self.m.var(id);
-            if !variable.array_dims.is_empty() {
-                continue;
-            }
-            let (width, signed, is_4state) = (variable.width, variable.signed, variable.is_4state);
-            let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
-            let value = self.read(store, id, full(width))?;
-            self.write(store, temp, full(width), value)?;
-            copies.insert(read, sv::ir::ConstExpr::Ident(temp_name));
-        }
-        *msb = substitute_const_idents(msb, &copies);
-        *lsb = substitute_const_idents(lsb, &copies);
+        *lsb = self.freeze_const(store, frames, lsb, &mut copies)?;
+        *msb = self.freeze_const(store, frames, msb, &mut copies)?;
         Ok(lvalue)
+    }
+
+    /// `expr` with each variable it reads, and each bit it reads from an
+    /// unpacked array, replaced by a copy of its current value.
+    fn freeze_const(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        expr: &sv::ir::ConstExpr,
+        copies: &mut HashMap<sv::ir::ConstExpr, sv::ir::ConstExpr>,
+    ) -> Result<sv::ir::ConstExpr, sv::AnalyzerError> {
+        use sv::ir::ConstExpr;
+        if let Some(copy) = copies.get(expr) {
+            return Ok(copy.clone());
+        }
+        let array = |this: &Self, name: &str| {
+            this.m
+                .id(name)
+                .map(|id| !this.m.var(id).array_dims.is_empty())
+        };
+        let frozen = match expr {
+            ConstExpr::Ident(name) if array(self, name) == Some(false) => {
+                let id = self.m.id(name).expect("a variable");
+                let variable = self.m.var(id);
+                let (width, signed, is_4state) =
+                    (variable.width, variable.signed, variable.is_4state);
+                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let value = self.read(store, id, full(width))?;
+                self.write(store, temp, full(width), value)?;
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
+            {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let bit = self.freeze_const(store, frames, bit, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb: bit.clone(),
+                    lsb: bit,
+                    signed: false,
+                };
+                let (node, sources) = self.eval(store, frames, &read, Some((1, false)))?;
+                let node =
+                    coerce_node_width(self.arena, node, Some(1), false).map_err(slt_error)?;
+                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
+                self.write(store, temp, full(1), (node, sources))?;
+                ConstExpr::Ident(temp_name)
+            }
+            ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
+                bit: Box::new(self.freeze_const(store, frames, bit, copies)?),
+            },
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| self.freeze_const(store, frames, arg, copies))
+                    .collect::<Result<_, _>>()?,
+                site: *site,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: Box::new(self.freeze_const(store, frames, left, copies)?),
+                op: *op,
+                right: Box::new(self.freeze_const(store, frames, right, copies)?),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: Box::new(self.freeze_const(store, frames, condition, copies)?),
+                then_expr: Box::new(self.freeze_const(store, frames, then_expr, copies)?),
+                else_expr: Box::new(self.freeze_const(store, frames, else_expr, copies)?),
+            },
+        };
+        copies.insert(expr.clone(), frozen.clone());
+        Ok(frozen)
     }
 
     /// Execute the user subroutine calls of an expression, left to right, and
@@ -1453,7 +1520,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         for part in parts {
             let part = self.hoist_lvalue(store, frames, part)?;
             let part = if parts.len() > 1 {
-                self.freeze_lvalue(store, part)?
+                self.freeze_lvalue(store, frames, part)?
             } else {
                 part
             };
@@ -1489,7 +1556,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         for part in lvalues {
             let part = self.hoist_lvalue(store, frames, part)?;
             let part = if lvalues.len() > 1 {
-                self.freeze_lvalue(store, part)?
+                self.freeze_lvalue(store, frames, part)?
             } else {
                 part
             };
