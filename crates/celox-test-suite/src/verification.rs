@@ -38,10 +38,16 @@ struct Args {
     /// Print the selected catalogue as JSON without invoking any tools.
     #[arg(long)]
     list: bool,
-    /// Reuse unchanged successful cases from output/results.json.
-    /// Failed, new, and changed cases always run again.
+    /// Reuse unchanged successful cases (the default; retained for compatibility).
     #[arg(long, conflicts_with = "list")]
     incremental: bool,
+    /// Execute every selected case afresh, including previously passing cases.
+    #[arg(long, conflicts_with_all = ["list", "incremental"])]
+    fresh: bool,
+    /// Shared result cache across worktrees; defaults to $XDG_CACHE_HOME/celox/
+    /// external-verification (or ~/.cache/celox/external-verification).
+    #[arg(long)]
+    cache: Option<PathBuf>,
 }
 
 /// A suite to verify: its cases and the reviewed tool exclusions.
@@ -184,12 +190,19 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
         .unwrap_or("")
         .to_owned();
     let context = context_fingerprint(tool_kind, suite.name, &version, args.include_ignored);
-    if args.incremental && context.is_none() {
+    let incremental = !args.fresh;
+    let cache = context.as_ref().and_then(|context| {
+        args.cache
+            .clone()
+            .or_else(default_cache)
+            .map(|root| root.join(context))
+    });
+    if incremental && context.is_none() {
         println!(
             "incremental reuse unavailable: incomplete verifier/tool fingerprint; verifying selected cases afresh"
         );
     }
-    let previous = if args.incremental {
+    let previous = if incremental {
         read_previous(&output.join("results.json"), context.as_deref())?
     } else {
         BTreeMap::new()
@@ -209,9 +222,28 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
                             case_fingerprint(case, &issue)
                         }))
                         .ok();
+                    let shared = if incremental {
+                        cache
+                            .as_ref()
+                            .zip(fingerprint.as_ref())
+                            .and_then(|(cache, key)| {
+                                read_cached(
+                                    &cache.join(format!("{key}.json")),
+                                    context.as_deref(),
+                                    case.name,
+                                )
+                            })
+                    } else {
+                        None
+                    };
                     if let Some(cached) = previous
                         .get(case.name)
                         .filter(|row| fingerprint.as_deref().is_some_and(|key| reusable(row, key)))
+                        .or_else(|| {
+                            shared.as_ref().filter(|row| {
+                                fingerprint.as_deref().is_some_and(|key| reusable(row, key))
+                            })
+                        })
                     {
                         let mut row = cached.clone();
                         row["reused"] = json!(true);
@@ -234,6 +266,15 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
                             .unwrap()
                             .as_secs()
                     );
+                    if let Some((cache, key)) = cache.as_ref().zip(fingerprint.as_ref()) {
+                        if reusable(&row, key) {
+                            if let Err(error) =
+                                store_cached(cache, key, context.as_deref().unwrap(), &row)
+                            {
+                                cache_warning(format!("could not cache {}: {error}", case.name));
+                            }
+                        }
+                    }
                     results.lock().unwrap().push(row);
                 }
             });
@@ -265,7 +306,7 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
         .filter(|row| is_failure(row["status"].as_str().unwrap()))
         .count();
     let reused = reused.into_inner();
-    let report = json!({"schema_version": 3, "suite": suite.name, "suite_version": env!("CARGO_PKG_VERSION"), "tool": tool, "version": version, "include_ignored": args.include_ignored, "exclude_stronger_than_sv": args.exclude_stronger_than_sv, "context_fingerprint": context, "incremental": args.incremental, "run_counts": {"fresh": results.len() - reused, "reused": reused}, "counts": counts, "cases": results});
+    let report = json!({"schema_version": 3, "suite": suite.name, "suite_version": env!("CARGO_PKG_VERSION"), "tool": tool, "version": version, "include_ignored": args.include_ignored, "exclude_stronger_than_sv": args.exclude_stronger_than_sv, "context_fingerprint": context, "incremental": incremental, "run_counts": {"fresh": results.len() - reused, "reused": reused}, "counts": counts, "cases": results});
     let contents = serde_json::to_string_pretty(&report)? + "\n";
     std::fs::write(output.join("results.json"), &contents)?;
     if let Some(path) = args.report {
@@ -323,37 +364,56 @@ fn fingerprint(parts: &[&[u8]]) -> String {
 fn case_fingerprint(case: &TestCase, issue: &Option<Value>) -> String {
     // The AST includes stimulus/assertions and options; design() also resolves
     // stdlib source parts, which may change independently of the .vtest file.
-    let mut script = case.script().clone();
-    script.pos.line = 0;
-    script.pos.column = 0;
-    for stmt in &mut script.body {
-        clear_positions(stmt);
-    }
     fingerprint(&[
-        format!("{script:?}").as_bytes(),
+        case.script_identity().as_bytes(),
         format!("{:?}", case.design()).as_bytes(),
         serde_json::to_string(issue).unwrap().as_bytes(),
     ])
 }
 
-fn clear_positions(stmt: &mut crate::script::ast::Stmt) {
-    use crate::script::ast::StmtKind;
-    stmt.pos.line = 0;
-    stmt.pos.column = 0;
-    match &mut stmt.kind {
-        StmtKind::Modify(body) | StmtKind::Block(body) | StmtKind::For(_, _, body) => {
-            for stmt in body {
-                clear_positions(stmt);
-            }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "User cache location at the CLI boundary"
+)]
+fn default_cache() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .map(|root| root.join("celox/external-verification"))
+}
+
+fn read_cached(path: &Path, context: Option<&str>, name: &str) -> Option<Value> {
+    match read_previous(path, context) {
+        Ok(mut rows) => rows.remove(name),
+        Err(error) => {
+            cache_warning(format!(
+                "ignoring invalid shared cache {}: {error}",
+                path.display()
+            ));
+            None
         }
-        StmtKind::If(_, yes, no) => {
-            clear_positions(yes);
-            if let Some(no) = no {
-                clear_positions(no);
-            }
-        }
-        _ => {}
     }
+}
+
+fn cache_warning(message: String) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
+fn store_cached(directory: &Path, key: &str, context: &str, row: &Value) -> Result<()> {
+    std::fs::create_dir_all(directory)?;
+    let report = json!({"schema_version": 3, "context_fingerprint": context, "cases": [row]});
+    // Different cases have different keys. Concurrent worktrees publish the
+    // same successful case atomically, without sharing build directories.
+    let temporary = directory.join(format!("{key}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec(&report)?)?;
+    let result = std::fs::rename(&temporary, directory.join(format!("{key}.json")));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(())
 }
 
 #[allow(
@@ -749,6 +809,35 @@ fn write_result(directory: &Path, row: Value) -> Value {
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
+
+    #[test]
+    fn local_reuse_is_default_and_ci_can_require_fresh_execution() {
+        let args = Args::try_parse_from(["verify"]).unwrap();
+        assert!(!args.fresh);
+        assert!(!args.incremental);
+        assert!(Args::try_parse_from(["verify", "--fresh"]).unwrap().fresh);
+        assert!(Args::try_parse_from(["verify", "--fresh", "--incremental"]).is_err());
+    }
+
+    #[test]
+    fn shared_cache_reuses_successes_without_a_worktree_report() {
+        let directory =
+            std::env::temp_dir().join(format!("celox-shared-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let row = json!({"name": "case", "status": "passed", "case_fingerprint": "case-key", "verified_at_unix": 123});
+        store_cached(&directory, "case-key", "tool-and-verifier", &row).unwrap();
+        let path = directory.join("case-key.json");
+        let loaded = read_cached(&path, Some("tool-and-verifier"), "case").unwrap();
+        assert!(reusable(&loaded, "case-key"));
+        assert_eq!(loaded["verified_at_unix"], 123);
+        assert!(!reusable(&loaded, "changed-source"));
+        assert!(read_cached(&path, Some("changed-tool"), "case").is_none());
+        assert!(read_cached(&path, Some("tool-and-verifier"), "other-case").is_none());
+        std::fs::write(&path, "interrupted write").unwrap();
+        assert!(read_cached(&path, Some("tool-and-verifier"), "case").is_none());
+        assert!(!directory.join("case-key.tmp").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn portable_diagnostics_do_not_depend_on_the_case_path() {
