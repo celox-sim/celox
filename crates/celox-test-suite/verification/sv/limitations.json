@@ -333,7 +333,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array (t[k][j], t[k][2:1]: \"Array index expressions must be constant here\"). Verilator passes the case.",
+    "reason": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: \"Array index expressions must be constant here\"). Verilator passes the two-state case; the four-state one is outside what it checks.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -341,6 +341,7 @@
     ],
     "cases": {
       "icarus": [
+        "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element",
         "indexed_select::runtime_indices_select_within_multidimensional_packed_elements"
       ]
     }
