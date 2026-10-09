@@ -18,6 +18,10 @@ pub struct Design {
     pub four_state: bool,
     /// Values of the top module's parameters, overriding their defaults.
     pub parameters: Vec<(String, u64)>,
+    /// Whether the case advances simulation time (`run_until`,
+    /// `run_to_finish`), so the design's own processes, delays and clocks
+    /// must run. An adapter builds a timed simulation for such a design.
+    pub timed: bool,
 }
 
 impl Design {
@@ -30,6 +34,7 @@ impl Design {
             top: top.into(),
             four_state: false,
             parameters: Vec::new(),
+            timed: false,
         }
     }
 
@@ -88,6 +93,18 @@ pub trait Backend {
     /// newline) and `$write` since the previous call.
     fn take_output(&mut self) -> Result<String> {
         Err("this adapter does not capture design output".into())
+    }
+    /// Advance simulation time to `time` (inclusive), running the design's
+    /// processes, delays and clocks. Fails when `time` is in the past or
+    /// when a process ended the simulation at or before `time`. Only a
+    /// timed design (`Design::timed`) receives this call.
+    fn run_until(&mut self, _time: u64) -> Result<()> {
+        Err("this adapter does not run timed simulations".into())
+    }
+    /// Run until a process ends the simulation with `$finish`. Fails when
+    /// the simulation runs out of events first.
+    fn run_to_finish(&mut self) -> Result<()> {
+        Err("this adapter does not run timed simulations".into())
     }
 }
 
@@ -198,6 +215,14 @@ impl Simulator {
 
     pub fn take_output(&mut self) -> Result<String> {
         self.backend.take_output()
+    }
+
+    pub fn run_until(&mut self, time: u64) -> Result<()> {
+        self.backend.run_until(time)
+    }
+
+    pub fn run_to_finish(&mut self) -> Result<()> {
+        self.backend.run_to_finish()
     }
 
     pub fn tick(&mut self, event: Event) -> Result<()> {

@@ -356,6 +356,30 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.get(signal)
     }
 
+    /// Returns the value and unknown-bit mask of a signal.
+    pub fn get_four_state(
+        &mut self,
+        signal: SignalRef,
+    ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.simulator.get_four_state(signal)
+    }
+
+    /// Sets a signal to a known value. The write takes effect at the current
+    /// time: processes waiting for it resume when the simulation next runs.
+    pub fn set_wide(&mut self, signal: SignalRef, value: num_bigint::BigUint) {
+        self.simulator.set_wide(signal, value);
+    }
+
+    /// Sets a signal's value and unknown-bit mask, like [`Self::set_wide`].
+    pub fn set_four_state(
+        &mut self,
+        signal: SignalRef,
+        value: num_bigint::BigUint,
+        mask: num_bigint::BigUint,
+    ) {
+        self.simulator.set_four_state(signal, value, mask);
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where

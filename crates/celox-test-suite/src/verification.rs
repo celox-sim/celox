@@ -498,6 +498,16 @@ impl Backend for ObservedBackend {
             .take_output()
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
+    fn run_until(&mut self, time: u64) -> Result<()> {
+        self.backend
+            .run_until(time)
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
+    fn run_to_finish(&mut self) -> Result<()> {
+        self.backend
+            .run_to_finish()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
 }
 
 /// How a runner builds a case for a tool: a design for the process

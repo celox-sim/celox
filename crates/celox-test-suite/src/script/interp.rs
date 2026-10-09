@@ -499,6 +499,20 @@ impl Interpreter<'_> {
                     panic!("run_testbench: {error}");
                 }
             }
+            StmtKind::RunUntil(time) => {
+                let time = self.known(time, pos, "time")?;
+                let Some(time) = time.to_u64() else {
+                    return fail(pos, format!("time {time} is out of range"));
+                };
+                if let Err(error) = self.sim.run_until(time) {
+                    panic!("run_until {time}: {error}");
+                }
+            }
+            StmtKind::RunToFinish => {
+                if let Err(error) = self.sim.run_to_finish() {
+                    panic!("run_to_finish: {error}");
+                }
+            }
             StmtKind::ExpectOutput(expected) => {
                 let output = self
                     .sim

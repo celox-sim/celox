@@ -2847,6 +2847,74 @@ mod host {
             }
         }
 
+        /// The same configuration as a builder of an event-driven
+        /// [`Simulator`] that emits the triggers the timed scheduler needs.
+        fn into_simulator_builder(self) -> SimulatorBuilder<'a, Simulator> {
+            let mut builder = SimulatorBuilder {
+                sources: self.sources,
+                sv_sources: self.sv_sources,
+                top: self.top,
+                ignored_loops: self.ignored_loops,
+                true_loops: self.true_loops,
+                options: self.options,
+                vcd_path: self.vcd_path,
+                metadata: self.metadata,
+                clock_type: self.clock_type,
+                reset_type: self.reset_type,
+                param_overrides: self.param_overrides,
+                live_signals: self.live_signals,
+                injected_components: self.injected_components,
+                frontend_artifact: self.frontend_artifact,
+                _marker: std::marker::PhantomData,
+            };
+            builder.options.emit_triggers = true;
+            builder
+        }
+
+        /// Compiles with the Cranelift JIT backend and constructs the timed
+        /// simulation wrapper.
+        pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
+            Ok(crate::Simulation::new(
+                self.into_simulator_builder().build_cranelift()?,
+            ))
+        }
+
+        /// Compiles with the interpreter backend and constructs the timed
+        /// simulation wrapper.
+        pub fn build_interpreter(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
+            Ok(crate::Simulation::new(
+                self.into_simulator_builder().build_interpreter()?,
+            ))
+        }
+
+        /// Compiles with the WebAssembly backend and constructs the timed
+        /// simulation wrapper.
+        pub fn build_wasm(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>
+        {
+            Ok(crate::Simulation::new(
+                self.into_simulator_builder().build_wasm()?,
+            ))
+        }
+
+        /// Compiles with the native backend of the host architecture and
+        /// constructs the timed simulation wrapper.
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        pub fn build_native(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            Ok(crate::Simulation::new(
+                self.into_simulator_builder().build_native()?,
+            ))
+        }
+
         /// Compiles the Veryl source and constructs the timed simulation wrapper.
         pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
             self.options.emit_triggers = true;

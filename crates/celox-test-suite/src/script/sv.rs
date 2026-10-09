@@ -11,7 +11,13 @@
 //! The timing follows the process adapters: a write takes effect at the next
 //! settle, which advances time by one step; a tick drives the event port to
 //! its inactive and then its active level, settling after each, and restores
-//! a level that was neither.
+//! a level that was neither. The testbench counts time in picoseconds while
+//! the design's time unit is a nanosecond (see the staged time scale), so
+//! the steps stay inside one script time unit: `run_until` reaches the
+//! script's time exactly, and the settle before the next read runs after
+//! everything the design does at that time. After `run_to_finish` the
+//! testbench only keeps the simulation alive; the checks that follow run in
+//! a `final` block, when the design has called `$finish`.
 
 use super::ast::{Actual, Expr, Op, ScriptCase, Sequence, Stmt, StmtKind, Value};
 use super::sexpr::Pos;
@@ -94,10 +100,50 @@ fn hex_encode(text: &str) -> String {
     text.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Whether a line is a simulator's own notice of a `$finish` call, which is
+/// not output of the design: Verilator prints `- FILE:LINE: Verilog $finish`
+/// and Icarus Verilog `FILE:LINE: $finish called at TIME (UNIT)`.
+fn is_finish_notice(line: &str) -> bool {
+    // `FILE:LINE`
+    let located = |text: &str| {
+        text.rsplit_once(':')
+            .is_some_and(|(file, line)| !file.is_empty() && line.parse::<usize>().is_ok())
+    };
+    if let Some(location) = line
+        .strip_prefix("- ")
+        .and_then(|rest| rest.strip_suffix(": Verilog $finish"))
+    {
+        return located(location);
+    }
+    if let Some((location, rest)) = line.split_once(": $finish called at ") {
+        return located(location) && rest.ends_with(')');
+    }
+    false
+}
+
+/// `text` without the simulators' `$finish` notices.
+fn design_output(text: &str) -> String {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('\n') {
+        let line = &rest[..at];
+        if !is_finish_notice(line) {
+            output.push_str(line);
+            output.push('\n');
+        }
+        rest = &rest[at + 1..];
+    }
+    if !is_finish_notice(rest) {
+        output.push_str(rest);
+    }
+    output
+}
+
 /// Check a generated testbench's stdout. The script must have run to its
 /// end: a design's `$finish` can end some simulators' runs early without a
 /// failure. Before that, the text before each `expect_output` marker, since
-/// the previous one, must equal the text the marker encodes.
+/// the previous one, must equal the text the marker encodes. A simulator's
+/// notice of a `$finish` call is not design output.
 pub fn check_output(log: &str) -> Result<(), String> {
     let Some(end) = log.find(&format!("\n{END_MARKER}\n")) else {
         return Err("the simulation ended before the script did".into());
@@ -120,6 +166,7 @@ pub fn check_output(log: &str) -> Result<(), String> {
             .collect::<Option<Vec<_>>>()
             .ok_or("malformed output marker")?;
         let expected = String::from_utf8_lossy(&bytes);
+        let output = design_output(output);
         if output != expected {
             return Err(format!(
                 "{location}: expect_output: expected {expected:?}, got {output:?}"
@@ -155,6 +202,9 @@ struct Generator<'a> {
     out: String,
     indent: usize,
     temps: usize,
+    /// Generating the checks after `run_to_finish`, which run in a `final`
+    /// block: time cannot advance there, and the state is final.
+    in_final: bool,
 }
 
 fn path_text(path: &SignalPath) -> String {
@@ -235,7 +285,11 @@ fn walk_stmt(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
                 walk_stmt(otherwise, visit);
             }
         }
-        StmtKind::Eval | StmtKind::RunTestbench | StmtKind::ExpectOutput(_) => {}
+        StmtKind::RunUntil(e) => walk_expr(e, visit),
+        StmtKind::Eval
+        | StmtKind::RunTestbench
+        | StmtKind::RunToFinish
+        | StmtKind::ExpectOutput(_) => {}
     }
 }
 
@@ -486,7 +540,7 @@ impl Generator<'_> {
     }
 
     fn settle_for(&mut self, exprs: &[&Expr]) {
-        if reads(exprs) {
+        if reads(exprs) && !self.in_final {
             self.line("settle();");
         }
     }
@@ -784,10 +838,50 @@ impl Generator<'_> {
                     self.where_(pos)
                 )));
             }
+            StmtKind::RunUntil(time) => {
+                if self.in_final {
+                    return Err(Unsupported(format!(
+                        "{}: run_until after run_to_finish",
+                        self.where_(pos)
+                    )));
+                }
+                self.settle_for(&[time]);
+                let time = self.expr(time);
+                self.require_known(&time, pos, "time");
+                let temp = self.temp();
+                self.line("begin");
+                self.indent += 1;
+                self.line(format!("longint {temp};"));
+                self.line(format!("{temp} = longint'({time}) * 1000;"));
+                // The settle steps stay inside the current time unit.
+                self.line(format!("if ({temp} / 1000 < $time / 1000) begin"));
+                self.indent += 1;
+                self.fail(
+                    pos,
+                    "run_until %0d: the simulation is already at %0d",
+                    &[format!("{temp} / 1000"), "$time / 1000".into()],
+                );
+                self.indent -= 1;
+                self.line("end");
+                self.line(format!("if ({temp} > $time) #({temp} - $time);"));
+                self.line("settled = 0;");
+                self.indent -= 1;
+                self.line("end");
+            }
+            StmtKind::RunToFinish => {
+                return Err(Unsupported(format!(
+                    "{}: run_to_finish inside a block",
+                    self.where_(pos)
+                )));
+            }
             StmtKind::ExpectOutput(text) => {
                 // HDL cannot read back its own output, so the harness checks
                 // it: the marker closes the output so far, which must equal
-                // the hex-encoded text (see `check_output`).
+                // the hex-encoded text (see `check_output`). The marker
+                // follows everything the design printed at this time.
+                if !self.in_final {
+                    self.line("settle();");
+                }
                 self.line(format!(
                     "$write(\"\\n{OUTPUT_MARKER}{} {}\\n\");",
                     hex_encode(text),
@@ -816,15 +910,32 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         out: String::new(),
         indent: 2,
         temps: 0,
+        in_final: false,
     };
-    generator.block(&case.body)?;
-    let body = generator.out;
+    let (before_finish, after_finish) = case.split_at_finish();
+    generator.block(before_finish)?;
+    if after_finish.is_some() {
+        // Keep events pending until the design finishes: a simulation that
+        // runs out of events would otherwise also run the final block.
+        generator.line("forever #1000000000;");
+    }
+    let body = std::mem::take(&mut generator.out);
+    let final_checks = match after_finish {
+        Some(after) => {
+            generator.in_final = true;
+            generator.block(after)?;
+            Some(std::mem::take(&mut generator.out))
+        }
+        None => None,
+    };
     let w = width - 1;
     let mut out = String::new();
     let _ = writeln!(out, "// Generated from {} by celox-test-suite.", case.name);
     // Script values are deliberately wider than the signals they meet.
     let _ = writeln!(out, "/* verilator lint_off WIDTH */");
     let _ = writeln!(out, "module {TESTBENCH_TOP};");
+    let _ = writeln!(out, "  timeunit 1ps;");
+    let _ = writeln!(out, "  timeprecision 1ps;");
     for port in &design.inputs {
         let range = port
             .array
@@ -901,14 +1012,41 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
   initial begin"#
     );
     out.push_str(&body);
-    let _ = writeln!(out, "    $write(\"\\n{END_MARKER}\\n\");");
-    out.push_str("`ifdef CELOX_SUITE_ICARUS\n    $celox_suite_finish;\n`endif\n    $finish;\n  end\nendmodule\n");
+    let end = format!(
+        "    $write(\"\\n{END_MARKER}\\n\");\n`ifdef CELOX_SUITE_ICARUS\n    $celox_suite_finish;\n`endif\n"
+    );
+    match final_checks {
+        Some(checks) => {
+            // The design ends the simulation; the checks run in its wake.
+            out.push_str("  end\n\n  final begin\n");
+            out.push_str(&checks);
+            out.push_str(&end);
+            out.push_str("  end\nendmodule\n");
+        }
+        None => {
+            out.push_str(&end);
+            out.push_str("    $finish;\n  end\nendmodule\n");
+        }
+    }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_notices_are_not_design_output() {
+        let icarus = "done\n/tmp/case/source_0.sv:17: $finish called at 18000 (1ps)\n";
+        assert_eq!(design_output(icarus), "done\n");
+        let verilator = "done\n- /tmp/case/source_0.sv:19: Verilog $finish\n";
+        assert_eq!(design_output(verilator), "done\n");
+        assert_eq!(
+            design_output("a: $finish called at x\n"),
+            "a: $finish called at x\n"
+        );
+        assert_eq!(design_output("no newline"), "no newline");
+    }
 
     fn case(text: &str) -> ScriptCase {
         let source = format!(

@@ -10959,6 +10959,7 @@
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
   "schema_version": 3,
+  "suite": "veryl",
   "suite_version": "0.10.1",
   "tool": "icarus",
   "version": "Icarus Verilog version 13.0 (stable) (v13_0)"

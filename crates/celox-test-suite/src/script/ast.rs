@@ -208,6 +208,40 @@ pub enum StmtKind {
     /// `(expect_output TEXT)`: the design printed exactly TEXT with
     /// `$display`/`$write` since the start or the previous `expect_output`.
     ExpectOutput(String),
+    /// `(run_until TIME)`: advance simulation time to TIME, running the
+    /// design's processes, delays and clocks.
+    RunUntil(Expr),
+    /// `(run_to_finish)`: run until a process of the design ends the
+    /// simulation with `$finish`. Only checks may follow it.
+    RunToFinish,
+}
+
+impl Stmt {
+    /// Visit this statement and the statements nested in it.
+    pub fn walk<'a>(&'a self, visit: &mut impl FnMut(&'a Stmt)) {
+        visit(self);
+        match &self.kind {
+            StmtKind::Modify(body) | StmtKind::Block(body) | StmtKind::For(_, _, body) => {
+                body.iter().for_each(|stmt| stmt.walk(visit));
+            }
+            StmtKind::If(_, then, otherwise) => {
+                then.walk(visit);
+                if let Some(otherwise) = otherwise {
+                    otherwise.walk(visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether this is a check that reads but never drives the design:
+    /// what may follow `(run_to_finish)`.
+    pub fn is_check(&self) -> bool {
+        matches!(
+            self.kind,
+            StmtKind::AssertEq(..) | StmtKind::Assert(..) | StmtKind::ExpectOutput(_)
+        )
+    }
 }
 
 /// Part of a source file: text, or a file of the Veryl standard library
@@ -234,6 +268,60 @@ pub struct ScriptCase {
     pub parameters: Vec<(String, u64)>,
     pub body: Vec<Stmt>,
     pub pos: Pos,
+}
+
+impl ScriptCase {
+    /// Whether the case advances simulation time, so the design's own
+    /// processes, delays and clocks run.
+    pub fn is_timed(&self) -> bool {
+        let mut timed = false;
+        for stmt in &self.body {
+            stmt.walk(&mut |stmt| {
+                timed |= matches!(stmt.kind, StmtKind::RunUntil(_) | StmtKind::RunToFinish);
+            });
+        }
+        timed
+    }
+
+    /// The statements before and after a top-level `(run_to_finish)`.
+    pub fn split_at_finish(&self) -> (&[Stmt], Option<&[Stmt]>) {
+        match self
+            .body
+            .iter()
+            .position(|stmt| stmt.kind == StmtKind::RunToFinish)
+        {
+            Some(at) => (&self.body[..at], Some(&self.body[at + 1..])),
+            None => (&self.body, None),
+        }
+    }
+}
+
+/// `(run_to_finish)` is a top-level statement, at most once, and only
+/// checks follow it: after the design has finished, nothing can drive it.
+fn validate_finish(body: &[Stmt]) -> Result<(), ScriptError> {
+    let mut finished = false;
+    for stmt in body {
+        if finished && !stmt.is_check() {
+            return error(
+                stmt.pos,
+                "only assert_eq, assert and expect_output may follow run_to_finish",
+            );
+        }
+        if stmt.kind == StmtKind::RunToFinish {
+            finished = true;
+            continue;
+        }
+        let mut nested = None;
+        stmt.walk(&mut |inner| {
+            if inner.kind == StmtKind::RunToFinish && nested.is_none() {
+                nested = Some(inner.pos);
+            }
+        });
+        if let Some(pos) = nested {
+            return error(pos, "run_to_finish must be a top-level statement");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -583,6 +671,14 @@ pub fn stmt(form: &Sexpr) -> Result<Stmt, ScriptError> {
             arity(items, pos, 1, Some(1))?;
             StmtKind::ExpectOutput(string(&items[1], "output")?)
         }
+        "run_until" => {
+            arity(items, pos, 1, Some(1))?;
+            StmtKind::RunUntil(expr(&items[1])?)
+        }
+        "run_to_finish" => {
+            arity(items, pos, 0, Some(0))?;
+            StmtKind::RunToFinish
+        }
         _ => return error(pos, format!("unknown statement `{head}`")),
     };
     Ok(Stmt { kind, pos })
@@ -767,6 +863,7 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
         if case.expectation == Expectation::CompilationError && !case.body.is_empty() {
             return error(pos, "a rejected case has no statements");
         }
+        validate_finish(&case.body)?;
         parsed.push(case);
     }
     Ok((group_name, parsed))

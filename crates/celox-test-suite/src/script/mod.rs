@@ -24,6 +24,13 @@
 //! | `(expand NAME (ITEM...) STMT...)` | Repeat the statements with `{NAME}` replaced by each item's text (in names and messages); `(expand (A B) ((a1 b1) ...) ...)` binds several. |
 //! | `(run_testbench)` | Run the design's native testbench to `$finish`. |
 //! | `(expect_output TEXT)` | The design printed exactly TEXT with `$display`/`$write` since the start or the previous `expect_output`. |
+//! | `(run_until TIME)` | Advance simulation time to TIME, running the design's processes, delays and clocks. TIME counts the design's time units and must not be in the past; a design that finishes first fails the case. |
+//! | `(run_to_finish)` | Run until a process of the design calls `$finish`; a simulation that runs out of events first fails the case. Only `assert_eq`, `assert` and `expect_output` may follow, and read the final state. |
+//!
+//! A case with `run_until` or `run_to_finish` is timed: the design's own
+//! `initial` and `always` processes run, and a write takes effect at the
+//! current time, so a process waiting for the signal resumes when time next
+//! advances. `tick` is not available in a timed case.
 //!
 //! A signal is `name` at the top or `inst.name`, `inst[2].name` below it.
 //!

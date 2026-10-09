@@ -1,0 +1,341 @@
+(group timing (category sequential))
+
+; Procedural timing controls: `#delay`, `@(event)` and `wait (condition)` in
+; `initial` blocks and `always` processes. The script advances time with
+; `run_until` and `run_to_finish`; the design generates its own clocks.
+
+(case delays_resume_initial_blocks_at_later_times
+  (source "delays.sv" #"
+                module Top(output logic [7:0] a);
+                    parameter int GAP = 4;
+                    logic [7:0] pause = 8'd3;
+                    initial begin
+                        a = 8'd1;
+                        #10 a = 8'd2;
+                        #GAP a = 8'd3;
+                        #(pause) a = 8'd4;
+                        #0 a = 8'd5;
+                        #pause;
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq a 1)
+  (run_until 10)
+  (assert_eq a 2)
+  (run_until 14)
+  (assert_eq a 3)
+  (run_until 17)
+  (assert_eq a 5 "the zero delay resumes at the same time")
+  (run_to_finish)
+  (assert_eq a 5))
+
+(case always_with_a_delay_generates_a_clock
+  (source "clock.sv" #"
+                module Top(output logic [7:0] count, output logic clk);
+                    initial clk = 1'b0;
+                    initial count = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) count <= count + 8'd1;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 4)
+  (assert_eq clk 0)
+  (assert_eq count 0)
+  ; Rising edges at 5, 15, ..., 95.
+  (run_until 100)
+  (assert_eq count 10)
+  (assert_eq clk 0))
+
+(case edge_waits_resume_before_the_registers_of_that_edge_update
+  (source "edges.sv" #"
+                module Top(output logic [7:0] q);
+                    logic clk = 1'b0;
+                    logic [7:0] d = 8'd0;
+                    initial q = 8'd0;
+                    always #5 clk = ~clk;
+                    always_ff @(posedge clk) q <= d;
+                    initial begin
+                        d = 8'd1;
+                        @(posedge clk);
+                        $display("first q=%0d", q);
+                        #1 d = 8'd2;
+                        @(posedge clk);
+                        $display("second q=%0d", q);
+                        @(negedge clk);
+                        $display("negedge q=%0d", q);
+                        repeat (2) @(posedge clk);
+                        $display("repeat q=%0d", q);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  ; A process woken by an edge runs in the active region, before the
+  ; nonblocking updates of that edge (IEEE 1800-2023 4.4).
+  (run_to_finish)
+  (expect_output "first q=0\nsecond q=1\nnegedge q=2\nrepeat q=2\n")
+  (assert_eq q 2))
+
+(case any_change_waits_wake_on_every_value_change
+  (source "changes.sv" #"
+                module Top(output logic [7:0] data, output logic flag);
+                    logic [7:0] other = 8'd0;
+                    initial begin
+                        data = 8'd0;
+                        flag = 1'b0;
+                        #3 data = 8'd7;
+                        #4 data = 8'd7;
+                        #1 data = 8'd9;
+                        #2 other = 8'd1;
+                        #2 flag = 1'b1;
+                        #1 $finish;
+                    end
+                    initial forever begin
+                        @(data);
+                        $display("data=%0d", data);
+                    end
+                    initial forever begin
+                        @(other or flag);
+                        $display("other=%0d flag=%0d", other, flag);
+                    end
+                    initial forever begin
+                        @(flag, data);
+                        $display("either");
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "data=7\neither\ndata=9\neither\nother=1 flag=0\nother=1 flag=1\neither\n"))
+
+(case wait_statements_block_until_their_condition_holds
+  (source "wait.sv" #"
+                module Top(output logic [7:0] y);
+                    logic go = 1'b0;
+                    logic [7:0] level = 8'd0;
+                    initial begin
+                        y = 8'd0;
+                        #7 go = 1'b1;
+                        #5 level = 8'd3;
+                        #5 level = 8'd5;
+                    end
+                    initial begin
+                        wait (go) $display("go");
+                        wait (go);
+                        $display("still go");
+                        wait (level > 8'd4) y = level;
+                        $display("level=%0d", level);
+                        #1 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 6)
+  (expect_output "")
+  (run_until 7)
+  (expect_output "go\nstill go\n")
+  (run_to_finish)
+  (expect_output "level=5\n")
+  (assert_eq y 5))
+
+(case level_sensitive_always_runs_as_a_process
+  (source "level.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a = 8'd0;
+                    logic [7:0] b = 8'd0;
+                    initial y = 8'd0;
+                    always @(a or b) y = a + b;
+                    initial begin
+                        #2 a = 8'd3;
+                        #2 b = 8'd4;
+                        #2 a = 8'd5;
+                        #2 $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq y 0)
+  (run_until 3)
+  (assert_eq y 3)
+  (run_until 5)
+  (assert_eq y 7)
+  (run_to_finish)
+  (assert_eq y 9))
+
+(case processes_wake_each_other_at_the_same_time
+  (source "handshake.sv" #"
+                module Top(output logic [7:0] y);
+                    logic start = 1'b0;
+                    logic done = 1'b0;
+                    initial begin
+                        y = 8'd0;
+                        #3 start = 1'b1;
+                        @(posedge done);
+                        $display("done at y=%0d", y);
+                        $finish;
+                    end
+                    initial begin
+                        @(posedge start);
+                        y = 8'd1;
+                        #0 y = 8'd2;
+                        done = 1'b1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "done at y=2\n"))
+
+(case tasks_with_timing_controls_run_in_processes
+  (source "tasks.sv" #"
+                module Top(output logic [7:0] y);
+                    logic clk = 1'b0;
+                    always #5 clk = ~clk;
+                    task automatic pulse(input logic [7:0] value, input int cycles);
+                        y = value;
+                        repeat (cycles) @(posedge clk);
+                        #1 y = 8'd0;
+                    endtask
+                    initial begin
+                        y = 8'd0;
+                        pulse(8'd7, 2);
+                        $display("y=%0d", y);
+                        pulse(8'd9, 1);
+                        $display("y=%0d", y);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 10)
+  (assert_eq y 7)
+  ; The first pulse ends at 16, when the second one starts.
+  (run_until 16)
+  (assert_eq y 9)
+  (expect_output "y=0\n")
+  (run_until 25)
+  (assert_eq y 9)
+  (run_to_finish)
+  (expect_output "y=0\n")
+  (assert_eq y 0))
+
+(case edge_waits_see_the_signals_the_script_drives
+  (source "driven.sv" #"
+                module Top(input logic a, output logic [7:0] seen);
+                    initial begin
+                        seen = 8'd0;
+                        forever begin
+                            @(posedge a);
+                            seen = seen + 8'd1;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0))
+  (run_until 1)
+  (for value (list 1 0 1 1 0)
+    (modify (set a value))
+    (run_until 2))
+  (assert_eq seen 2)
+  (modify (set a 1))
+  (run_until 3)
+  (assert_eq seen 3))
+
+(case finish_in_an_always_process_ends_the_simulation
+  (source "finish.sv" #"
+                module Top(output logic [7:0] ticks);
+                    initial ticks = 8'd0;
+                    always begin
+                        #3 ticks = ticks + 8'd1;
+                        if (ticks == 8'd4) $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 7)
+  (assert_eq ticks 2)
+  (run_to_finish)
+  (assert_eq ticks 4))
+
+(case waiting_processes_do_not_keep_an_idle_simulation_running
+  (source "idle.sv" #"
+                module Top(output logic [7:0] y);
+                    logic never = 1'b0;
+                    initial begin
+                        y = 8'd1;
+                        @(posedge never);
+                        y = 8'd2;
+                    end
+                    initial #5 y = 8'd3;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 5)
+  (assert_eq y 3)
+  (run_until 100)
+  (assert_eq y 3))
+
+(case four_state_edges_count_transitions_through_unknown
+  (source "four_state_edges.sv" #"
+                module Top(output logic [7:0] pos, output logic [7:0] neg, output logic [7:0] any);
+                    logic s = 1'b0;
+                    initial begin
+                        pos = 8'd0;
+                        neg = 8'd0;
+                        any = 8'd0;
+                        #1 s = 1'bx; // 0 -> x: posedge
+                        #1 s = 1'b1; // x -> 1: posedge
+                        #1 s = 1'bz; // 1 -> z: negedge
+                        #1 s = 1'bx; // z -> x: no edge, a change
+                        #1 s = 1'b0; // x -> 0: negedge
+                        #1 s = 1'b1; // 0 -> 1: posedge
+                        #1 s = 1'b0; // 1 -> 0: negedge
+                        #1 $finish;
+                    end
+                    initial forever begin
+                        @(posedge s);
+                        pos = pos + 8'd1;
+                    end
+                    initial forever begin
+                        @(negedge s);
+                        neg = neg + 8'd1;
+                    end
+                    initial forever begin
+                        @(s);
+                        any = any + 8'd1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (four_state)
+  (run_to_finish)
+  (assert_eq pos 3)
+  (assert_eq neg 3)
+  (assert_eq any 7))
+
+(case unknown_delays_and_conditions_count_as_zero_and_false
+  (source "unknown.sv" #"
+                module Top(output logic [7:0] y);
+                    logic [7:0] amount = 8'bx;
+                    logic flag = 1'bx;
+                    initial begin
+                        y = 8'd1;
+                        #amount y = 8'd2;
+                        wait (flag) y = 8'd3;
+                        $finish;
+                    end
+                    initial #4 flag = 1'b1;
+                endmodule
+            "#)
+  (top Top)
+  (four_state)
+  (run_until 0)
+  (assert_eq y 2)
+  (run_to_finish)
+  (assert_eq y 3))
