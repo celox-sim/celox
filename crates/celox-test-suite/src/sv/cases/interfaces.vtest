@@ -386,3 +386,24 @@
     (modify (set v value))
     (assert_eq b0 (trunc 8 (+ value 3)))
     (assert_eq b1 (trunc 8 (+ value 6)))))
+
+(case initializes_interface_members_from_their_declarations
+  (source "interface_initializers.sv" #"
+        interface Cfg #(parameter int K = 3);
+            logic [7:0] scale = 8'(K * 2);
+            logic [7:0] in;
+            logic [7:0] out;
+            assign out = in * scale;
+        endinterface
+        module Top(input logic [7:0] x, output logic [7:0] y, output logic [7:0] s);
+            Cfg #(.K(5)) c();
+            assign c.in = x;
+            assign y = c.out;
+            assign s = c.scale;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 3 0x40)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (* value 10)))
+    (assert_eq s 10)))

@@ -42,4 +42,8 @@ sv_backends! {
     fn drives_members_through_child_outputs_and_array_generate_regions(sim) {
         @case "interfaces::drives_members_through_child_outputs_and_array_generate_regions";
     }
+
+    fn initializes_interface_members_from_their_declarations(sim) {
+        @case "interfaces::initializes_interface_members_from_their_declarations";
+    }
 }

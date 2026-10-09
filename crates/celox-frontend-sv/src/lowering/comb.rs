@@ -2732,9 +2732,12 @@ impl<'p, 'a> Comb<'p, 'a> {
 
     /// Execute an `initial` block and return the initial state it defines.
     /// Its writes must have constant values.
+    /// The initial state an `initial` process, or the variable declaration
+    /// initializers when `initializer` is set, define.
     pub fn lower_initial(
         &mut self,
         body: &[sv::ir::Stmt],
+        initializer: bool,
     ) -> Result<Vec<InitialStateValue<SourceVarId>>, sv::AnalyzerError> {
         self.initial = true;
         self.allow_nonblocking = true;
@@ -2755,10 +2758,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let Some((node, _)) = value else { continue };
                 let (value, mask, _) =
                     slt_const4(self.arena, &mut self.consts, *node).ok_or_else(|| {
-                        unsupported(format!(
-                            "initial block value of `{}` that depends on design state",
-                            self.m.var(id).path.join(".")
-                        ))
+                        let name = self.m.var(id).path.join(".");
+                        unsupported(if initializer {
+                            format!("declaration initializer of `{name}` that is not constant")
+                        } else {
+                            format!("initial block value of `{name}` that depends on design state")
+                        })
                     })?;
                 let shift = lsb - origin;
                 let keep = (BigUint::from(1u8) << *width) - BigUint::from(1u8);

@@ -309,6 +309,32 @@ fn validate_specialized_instance_net_drivers(
                     "multiple variable drivers for `{signal_name}`"
                 )));
             }
+            // A variable written by a continuous assignment or an output
+            // port may not also be written procedurally, including by its
+            // initializer or an `initial` block (IEEE 1800-2023 6.5).
+            let mut continuous = child_driver_ranges
+                .into_iter()
+                .chain(continuous_driver_ranges(
+                    &module.source,
+                    signal_name,
+                    &module.constants,
+                    &module.parameter_types,
+                ));
+            let initial = initial_driver_ranges(
+                &module.source,
+                signal_name,
+                &module.constants,
+                &module.parameter_types,
+            );
+            if continuous.any(|(_, continuous)| {
+                initial
+                    .iter()
+                    .any(|(_, initial)| net_driver_ranges_overlap(continuous, *initial))
+            }) {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "procedural initialization of `{signal_name}`, which a continuous assignment or output port also drives"
+                )));
+            }
         }
     }
     Ok(())
@@ -498,6 +524,45 @@ fn validate_variable_driver_ranges(
     Ok(())
 }
 
+/// Records the ranges of `signal_name` that the assignments of `body` write.
+fn body_driver_ranges(
+    drivers: &mut Vec<(usize, Option<(i128, i128)>)>,
+    body: &[sv::ir::Stmt],
+    driver_id: usize,
+    signal_name: &str,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) {
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            let lvalues: Vec<&sv::ir::LValue> = match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => vec![lhs],
+                sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().collect(),
+                _ => Vec::new(),
+            };
+            for lvalue in lvalues {
+                if lvalue.name() == signal_name {
+                    drivers.push((
+                        driver_id,
+                        net_lvalue_range(lvalue, constants, parameter_types),
+                    ));
+                }
+            }
+        });
+    }
+}
+
+fn condition_is_active(
+    condition: Option<&sv::ir::ConstExpr>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    condition.is_none_or(|condition| {
+        sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
+            .is_none_or(|value| value != 0)
+    })
+}
+
 fn local_driver_ranges(
     module: &sv::ir::Module,
     signal_name: &str,
@@ -506,38 +571,78 @@ fn local_driver_ranges(
 ) -> Vec<(usize, Option<(i128, i128)>)> {
     let mut drivers = Vec::new();
     let mut driver_id = 0;
-    let body_drivers = |drivers: &mut Vec<_>, body: &[sv::ir::Stmt], driver_id: usize| {
-        for stmt in body {
-            stmt.walk(&mut |stmt| {
-                let lvalues: Vec<&sv::ir::LValue> = match stmt {
-                    sv::ir::Stmt::Assign { lhs, .. } => vec![lhs],
-                    sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().collect(),
-                    _ => Vec::new(),
-                };
-                for lvalue in lvalues {
-                    if lvalue.name() == signal_name {
-                        drivers.push((
-                            driver_id,
-                            net_lvalue_range(lvalue, constants, parameter_types),
-                        ));
-                    }
-                }
-            });
-        }
-    };
     for process in module.comb_processes() {
-        let active = process.condition().is_none_or(|condition| {
-            sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
-                .is_none_or(|value| value != 0)
-        });
-        if active {
-            body_drivers(&mut drivers, process.body(), driver_id);
+        if condition_is_active(process.condition(), constants, parameter_types) {
+            body_driver_ranges(
+                &mut drivers,
+                process.body(),
+                driver_id,
+                signal_name,
+                constants,
+                parameter_types,
+            );
         }
         driver_id += 1;
     }
     for process in module.ff_processes() {
-        body_drivers(&mut drivers, process.body(), driver_id);
+        body_driver_ranges(
+            &mut drivers,
+            process.body(),
+            driver_id,
+            signal_name,
+            constants,
+            parameter_types,
+        );
         driver_id += 1;
+    }
+    drivers
+}
+
+/// The ranges of `signal_name` that continuous assignments write.
+fn continuous_driver_ranges(
+    module: &sv::ir::Module,
+    signal_name: &str,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Vec<(usize, Option<(i128, i128)>)> {
+    let mut drivers = Vec::new();
+    for (driver_id, process) in module.comb_processes().iter().enumerate() {
+        if process.kind() == sv::ir::CombProcessKind::ContinuousAssign
+            && condition_is_active(process.condition(), constants, parameter_types)
+        {
+            body_driver_ranges(
+                &mut drivers,
+                process.body(),
+                driver_id,
+                signal_name,
+                constants,
+                parameter_types,
+            );
+        }
+    }
+    drivers
+}
+
+/// The ranges of `signal_name` that `initial` processes and variable
+/// declaration initializers write.
+fn initial_driver_ranges(
+    module: &sv::ir::Module,
+    signal_name: &str,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Vec<(usize, Option<(i128, i128)>)> {
+    let mut drivers = Vec::new();
+    for (driver_id, process) in module.initial_processes().iter().enumerate() {
+        if condition_is_active(process.condition(), constants, parameter_types) {
+            body_driver_ranges(
+                &mut drivers,
+                process.body(),
+                driver_id,
+                signal_name,
+                constants,
+                parameter_types,
+            );
+        }
     }
     drivers
 }
@@ -1741,7 +1846,7 @@ fn lower_initial_processes(
         }
         let mut arena = SLTNodeArena::new();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
-        values.extend(comb.lower_initial(process.body())?);
+        values.extend(comb.lower_initial(process.body(), process.is_initializer())?);
     }
     let created = std::mem::take(&mut pm.created);
     for id in created {

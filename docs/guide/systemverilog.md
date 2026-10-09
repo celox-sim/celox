@@ -49,7 +49,7 @@ synthesis and is tested at the design level.
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
-| Initial blocks | `initial` blocks whose writes have constant values (they define the initial state), with constant `if` / `for`, and `$readmemh` / `$readmemb` |
+| Initial blocks | `initial` blocks whose writes have constant values (they define the initial state), with constant `if` / `for`, and `$readmemh` / `$readmemb`; variable declaration initializers with constant values (`logic [7:0] v = 8'h5a;`), also of interface members, which take effect before the `initial` blocks |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` (without timing) with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
@@ -103,7 +103,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
-- Declarations: variable declaration initializers ([#439](https://github.com/celox-sim/celox/issues/439)), packed unions
+- Declarations: variable declaration initializers that are not constant or that
+  initialize members of an interface array, ANSI port default values, packed unions
   ([#440](https://github.com/celox-sim/celox/issues/440)), multidimensional packed ranges that are not zero-based and
   descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)), block-local
   variables that share a name with a variable of another process ([#445](https://github.com/celox-sim/celox/issues/445)),
