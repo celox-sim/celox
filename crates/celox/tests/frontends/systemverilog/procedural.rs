@@ -47,6 +47,10 @@ sv_backends! {
         @case "procedural::ff_select_index_calls_write_state_and_run_once";
     }
 
+    fn function_bodies_run_their_index_calls_each_time(sim) {
+        @case "procedural::function_bodies_run_their_index_calls_each_time";
+    }
+
     fn ff_processes_write_bits_of_separate_array_elements(sim) {
         @case "procedural::ff_processes_write_bits_of_separate_array_elements";
     }

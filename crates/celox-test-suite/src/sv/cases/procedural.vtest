@@ -369,6 +369,35 @@
     (assert_eq bits 4)
     (assert_eq calls_out 1)))
 
+(case function_bodies_run_their_index_calls_each_time
+  ; Two calls of a function whose body calls another function in a select
+  ; index each run that call.
+  (source "body_index_calls.sv" #"
+                module Top(input logic [3:0] tbl, output logic [3:0] calls_out,
+                           output logic [3:0] bits);
+                    logic [3:0] count;
+                    function automatic logic inner(input logic [3:0] prior,
+                                                   output logic [3:0] after);
+                        after = prior + 4'd1;
+                        return 1'b1;
+                    endfunction
+                    function automatic logic [1:0] outer(input logic x);
+                        return {1'b0, tbl[inner(count, count)]};
+                    endfunction
+                    always_comb begin
+                        count = 4'd0;
+                        bits = 4'd0;
+                        bits[outer(1'b0) + outer(1'b0)] = 1'b1;
+                        calls_out = count;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (t) (list (5) (2))
+    (modify (set tbl t))
+    (assert_eq calls_out 2)
+    (assert_eq bits (<< 1 (* 2 (& (>> t 1) 1))))))
+
 (case ff_processes_write_bits_of_separate_array_elements
   ; One process writes a run-time bit of mem[1], another the whole mem[2];
   ; each keeps the other's element.

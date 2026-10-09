@@ -326,11 +326,13 @@ pub(super) fn expand_expr_calls(
             let Some(function_body) = &function.body else {
                 return Expr::Call { name, args };
             };
-            // Inlining copies or drops an argument with its parameter; an
-            // argument that calls a subroutine runs exactly once instead.
+            // Inlining copies or drops an argument with its parameter, and
+            // copies the calls of the body with their sites; a subroutine call
+            // in either runs once per evaluation instead.
             if function.params.len() != args.len() || args.iter().any(calls_subroutine) {
                 return Expr::Call { name, args };
             }
+            let call_args = args.clone();
             let env = function
                 .params
                 .iter()
@@ -368,6 +370,12 @@ pub(super) fn expand_expr_calls(
                 depth + 1,
                 apply_return_type,
             );
+            if calls_subroutine(&expanded) {
+                return Expr::Call {
+                    name,
+                    args: call_args,
+                };
+            }
             let mut expanded = if apply_return_type && let Some(width) = function.return_width {
                 let expression_signed =
                     expr_signedness(&expanded, expression_signedness, functions).unwrap_or(false);
