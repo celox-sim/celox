@@ -108,6 +108,54 @@ pub(super) fn expr_signedness_with_return_types(
     }
 }
 
+/// Whether `expr` calls a subroutine, which may have side effects.
+fn calls_subroutine(expr: &Expr) -> bool {
+    fn constant(expr: &ConstExpr) -> bool {
+        match expr {
+            ConstExpr::Function { name, args, .. } => {
+                !name.starts_with('$') || args.iter().any(constant)
+            }
+            ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
+            ConstExpr::Unary { expr, .. } => constant(expr),
+            ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => constant(condition) || constant(then_expr) || constant(else_expr),
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        }
+    }
+    match expr {
+        Expr::Call { name, args } => !name.starts_with('$') || args.iter().any(calls_subroutine),
+        Expr::Ident(_) | Expr::Literal(_) => false,
+        Expr::Select { expr, msb, lsb, .. } => {
+            calls_subroutine(expr) || constant(msb) || constant(lsb)
+        }
+        Expr::Concat(parts) => parts.iter().any(calls_subroutine),
+        Expr::RepeatConcat { count, parts } => {
+            constant(count) || parts.iter().any(calls_subroutine)
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => calls_subroutine(expr),
+        Expr::Binary { left, right, .. } => calls_subroutine(left) || calls_subroutine(right),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            calls_subroutine(condition)
+                || calls_subroutine(then_expr)
+                || calls_subroutine(else_expr)
+        }
+        Expr::Inside { expr, items } => {
+            calls_subroutine(expr)
+                || items
+                    .iter()
+                    .any(|item| item.exprs().into_iter().any(calls_subroutine))
+        }
+    }
+}
+
 pub(super) fn expand_expr_calls(
     expr: Expr,
     functions: &HashMap<String, Function>,
@@ -278,9 +326,13 @@ pub(super) fn expand_expr_calls(
             let Some(function_body) = &function.body else {
                 return Expr::Call { name, args };
             };
-            if function.params.len() != args.len() {
+            // Inlining copies or drops an argument with its parameter, and
+            // copies the calls of the body with their sites; a subroutine call
+            // in either runs once per evaluation instead.
+            if function.params.len() != args.len() || args.iter().any(calls_subroutine) {
                 return Expr::Call { name, args };
             }
+            let call_args = args.clone();
             let env = function
                 .params
                 .iter()
@@ -318,6 +370,12 @@ pub(super) fn expand_expr_calls(
                 depth + 1,
                 apply_return_type,
             );
+            if calls_subroutine(&expanded) {
+                return Expr::Call {
+                    name,
+                    args: call_args,
+                };
+            }
             let mut expanded = if apply_return_type && let Some(width) = function.return_width {
                 let expression_signed =
                     expr_signedness(&expanded, expression_signedness, functions).unwrap_or(false);

@@ -99,7 +99,7 @@ use dimensions::{
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
     expr_from_function_subroutine_call, expr_from_primary, expr_from_subroutine_call,
-    expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
+    expr_from_tf_call, expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{
@@ -1312,6 +1312,10 @@ pub enum ConstExpr {
     Function {
         name: String,
         args: Vec<ConstExpr>,
+        /// Tells a user subroutine call apart from a call written alike: a
+        /// select repeats its index in its bounds and range checks, and the
+        /// copies of one call share its site, so the call runs once.
+        site: Option<usize>,
     },
     Unary {
         op: UnaryOp,
@@ -1327,6 +1331,28 @@ pub enum ConstExpr {
         then_expr: Box<ConstExpr>,
         else_expr: Box<ConstExpr>,
     },
+}
+
+thread_local! {
+    static NEXT_CALL_SITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Run one analysis step with call sites numbered from zero, so that
+/// analyzing the same source always gives the same sites.
+pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
+    let saved = NEXT_CALL_SITE.with(|next| next.replace(0));
+    let result = f();
+    NEXT_CALL_SITE.with(|next| next.set(saved));
+    result
+}
+
+impl ConstExpr {
+    /// A call of `name`; a user subroutine call gets a site of its own.
+    fn call(name: String, args: Vec<ConstExpr>) -> Self {
+        let site = (!name.starts_with('$'))
+            .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
+        ConstExpr::Function { name, args, site }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

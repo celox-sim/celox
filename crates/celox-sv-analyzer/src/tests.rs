@@ -3571,3 +3571,22 @@ fn rejects_unsupported_interface_uses() {
         );
     }
 }
+
+#[test]
+fn analyzing_a_source_again_gives_the_same_call_sites() {
+    let code = r#"
+        module Top(input logic [1:0] i, output logic [3:0] y);
+            function automatic logic [1:0] pick(input logic [1:0] x);
+                return x;
+            endfunction
+            always_comb begin
+                y = 4'd0;
+                y[pick(i)] = 1'b1;
+            end
+        endmodule
+    "#;
+    let path = Path::new("sites.sv");
+    let first = analyze_source(code, path).unwrap();
+    let second = analyze_source(code, path).unwrap();
+    assert_eq!(first, second);
+}

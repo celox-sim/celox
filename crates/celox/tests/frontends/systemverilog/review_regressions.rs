@@ -8238,3 +8238,159 @@ fn reports_incompatible_unpacked_arrays_in_each_assignment_like_context() {
         }
     }
 }
+
+#[test]
+fn runs_both_ff_select_index_arms_for_an_unknown_condition() {
+    // An ambiguous condition evaluates both arms (IEEE 1800-2023 11.4.11).
+    let source = r#"
+        module Top(input bit clk, input logic c, output logic [3:0] count);
+            function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            always_ff @(posedge clk) begin
+                logic [3:0] calls;
+                logic [3:0] bits;
+                calls = 4'd0;
+                bits = 4'd0;
+                bits[c ? tick(calls, calls) : tick(calls, calls)] = 1'b1;
+                count <= calls;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_mux_x.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let c = sim.signal("c");
+    let count = sim.signal("count");
+    let clk = sim.event("clk");
+    for (payload, mask, calls) in [(1u8, 0u8, 1u8), (0, 0, 1), (0, 1, 2)] {
+        sim.modify(|io| io.set_four_state(c, BigUint::from(payload), BigUint::from(mask)))
+            .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(count),
+            (BigUint::from(calls), BigUint::default()),
+            "c = {payload}/{mask}"
+        );
+    }
+}
+
+#[test]
+fn runs_one_select_index_arm_for_a_true_condition_with_unknown_bits() {
+    // 2'b1x is true: only the first arm runs; 2'b0x is ambiguous: both run
+    // (IEEE 1800-2023 11.4.11).
+    let source = r#"
+        module Top(input logic [1:0] c, output logic [3:0] first, output logic [3:0] second);
+            function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                output logic [3:0] after);
+                after = prior + 4'd1;
+                return 2'd1;
+            endfunction
+            always_comb begin
+                logic [3:0] a;
+                logic [3:0] b;
+                logic [3:0] bits;
+                a = 4'd0;
+                b = 4'd0;
+                bits = 4'd0;
+                bits[c ? tick(a, a) : tick(b, b)] = 1'b1;
+                first = a;
+                second = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("comb_mux_x.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let c = sim.signal("c");
+    let first = sim.signal("first");
+    let second = sim.signal("second");
+    for (payload, mask, a, b) in [
+        (0b10u8, 0b01u8, 1u8, 0u8),
+        (0b00, 0b01, 1, 1),
+        (0b00, 0b00, 0, 1),
+    ] {
+        sim.modify(|io| io.set_four_state(c, BigUint::from(payload), BigUint::from(mask)))
+            .unwrap();
+        let known = |value: u8| (BigUint::from(value), BigUint::default());
+        assert_eq!(
+            sim.get_four_state(first),
+            known(a),
+            "c = {payload:b}/{mask:b}"
+        );
+        assert_eq!(
+            sim.get_four_state(second),
+            known(b),
+            "c = {payload:b}/{mask:b}"
+        );
+    }
+}
+
+#[test]
+fn reemits_run_time_loop_events_when_only_the_bound_changes() {
+    let source = r#"
+        module Top(input logic [2:0] count, input logic a, output logic y);
+            always_comb begin
+                for (int i = 0; i < count; i++) $display("tick %0d", i);
+                y = a;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("loop_bound.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let count = sim.signal("count");
+    let ticks = |n: usize| {
+        (0..n)
+            .map(|i| celox::RuntimeEvent::Display {
+                message: format!("tick {i}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(count, 2u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), ticks(2));
+    sim.modify(|io| io.set(count, 3u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), ticks(3));
+}
+
+#[test]
+fn commits_ff_output_actuals_whose_index_calls_a_function() {
+    // `outer` writes `state[inner(k)]` from an always_ff select index; the
+    // write is committed with the process.
+    let source = r#"
+        module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
+                   output logic [3:0] bits);
+            function automatic logic [1:0] inner(input logic [1:0] x);
+                return x;
+            endfunction
+            function automatic logic [1:0] outer(output logic y);
+                y = 1'b1;
+                return 2'd2;
+            endfunction
+            logic [3:0] state;
+            always_ff @(posedge clk) begin
+                state <= 4'd0;
+                bits[outer(state[inner(k)])] <= 1'b1;
+            end
+            assign st = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_nested.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let k = sim.signal("k");
+    let st = sim.signal("st");
+    let bits = sim.signal("bits");
+    let clk = sim.event("clk");
+    for index in [1u8, 3, 0] {
+        sim.modify(|io| io.set(k, index)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(st), 1 << index, "k = {index}");
+        assert_eq!(sim.get_as::<u8>(bits), 4);
+    }
+}

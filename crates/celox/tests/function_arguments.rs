@@ -77,8 +77,10 @@ fn test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body(sim)
 
 fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index: "select index `observe(copied)`"
-    // (#88).
+    // The expected values follow Celox's Veryl order, which writes the later
+    // parts of a concatenated destination before it evaluates the select of an
+    // earlier part. In SystemVerilog every position of the destination is
+    // evaluated before the assignment (IEEE 1800-2023 10.4.1, 11.4.12).
     @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (

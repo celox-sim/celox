@@ -280,8 +280,10 @@ module Top (
 
 fn test_comb_output_destination_observer_uses_return_aware_loop_value(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index:
-    // "select index `observe_index(tmp)`" (#88).
+    // The expected values follow Celox's Veryl order, which writes the later
+    // parts of a concatenated destination before it evaluates the select of an
+    // earlier part. In SystemVerilog every position of the destination is
+    // evaluated before the assignment (IEEE 1800-2023 10.4.1, 11.4.12).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -473,9 +475,6 @@ module Top (
 
 fn test_comb_runtime_effect_inside_assignment_destination_is_collected(sim) {
     @omit_veryl;
-    // SV frontend rejects a destination index that calls a function with an output argument:
-    // "assignment target `data`" (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     sel: input logic<2>,
@@ -585,8 +584,6 @@ module Top (
 
 fn test_comb_runtime_effect_inside_loop_bound_is_collected(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -1775,8 +1772,6 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_reactivates_after_assign_chain(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -2090,8 +2085,6 @@ module Top (
 
 fn test_comb_capture_before_dynamic_for_backedge_keeps_loop_state(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -2416,8 +2409,6 @@ module Top (
 
 fn test_return_before_dynamic_loop_suppresses_loop_effects(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2672,8 +2663,6 @@ fn test_named_function_outputs_apply_in_source_order(sim) {
 
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3490,8 +3479,6 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_runs_each_iteration(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3544,8 +3531,6 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_remaps_site_after_prior_comb_event(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3605,8 +3590,6 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_preserves_repeated_identical_events(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3643,8 +3626,6 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_with_multiple_updates_emits_once_per_iteration(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3698,8 +3679,6 @@ module Top (
 
 fn test_comb_display_preserves_order_around_dynamic_for(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -4142,9 +4121,6 @@ module Top (
 
 fn test_comb_display_function_output_dynamic_actual_excludes_only_prefix(sim) {
     @omit_veryl;
-    // SV frontend rejects a run-time select `mem[1][idx]` as an output argument:
-    // "assignment target `mem`" (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     idx: input logic,
@@ -4373,9 +4349,6 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_runtime_effect_in_function_output_destination_is_detected(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index:
-    // "select index `choose_index(index, seen)`" (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) {
     function choose_index (
@@ -4470,9 +4443,6 @@ fn test_comb_function_loop_skips_conditions_after_break(sim) {
 
 fn test_comb_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index: "select index `observe(first)`"
-    // (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,
@@ -4525,8 +4495,8 @@ module Top (
 
 fn test_comb_outputless_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index: "select index `observe(first)`"
-    // (#88).
+    // `slots[observe(first)]` writes one bit of `slots` and leaves the other
+    // unassigned, which the SV frontend rejects as a latch in always_comb.
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
@@ -4578,8 +4548,6 @@ module Top (
 
 fn test_comb_return_aware_function_loop_collects_bound_effects(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic<8>, out: output logic<8>) {
     function bound (x: input logic<8>, seen: output logic<8>) -> logic<2> {
@@ -4617,9 +4585,6 @@ module Top (value: input logic<8>, out: output logic<8>) {
 
 fn test_comb_variable_indices_observe_prior_index_output_write(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index:
-    // "select index `set_index(value, seen)`" (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic, out: output logic) {
     function set_index (x: input logic, seen: output logic) -> logic {
@@ -4653,8 +4618,6 @@ module Top (value: input logic, out: output logic) {
 
 fn test_comb_function_loop_bound_write_is_guarded_after_return(sim) {
     @omit_veryl;
-    // SV frontend rejects `$display` inside a combinational loop with a run-time bound (#88).
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     skip: input logic,
@@ -4703,8 +4666,10 @@ module Top (
 
 fn test_comb_concat_destination_observes_prior_destination_write(sim) {
     @omit_veryl;
-    // SV frontend rejects `{data[observe(tmp)], tmp} = ...`, whose index calls a function:
-    // "assignment target `data`" (#88).
+    // The expected values follow Celox's Veryl order, which writes the later
+    // parts of a concatenated destination before it evaluates the select of an
+    // earlier part. In SystemVerilog every position of the destination is
+    // evaluated before the assignment (IEEE 1800-2023 10.4.1, 11.4.12).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {
@@ -4732,8 +4697,10 @@ module Top (trigger: input logic, out: output logic<2>) {
 
 fn test_comb_function_output_concat_observes_prior_destination_write(sim) {
     @omit_veryl;
-    // SV frontend rejects a function call in a select index: "select index `observe(tmp)`"
-    // (#88).
+    // The expected values follow Celox's Veryl order, which writes the later
+    // parts of a concatenated destination before it evaluates the select of an
+    // earlier part. In SystemVerilog every position of the destination is
+    // evaluated before the assignment (IEEE 1800-2023 10.4.1, 11.4.12).
     @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {
