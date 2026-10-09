@@ -2032,7 +2032,7 @@ fn relocate_units(
                         &runtime_event_site_map,
                         &extern_function_map,
                     ),
-                    slots: process.slots.map(|var_id| AbsoluteAddr {
+                    slots: process.slots.clone().map(|var_id| AbsoluteAddr {
                         instance_id: *id,
                         var_id,
                     }),

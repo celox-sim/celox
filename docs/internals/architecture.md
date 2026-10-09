@@ -184,9 +184,12 @@ to the next. Each process owns three hidden two-state state objects:
 
 - a resume slot, which the kernel's entry block dispatches on with a `Switch`
   (two levels beyond 255 suspension points);
-- a status slot, in which the kernel reports a delay, a wait, the end of the
-  process, or `$finish` before it returns;
-- a delay slot, which holds the wait amount.
+- a status slot, in which the kernel reports a delay, a wait, a clock wait,
+  the end of the process, or `$finish` before it returns;
+- a delay slot, which holds the wait amount: time units or clock edges;
+- a clock slot, which names the process clock of a clock wait among the
+  clocks the process may wait on, listed with their periods in the runtime
+  schema.
 
 A suspension stores these slots and returns, so no backend needs a new
 terminator. Kernels are never merged with each other or with a phase, and
@@ -215,11 +218,26 @@ waited for zero time, or that the settled state wakes, resume in a further
 round at the same time, which repeats the edge detection and settling; a
 round in which every waiting process reports a pending wait ends the time.
 `Simulation::step` and `run_until` also run such a round first, so a host
-write between steps wakes the processes that wait for it. Because the slots
-are ordinary state, a checkpoint captures suspended processes. The optimizer
-does not yet optimize kernels, but it treats their accesses like those of FF
-domains, so identity aliasing and dead-store elimination keep the state they
-use.
+write between steps wakes the processes that wait for it.
+
+A clock wait asks for a number of rising edges of a process clock. The
+scheduler generates that clock's edges from the first wait on it: a rising
+edge is due at the clock's next edge time whenever a process waits, applied
+after the processes of that time have run, and its falling edge half a
+period later; each rising edge counts against the waits, and a process whose
+count is reached resumes one period after that edge, before the edge that
+follows. When every live process waits on the single clock that is due and
+no event, resumption or falling edge is pending, the scheduler instead runs
+as many edges as the earliest resumption needs through
+`SimulationExecutor::tick_many`, the same fused combinational-plus-sequential
+loop that event-driven ticks use, and advances time past them in one step.
+Those ticks leave the clock signal untouched and skip the per-edge hooks of
+external components, which is why the host can veto them. Because the slots
+are ordinary state, a checkpoint captures suspended processes, and the
+scheduler's snapshot carries the generated clocks and clock waits. The
+optimizer does not yet optimize kernels, but it treats their accesses like
+those of FF domains, so identity aliasing and dead-store elimination keep
+the state they use.
 
 A running simulator retains the elaborated design, source lookup, runtime schema,
 bound testbench bytecode, and compiled backend. The backend owns the finalized

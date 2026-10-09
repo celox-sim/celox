@@ -622,3 +622,201 @@ fn zero_delay_pulse_triggers_registers() {
     assert_eq!(sim.get(clk), 1u8.into());
     assert_eq!(sim.next_event_time(), None);
 }
+
+/// A counter clocked by `clk`, which only processes drive: the runtime
+/// generates its edges while a process waits on it.
+fn clocked_by_process_waits(
+    period: u64,
+) -> (
+    ModuleBuilder,
+    celox::frontend_sdk::SignalId,
+    celox::frontend_sdk::SignalId,
+) {
+    let bit = ValueType::bits(1).unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let mut module = ModuleBuilder::new("ClockWaits").unwrap();
+    let clk = module.internal("clk", bit).unwrap();
+    let count = module.output("count", word).unwrap();
+    module
+        .set_initial(count, Constant::two_state(0u8, 32).unwrap())
+        .unwrap();
+    let count_expr = module.read(count).unwrap();
+    let one = constant(&mut module, 1, 32);
+    let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
+    let count_target = module.whole(count).unwrap();
+    module
+        .register(count_target, next, clk, Edge::Posedge, None, None)
+        .unwrap();
+    module.clock_period(clk, period).unwrap();
+    (module, clk, count)
+}
+
+#[test]
+fn clock_waits_count_rising_edges_and_resume_before_the_next() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    let word = ValueType::bits(32).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let ten = constant(&mut module, 10, 64);
+    let three = constant(&mut module, 3, 64);
+    let zero = constant(&mut module, 0, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let seen = sim.signal("seen");
+    // Edges at 0, 2, ..., 18; the process resumes at 20, before the edge there.
+    sim.run_until(19).unwrap();
+    assert_eq!(sim.get(count), 10u32.into());
+    assert_eq!(sim.get(seen), 0u32.into());
+    assert_eq!(sim.ticks(), 10);
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert!(!sim.is_finished());
+    // Three more edges at 20, 22 and 24; the process finishes at 26.
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 26);
+    assert_eq!(sim.get(count), 13u32.into());
+    assert_eq!(sim.ticks(), 13);
+}
+
+#[test]
+fn clock_waits_of_several_processes_share_fused_edges() {
+    let (mut module, clk, count) = clocked_by_process_waits(10);
+    let word = ValueType::bits(32).unwrap();
+    let early = module.output("early", word).unwrap();
+    let late = module.output("late", word).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let early_target = module.whole(early).unwrap();
+    let late_target = module.whole(late).unwrap();
+    let a_lot = constant(&mut module, 1_000_000, 64);
+    let fewer = constant(&mut module, 300_000, 64);
+    let some = constant(&mut module, 5, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: a_lot,
+            },
+            Statement::Assign {
+                target: late_target,
+                value: count_expr,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: fewer,
+            },
+            Statement::Assign {
+                target: early_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: some,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let early = sim.signal("early");
+    let late = sim.signal("late");
+    sim.run_until(u64::MAX - 1).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(early), 300_000u32.into());
+    assert_eq!(sim.get(late), 1_000_000u32.into());
+    assert_eq!(sim.ticks(), 1_000_000);
+    assert_eq!(sim.time(), 10_000_000);
+}
+
+#[test]
+fn clock_waits_interleave_with_delays_and_checkpoints() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    let word = ValueType::bits(32).unwrap();
+    let bit = ValueType::bits(1).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let flag = module.output("flag", bit).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let flag_target = module.whole(flag).unwrap();
+    let ten = constant(&mut module, 10, 64);
+    let five = constant(&mut module, 5, 64);
+    let one = constant(&mut module, 1, 1);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    module
+        .process(vec![
+            Statement::Delay { amount: five },
+            Statement::Assign {
+                target: flag_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let seen = sim.signal("seen");
+    let flag = sim.signal("flag");
+    let clk = sim.signal("clk");
+    // Edges at 0, 2 and 4 run one by one around the delay at 5; the clock
+    // signal shows them.
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(count), 2u32.into());
+    assert_eq!(sim.get(clk), 1u8.into());
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(flag), 1u8.into());
+    assert_eq!(sim.get(count), 3u32.into());
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(20).unwrap();
+    // The process resumed at 20 before the edge there, and waits again, so
+    // that edge fires.
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert_eq!(sim.get(count), 11u32.into());
+    sim.restore(&checkpoint).unwrap();
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.get(seen), 0u32.into());
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 40);
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert_eq!(sim.get(count), 20u32.into());
+}

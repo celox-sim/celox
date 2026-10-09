@@ -131,6 +131,7 @@ in order:
 | `If` | Branch on a condition. A condition with unknown bits counts as false. |
 | `While` / `Forever` | Repeat a body while a condition holds, or forever. |
 | `Delay` | Suspend for an amount of time units, at most 64 bits wide. |
+| `ClockCycles` | Suspend until a number of rising edges of a clock have passed. The clock must clock a register and have a period set with `ModuleBuilder::clock_period`; the runtime generates its edges from the first wait on it, and the process resumes one period after the last counted edge, before the edge that follows. |
 | `Finish` | End the simulation. |
 
 ```rust
@@ -154,6 +155,15 @@ causes trigger registers at the current time, like a scheduled event. A zero
 delay resumes the process later at the same time, after the other processes
 have run and the registers their edges trigger have settled, so a pulse
 separated by a zero delay is still an edge.
+
+A clock that processes wait on with `ClockCycles` toggles every half period
+once a process has waited on it, as long as one does. While every live
+process waits on the same clock and nothing else is scheduled, the edges run
+as fused ticks inside the backend's generated code, so a long wait costs no
+more than the same number of ticks of an event-driven `Simulator`; such a
+run skips the clock signal's own edges and the per-edge hooks of external
+components, which are honored again as soon as another process or event
+interleaves.
 
 A process may write output and internal signals that no continuous assignment
 or register drives. Several processes may write the same signal. Checkpoints

@@ -443,6 +443,10 @@ impl<B: SimBackend> Simulator<B> {
             // State files are rejected for designs with processes.
             process_wakeups: Vec::new(),
             waiting_processes: Vec::new(),
+            process_clocks: Vec::new(),
+            clock_waits: Vec::new(),
+            done_processes: Vec::new(),
+            ticks: 0,
             finished: false,
         })
     }
