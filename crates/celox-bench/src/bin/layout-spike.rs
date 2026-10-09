@@ -359,6 +359,7 @@ mod tests {
             eval_only_ffs: FxHashMap::default(),
             apply_ffs: FxHashMap::default(),
             parallel: None,
+            processes: Vec::new(),
         }
     }
 

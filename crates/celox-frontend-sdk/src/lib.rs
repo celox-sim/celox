@@ -12,7 +12,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Current JSON interchange version of [`FrontendArtifact`].
-pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 adds [`Process`]es. An artifact without processes is still
+/// written as version 1, so older consumers keep accepting it.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
+
+/// Oldest JSON interchange version [`FrontendArtifact::from_json`] accepts.
+pub const MIN_ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 /// Identity of one signal in the elaborated module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -441,6 +447,54 @@ impl Register {
     }
 }
 
+/// One statement of a [`Process`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Statement {
+    /// Blocking assignment. Later statements of the process read the new
+    /// value; other logic sees it once the process suspends.
+    Assign { target: SignalSlice, value: ExprId },
+    /// Run `then_body` when `condition` is nonzero, otherwise `else_body`.
+    /// A condition is nonzero when some bit is a known one; one whose truth
+    /// is unknown counts as false.
+    If {
+        condition: ExprId,
+        then_body: Vec<Statement>,
+        else_body: Vec<Statement>,
+    },
+    /// Run `body` while `condition` is nonzero, testing it before each
+    /// iteration.
+    While {
+        condition: ExprId,
+        body: Vec<Statement>,
+    },
+    /// Run `body` forever.
+    Forever { body: Vec<Statement> },
+    /// Suspend the process for `amount` time units. Unknown bits of the
+    /// amount count as zero; a zero delay resumes at the same time, after
+    /// the other processes and the registers their edges trigger.
+    Delay { amount: ExprId },
+    /// End the simulation.
+    Finish,
+}
+
+/// A procedural process that starts at time zero, such as an `initial`
+/// block. Processes run in declaration order whenever several resume at the
+/// same time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Process {
+    body: Vec<Statement>,
+}
+
+impl Process {
+    pub fn body(&self) -> &[Statement] {
+        &self.body
+    }
+}
+
+/// Widest delay amount a [`Statement::Delay`] may use.
+pub const MAX_DELAY_WIDTH: usize = 64;
+
 /// Fully elaborated frontend result. The first SDK version intentionally
 /// models one flattened module; hierarchical netlists can be flattened by the
 /// producing frontend without affecting runtime signal names.
@@ -453,6 +507,8 @@ pub struct FrontendArtifact {
     assignments: Vec<Assignment>,
     registers: Vec<Register>,
     port_order: Vec<SignalId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    processes: Vec<Process>,
 }
 
 impl FrontendArtifact {
@@ -468,7 +524,10 @@ impl FrontendArtifact {
     /// Decode and version-check an artifact produced by an external frontend.
     pub fn from_json(json: &str) -> Result<Self, ArtifactJsonError> {
         let artifact: Self = serde_json::from_str(json)?;
-        if artifact.format_version != ARTIFACT_FORMAT_VERSION {
+        if !(MIN_ARTIFACT_FORMAT_VERSION..=ARTIFACT_FORMAT_VERSION)
+            .contains(&artifact.format_version)
+            || (artifact.format_version < 2 && !artifact.processes.is_empty())
+        {
             return Err(ArtifactJsonError::UnsupportedVersion {
                 expected: ARTIFACT_FORMAT_VERSION,
                 actual: artifact.format_version,
@@ -788,6 +847,9 @@ impl FrontendArtifact {
             }
             insert_driver_target(&mut driver_ranges, register.target, &target.name)?;
         }
+        for process in &self.processes {
+            self.validate_statements(&process.body, &driver_ranges)?;
+        }
         let mut ordered_ports = FxHashMap::default();
         for signal in &self.port_order {
             let signal = self
@@ -838,6 +900,23 @@ impl FrontendArtifact {
 
     pub fn port_order(&self) -> &[SignalId] {
         &self.port_order
+    }
+
+    pub fn processes(&self) -> &[Process] {
+        &self.processes
+    }
+
+    fn validate_statements(
+        &self,
+        statements: &[Statement],
+        driver_ranges: &FxHashMap<SignalId, BTreeMap<usize, usize>>,
+    ) -> Result<(), BuildError> {
+        validate_statements(
+            statements,
+            &|signal| self.signal(signal),
+            &|expression| self.expression(expression),
+            driver_ranges,
+        )
     }
 
     pub fn signal(&self, id: SignalId) -> Option<&Signal> {
@@ -906,6 +985,10 @@ pub enum BuildError {
     SignalNamespaceCollision { first: String, second: String },
     #[error("inout signal `{name}` is not supported by frontend artifact format version 1")]
     UnsupportedInout { name: String },
+    #[error("signal `{name}` is driven by both a process and continuous or register logic")]
+    ProcessDriverConflict { name: String },
+    #[error("delay amount is {width} bits wide; at most {MAX_DELAY_WIDTH} bits are supported")]
+    DelayTooWide { width: usize },
 }
 
 /// JSON interchange failures for frontend artifacts.
@@ -930,6 +1013,7 @@ pub struct ModuleBuilder {
     registers: Vec<Register>,
     driver_ranges: FxHashMap<SignalId, BTreeMap<usize, usize>>,
     port_order: Vec<SignalId>,
+    processes: Vec<Process>,
 }
 
 impl ModuleBuilder {
@@ -948,6 +1032,7 @@ impl ModuleBuilder {
             registers: Vec::new(),
             driver_ranges: FxHashMap::default(),
             port_order: Vec::new(),
+            processes: Vec::new(),
         })
     }
 
@@ -1273,15 +1358,32 @@ impl ModuleBuilder {
         Ok(Enable { signal, active })
     }
 
+    /// Add a process that starts at time zero and runs `body` once.
+    pub fn process(&mut self, body: Vec<Statement>) -> Result<(), BuildError> {
+        validate_statements(
+            &body,
+            &|signal| self.signals.get(signal.index() as usize),
+            &|expression| self.expressions.get(expression.index() as usize),
+            &self.driver_ranges,
+        )?;
+        self.processes.push(Process { body });
+        Ok(())
+    }
+
     pub fn finish(self) -> FrontendArtifact {
         FrontendArtifact {
-            format_version: ARTIFACT_FORMAT_VERSION,
+            format_version: if self.processes.is_empty() {
+                MIN_ARTIFACT_FORMAT_VERSION
+            } else {
+                ARTIFACT_FORMAT_VERSION
+            },
             module_name: self.name,
             signals: self.signals,
             expressions: self.expressions,
             assignments: self.assignments,
             registers: self.registers,
             port_order: self.port_order,
+            processes: self.processes,
         }
     }
 
@@ -1328,6 +1430,16 @@ impl ModuleBuilder {
 
     fn record_driver_target(&mut self, target: SignalSlice) -> Result<(), BuildError> {
         let signal_name = self.signal_info(target.signal)?.name.clone();
+        let mut process_targets = Vec::new();
+        for process in &self.processes {
+            collect_process_targets(&process.body, &mut process_targets);
+        }
+        if process_targets
+            .iter()
+            .any(|written| slices_overlap(*written, target))
+        {
+            return Err(BuildError::ProcessDriverConflict { name: signal_name });
+        }
         insert_driver_target(&mut self.driver_ranges, target, &signal_name)
     }
 
@@ -1340,6 +1452,110 @@ impl ModuleBuilder {
         });
         id
     }
+}
+
+fn slices_overlap(a: SignalSlice, b: SignalSlice) -> bool {
+    a.signal == b.signal && a.lsb < b.lsb + b.width && b.lsb < a.lsb + a.width
+}
+
+fn collect_process_targets(statements: &[Statement], targets: &mut Vec<SignalSlice>) {
+    for statement in statements {
+        match statement {
+            Statement::Assign { target, .. } => targets.push(*target),
+            Statement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_process_targets(then_body, targets);
+                collect_process_targets(else_body, targets);
+            }
+            Statement::While { body, .. } | Statement::Forever { body } => {
+                collect_process_targets(body, targets);
+            }
+            Statement::Delay { .. } | Statement::Finish => {}
+        }
+    }
+}
+
+/// Check the statements of one process against the module's signals,
+/// expressions, and continuous or register drivers.
+fn validate_statements<'a>(
+    statements: &[Statement],
+    signal: &dyn Fn(SignalId) -> Option<&'a Signal>,
+    expression: &dyn Fn(ExprId) -> Option<&'a Expression>,
+    driver_ranges: &FxHashMap<SignalId, BTreeMap<usize, usize>>,
+) -> Result<(), BuildError> {
+    let expression_type = |id: ExprId| {
+        expression(id)
+            .map(|expression| expression.value_type)
+            .ok_or(BuildError::UnknownExpression(id.index()))
+    };
+    for statement in statements {
+        match statement {
+            Statement::Assign { target, value } => {
+                let target_signal = signal(target.signal)
+                    .ok_or(BuildError::UnknownSignal(target.signal.index()))?;
+                if target.width == 0 {
+                    return Err(BuildError::ZeroWidth);
+                }
+                if target
+                    .lsb
+                    .checked_add(target.width)
+                    .is_none_or(|end| end > target_signal.value_type.width())
+                {
+                    return Err(BuildError::InvalidSlice {
+                        lsb: target.lsb,
+                        width: target.width,
+                        signal_width: target_signal.value_type.width(),
+                    });
+                }
+                validate_driver_target(target_signal)?;
+                let end = target.lsb + target.width;
+                if driver_ranges.get(&target.signal).is_some_and(|ranges| {
+                    ranges
+                        .range(..end)
+                        .next_back()
+                        .is_some_and(|(_, existing_end)| *existing_end > target.lsb)
+                }) {
+                    return Err(BuildError::ProcessDriverConflict {
+                        name: target_signal.name.clone(),
+                    });
+                }
+                let value_width = expression_type(*value)?.width();
+                if value_width != target.width {
+                    return Err(BuildError::WidthMismatch {
+                        expected: target.width,
+                        actual: value_width,
+                    });
+                }
+            }
+            Statement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                expression_type(*condition)?;
+                validate_statements(then_body, signal, expression, driver_ranges)?;
+                validate_statements(else_body, signal, expression, driver_ranges)?;
+            }
+            Statement::While { condition, body } => {
+                expression_type(*condition)?;
+                validate_statements(body, signal, expression, driver_ranges)?;
+            }
+            Statement::Forever { body } => {
+                validate_statements(body, signal, expression, driver_ranges)?;
+            }
+            Statement::Delay { amount } => {
+                let width = expression_type(*amount)?.width();
+                if width > MAX_DELAY_WIDTH {
+                    return Err(BuildError::DelayTooWide { width });
+                }
+            }
+            Statement::Finish => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_driver_target(signal: &Signal) -> Result<(), BuildError> {

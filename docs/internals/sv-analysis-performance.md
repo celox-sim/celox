@@ -95,6 +95,80 @@ build or the old frontend's additional metadata/rewrite parses.
 | 32 | 531.142 | 26.507 |
 | 128 | 8,819.291 | 109.228 |
 
+## Type-query scope reuse
+
+The follow-up removes repeated declaration discovery from `$bits`/`$size`
+expressions once a module's ports, signals, and function types have been
+collected. Generated and procedural scopes overlay that completed metadata.
+Preliminary parameter, function, and range lowering keeps the completion flag
+false; an unresolved query still falls back to syntax discovery.
+
+Queries use unexpanded function calls, so `$size(f())` retains the first packed
+return dimension rather than the width of an inlined body. Operand signedness
+and implicit parameter widths use per-name lookups instead of reconstructing
+the complete parameter type table. An unqualified typedef parsed as an
+expression can use the alias table directly when no visible value shadows it.
+
+This follows IEEE 1800-2023 20.6.2, **Expression size system function**, and
+20.7, **Array query functions**: fixed-size queries use operand types, and
+`$bits` does not evaluate the enclosed expression. Completed-scope metadata
+also preserves the local binding required by 23.9, **Scope rules**. For
+example, a generate-local `localparam x = 1` hides an eight-bit module input
+`x`; its implied packed range follows 6.20.2, **Value parameters**. Its
+`$bits` and `$size` results are 32 in Celox. The old declaration rebuild could
+reintroduce the outer eight-bit signal. A sized unknown literal similarly
+retains its declared literal width without requiring a numeric value.
+
+The shared `generate::size_queries_use_generate_local_parameter_types` case
+checks both known and unknown local parameters through the backend harness and
+Verilator/Icarus. Analyzer tests compare completed-scope results with discovery
+for arrays, selects, structures, aliases, and function returns; they also assert
+that these queries do not rewalk declarations. Separate tests cover preliminary
+function scopes, typedef shadowing, and repeated parameter specializations.
+
+The `crates/celox-sv-analyzer/examples/type_queries.rs` probe uses the same
+three-run, phase-separated measurements as `scaling`. Its default counts are
+16, 64, and 256 queries. `--parameters` selects declaration-order parameters
+and reverse-ordered generate-local dependencies instead.
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries -- --parameters 16 64
+```
+
+The follow-up's baseline is `3665f501e`, after scope sharing and syntax reuse.
+It uses the same `$bits`, `$size`, selected-value, and function-value inputs.
+The after measurements include the intervening correctness fixes in `6c5b09891`
+and use the same machine, profile, and three-run median procedure above.
+
+| Query | Count | AST before (ms) | AST after (ms) |
+| --- | ---: | ---: | ---: |
+| `$bits(a)` | 16 | 10.644 | 2.290 |
+| `$bits(a)` | 64 | 135.854 | 8.197 |
+| `$bits(a)` | 256 | 2,407.279 | 29.080 |
+| `$size(a)` | 16 | 10.729 | 1.900 |
+| `$size(a)` | 64 | 138.075 | 6.965 |
+| `$size(a)` | 256 | 3,491.439 | 26.993 |
+| `$bits(a[0])` | 16 | 13.030 | 2.673 |
+| `$bits(a[0])` | 64 | 167.299 | 9.769 |
+| `$bits(a[0])` | 256 | 2,574.959 | 39.533 |
+| `$bits(f(a))` | 16 | 14.360 | 3.023 |
+| `$bits(f(a))` | 64 | 169.062 | 9.857 |
+| `$bits(f(a))` | 256 | 2,483.456 | 38.064 |
+
+The completed-scope paths avoid declaration rewalks even when the module has
+many unrelated signals. At 256 queries, parsing still takes about 47–71 ms
+for these four inputs; AST-to-IR conversion takes less than 0.2 ms. These AST
+improvements exclude parsing and backend work. The added typedef workload
+`$bits(byte_t)` takes 2.111/6.955/26.921 ms of AST construction at 16/64/256
+queries; no before measurement is recorded for that workload.
+
+The parameter probe still shows quadratic growth: before this follow-up,
+16/64 declaration-order parameters took 13.785/201.113 ms of AST construction,
+and reverse generate dependencies took 15.630/182.504 ms. After measurements
+are 13.705/186.642 ms and 15.865/179.495 ms, respectively. This change does not
+replace their dependency scheduling or repeated environment construction.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -104,11 +178,12 @@ Resolving the parser's source root can still visit its description list.
 
 Constant environments, type-alias tables, and generated parameter metadata are
 still copied in some scope paths. Many dependent parameters, many functions
-inside generated scopes, and repeated `$bits`/`$size` type discovery can have
-different scaling from the flat probes: the latter still discovers enclosing
-declarations by walking syntax. This change does not establish linear scaling
-for those workloads. The probes provide reproducible baselines for further
-optimization without changing their language semantics.
+inside generated scopes, and `$bits`/`$size` queries during declaration lowering
+or in numeric cast targets can have different scaling from the flat probes.
+Those preliminary queries still discover enclosing declarations by walking
+syntax. Query contexts also clone some constant/alias/function-type tables.
+This change does not establish linear scaling for those workloads. The probes
+provide reproducible baselines for further optimization.
 
 ## Validation
 
@@ -129,4 +204,15 @@ cargo test --locked -p celox-sv-analyzer -p celox-frontend-sv --all-features
 cargo test --locked -p celox --features sv-dpi --test systemverilog --test sv_unpacked_array --test sv_dpi
 cargo doc --locked -p celox-sv-analyzer -p celox-frontend-sv --no-deps
 pnpm docs:build
+```
+
+The type-query follow-up also validates the suite catalogue, including the
+retained-report integration tests, and the new shared case with both available
+independent simulators. Add each new case's observed results to both retained
+reports under `crates/celox-test-suite/verification/sv` and recompute their counts:
+
+```sh
+cargo test --locked -p celox-test-suite --features verilator,icarus
+cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-verilator -- --filter generate::size_queries_use_generate_local_parameter_types
+cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-icarus -- --filter generate::size_queries_use_generate_local_parameter_types
 ```

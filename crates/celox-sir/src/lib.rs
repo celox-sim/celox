@@ -41,6 +41,11 @@ pub struct SirProgram<EventAddr, StateAddr> {
     /// Lane-partitioned alternatives of the hot phases, present only when
     /// compilation requested more than one simulation lane.
     pub parallel: Option<ParallelSirProgram<EventAddr, StateAddr>>,
+    /// Resumable process kernels, invoked individually by the runtime.
+    ///
+    /// Each kernel is exactly one unit: a `Return` hands control back to the
+    /// runtime, so kernels are never merged with each other or with a phase.
+    pub processes: Vec<ExecutionUnit<StateAddr>>,
 }
 
 /// One execution unit of a lane-partitioned kernel.
@@ -208,6 +213,11 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
             ),
             eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
             apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
+            processes: self
+                .processes
+                .into_iter()
+                .map(|unit| map_unit(unit, &mut map_state))
+                .collect(),
             parallel: self.parallel.map(|parallel| ParallelSirProgram {
                 lanes: parallel.lanes,
                 eval_comb: parallel
@@ -1093,6 +1103,7 @@ mod program_mapping_tests {
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             parallel: None,
+            processes: Vec::new(),
         };
 
         let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);

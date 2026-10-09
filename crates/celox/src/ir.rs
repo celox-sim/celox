@@ -738,6 +738,7 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
+        .chain(&program.sir.processes)
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {

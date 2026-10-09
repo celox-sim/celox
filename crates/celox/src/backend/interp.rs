@@ -1202,6 +1202,8 @@ pub struct InterpBackend {
     eval_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
     eval_only_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
     apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
+    /// One unit per process kernel.
+    process_units: Vec<PreparedUnit>,
     layout: MemoryLayout,
     four_state: bool,
     memory: MemoryImage,
@@ -1378,6 +1380,7 @@ impl InterpBackend {
             .iter()
             .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
             .collect();
+        let process_units = prepare_units(&laid_out.sir.processes, four_state);
         // Only eval/apply clocks receive combined ticks; eval-only and
         // apply-only groups fall back to the default two-phase evaluation.
         let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
@@ -1411,6 +1414,7 @@ impl InterpBackend {
             eval_apply_units,
             eval_only_units,
             apply_units,
+            process_units,
             layout,
             four_state,
             memory,
@@ -1579,6 +1583,26 @@ impl SimBackend for InterpBackend {
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
             self.emit_triggers,
+        )
+    }
+
+    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        let unit = self
+            .process_units
+            .get_mut(index)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        // Process kernels carry no trigger stores; the runtime finds the
+        // edges they cause by comparing event values.
+        run_units(
+            self.memory.as_mut_slice(),
+            &self.layout,
+            &self.extern_functions,
+            self.four_state,
+            &mut self.comb_capture_enabled,
+            std::slice::from_mut(unit),
+            &[],
+            &mut self.trigger_snapshots,
+            false,
         )
     }
 

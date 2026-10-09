@@ -1,5 +1,30 @@
 (group generate (category control_flow))
 
+(case size_queries_use_generate_local_parameter_types
+  (source "generate_size_query_shadowing.sv" #"
+                module Top(input logic [7:0] x,
+                           output logic [31:0] bits_known, size_known,
+                           output logic [31:0] bits_unknown, size_unknown);
+                    if (1) begin : known
+                        localparam x = 1;
+                        assign bits_known = $bits(x);
+                        assign size_known = $size(x);
+                    end
+                    if (1) begin : unknown
+                        localparam x = 4'bxxxx;
+                        assign bits_unknown = $bits(x);
+                        assign size_unknown = $size(x);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 255)
+    (modify (set x value))
+    (assert_eq bits_known 32)
+    (assert_eq size_known 32)
+    (assert_eq bits_unknown 4)
+    (assert_eq size_unknown 4)))
+
 (case counts_only_known_ones_in_generate_system_functions
   (source "generate_onehot_unknowns.sv" #"
                 module Top(output logic [6:0] y);

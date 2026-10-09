@@ -68,7 +68,8 @@ pub(crate) fn eliminate_dead_stores(
                 .parallel
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
-        );
+        )
+        .chain(&program.sir.processes);
 
     for eu in all_eus {
         for block in eu.blocks.values() {
