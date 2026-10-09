@@ -10956,17 +10956,6 @@
       "tags": []
     }
   ],
-  "counts": {
-    "compile_error": 11,
-    "emission_error": 0,
-    "ignored": 219,
-    "mismatch": 0,
-    "passed": 499,
-    "rejected": 8,
-    "runtime_error": 0,
-    "unexpected_accept": 0,
-    "unsupported": 0
-  },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
   "schema_version": 3,

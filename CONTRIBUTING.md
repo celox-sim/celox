@@ -42,7 +42,9 @@ empty selections, compilation failures, and simulator errors are not passes.
 
 For repeated external verification, use `--incremental --report <report.json>`
 to refresh the full selection while running only new/changed cases and prior
-failures. The report records reused evidence separately. Keep filters out of a
+failures. Reuse is decided from `<output>/results.json`, which records reused
+evidence separately; the retained report holds only the results, so branches
+that add different cases do not conflict in it. Keep filters out of a
 full-report refresh; filtered runs still produce partial reports. See the
 [runner documentation](crates/celox-test-suite/README.md#independent-verification).
 Daily CI omits `--incremental` and runs the complete corpus afresh.

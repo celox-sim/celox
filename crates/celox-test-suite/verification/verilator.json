@@ -5464,7 +5464,7 @@
     },
     {
       "category": "Hierarchy",
-      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:17:21: Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)\n                                                                                                                                                                                                                                                 : ... note: In instance 'Top'\n                                                                                                                                                                                                                                                 : ... Left-hand data type: 'logic[15:0]' (4-state)\n                                                                                                                                                                                                                                                 : ... Right-hand data type: 'logic[7:0]$[0:1]' (4-state)\n   17 |     always_comb out = mem;\n      |                     ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:17:21: Operator ASSIGN expects 16 bits on the Assign RHS, but Assign RHS's VARREF 'mem' generates 8 bits.\n                                                                                                                                                                                                                                                               : ... note: In instance 'Top'\n   17 |     always_comb out = mem;\n      |                     ^\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:17:21: Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)\n                                : ... note: In instance 'Top'\n                                : ... Left-hand data type: 'logic[15:0]' (4-state)\n                                : ... Right-hand data type: 'logic[7:0]$[0:1]' (4-state)\n   17 |     always_comb out = mem;\n      |                     ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:17:21: Operator ASSIGN expects 16 bits on the Assign RHS, but Assign RHS's VARREF 'mem' generates 8 bits.\n                                              : ... note: In instance 'Top'\n   17 |     always_comb out = mem;\n      |                     ^\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
       "expectation": "CompilationError",
       "name": "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb",
       "phase": "compile",
@@ -8406,7 +8406,7 @@
     },
     {
       "category": "Regression",
-      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:17:35: Expecting expression to be constant, but can't determine constant for FUNCREF 'f'\n                                                                                                                                                                                                                                          : ... note: In instance 'celox_suite_tb.dut'\n        <case>/source_0.sv:11:13: ... Location of non-constant INSIDERANGE: Unknown node type, perhaps missing visitor in SimulateVisitor\n        <case>/source_0.sv:17:35: ... Called from 'f()' with parameters:\n           n = 8'hfb\n   17 |     localparam logic [8-1:0] C1 = f(-5);\n      |                                   ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:17:35: Expecting expression to be constant, but can't determine constant for FUNCREF 'f'\n                                : ... note: In instance 'celox_suite_tb.dut'\n        <case>/source_0.sv:11:13: ... Location of non-constant INSIDERANGE: Unknown node type, perhaps missing visitor in SimulateVisitor\n        <case>/source_0.sv:17:35: ... Called from 'f()' with parameters:\n           n = 8'hfb\n   17 |     localparam logic [8-1:0] C1 = f(-5);\n      |                                   ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
       "expectation": "Simulation",
       "name": "veryl_context_regressions::constant_case_on_signed_target",
       "phase": "compile",
@@ -9373,17 +9373,6 @@
       "tags": []
     }
   ],
-  "counts": {
-    "compile_error": 1,
-    "emission_error": 0,
-    "ignored": 91,
-    "mismatch": 0,
-    "passed": 528,
-    "rejected": 1,
-    "runtime_error": 0,
-    "unexpected_accept": 0,
-    "unsupported": 116
-  },
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
   "schema_version": 3,

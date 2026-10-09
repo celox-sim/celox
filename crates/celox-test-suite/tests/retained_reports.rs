@@ -1,5 +1,30 @@
 #![cfg(any(feature = "verilator", feature = "icarus"))]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+const STATUSES: [&str; 9] = [
+    "passed",
+    "rejected",
+    "unexpected_accept",
+    "mismatch",
+    "emission_error",
+    "compile_error",
+    "runtime_error",
+    "unsupported",
+    "ignored",
+];
+
+/// Metadata that changes on every run stays out of retained reports, so that
+/// branches adding cases only conflict where they change the same results.
+fn assert_no_run_metadata(report: &serde_json::Value) {
+    for key in ["context_fingerprint", "incremental", "run_counts", "counts"] {
+        assert!(report.get(key).is_none(), "retained report has {key}");
+    }
+    for row in report["cases"].as_array().unwrap() {
+        for key in ["case_fingerprint", "reused", "verified_at_unix"] {
+            assert!(row.get(key).is_none(), "{} has {key}", row["name"]);
+        }
+    }
+}
 
 #[test]
 fn retained_reports_cover_the_catalogue_without_losing_failures() {
@@ -12,6 +37,7 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
     ] {
         let report: serde_json::Value = serde_json::from_str(contents).unwrap();
         assert_eq!(report["schema_version"], 3);
+        assert_no_run_metadata(&report);
         assert!(report["include_ignored"].is_boolean());
         let rows = report["cases"].as_array().unwrap();
         let names: BTreeSet<_> = rows
@@ -23,7 +49,6 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
             names, catalogue,
             "refresh both reports after catalogue changes"
         );
-        let mut counts = BTreeMap::new();
         for row in rows {
             let case = celox_test_suite::veryl::case(row["name"].as_str().unwrap()).unwrap();
             assert_eq!(row["expectation"], format!("{:?}", case.expectation));
@@ -37,11 +62,7 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
                 assert_eq!(case.expectation, celox_test_suite::Expectation::Simulation);
             }
             let status = row["status"].as_str().unwrap();
-            assert!(
-                report["counts"].get(status).is_some(),
-                "unknown result status"
-            );
-            *counts.entry(status).or_insert(0u64) += 1;
+            assert!(STATUSES.contains(&status), "unknown result status");
             if status != "passed" {
                 assert!(!row["detail"].as_str().unwrap().is_empty());
             }
@@ -81,12 +102,6 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
                 }
             }
         }
-        for (status, count) in report["counts"].as_object().unwrap() {
-            assert_eq!(
-                count.as_u64().unwrap(),
-                counts.get(status.as_str()).copied().unwrap_or(0)
-            );
-        }
     }
 }
 
@@ -104,6 +119,7 @@ fn systemverilog_reports_cover_the_catalogue_and_explain_every_exclusion() {
     ] {
         let report: serde_json::Value = serde_json::from_str(contents).unwrap();
         assert_eq!(report["schema_version"], 3);
+        assert_no_run_metadata(&report);
         let rows = report["cases"].as_array().unwrap();
         let names: BTreeSet<_> = rows
             .iter()
