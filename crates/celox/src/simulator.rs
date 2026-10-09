@@ -581,7 +581,7 @@ mod host {
 
     // ── Generic methods available for any backend ────────────────────────
     impl<B: SimBackend> Simulator<B> {
-        pub(super) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
+        pub(crate) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {

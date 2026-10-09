@@ -144,11 +144,11 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule"#,
         ),
         (
-            "system task `$display` inside an initial block",
-            r#"module Top(output logic y);
-                initial $display("x");
+            "system task `$assert` inside an initial block",
+            "module Top(output logic y);
+                initial $assert(1'b1);
                 assign y = 1'b0;
-            endmodule"#,
+            endmodule",
         ),
         (
             "system function `$left`",
@@ -238,5 +238,177 @@ fn value_functions_called_as_statements_evaluate_their_operands_once() {
         vec![celox::RuntimeEvent::Display {
             message: "g 5".to_string(),
         }],
+    );
+}
+
+fn initial_simulation(source: &str) -> celox::Simulation {
+    celox::Simulation::from_sv_sources(vec![(source, Path::new("initial.sv"))], "Top")
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn initial_blocks_run_their_system_tasks_at_time_zero() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic [15:0] a = 16'h1234;
+            logic [7:0] b;
+            initial begin
+                b = a[0+:8];
+                $display("b=%h", b);
+                for (int i = 0; i < 2; i++) $write("%0d,", i);
+                if (b == 8'h35) $display("unreachable");
+                $error("e%0d", b - 8'h30);
+            end
+            assign y = b;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let y = sim.signal("y");
+    // The block runs as a process at time zero, not before it.
+    assert_eq!(sim.get(y), 0u8.into());
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(y), 0x34u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "b=34".to_string(),
+            },
+            celox::RuntimeEvent::Write {
+                message: "0,".to_string(),
+            },
+            celox::RuntimeEvent::Write {
+                message: "1,".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "e4".to_string(),
+            },
+        ],
+    );
+    assert!(!sim.is_finished());
+    assert_eq!(sim.step().unwrap(), None);
+}
+
+#[test]
+fn finish_in_an_initial_block_ends_the_simulation() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $display("before");
+                $finish;
+                $display("after");
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "before".to_string(),
+        }],
+    );
+}
+
+#[test]
+fn fatal_in_an_initial_block_fails_the_simulation() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $display("before");
+                $fatal(1, "boom %0d", 7);
+                $display("after");
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let error = sim.step().unwrap_err();
+    assert!(error.to_string().contains("boom"), "{error}");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before".to_string(),
+            },
+            celox::RuntimeEvent::AssertFatal {
+                message: "boom 7".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn initial_blocks_skip_the_operands_short_circuits_skip() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            logic d;
+            function automatic logic f(input logic v);
+                $display("called");
+                return v;
+            endfunction
+            initial begin
+                d = 1'b1 || f(a);
+                $display("%0d", d);
+            end
+            assign y = d;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "1".to_string(),
+        }],
+    );
+}
+
+#[test]
+fn initial_blocks_that_read_design_state_run_at_time_zero() {
+    let source = r#"
+        module Top(input logic [3:0] a, output logic [3:0] y);
+            logic [3:0] value = a + 4'd1;
+            initial begin
+                $display("value=%0d", value);
+                if (a == 4'd0) $display("zero");
+            end
+            assign y = value;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let y = sim.signal("y");
+    sim.step().unwrap();
+    // The initializer runs before the initial block.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "value=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "zero".to_string(),
+            },
+        ],
+    );
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn rejects_nonblocking_assignments_in_initial_processes() {
+    let error = build_error(
+        r#"module Top(output logic y);
+            logic v;
+            initial begin v <= 1'b1; $display("%0d", v); end
+            assign y = v;
+        endmodule"#,
+    );
+    assert!(
+        error.contains("nonblocking assignment in an initial block that runs as a process"),
+        "{error}"
     );
 }

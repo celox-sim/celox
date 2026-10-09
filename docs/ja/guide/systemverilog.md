@@ -44,7 +44,7 @@ let mut sim = Simulator::from_sv_sources(
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット |
-| initial ブロック | 書き込む値が定数の `initial` ブロック（初期状態を定める）。定数の `if` / `for`、`$readmemh` / `$readmemb`。値が定数の変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。`initial` ブロックより先に適用 |
+| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
@@ -52,7 +52,7 @@ let mut sim = Simulator::from_sv_sources(
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
 | システム関数 | `$bits`、`$size`、`$clog2`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -65,14 +65,14 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
 - interface と modport、クラス、タイミング制御を持つ task。
-- 振る舞い記述・検証向けの構文：デザインの状態を読む、またはタイミング制御を持つ `initial`
-  ブロック、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
+- 振る舞い記述・検証向けの構文：タイミング制御を持つ `initial` ブロック、プロセスとして
+  実行される `initial` ブロック内のノンブロッキング代入、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
   並行アサーション、`force` / `release`。
 - `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、`@*` 以外のレベルセンシティブなセンシティビティリスト、
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：定数でない、または interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
   多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、別の
   プロセスの変数と同名のブロックローカル変数（[#445](https://github.com/celox-sim/celox/issues/445)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
@@ -87,8 +87,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）、X/Z を含む値や 128 ビットを超える値など、単純な整数で
   ないパラメータ上書き（[#461](https://github.com/celox-sim/celox/issues/461)）。
 - システムタスクとシステム関数：Celox は IEEE 1800-2023 第 20・21 章のすべての名前を
-  知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen`、`initial`
-  ブロック内の `$display` など）は、使われていないパラメータや関数本体の中を含め、書かれた
+  知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen` など）は、
+  使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出しや関数の引数の省略、値として使ったタスクはエラーです。
 - DPI、トライステートバスと複数ドライバ、階層参照。
@@ -103,7 +103,10 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - **ワイルドカード比較。** `casez`、`casex`、`inside`、`==?` は、定数パターンの `?`、`x`、`z`
   ビットを、2 値・4 値のどちらのシミュレーションでも尊重します。
 - **package** は、使うモジュールごとにインライン展開します。名前は素の識別子で解決するため、
-  package の項目とモジュールの項目が同名だと、重複宣言として報告します。
+  package の項目とモジュールの項目が同名だと、重複宣言として報告します。package の変数と net は、
+  1 つのオブジェクトを共有せずモジュールごとのコピーになってしまうため拒否します。`const` 変数は
+  受け付けます。package をスコープとして解決する対応は
+  [#1146](https://github.com/celox-sim/celox/issues/1146) で追跡しています。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の
