@@ -96,7 +96,8 @@ impl Backend for ProcessBackend {
             write!(self.transcript, "{line}")?;
         }
         // The harness reports missing finish and runtime failures through its
-        // exit status. HDL output (including protocol-looking text) is just a log.
+        // exit status. HDL output (including protocol-looking text) is only
+        // logged; the runner reads expect_output markers from the log.
         let status = self.child.wait()?;
         if !status.success() {
             return Err(format!(

@@ -1,5 +1,6 @@
 use celox_design::{
-    BitAccess, InstanceId, PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr,
+    BitAccess, DisplaySizing, InstanceId, PortTypeKind, RuntimeEventKind, RuntimeEventSite,
+    StateAddr,
 };
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
@@ -104,6 +105,7 @@ fn runtime_event_site_for_assert(
             AssertKind::Continue => RuntimeEventKind::AssertContinue,
         },
         template,
+        sizing: DisplaySizing::Minimal,
         scope: None,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args

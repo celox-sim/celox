@@ -26,6 +26,22 @@ sv_backends! {
         assert!(sim.drain_runtime_events().is_empty());
     }
 
+    fn display_arguments_are_sized_as_ieee_specifies(sim) {
+        @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
+    }
+
+    fn display_field_widths_expand_to_the_value(sim) {
+        @case "system_functions::display_field_widths_expand_to_the_value";
+    }
+
+    fn display_unknown_bits_as_ieee_specifies(sim) {
+        @case "system_functions::display_unknown_bits_as_ieee_specifies";
+    }
+
+    fn display_tasks_default_to_their_radix(sim) {
+        @case "system_functions::display_tasks_default_to_their_radix";
+    }
+
     fn countones_preserves_argument_and_return_types(sim) {
         @case "system_functions::countones_preserves_argument_and_return_types";
     }

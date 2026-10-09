@@ -205,6 +205,9 @@ pub enum StmtKind {
     Block(Vec<Stmt>),
     /// `(run_testbench)`: run the design's native testbench to `$finish`.
     RunTestbench,
+    /// `(expect_output TEXT)`: the design printed exactly TEXT with
+    /// `$display`/`$write` since the start or the previous `expect_output`.
+    ExpectOutput(String),
 }
 
 /// Part of a source file: text, or a file of the Veryl standard library
@@ -575,6 +578,10 @@ pub fn stmt(form: &Sexpr) -> Result<Stmt, ScriptError> {
         "run_testbench" => {
             arity(items, pos, 0, Some(0))?;
             StmtKind::RunTestbench
+        }
+        "expect_output" => {
+            arity(items, pos, 1, Some(1))?;
+            StmtKind::ExpectOutput(string(&items[1], "output")?)
         }
         _ => return error(pos, format!("unknown statement `{head}`")),
     };

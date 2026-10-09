@@ -10,10 +10,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
-    InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind,
-    ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
+    InitialStateData, InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH,
+    PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind,
+    RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{

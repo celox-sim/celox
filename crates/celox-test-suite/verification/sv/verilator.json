@@ -2395,6 +2395,50 @@
       "tags": []
     },
     {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_arguments_are_sized_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_tasks_default_to_their_radix",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::display_unknown_bits_as_ieee_specifies",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
