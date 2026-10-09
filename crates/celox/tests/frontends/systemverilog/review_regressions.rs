@@ -387,6 +387,33 @@ fn rejects_variables_also_written_by_called_subroutine_bodies() {
 }
 
 #[test]
+fn rejects_variables_also_written_by_default_argument_calls() {
+    // `f()` evaluates the default of its omitted argument, which writes `q`.
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, input logic [3:0] d, output logic [1:0] x,
+                   output wire [3:0] y);
+            logic [3:0] q;
+            function automatic logic side_effect(output logic [3:0] o);
+                o = 4'd5;
+                return 1'b1;
+            endfunction
+            function automatic logic [1:0] f(input logic a = side_effect(q));
+                return {1'b0, a};
+            endfunction
+            always_ff @(posedge clk) x <= f();
+            always_ff @(posedge clk) q <= d;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn accepts_a_variable_written_only_through_one_process_calls() {
     let source = r#"
         module Top(input logic clk, output logic [1:0] x, output wire [3:0] y);

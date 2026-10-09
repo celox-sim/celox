@@ -1698,3 +1698,18 @@ pub(super) fn stmt_calls(
         collect_calls(expr, calls);
     }
 }
+
+/// The calls in the default values a call uses for its omitted arguments.
+pub(super) fn default_calls(
+    subroutine: &sv::ir::Subroutine,
+    args: &[Option<sv::ir::Expr>],
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    for (position, param) in subroutine.params.iter().enumerate() {
+        if matches!(args.get(position), None | Some(None))
+            && let Some(default) = &param.default
+        {
+            collect_calls(default, calls);
+        }
+    }
+}

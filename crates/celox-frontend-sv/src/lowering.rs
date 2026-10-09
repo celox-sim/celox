@@ -534,7 +534,7 @@ fn body_driver_ranges(
     scan: &DriverScan<'_>,
 ) {
     let mut visited = HashSet::default();
-    scan.body(drivers, body, driver_id, &mut visited);
+    scan.body(drivers, body, driver_id, &mut visited, 0);
 }
 
 /// What `body_driver_ranges` looks for and in which module.
@@ -552,7 +552,12 @@ impl DriverScan<'_> {
         body: &[sv::ir::Stmt],
         driver_id: usize,
         visited: &mut HashSet<String>,
+        depth: usize,
     ) {
+        // Deeper calls are rejected when the processes are lowered.
+        if depth > procedural::MAX_CALL_DEPTH {
+            return;
+        }
         let record = |drivers: &mut Vec<_>, lvalue: &sv::ir::LValue| {
             if lvalue.name() == self.signal_name {
                 drivers.push((
@@ -574,7 +579,7 @@ impl DriverScan<'_> {
                 procedural::stmt_calls(stmt, &mut calls);
             });
         }
-        for (name, args) in calls {
+        while let Some((name, args)) = calls.pop() {
             let Some(subroutine) = self
                 .subroutines
                 .iter()
@@ -582,6 +587,7 @@ impl DriverScan<'_> {
             else {
                 continue;
             };
+            procedural::default_calls(subroutine, &args, &mut calls);
             for (param, arg) in subroutine.params.iter().zip(&args) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
@@ -592,7 +598,7 @@ impl DriverScan<'_> {
             // A subroutine body writes a module variable for each caller;
             // its own formals and locals have module-unique names.
             if visited.insert(name) {
-                self.body(drivers, &subroutine.body, driver_id, visited);
+                self.body(drivers, &subroutine.body, driver_id, visited, depth + 1);
             }
         }
     }

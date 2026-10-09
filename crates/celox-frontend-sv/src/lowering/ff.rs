@@ -154,10 +154,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
-        for (name, args) in calls {
+        while let Some((name, args)) = calls.pop() {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
+            default_calls(&subroutine, &args, &mut calls);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
