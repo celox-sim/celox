@@ -54,4 +54,16 @@ sv_backends! {
     fn runtime_bits_stay_within_their_element(sim) {
         @case "procedural::runtime_bits_stay_within_their_element";
     }
+
+    fn declaration_initializers_define_the_initial_state(sim) {
+        @case "procedural::declaration_initializers_define_the_initial_state";
+    }
+
+    fn initial_blocks_run_after_declaration_initializers(sim) {
+        @case "procedural::initial_blocks_run_after_declaration_initializers";
+    }
+
+    fn declaration_initializers_keep_unknown_bits(sim) {
+        @case "procedural::declaration_initializers_keep_unknown_bits";
+    }
 }

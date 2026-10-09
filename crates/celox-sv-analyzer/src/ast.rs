@@ -52,7 +52,8 @@ mod types;
 mod validation;
 
 use array_compatibility::{
-    check_unpacked_array_assignment, net_lvalue_unpacked_shape, variable_lvalue_unpacked_shape,
+    check_unpacked_array_assignment, net_lvalue_unpacked_shape, selected_unpacked_shape,
+    variable_lvalue_unpacked_shape,
 };
 use assignment_analysis::two_state_conditions_are_complements;
 use case::expr_is_two_state;
@@ -1528,11 +1529,17 @@ impl FfProcess {
 pub struct InitialProcess {
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
+    initializer: bool,
 }
 
 impl InitialProcess {
     pub fn condition(&self) -> Option<&ConstExpr> {
         self.condition.as_ref()
+    }
+
+    /// Whether this process holds variable declaration initializers.
+    pub fn is_initializer(&self) -> bool {
+        self.initializer
     }
 
     pub fn body(&self) -> &[Stmt] {

@@ -158,6 +158,7 @@ impl ArrayParameter<'_> {
                 rhs: value,
                 nonblocking: false,
             }],
+            initializer: false,
         })
     }
 }

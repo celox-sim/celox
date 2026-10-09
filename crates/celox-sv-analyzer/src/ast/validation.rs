@@ -183,23 +183,6 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
-    // Declarations inside procedural blocks and subroutines are scoped
-    // locals: their initializers run where they are declared.
-    let procedural_declarations: Vec<_> = node
-        .clone()
-        .into_iter()
-        .filter(|child| {
-            matches!(
-                child,
-                RefNode::AlwaysConstruct(_)
-                    | RefNode::InitialConstruct(_)
-                    | RefNode::FunctionDeclaration(_)
-                    | RefNode::TaskDeclaration(_)
-            )
-        })
-        .flat_map(|root| root.into_iter())
-        .filter(|child| matches!(child, RefNode::VariableDeclAssignmentVariable(_)))
-        .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
             continue;
@@ -323,14 +306,6 @@ pub(super) fn reject_silently_ignored_constructs(
             RefNode::ConcurrentAssertionItem(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "concurrent assertion".to_string(),
-                ));
-            }
-            RefNode::VariableDeclAssignmentVariable(assignment)
-                if assignment.nodes.2.is_some()
-                    && !procedural_declarations.contains(&RefNode::VariableDeclAssignmentVariable(assignment)) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "variable declaration initializer".to_string(),
                 ));
             }
             RefNode::IndexedRange(range) => {

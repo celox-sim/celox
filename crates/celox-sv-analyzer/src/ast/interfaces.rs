@@ -456,6 +456,8 @@ struct Member {
     data_type: Option<Span>,
     /// The unpacked dimensions of the declarator.
     dimensions: Vec<Span>,
+    /// The initializer of a variable.
+    initializer: Option<Span>,
 }
 
 struct Function {
@@ -2379,8 +2381,22 @@ impl<'a> Design<'a> {
                 }
                 Item::Member(index) => {
                     let member = &interface.members[*index];
+                    // Each element of an instance array would need its own
+                    // copy of the initial value.
+                    let initializer = match member.initializer {
+                        Some(_) if !dimensions.is_empty() => {
+                            return Err(unsupported(format!(
+                                "initializer of member `{}` in the interface array `{instance}`",
+                                member.name
+                            )));
+                        }
+                        Some(span) => {
+                            format!(" = {}", interface.render(interface_file, span, &plain))
+                        }
+                        None => String::new(),
+                    };
                     declarations.push(format!(
-                        "{} {};",
+                        "{} {}{initializer};",
                         interface.member_type(interface_file, member, &plain),
                         interface.member_declarator(
                             interface_file,
@@ -3882,11 +3898,12 @@ impl InterfaceDecl {
                                     self.name
                                 )));
                             };
-                            if declarator.nodes.2.is_some() {
-                                return Err(unsupported(
-                                    "variable declaration initializer in an interface",
-                                ));
-                            }
+                            let initializer = declarator
+                                .nodes
+                                .2
+                                .as_ref()
+                                .map(|(_, value)| file.span(RefNode::Expression(value)))
+                                .transpose()?;
                             let member_name = name(
                                 RefNode::VariableIdentifier(&declarator.nodes.0),
                                 syntax_tree,
@@ -3902,6 +3919,7 @@ impl InterfaceDecl {
                                 kind: MemberKind::Variable,
                                 data_type,
                                 dimensions,
+                                initializer,
                             })?;
                         }
                     }
@@ -3988,6 +4006,7 @@ impl InterfaceDecl {
             kind,
             data_type,
             dimensions,
+            initializer: None,
         })?;
         Ok(())
     }

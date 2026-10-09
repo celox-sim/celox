@@ -87,13 +87,20 @@ static PLI_INT32 commands(p_cb_data) {
 }
 
 static void initialize(vpiHandle scope) {
-    // The suite's two-state mode starts all storage at zero. Icarus itself
-    // remains four-state so unknown values produced later are still reported.
+    // The suite's two-state mode starts all unknown storage bits at zero;
+    // Icarus has already applied the declaration initializers, which keep
+    // their values. Icarus itself remains four-state so unknown values
+    // produced later are still reported.
     for (const int type : {vpiReg, vpiIntegerVar, vpiMemory}) {
         if (auto iter = vpi_iterate(type, scope)) {
             while (auto item = vpi_scan(iter)) {
+                std::string bits = read_bits(item);
+                if (bits.find_first_not_of("01") == std::string::npos) continue;
+                for (char& bit : bits) {
+                    if (bit != '1') bit = '0';
+                }
                 size_t consumed = 0;
-                write_bits(item, "0", consumed);
+                write_bits(item, bits, consumed);
             }
         }
     }

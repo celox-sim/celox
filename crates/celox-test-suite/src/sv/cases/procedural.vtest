@@ -424,3 +424,67 @@
     (assert_eq element (? (< i 8) (<< 1 i) 0))
     (assert_eq next 0)
     (assert_eq picked (? (< i 8) 0 (fourstate 1 1)))))
+
+(case declaration_initializers_define_the_initial_state
+  (source "initializers.sv" #"
+                module Top(input logic clk, input logic [1:0] index,
+                           output logic [7:0] y, output logic [3:0] count,
+                           output logic [7:0] entry, output logic [7:0] scoped);
+                    localparam int W = 8;
+                    function automatic logic [W-1:0] mix(input logic [W-1:0] v);
+                        return v ^ 8'h0f;
+                    endfunction
+                    logic [W-1:0] seed = mix(8'h55), unused, other = W'(17);
+                    logic [3:0] counter = 4'd7;
+                    logic [7:0] lut [4] = '{8'd10, 8'd20, 8'd30, 8'd40};
+                    always_ff @(posedge clk) counter <= counter + 4'd1;
+                    if (W == 8) begin : g
+                        logic [7:0] v = 8'(W * 2);
+                        assign scoped = v;
+                    end
+                    assign y = seed ^ other;
+                    assign count = counter;
+                    assign entry = lut[index];
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq entry (* (+ i 1) 10)))
+  (assert_eq y 0x4b)
+  (assert_eq scoped 16)
+  (assert_eq count 7)
+  (tick clk)
+  (assert_eq count 8))
+
+(case initial_blocks_run_after_declaration_initializers
+  (source "initializer_order.sv" #"
+                module Top(output logic [7:0] a, output logic [7:0] b);
+                    logic [7:0] x = 8'h01;
+                    logic [7:0] z = 8'h02;
+                    initial x = 8'h33;
+                    assign a = x;
+                    assign b = z;
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq a 0x33)
+  (assert_eq b 2))
+
+(case declaration_initializers_keep_unknown_bits
+  (four_state)
+  (source "initializer_unknown.sv" #"
+                module Top(output logic [3:0] known, output logic [3:0] partial,
+                           output logic [3:0] unset);
+                    logic [3:0] k = 4'b1010;
+                    logic [3:0] p = 4'b1x0x;
+                    logic [3:0] u;
+                    assign known = k;
+                    assign partial = p;
+                    assign unset = u;
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq known 0xa)
+  (assert_eq partial (fourstate 0xd 0x5))
+  (assert_eq unset (fourstate 0xf 0xf)))

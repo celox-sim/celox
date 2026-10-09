@@ -38,7 +38,7 @@ fn unpacked_array_type(
 
 /// The shape of a variable `name` after `indices` index selects, when that
 /// is still an unpacked array.
-fn selected_unpacked_shape(
+pub(super) fn selected_unpacked_shape(
     name: &str,
     indices: usize,
     dims: &PackedDimensions,
