@@ -93,7 +93,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
-        self.backend.run_process(index)
+        self.backend
+            .run_process(index)
+            .map_err(|e| self.decorate_runtime_error(e))
     }
 
     fn stage_external_event(
@@ -142,6 +144,16 @@ impl Simulation {
         top: &'a str,
     ) -> crate::SimulatorBuilder<'a, Simulation> {
         crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
+    }
+
+    /// Build a timed simulation directly from SystemVerilog sources.
+    #[cfg(feature = "systemverilog")]
+    pub fn from_sv_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> crate::SimulatorBuilder<'a, Simulation> {
+        crate::SimulatorBuilder::<Simulation>::from_sources(Vec::new(), top)
+            .into_sv_sources(sources)
     }
 
     /// Low-level adapter hook for a timed simulation from an external artifact.
@@ -419,6 +431,12 @@ impl<B: SimBackend> Simulation<B> {
     /// state), as (event id, period).
     pub fn clock_periods(&self) -> Vec<(usize, u64)> {
         self.state.clock_periods()
+    }
+
+    /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
+    /// design emitted since the last call, in emission order.
+    pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        self.simulator.drain_runtime_events()
     }
 
     /// Returns the time of the next scheduled event, if any.

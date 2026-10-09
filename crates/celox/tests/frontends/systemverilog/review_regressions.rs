@@ -5323,12 +5323,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "declaration initializer of `value` that is not constant",
-            r#"
-            module Top(input logic a, output logic y); logic value = a; assign y = value; endmodule
-        "#,
-        ),
-        (
             "procedural initialization of `value`, which a continuous assignment",
             r#"
             module Top(input logic a, output logic y);

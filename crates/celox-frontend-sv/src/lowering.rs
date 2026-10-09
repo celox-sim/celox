@@ -11,13 +11,14 @@ use std::path::Path;
 
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, ExternFunction, ExternSignature, ExternType, InitialStateData,
-    InitialStateValue, ModuleId, PortTypeKind, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind,
+    ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
+    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
+use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
-    ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
-    SymbolicVariable,
+    ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicProcess,
+    SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
     FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
@@ -1164,9 +1165,9 @@ fn lower_module_with_overrides(
             reset_clock_map,
             parallel_ff_parts,
         ),
-        runtime_event_sites,
-        runtime_errors,
-        extern_functions,
+        mut runtime_event_sites,
+        mut runtime_errors,
+        mut extern_functions,
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
@@ -1185,14 +1186,18 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
-    initial_memory_values.extend(lower_initial_processes(
+    let (initial_values, processes) = lower_initial_processes(
         module,
         &mut variables,
         &mut name_to_id,
         &constants,
         &parameter_types,
         four_state,
-    )?);
+        &mut runtime_event_sites,
+        &mut runtime_errors,
+        &mut extern_functions,
+    )?;
+    initial_memory_values.extend(initial_values);
 
     let shared_variables = variables
         .iter()
@@ -1283,7 +1288,7 @@ fn lower_module_with_overrides(
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
             reset_clock_map,
-            processes: Vec::new(),
+            processes,
         },
         variables,
         port_order,
@@ -1854,9 +1859,17 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
     }
 }
 
-/// The initial state `initial` blocks define (IEEE 1800-2023 9.2.1): their
-/// bodies run once, before any other process, so each must compute constant
-/// values. The hidden variables used while executing them are discarded.
+/// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
+/// 10.5): the initial state they define, and the processes that run the
+/// others from time zero.
+///
+/// A block whose writes have constant values defines initial state, with
+/// the hidden variables used while executing it discarded. Declaration
+/// initializers come first, and blocks start from the values they define.
+/// A block that reads design state or runs a system task becomes a process
+/// kernel; such kernels start at time zero in declaration order, initializers
+/// first.
+#[allow(clippy::too_many_arguments)]
 fn lower_initial_processes(
     module: &sv::ir::Module,
     variables: &mut HashMap<SourceVarId, SvVariable>,
@@ -1864,11 +1877,15 @@ fn lower_initial_processes(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
-) -> Result<Vec<InitialStateValue<SourceVarId>>, sv::AnalyzerError> {
+    runtime_event_sites: &mut Vec<RuntimeEventSite>,
+    runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+    extern_functions: &mut Vec<ExternFunction>,
+) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
     if module.initial_processes().is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
+    let mut runtime = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
         variables,
@@ -1877,6 +1894,8 @@ fn lower_initial_processes(
         parameter_types,
         four_state,
     );
+    let mut arena = SLTNodeArena::new();
+    let mut seed = comb::Store::default();
     for process in module.initial_processes() {
         if let Some(condition) = process.condition() {
             let condition =
@@ -1888,9 +1907,16 @@ fn lower_initial_processes(
                 continue;
             }
         }
-        let mut arena = SLTNodeArena::new();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
-        values.extend(comb.lower_initial(process.body(), process.is_initializer())?);
+        match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
+            Ok((written, store)) => {
+                values.extend(written);
+                if process.is_initializer() {
+                    seed = store;
+                }
+            }
+            Err(_) => runtime.push(process),
+        }
     }
     let created = std::mem::take(&mut pm.created);
     for id in created {
@@ -1898,7 +1924,75 @@ fn lower_initial_processes(
             name_to_id.remove(&variable.path.join("."));
         }
     }
-    Ok(values)
+    if runtime.is_empty() {
+        return Ok((values, Vec::new()));
+    }
+
+    let mut next_id = SourceVarId(
+        variables
+            .keys()
+            .map(|id| id.0 + 1)
+            .max()
+            .unwrap_or_default(),
+    );
+    let slots: Vec<_> = (0..runtime.len())
+        .map(|index| {
+            let mut declare = |slot: &str, width: usize| {
+                let id = next_var_id(&mut next_id);
+                variables.insert(
+                    id,
+                    SvVariable {
+                        path: vec![format!("$initial[{index}]"), slot.to_string()],
+                        width,
+                        signed: false,
+                        is_4state: false,
+                        packed_ranges: vec![(width as i128 - 1, 0)],
+                        array_dims: Vec::new(),
+                        domain_kind: DomainKind::Other,
+                        kind: VariableKind::Variable,
+                        type_kind: PortTypeKind::Bit,
+                        source: None,
+                        // Control slots are not signals of the design.
+                        hidden: true,
+                    },
+                );
+                id
+            };
+            ProcessSlots {
+                resume: declare("resume", PROCESS_RESUME_WIDTH),
+                status: declare("status", PROCESS_STATUS_WIDTH),
+                delay: declare("delay", PROCESS_DELAY_WIDTH),
+            }
+        })
+        .collect();
+    // The kernels add their event sites, runtime errors and extern functions
+    // after those of the sequential processes. Their hidden variables are
+    // state the kernels keep.
+    let mut pm = procedural::ProcModule::new(
+        module,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        four_state,
+    );
+    pm.runtime_event_sites = std::mem::take(runtime_event_sites);
+    pm.runtime_errors = std::mem::take(runtime_errors);
+    pm.extern_functions = std::mem::take(extern_functions);
+    let processes = runtime
+        .into_iter()
+        .zip(slots)
+        .map(|(process, slots)| {
+            Ok(SymbolicProcess {
+                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                slots,
+            })
+        })
+        .collect::<Result<Vec<_>, sv::AnalyzerError>>();
+    *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
+    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
+    *extern_functions = std::mem::take(&mut pm.extern_functions);
+    Ok((values, processes?))
 }
 
 fn lower_comb_processes(

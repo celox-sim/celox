@@ -832,6 +832,15 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             }
         }
         SLTNode::Binary(left, op, right) => {
+            // A logical operator that its left operand decides does not
+            // evaluate its right operand (IEEE 1800-2023 11.4.7), which need
+            // not be constant.
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                let decides = matches!(op, BinaryOp::LogicOr);
+                if child(*left).and_then(|left| truth(&left)) == Some(decides) {
+                    return Some((BigUint::from(u8::from(decides)), BigUint::zero(), width));
+                }
+            }
             let (lv, lm, lw) = child(*left)?;
             let (rv, rm, rw) = child(*right)?;
             let both_signed = node_is_signed(arena, *left) && node_is_signed(arena, *right);
