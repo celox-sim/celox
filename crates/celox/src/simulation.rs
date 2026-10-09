@@ -93,7 +93,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
-        self.backend.run_process(index)
+        self.backend
+            .run_process(index)
+            .map_err(|e| self.decorate_runtime_error(e))
     }
 
     fn stage_external_event(

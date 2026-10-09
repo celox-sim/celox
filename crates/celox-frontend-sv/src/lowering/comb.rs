@@ -16,7 +16,7 @@ use celox_slt::{
 use num_traits::{ToPrimitive, Zero};
 
 type Sources = HashSet<VarAtomBase<SourceVarId>>;
-type Store = SymbolicStore<SourceVarId, NodeId>;
+pub(super) type Store = SymbolicStore<SourceVarId, NodeId>;
 type Value = (NodeId, Sources);
 
 #[derive(Clone)]
@@ -3126,14 +3126,36 @@ impl<'p, 'a> Comb<'p, 'a> {
     /// Its writes must have constant values.
     /// The initial state an `initial` process, or the variable declaration
     /// initializers when `initializer` is set, define.
+    ///
+    /// The block starts from `seed`, the values the declaration initializers
+    /// before it define; only the values it changes are returned, together
+    /// with its final store.
     pub fn lower_initial(
         &mut self,
         body: &[sv::ir::Stmt],
         initializer: bool,
-    ) -> Result<Vec<InitialStateValue<SourceVarId>>, sv::AnalyzerError> {
+        seed: &Store,
+    ) -> Result<(Vec<InitialStateValue<SourceVarId>>, Store), sv::AnalyzerError> {
         self.initial = true;
         self.allow_nonblocking = true;
-        let store = self.exec_block(Store::default(), &[], body)?;
+        let store = self.exec_block(seed.fork(), &[], body)?;
+        // A value is unchanged when the seed holds the same node at the same
+        // origin over its bits.
+        let unchanged = |id: SourceVarId, lsb: usize, width: usize, node: NodeId, origin: usize| {
+            seed.get(&id).is_some_and(|range| {
+                range
+                    .ranges
+                    .iter()
+                    .any(|(&seed_lsb, (value, seed_width, seed_origin))| {
+                        value
+                            .as_ref()
+                            .is_some_and(|(seed_node, _)| *seed_node == node)
+                            && *seed_origin == origin
+                            && seed_lsb <= lsb
+                            && lsb + width <= seed_lsb + seed_width
+                    })
+            })
+        };
         let mut ids: Vec<SourceVarId> = store
             .keys()
             .copied()
@@ -3148,6 +3170,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             let mut runs = Vec::new();
             for (&lsb, (value, width, origin)) in &range.ranges {
                 let Some((node, _)) = value else { continue };
+                if unchanged(id, lsb, *width, *node, *origin) {
+                    continue;
+                }
                 let (value, mask, _) =
                     slt_const4(self.arena, &mut self.consts, *node).ok_or_else(|| {
                         let name = self.m.var(id).path.join(".");
@@ -3179,7 +3204,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 });
             }
         }
-        Ok(values)
+        Ok((values, store))
     }
 
     /// Execute one combinational process and return the logic it defines.

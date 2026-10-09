@@ -110,8 +110,8 @@ const fn function(name: &'static str, min_args: usize, max_args: usize) -> Syste
 /// The catalog, in the order of IEEE 1800-2023 clauses 20 and 21.
 pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.2 Simulation control system tasks
-    task("$finish", Procedural, 0, Some(1)),
-    task("$stop", Procedural, 0, Some(1)),
+    task("$finish", ProceduralAndInitial, 0, Some(1)),
+    task("$stop", ProceduralAndInitial, 0, Some(1)),
     unsupported("$exit", Task),
     // 20.3 Simulation time system functions
     unsupported("$time", Function),
@@ -177,10 +177,10 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function("$onehot0", 1, 1),
     function("$isunknown", 1, 1),
     // 20.10 Severity tasks (and 20.11 elaboration system tasks)
-    task("$fatal", Procedural, 0, None),
-    task("$error", Procedural, 0, None),
-    task("$warning", Procedural, 0, None),
-    task("$info", Procedural, 0, None),
+    task("$fatal", ProceduralAndInitial, 0, None),
+    task("$error", ProceduralAndInitial, 0, None),
+    task("$warning", ProceduralAndInitial, 0, None),
+    task("$info", ProceduralAndInitial, 0, None),
     // 20.12 Assertion control system tasks
     unsupported("$asserton", Task),
     unsupported("$assertoff", Task),
@@ -255,14 +255,14 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.18 Miscellaneous tasks and functions
     unsupported("$system", TaskOrFunction),
     // 21.2 Display system tasks
-    task("$display", Procedural, 0, None),
-    task("$displayb", Procedural, 0, None),
-    task("$displayo", Procedural, 0, None),
-    task("$displayh", Procedural, 0, None),
-    task("$write", Procedural, 0, None),
-    task("$writeb", Procedural, 0, None),
-    task("$writeo", Procedural, 0, None),
-    task("$writeh", Procedural, 0, None),
+    task("$display", ProceduralAndInitial, 0, None),
+    task("$displayb", ProceduralAndInitial, 0, None),
+    task("$displayo", ProceduralAndInitial, 0, None),
+    task("$displayh", ProceduralAndInitial, 0, None),
+    task("$write", ProceduralAndInitial, 0, None),
+    task("$writeb", ProceduralAndInitial, 0, None),
+    task("$writeo", ProceduralAndInitial, 0, None),
+    task("$writeh", ProceduralAndInitial, 0, None),
     unsupported("$strobe", Task),
     unsupported("$strobeb", Task),
     unsupported("$strobeo", Task),
