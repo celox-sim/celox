@@ -1110,7 +1110,10 @@ fn const_expr_from_function_subroutine_call(
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };
-    if matches!(name, "$countones" | "$onehot" | "$onehot0" | "$isunknown") {
+    if matches!(
+        name,
+        "$countbits" | "$countones" | "$onehot" | "$onehot0" | "$isunknown"
+    ) {
         // Use expression lowering so selections are never silently discarded
         // by the limited constant-primary identifier path below. Unsupported
         // constant argument forms must remain unresolved rather than counting

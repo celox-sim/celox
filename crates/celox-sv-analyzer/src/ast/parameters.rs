@@ -1072,7 +1072,7 @@ pub(super) fn infer_const_expr_type(
             signed: false,
         }),
         ConstExpr::Function { name, .. } => match name.as_str() {
-            "$clog2" | "$countones" => Some(ExprType {
+            "$clog2" | "$countones" | "$countbits" => Some(ExprType {
                 width: 32,
                 signed: true,
             }),

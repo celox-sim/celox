@@ -204,3 +204,139 @@
     (assert_eq unknown_wide (!= mask 0) "unknown_wide")
     (assert_eq unknown_bit (bit mask 0) "unknown_bit")
     (assert_eq unknown_partial (!= (slice mask 128 0) 0) "unknown_partial")))
+
+(case countbits_preserves_argument_and_return_types
+  (source "countbits.sv" #"
+    module Child(input int a, output int y);
+        assign y = a;
+    endmodule
+    module Top(input logic signed [7:0] a, input logic [7:0] control,
+               output int ones, zeros, selected, via_child, sum_count, nested,
+               output logic [63:0] inverted, output logic [1:0] narrow,
+               output logic negative);
+        function automatic int count(input logic [7:0] v, c);
+            return $countbits(v, c);
+        endfunction
+        assign ones = $countbits(a, '1, '1);
+        assign zeros = $countbits(a, '0);
+        assign selected = count(a, control);
+        assign inverted = ~$countbits(a, '1);
+        assign narrow = $countbits(a, '1);
+        assign sum_count = $countbits(a + 8'd1, '1);
+        assign nested = $countbits($countbits(a, '1), '1);
+        assign negative = ($countbits(a, '1) - 32'sd9) < 0;
+        Child child(.a($countbits(a[5:2], '1)), .y(via_child));
+    endmodule
+  "#)
+  (top Top)
+  (for value (range 0 256)
+    (modify (set a value) (set control value))
+    (let ones (popcount value))
+    (assert_eq ones ones)
+    (assert_eq zeros (- 8 ones))
+    (assert_eq selected (? (bit value 0) ones (- 8 ones)))
+    (assert_eq inverted (trunc 64 (~ ones)))
+    (assert_eq narrow (& ones 3))
+    (assert_eq sum_count (popcount (trunc 8 (+ value 1))))
+    (assert_eq nested (popcount ones))
+    (assert_eq negative 1)
+    (assert_eq via_child (popcount (& (>> value 2) 15)))))
+
+(case countbits_in_constant_expressions
+  (four_state)
+  (source "countbits_constants.sv" #"
+    module Top(output int result, literals);
+        localparam logic signed [7:0] NEG = -1;
+        localparam C = $countbits(NEG, 8'hff, '1);
+        localparam X = $countbits(8'b10xz_11xz, 'x);
+        localparam Z = $countbits(8'b10xz_11xz, 'z);
+        localparam K = $countbits(8'b10xz_11xz, '0, '1);
+        if (C == 8 && X == 2 && Z == 2 && K == 4 &&
+            $bits(C) == 32 && $size(C) == 32 &&
+            $countbits(3'b1xz, 'x, 'z) == 2 &&
+            $countbits(8'hff + 8'd1, '0) == 8 &&
+            $countbits(1'bx ? 4'b1010 : 4'b1000, 'x) == 1 &&
+            $countbits(8'hfe, 8'hfe) == 1) begin
+            assign result = $countbits(256'hx, 'x, 'x) +
+                            $countbits(256'hz, 'z) +
+                            $countbits(8'b10xz_11xz, '0, '1, 'x, 'z, '0);
+        end else begin
+            assign result = 0;
+        end
+        assign literals = $countbits('1, '1) + $countbits(-1, '1) +
+                          $countbits('x, 'x) + $countbits('z, 'z);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 520)
+  (assert_eq literals 35))
+
+(case countbits_matches_four_states_and_variable_controls
+  (four_state)
+  (source "countbits_four_state.sv" #"
+    module Child(input logic [255:0] a, input logic c, output int y);
+        assign y = $countbits(a, c, c);
+    endmodule
+    module Top(input bit clk, input logic [255:0] a,
+               input logic [7:0] c, d,
+               output int zeros, ones, xs, zs, selected, registered, via_child,
+               output int all_states);
+        assign zeros = $countbits(a, '0);
+        assign ones = $countbits(a, '1);
+        assign xs = $countbits(a, 'x);
+        assign zs = $countbits(a, 'z);
+        always_comb selected = $countbits(a, c, d, c);
+        always_ff @(posedge clk) registered <= $countbits(a, c, d, c);
+        Child child(.a(a), .c(c[0]), .y(via_child));
+        assign all_states = $countbits(a, '0, '1, 'x, 'z);
+    endmodule
+  "#)
+  (top Top)
+  (let all (- (<< 1 256) 1))
+  ; Exercise every pair of control states, with upper control bits ignored.
+  (for mask (range 0 4)
+    (for value (range 0 4)
+      (for cm (range 0 2)
+        (for cv (range 0 2)
+          (for dm (range 0 2)
+            (for dv (range 0 2)
+              (modify (set a (fourstate value mask))
+                      (set c (fourstate (| 0xa0 cv) (| 0xf0 cm)))
+                      (set d (fourstate (| 0x50 dv) (| 0xf0 dm))))
+              (tick clk)
+              (let zeros (- 256 (popcount (| value mask))))
+              (let ones (popcount (& value (~ mask))))
+              (let xs (popcount (& value mask)))
+              (let zs (popcount (& (~ value) mask)))
+              (let cc (? cm (? cv xs zs) (? cv ones zeros)))
+              (let dc (? dm (? dv xs zs) (? dv ones zeros)))
+              (let expected (+ cc (? (&& (== cm dm) (== cv dv)) 0 dc)))
+              (assert_eq zeros zeros)
+              (assert_eq ones ones)
+              (assert_eq xs xs)
+              (assert_eq zs zs)
+              (expand name (selected registered)
+                (assert_eq {name} expected "{name}"))
+              (assert_eq via_child cc)
+              (assert_eq all_states 256)))))))
+  ; Unknown states across machine-word boundaries, including the highest bit.
+  (for b (list 63 64 127 128 200 255)
+    (for value (list 0 (<< 1 b))
+      (modify (set a (fourstate value (<< 1 b)))
+              (set c (fourstate 1 1)) (set d (fourstate 0 1)))
+      (tick clk)
+      (assert_eq zeros 255)
+      (assert_eq ones 0)
+      (assert_eq xs (!= value 0))
+      (assert_eq zs (== value 0))
+      (assert_eq selected 1)
+      (assert_eq registered 1)
+      (assert_eq via_child (!= value 0))
+      (assert_eq all_states 256)))
+  (modify (set a (fourstate all all)))
+  (tick clk)
+  (assert_eq xs 256)
+  (assert_eq zs 0)
+  (assert_eq selected 256)
+  (assert_eq registered 256))

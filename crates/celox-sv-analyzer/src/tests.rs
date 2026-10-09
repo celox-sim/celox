@@ -2246,6 +2246,50 @@ fn records_continuous_assignments() {
 }
 
 #[test]
+fn folds_countbits_with_self_determined_argument_and_control_types() {
+    let ir = analyze_source(
+        r#"
+            module Top #(
+                parameter logic signed [7:0] NEG = -1,
+                parameter C = $countbits(NEG, '1, '1),
+                parameter X = $countbits(8'b10xz_11xz, 'x),
+                parameter Z = $countbits(8'b10xz_11xz, 'z),
+                parameter ALL = $countbits(8'b10xz_11xz, '0, '1, 'x, 'z),
+                parameter F = $countbits('1, '1),
+                parameter N = $countbits(-1, '1),
+                parameter W = $countbits(256'hx, 'x),
+                parameter S = ($countbits(NEG, '1) - 32'sd9) < 0,
+                parameter B = $bits($countbits(NEG, '1)),
+                parameter D = $size($countbits(NEG, '1)),
+                parameter LSB = $countbits(8'hfe, 8'hfe),
+                parameter logic [7:0] MASK = 8'hfe,
+                parameter SELECTED = $countbits(MASK[0], '0)
+            )(output logic [C-1:0] y);
+                assign y = '0;
+            endmodule
+        "#,
+        Path::new("countbits.sv"),
+    )
+    .expect("countbits constants should be evaluated");
+    let module = &ir.modules()[0];
+    for (parameter, expected) in module
+        .parameters()
+        .iter()
+        .zip([-1, 8, 2, 2, 8, 1, 32, 256, 1, 32, 32, 1, 254, 1])
+    {
+        assert_eq!(
+            parameter.resolved_value(),
+            Some(expected),
+            "{}",
+            parameter.name()
+        );
+    }
+    assert_eq!(module.parameters()[1].resolved_width(), Some(32));
+    assert_eq!(module.parameters()[1].resolved_signed(), Some(true));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+}
+
+#[test]
 fn folds_countones_with_self_determined_argument_types() {
     let ir = analyze_source(
         r#"
