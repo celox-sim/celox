@@ -561,8 +561,9 @@ pub(super) fn readmem_destination<'e>(
 }
 
 pub(super) enum SystemTaskKind {
-    /// `$display` and `$write` (and their radix variants).
-    Print(RuntimeEventKind),
+    /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
+    /// variants (`d` otherwise).
+    Print(RuntimeEventKind, char),
     /// `$finish` and `$stop`.
     Finish,
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
@@ -574,10 +575,10 @@ pub(super) enum SystemTaskKind {
 pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
     Some(match name {
         "$display" | "$displayb" | "$displayh" | "$displayo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Display)
+            SystemTaskKind::Print(RuntimeEventKind::Display, print_radix(name))
         }
         "$write" | "$writeb" | "$writeh" | "$writeo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Write)
+            SystemTaskKind::Print(RuntimeEventKind::Write, print_radix(name))
         }
         "$finish" | "$stop" => SystemTaskKind::Finish,
         "$error" | "$warning" | "$info" => SystemTaskKind::Message,
@@ -586,8 +587,37 @@ pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
     })
 }
 
+fn print_radix(name: &str) -> char {
+    match name.as_bytes().last() {
+        Some(radix @ (b'b' | b'o' | b'h')) => char::from(*radix),
+        _ => 'd',
+    }
+}
+
+/// How many arguments the conversions of `template` consume, as the runtime
+/// renders them.
+fn template_arguments(template: &str) -> usize {
+    let mut chars = template.chars().peekable();
+    let mut count = 0;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if let Some(spec) = chars.next()
+            && "bBoOhHxXdDiIcCsS".contains(spec)
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// The message template and value arguments of a system task: a leading
 /// string literal is the template. `$fatal` first takes a finish number.
+/// A `$display` or `$write` argument without a conversion of its own is
+/// displayed in the task's radix, directly after the previous one (IEEE
+/// 1800-2023 21.2.1.1).
 pub(super) fn system_task_template(
     kind: &SystemTaskKind,
     args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
@@ -599,12 +629,22 @@ pub(super) fn system_task_template(
         SystemTaskKind::Finish => &[][..],
         _ => args,
     };
-    match args.first() {
+    let (mut template, values) = match args.first() {
         Some(sv::ir::SystemTaskArg::Str(template)) => {
             (Some(unescape(template)), args[1..].to_vec())
         }
         _ => (None, args.to_vec()),
+    };
+    if let SystemTaskKind::Print(_, radix) = kind {
+        let converted = template.as_deref().map_or(0, template_arguments);
+        let rest = values.len().saturating_sub(converted);
+        if rest > 0 {
+            let mut text = template.unwrap_or_default();
+            text.push_str(&format!("%{radix}").repeat(rest));
+            template = Some(text);
+        }
     }
+    (template, values)
 }
 
 /// The value of a string literal's escape sequences (IEEE 1800-2023 5.9.1).

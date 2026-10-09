@@ -399,6 +399,23 @@
     }
   },
   {
+    "id": "sv_icarus_display_field_width",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::display_field_widths_expand_to_the_value"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_constant_unknown_bits",
     "category": "simulator_two_state",
     "phase": "execute",

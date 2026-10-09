@@ -43,11 +43,13 @@ mod host {
         IOContext, RuntimeErrorCode,
         backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
         ir::{
-            InitialMemoryData, InitialMemoryWriteRun, InstancePath, RuntimeEventKind,
-            RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
+            DisplaySizing, InitialMemoryData, InitialMemoryWriteRun, InstancePath,
+            RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
         },
     };
-    use celox_testbench::{DisplayFormatArg, format_display_arg};
+    use celox_testbench::{
+        DisplayFormatArg, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
+    };
     use num_bigint::BigUint;
 
     /// Hierarchical instance tree with resolved signals.
@@ -302,19 +304,25 @@ mod host {
         }
     }
 
-    fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> String {
+    fn runtime_event_format_arg(
+        arg: &RuntimeEventArgValue,
+        spec: char,
+        sizing: DisplaySizing,
+        field_width: Option<usize>,
+    ) -> String {
         let value = runtime_event_words_to_biguint(&arg.values, arg.width);
         let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
-        format_display_arg(
-            &DisplayFormatArg {
-                value: &value,
-                mask: Some(&mask),
-                width: arg.width,
-                signed: arg.signed,
-                is_string: arg.is_string,
-            },
-            spec,
-        )
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width: arg.width,
+            signed: arg.signed,
+            is_string: arg.is_string,
+        };
+        match sizing {
+            DisplaySizing::Minimal => format_display_arg(&arg, Some(spec)),
+            DisplaySizing::Ieee => format_sized_display_arg(&arg, spec, field_width),
+        }
     }
 
     fn render_runtime_event_message(
@@ -336,7 +344,7 @@ mod host {
             };
             return args
                 .iter()
-                .map(|arg| runtime_event_format_arg(arg, Some(default_spec)))
+                .map(|arg| runtime_event_format_arg(arg, default_spec, site.sizing, None))
                 .collect::<Vec<_>>()
                 .join(" ");
         };
@@ -353,8 +361,16 @@ mod host {
                 out.push('%');
                 continue;
             }
-            while matches!(chars.peek(), Some('0'..='9')) {
+            let mut field_width = None;
+            while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
                 chars.next();
+                field_width = Some(
+                    field_width
+                        .unwrap_or(0usize)
+                        .saturating_mul(10)
+                        .saturating_add(digit as usize)
+                        .min(MAX_FIELD_WIDTH),
+                );
             }
             let spec = chars.next().unwrap_or('d');
             match spec {
@@ -363,7 +379,12 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                    out.push_str(&runtime_event_format_arg(
+                        arg,
+                        spec,
+                        site.sizing,
+                        field_width,
+                    ));
                     arg_idx += 1;
                 }
                 'd' | 'D' | 'i' | 'I' => {
@@ -371,7 +392,12 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                    out.push_str(&runtime_event_format_arg(
+                        arg,
+                        spec,
+                        site.sizing,
+                        field_width,
+                    ));
                     arg_idx += 1;
                 }
                 't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),

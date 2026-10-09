@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 7,
+    "mismatch": 8,
     "emission_error": 0,
     "compile_error": 48,
     "runtime_error": 2,
@@ -478,6 +478,14 @@
       "name": "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::display_field_widths_expand_to_the_value at 245:3: expect_output: expected \":1234:11064:\\n\", got \":00001234:00000011064:\\n\"",
+      "expectation": "Simulation",
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

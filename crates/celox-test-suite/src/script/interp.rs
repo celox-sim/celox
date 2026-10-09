@@ -499,6 +499,18 @@ impl Interpreter<'_> {
                     panic!("run_testbench: {error}");
                 }
             }
+            StmtKind::ExpectOutput(expected) => {
+                let output = self
+                    .sim
+                    .take_output()
+                    .unwrap_or_else(|error| panic!("output: {error}"));
+                if &output != expected {
+                    return fail(
+                        pos,
+                        format!("expect_output: expected {expected:?}, got {output:?}"),
+                    );
+                }
+            }
         }
         Ok(())
     }
