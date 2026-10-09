@@ -3239,21 +3239,34 @@ fn lower_glue_parent_expr(
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
-            let arg = &args[0];
-            let width =
-                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
-            let (inner, sources, source_ids) = lower_glue_parent_expr(
-                arg,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arena,
-                Some(width),
-                None,
-            )?;
+            let mut operands = Vec::with_capacity(args.len());
+            let mut sources = HashSet::default();
+            let mut source_ids = Vec::new();
+            for arg in args {
+                let width =
+                    sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+                let (inner, arg_sources, arg_source_ids) = lower_glue_parent_expr(
+                    arg,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    Some(width),
+                    None,
+                )?;
+                operands.push(inner);
+                sources.extend(arg_sources);
+                source_ids.extend(arg_source_ids);
+            }
             Some((
-                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(
+                    arena,
+                    name,
+                    &operands,
+                    context_width,
+                    context_signed,
+                )?,
                 sources,
                 source_ids,
             ))
@@ -3594,19 +3607,62 @@ fn permute_reversed_lvalue_rhs_slt(
     arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
-// IEEE 1800-2023 20.9: count only known ones; predicates return a two-state bit.
+// IEEE 1800-2023 20.9: bit vector functions return known counts/predicates.
 fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     name: &str,
-    inner: NodeId,
+    operands: &[NodeId],
     context_width: Option<usize>,
     context_signed: Option<bool>,
 ) -> Option<NodeId> {
+    let inner = *operands.first()?;
     let known = arena
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
-    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, 1)?;
-    let result = if name == "$clog2" {
+    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, operands.len())?;
+    let result = if name == "$countbits" {
+        let controls = operands[1..]
+            .iter()
+            .map(|&expr| {
+                arena
+                    .alloc(SLTNode::Slice {
+                        expr,
+                        access: BitAccess::new(0, 0),
+                    })
+                    .ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let operand_width = celox_slt::get_width(inner, arena);
+        let mut matches = Vec::with_capacity(operand_width);
+        for bit in (0..operand_width).rev() {
+            let selected = arena
+                .alloc(SLTNode::Slice {
+                    expr: inner,
+                    access: BitAccess::new(bit, bit),
+                })
+                .ok()?;
+            let mut matched = None;
+            for &control in &controls {
+                // Case equality distinguishes all four states and returns a
+                // known bit. OR makes repeated controls count only once.
+                let equal = arena
+                    .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                    .ok()?;
+                matched = Some(match matched {
+                    None => equal,
+                    Some(previous) => arena
+                        .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
+                        .ok()?,
+                });
+            }
+            matches.push((matched?, 1));
+        }
+        let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
+        let count = arena
+            .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
+            .ok()?;
+        coerce_node_width(arena, count, Some(32), false).ok()?
+    } else if name == "$clog2" {
         // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
         // (IEEE 1800-2023 20.8.1).
         let operand_width = celox_slt::get_width(known, arena);
@@ -4342,21 +4398,33 @@ fn lower_expr_with_context(
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
-            let arg = &args[0];
-            let width =
-                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
-            let (inner, sources) = lower_expr_with_context(
-                arg,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arena,
-                Some(width),
-                None,
-            )?;
+            let mut operands = Vec::with_capacity(args.len());
+            let mut sources = HashSet::default();
+
+            for arg in args {
+                let width =
+                    sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+                let (inner, arg_sources) = lower_expr_with_context(
+                    arg,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    Some(width),
+                    None,
+                )?;
+                operands.push(inner);
+                sources.extend(arg_sources);
+            }
             Some((
-                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(
+                    arena,
+                    name,
+                    &operands,
+                    context_width,
+                    context_signed,
+                )?,
                 sources,
             ))
         }

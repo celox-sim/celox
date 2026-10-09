@@ -607,6 +607,23 @@ fn expr_from_system_function_call(
                 signed: name == "$signed",
             })
         }
+        "$countbits" => {
+            let sv_parser::SystemTfCall::ArgExpression(call) = call else {
+                return Err(operand_error());
+            };
+            let mut args = Vec::new();
+            for argument in call.nodes.1.nodes.1.0.contents() {
+                args.push(expr_from_expression_with_types(
+                    argument.as_ref().ok_or_else(operand_error)?,
+                    syntax_tree,
+                    packed_dimensions,
+                )?);
+            }
+            Ok(Expr::Call {
+                name: name.to_string(),
+                args,
+            })
+        }
         "$clog2" | "$countones" | "$onehot" | "$onehot0" | "$isunknown" => {
             let arg = expr_from_expression_with_types(
                 single_expression_argument(call).ok_or_else(operand_error)?,

@@ -15,6 +15,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
+        let mut parameter_literals = HashMap::default();
         let mut parameter_table = ParameterTable::default();
         let mut parameters = Vec::new();
         // Package parameters come first: the module's parameters may use them.
@@ -34,7 +35,17 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 parameter_table.insert(module, parameter)?;
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
-            let resolved_value = parameter.resolved_value(&constants, &parameter_types);
+            let resolved_value = parameter.resolved_value_with_literals(
+                &constants,
+                &parameter_types,
+                &parameter_literals,
+            );
+            if resolved_value.is_none()
+                && let Some(literal) =
+                    parameter.resolved_literal(&constants, &parameter_types, &parameter_literals)
+            {
+                parameter_literals.insert(parameter.name().to_string(), literal);
+            }
             if let Some(resolved_value) = resolved_value {
                 constants.insert(parameter.name().to_string(), resolved_value);
             }
