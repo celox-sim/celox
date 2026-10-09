@@ -932,6 +932,43 @@ impl Parameter {
         Some(value)
     }
 
+    pub(crate) fn resolved_value_with_literals(
+        &self,
+        constants: &HashMap<String, i128>,
+        parameter_types: &HashMap<String, ExprType>,
+        literals: &HashMap<String, Expr>,
+    ) -> Option<i128> {
+        self.resolved_value(constants, parameter_types).or_else(|| {
+            let literal = self.resolved_literal(constants, parameter_types, literals)?;
+            eval_ast_const_expr(&expr_to_const(literal)?, constants)
+        })
+    }
+
+    pub(crate) fn resolved_literal(
+        &self,
+        constants: &HashMap<String, i128>,
+        parameter_types: &HashMap<String, ExprType>,
+        literals: &HashMap<String, Expr>,
+    ) -> Option<Expr> {
+        // A previous elaboration pass may have left this declaration's numeric
+        // value in the environment. Evaluate its initializer, not that value.
+        let mut evaluation_constants = constants.clone();
+        evaluation_constants.remove(self.name());
+        let mut parameter = self.clone();
+        parameter.value = self.value.clone().map(|value| {
+            substitute_typed_parameter_literals(value, &evaluation_constants, parameter_types)
+        });
+        if let Some(ty) = self.resolved_type(parameter_types) {
+            parameter.declared_width = Some(ty.width);
+            parameter.declared_signed = Some(ty.signed);
+        }
+        let value = parameter_value_env(std::slice::from_ref(&parameter), &evaluation_constants)
+            .remove(self.name())?;
+        let value = substitute_expr_idents(value, literals);
+        let value = fold_const_integral_expr_preserving_mask(value, &evaluation_constants);
+        matches!(value, Expr::Literal(_)).then_some(value)
+    }
+
     pub(crate) fn resolved_type(
         &self,
         parameter_types: &HashMap<String, ExprType>,

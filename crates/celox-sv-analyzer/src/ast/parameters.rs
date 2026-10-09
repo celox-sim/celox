@@ -67,29 +67,47 @@ pub(super) struct ParameterEnvironment {
     values: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
+    // Numeric environments cannot represent X/Z. Keep resolved literals for
+    // evaluating later declarations without dropping their state bits.
+    literals: HashMap<String, Expr>,
 }
 
 impl ParameterEnvironment {
     pub(super) fn new(parameters: &[Parameter], base: &HashMap<String, i128>) -> Self {
         let mut values = HashMap::default();
         let mut types = HashMap::default();
+        let mut literals = HashMap::default();
         for parameter in parameters {
-            bind_parameter(&mut values, &mut types, parameter);
+            bind_parameter(&mut values, &mut types, &mut literals, parameter);
         }
         let mut constants = base.clone();
         constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
+        for name in literals.keys() {
+            if !values.contains_key(name) {
+                constants.remove(name);
+            }
+        }
         Self {
             values,
             types,
             constants,
+            literals,
         }
     }
 
     fn append(&mut self, parameter: &Parameter) {
-        if !bind_parameter(&mut self.values, &mut self.types, parameter) {
+        if !bind_parameter(
+            &mut self.values,
+            &mut self.types,
+            &mut self.literals,
+            parameter,
+        ) {
             return;
         }
         let name = parameter.name();
+        if self.literals.contains_key(name) && !self.values.contains_key(name) {
+            self.constants.remove(name);
+        }
         let mut keys = vec![
             name.to_string(),
             parameter_marker(name),
@@ -417,25 +435,41 @@ pub(super) fn extend_const_env_with_parameters(
     parameters: &[Parameter],
 ) {
     let mut parameter_types = parameter_types_from_const_env(env);
+    let mut literals = HashMap::default();
     for parameter in parameters {
-        bind_parameter(env, &mut parameter_types, parameter);
+        bind_parameter(env, &mut parameter_types, &mut literals, parameter);
     }
 }
 
 fn bind_parameter(
     env: &mut HashMap<String, i128>,
     types: &mut HashMap<String, ExprType>,
+    literals: &mut HashMap<String, Expr>,
     parameter: &Parameter,
 ) -> bool {
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
-    let Some(value) = parameter.resolved_value(env, types) else {
-        return false;
+    let value = parameter.resolved_value_with_literals(env, types, literals);
+    let literal = if value.is_none() {
+        let Some(literal) = parameter.resolved_literal(env, types, literals) else {
+            return false;
+        };
+        Some(literal)
+    } else {
+        None
     };
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
     }
+    if let Some(literal) = literal {
+        // Shadow a numeric inherited binding with the four-state declaration.
+        env.remove(parameter.name());
+        literals.insert(parameter.name().to_string(), literal);
+        insert_parameter_dimension_markers(env, parameter);
+        return true;
+    }
+    let value = value.expect("a known value or a resolved literal was checked above");
     env.insert(parameter.name().to_string(), value);
     env.insert(parameter_marker(parameter.name()), value);
     if parameter.is_local {
@@ -828,6 +862,7 @@ pub(super) fn parameter_value_env(
                 expr: Box::new(value),
             };
         }
+        value = fold_const_integral_expr_preserving_mask(value, const_env);
         values.insert(parameter.name().to_string(), value);
     }
     values

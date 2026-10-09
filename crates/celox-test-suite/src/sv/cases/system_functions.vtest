@@ -247,19 +247,27 @@
   (source "countbits_constants.sv" #"
     module Top(output int result, literals);
         localparam logic signed [7:0] NEG = -1;
+        localparam logic [7:0] MIXED = 8'b10xz_11xz;
+        localparam logic [255:0] WIDE_X = 'x;
+        localparam logic [7:0] CTRL_X = 8'b0000_000x;
+        localparam logic [7:0] CTRL_Z = 8'b1111_111z;
         localparam C = $countbits(NEG, 8'hff, '1);
-        localparam X = $countbits(8'b10xz_11xz, 'x);
-        localparam Z = $countbits(8'b10xz_11xz, 'z);
-        localparam K = $countbits(8'b10xz_11xz, '0, '1);
+        localparam X = $countbits(MIXED, 'x);
+        localparam Z = $countbits(MIXED, 'z);
+        localparam K = $countbits(MIXED, '0, '1);
         if (C == 8 && X == 2 && Z == 2 && K == 4 &&
             $bits(C) == 32 && $size(C) == 32 &&
-            $countbits(3'b1xz, 'x, 'z) == 2 &&
+            $countbits(MIXED[2:0], 'x, 'z) == 2 &&
             $countbits(8'hff + 8'd1, '0) == 8 &&
             $countbits(1'bx ? 4'b1010 : 4'b1000, 'x) == 1 &&
-            $countbits(8'hfe, 8'hfe) == 1) begin
+            $countbits(8'hfe, 8'hfe) == 1 &&
+            $countbits(WIDE_X, CTRL_X, CTRL_X) == 256 &&
+            $countbits(MIXED, CTRL_Z) == 2 &&
+            $countbits({MIXED[2:0], MIXED[7:4]}, 'x, 'z) == 4 &&
+            $countbits({2{MIXED}}, 'x, 'z) == 8) begin
             assign result = $countbits(256'hx, 'x, 'x) +
                             $countbits(256'hz, 'z) +
-                            $countbits(8'b10xz_11xz, '0, '1, 'x, 'z, '0);
+                            $countbits(MIXED, '0, '1, 'x, 'z, '0);
         end else begin
             assign result = 0;
         end
@@ -281,7 +289,7 @@
     module Top(input bit clk, input logic [255:0] a,
                input logic [7:0] c, d,
                output int zeros, ones, xs, zs, selected, registered, via_child,
-               output int all_states);
+               output int all_states, literal_controlled);
         assign zeros = $countbits(a, '0);
         assign ones = $countbits(a, '1);
         assign xs = $countbits(a, 'x);
@@ -290,6 +298,7 @@
         always_ff @(posedge clk) registered <= $countbits(a, c, d, c);
         Child child(.a(a), .c(c[0]), .y(via_child));
         assign all_states = $countbits(a, '0, '1, 'x, 'z);
+        assign literal_controlled = $countbits(8'b10xz_11xz, c[0], d[0], c[0]);
     endmodule
   "#)
   (top Top)
@@ -319,7 +328,10 @@
               (expand name (selected registered)
                 (assert_eq {name} expected "{name}"))
               (assert_eq via_child cc)
-              (assert_eq all_states 256)))))))
+              (assert_eq all_states 256)
+              (let lc (? cm 2 (? cv 3 1)))
+              (let ld (? dm 2 (? dv 3 1)))
+              (assert_eq literal_controlled (+ lc (? (&& (== cm dm) (== cv dv)) 0 ld)))))))))
   ; Unknown states across machine-word boundaries, including the highest bit.
   (for b (list 63 64 127 128 200 255)
     (for value (list 0 (<< 1 b))
@@ -340,3 +352,45 @@
   (assert_eq zs 0)
   (assert_eq selected 256)
   (assert_eq registered 256))
+
+(case countbits_in_parameter_specializations_and_generate_scopes
+  (four_state)
+  (source "countbits_parameters.sv" #"
+    module Child #(parameter logic [7:0] MASK = 8'b10xz_11xz,
+                   parameter int C = $countbits(MASK, 'x, 'z))
+                  (output logic [C:0] y, output int count);
+        localparam ALIAS = MASK;
+        assign y = '1;
+        assign count = $countbits(ALIAS, 'x, 'z);
+    endmodule
+    module Top(output logic [4:0] original, output logic [0:0] known,
+               output int c_original, c_known,
+               output int scoped, extended, via_function);
+        localparam logic [7:0] MIXED = 8'b10xz_11xz;
+        localparam logic signed [3:0] SIGNED_X = 4'bx001;
+        localparam logic signed [7:0] EXTENDED_X = SIGNED_X;
+        function automatic int count_parameter();
+            return $countbits(MIXED, 'x, 'z);
+        endfunction
+        assign extended = $countbits(EXTENDED_X, 'x);
+        assign via_function = count_parameter();
+        Child a(.y(original), .count(c_original));
+        Child #(.MASK(8'hff)) b(.y(known), .count(c_known));
+        if ($countbits(MIXED, 'x, 'z) == 4) begin : g
+            localparam logic [7:0] CONTROL = 8'bxxxx_xxxz;
+            localparam COUNT = $countbits(MIXED, CONTROL, CONTROL);
+            assign scoped = COUNT;
+        end else begin
+            assign scoped = -1;
+        end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq original 31)
+  (assert_eq known 1)
+  (assert_eq c_original 4)
+  (assert_eq c_known 0)
+  (assert_eq scoped 2)
+  (assert_eq extended 5)
+  (assert_eq via_function 4))

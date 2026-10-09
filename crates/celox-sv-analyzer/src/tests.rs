@@ -2246,6 +2246,39 @@ fn records_continuous_assignments() {
 }
 
 #[test]
+fn folds_countbits_with_four_state_parameter_operands_and_controls() {
+    let ir = analyze_source(
+        r#"
+            module Top #(
+                parameter logic [7:0] MIXED = 8'b10xz_11xz,
+                parameter ALIAS = MIXED,
+                parameter logic [7:0] CTRL = 8'bxxxx_xxxz,
+                parameter logic signed [3:0] SIGNED_X = 4'bx001,
+                parameter logic signed [7:0] EXTENDED_X = SIGNED_X,
+                parameter X = $countbits(ALIAS, 'x),
+                parameter Z = $countbits(MIXED, CTRL, CTRL),
+                parameter ALL = $countbits(MIXED, '0, '1, 'x, 'z),
+                parameter EXTENDED = $countbits(EXTENDED_X, 'x),
+                parameter logic [255:0] WIDE = 'x,
+                parameter W = $countbits(WIDE, 'x)
+            )(output logic [X-1:0] y);
+                assign y = '0;
+            endmodule
+        "#,
+        Path::new("countbits_parameters.sv"),
+    )
+    .expect("four-state countbits parameters should be evaluated");
+    let module = &ir.modules()[0];
+    for (index, expected) in [(5, 2), (6, 2), (7, 8), (8, 5), (10, 256)] {
+        assert_eq!(module.parameters()[index].resolved_value(), Some(expected));
+        assert_eq!(module.parameters()[index].resolved_width(), Some(32));
+        assert_eq!(module.parameters()[index].resolved_signed(), Some(true));
+    }
+    assert_eq!(module.parameters()[1].resolved_width(), Some(8));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(2));
+}
+
+#[test]
 fn folds_countbits_with_self_determined_argument_and_control_types() {
     let ir = analyze_source(
         r#"
@@ -3665,4 +3698,32 @@ fn analyzing_a_source_again_gives_the_same_call_sites() {
     let first = analyze_source(code, path).unwrap();
     let second = analyze_source(code, path).unwrap();
     assert_eq!(first, second);
+}
+
+#[test]
+fn countbits_alias_parameter_keeps_unknown_bits_in_assignments() {
+    let ir = analyze_source(
+        r#"module Child #(parameter logic [7:0] MASK = 8'b10xz_11xz,
+                         parameter int C = $countbits(MASK, 'x, 'z))
+                        (output logic [C:0] y, output int count);
+            localparam ALIAS = MASK;
+            assign y = '1;
+            assign count = $countbits(ALIAS, 'x, 'z);
+        endmodule"#,
+        Path::new("countbits_alias.sv"),
+    )
+    .unwrap();
+    let module = &ir.modules()[0];
+    assert_eq!(module.parameters()[2].resolved_value(), None);
+    let ir::Expr::Literal(literal) = module.assignments()[1].rhs() else {
+        panic!(
+            "a constant count should be folded: {:?}",
+            module.assignments()[1].rhs()
+        );
+    };
+    let literal = typecheck::parse_integral_literal(literal).unwrap();
+    assert_eq!(literal.width, 32);
+    assert!(literal.signed);
+    assert_eq!(literal.value, num_bigint::BigUint::from(4u8));
+    assert_eq!(literal.mask, num_bigint::BigUint::default());
 }

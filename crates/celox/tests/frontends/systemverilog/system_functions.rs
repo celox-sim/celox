@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
+        @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
+    }
+
     fn countbits_preserves_argument_and_return_types(sim) {
         @case "system_functions::countbits_preserves_argument_and_return_types";
     }
