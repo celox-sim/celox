@@ -8328,3 +8328,40 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
     sim.modify(|io| io.set(count, 3u8)).unwrap();
     assert_eq!(sim.drain_runtime_events(), ticks(3));
 }
+
+#[test]
+fn commits_ff_output_actuals_whose_index_calls_a_function() {
+    // `outer` writes `state[inner(k)]` from an always_ff select index; the
+    // write is committed with the process.
+    let source = r#"
+        module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
+                   output logic [3:0] bits);
+            function automatic logic [1:0] inner(input logic [1:0] x);
+                return x;
+            endfunction
+            function automatic logic [1:0] outer(output logic y);
+                y = 1'b1;
+                return 2'd2;
+            endfunction
+            logic [3:0] state;
+            always_ff @(posedge clk) begin
+                state <= 4'd0;
+                bits[outer(state[inner(k)])] <= 1'b1;
+            end
+            assign st = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_nested.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let k = sim.signal("k");
+    let st = sim.signal("st");
+    let bits = sim.signal("bits");
+    let clk = sim.event("clk");
+    for index in [1u8, 3, 0] {
+        sim.modify(|io| io.set(k, index)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(st), 1 << index, "k = {index}");
+        assert_eq!(sim.get_as::<u8>(bits), 4);
+    }
+}
