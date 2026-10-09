@@ -489,3 +489,136 @@ fn unreachable_statements_are_not_lowered() {
     assert_eq!(sim.time(), 2);
     assert_eq!(sim.get(a), 1u8.into());
 }
+
+/// A condition is true when some bit is a known one, even if other bits are
+/// unknown, and false when its truth is unknown.
+#[test]
+fn multi_bit_and_four_state_conditions() {
+    let byte = ValueType::bits(8).unwrap();
+    let mut module = ModuleBuilder::new("Conditions").unwrap();
+    let sel = module
+        .internal("sel", ValueType::logic(8).unwrap())
+        .unwrap();
+    let n = module.internal("n", byte).unwrap();
+    let out = module.output("out", byte).unwrap();
+    let total = module.output("total", byte).unwrap();
+    module
+        .set_initial(sel, Constant::four_state(0b0100u8, 0b0010u8, 8).unwrap())
+        .unwrap();
+    module
+        .set_initial(n, Constant::two_state(3u8, 8).unwrap())
+        .unwrap();
+    module
+        .set_initial(total, Constant::two_state(0u8, 8).unwrap())
+        .unwrap();
+    let sel_target = module.whole(sel).unwrap();
+    let n_target = module.whole(n).unwrap();
+    let out_target = module.whole(out).unwrap();
+    let total_target = module.whole(total).unwrap();
+    let sel_expr = module.read(sel).unwrap();
+    let n_expr = module.read(n).unwrap();
+    let total_expr = module.read(total).unwrap();
+    let unknown = module.constant(Constant::four_state(0u8, 1u8, 8).unwrap());
+    let one = constant(&mut module, 1, 8);
+    let two = constant(&mut module, 2, 8);
+    let next_n = module.binary(BinaryOp::Sub, n_expr, one, byte).unwrap();
+    let next_total = module.binary(BinaryOp::Add, total_expr, one, byte).unwrap();
+    let branch = Statement::If {
+        condition: sel_expr,
+        then_body: vec![Statement::Assign {
+            target: out_target,
+            value: one,
+        }],
+        else_body: vec![Statement::Assign {
+            target: out_target,
+            value: two,
+        }],
+    };
+    module
+        .process(vec![
+            branch.clone(),
+            Statement::While {
+                condition: n_expr,
+                body: vec![
+                    Statement::Assign {
+                        target: n_target,
+                        value: next_n,
+                    },
+                    Statement::Assign {
+                        target: total_target,
+                        value: next_total,
+                    },
+                ],
+            },
+            Statement::Delay { amount: one },
+            Statement::Assign {
+                target: sel_target,
+                value: unknown,
+            },
+            branch,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let out = sim.signal("out");
+    let total = sim.signal("total");
+
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(out), 1u8.into());
+    assert_eq!(sim.get(total), 3u8.into());
+    assert_eq!(sim.step().unwrap(), Some(1));
+    assert_eq!(sim.get(out), 2u8.into());
+}
+
+/// A pulse separated by a zero delay is an edge: registers see the rising
+/// edge before the process resumes and lowers the clock again.
+#[test]
+fn zero_delay_pulse_triggers_registers() {
+    let bit = ValueType::bits(1).unwrap();
+    let byte = ValueType::bits(8).unwrap();
+    let mut module = ModuleBuilder::new("Pulse").unwrap();
+    let clk = module.internal("clk", bit).unwrap();
+    let count = module.output("count", byte).unwrap();
+    module
+        .set_initial(clk, Constant::two_state(0u8, 1).unwrap())
+        .unwrap();
+    module
+        .set_initial(count, Constant::two_state(0u8, 8).unwrap())
+        .unwrap();
+    let count_expr = module.read(count).unwrap();
+    let one = constant(&mut module, 1, 8);
+    let next = module.binary(BinaryOp::Add, count_expr, one, byte).unwrap();
+    let count_target = module.whole(count).unwrap();
+    module
+        .register(count_target, next, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let clk_target = module.whole(clk).unwrap();
+    let high = constant(&mut module, 1, 1);
+    let low = constant(&mut module, 0, 1);
+    let zero = constant(&mut module, 0, 64);
+    module
+        .process(vec![
+            Statement::Assign {
+                target: clk_target,
+                value: high,
+            },
+            Statement::Delay { amount: zero },
+            Statement::Assign {
+                target: clk_target,
+                value: low,
+            },
+            Statement::Delay { amount: zero },
+            Statement::Assign {
+                target: clk_target,
+                value: high,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let clk = sim.signal("clk");
+
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(count), 2u8.into());
+    assert_eq!(sim.get(clk), 1u8.into());
+    assert_eq!(sim.next_event_time(), None);
+}

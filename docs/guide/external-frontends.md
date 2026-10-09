@@ -148,10 +148,12 @@ module.process(vec![Statement::Forever {
 
 Processes run only in a timed `Simulation`. Each one is compiled into a
 resumable kernel that the simulation scheduler resumes when its delay expires.
-Processes that resume at the same time run in declaration order. A zero delay
-runs again after the other processes of that time. A process sees the state
-settled at the previous time. The clock and reset edges it causes trigger
-registers at the current time, like a scheduled event.
+Processes that resume at the same time run in declaration order. A process
+sees the state settled at the previous time. The clock and reset edges it
+causes trigger registers at the current time, like a scheduled event. A zero
+delay resumes the process later at the same time, after the other processes
+have run and the registers their edges trigger have settled, so a pulse
+separated by a zero delay is still an edge.
 
 A process may write output and internal signals that no continuous assignment
 or register drives. Several processes may write the same signal. Checkpoints

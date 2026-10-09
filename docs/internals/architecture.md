@@ -197,7 +197,8 @@ The timed scheduler keeps a queue of process wakeups next to its event queue.
 At each time it applies the scheduled values, then runs the processes that
 resume at that time in declaration order. It detects the clock edges they cause
 by comparing event signals before and after, and then settles as for scheduled
-events. Because the slots are ordinary state, a checkpoint captures suspended
+events. Processes that waited for zero time resume in a further round at the
+same time, which repeats the edge detection and settling. Because the slots are ordinary state, a checkpoint captures suspended
 processes. The optimizer does not yet optimize kernels, but it treats their
 accesses like those of FF domains, so identity aliasing and dead-store
 elimination keep the state they use.

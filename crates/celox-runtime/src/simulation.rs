@@ -32,7 +32,9 @@ pub trait SimulationExecutor {
         &mut self,
         event: <Self::Backend as SimBackend>::Event,
     ) -> Result<(), SimulatorErrorCode>;
-    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode>;
+    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        self.backend_mut().run_process(index)
+    }
 
     /// Snapshot external-component inputs immediately before an event domain
     /// evaluates its sequential logic.
@@ -263,60 +265,67 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
+        let ready = self.take_ready_processes(current_time);
+        self.step_round(executor, current_time, events_to_process, ready)?;
+        // A process that waited for zero time resumes in a later round of
+        // this time, after the previous round's edges have been handled.
+        while !self.finished {
+            let ready = self.take_ready_processes(current_time);
+            if ready.is_empty() {
+                break;
+            }
+            self.step_round(executor, current_time, Vec::new(), ready)?;
+        }
+        executor.finish_timed_step(current_time);
+        Ok(Some(current_time))
+    }
+
+    /// Remove the processes waiting for `time`, in declaration order.
+    fn take_ready_processes(&mut self, time: u64) -> Vec<usize> {
         let mut ready = Vec::new();
-        while let Some(&Reverse((time, process))) = self.process_wakeups.peek() {
-            if time != current_time {
+        while let Some(&Reverse((wakeup, process))) = self.process_wakeups.peek() {
+            if wakeup != time {
                 break;
             }
             self.process_wakeups.pop();
             ready.push(process);
         }
-        self.step_events(executor, current_time, events_to_process, ready)
+        ready
     }
 
     /// Run `ready` processes in order until each suspends or ends. A process
-    /// that waits for zero time runs again at this time after the others.
+    /// that waits for zero time is queued for the next round of this time.
     fn run_processes<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
-        mut ready: Vec<usize>,
+        ready: Vec<usize>,
     ) -> Result<(), SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        while !ready.is_empty() && !self.finished {
-            let mut again = Vec::new();
-            for process in ready {
-                executor.run_process(process)?;
-                let refs = self.processes[process];
-                let status: u8 = executor.backend().get_as(refs.status);
-                match ProcessStatus::from_code(status) {
-                    Some(ProcessStatus::Delay) => {
-                        let delay: u64 = executor.backend().get_as(refs.delay);
-                        if delay == 0 {
-                            again.push(process);
-                        } else {
-                            let time = current_time.checked_add(delay).ok_or_else(|| {
-                                SimulatorErrorCode::Runtime {
-                                    message: format!(
-                                        "process {process} delay overflows simulation time"
-                                    ),
-                                    signals: Vec::new(),
-                                }
-                            })?;
-                            self.process_wakeups.push(Reverse((time, process)));
+        for process in ready {
+            executor.run_process(process)?;
+            let refs = self.processes[process];
+            let status: u8 = executor.backend().get_as(refs.status);
+            match ProcessStatus::from_code(status) {
+                Some(ProcessStatus::Delay) => {
+                    let delay: u64 = executor.backend().get_as(refs.delay);
+                    let time = current_time.checked_add(delay).ok_or_else(|| {
+                        SimulatorErrorCode::Runtime {
+                            message: format!("process {process} delay overflows simulation time"),
+                            signals: Vec::new(),
                         }
-                    }
-                    Some(ProcessStatus::Done) => {}
-                    Some(ProcessStatus::Finish) => {
-                        self.finished = true;
-                        break;
-                    }
-                    None => return Err(SimulatorErrorCode::InternalError),
+                    })?;
+                    self.process_wakeups.push(Reverse((time, process)));
                 }
+                Some(ProcessStatus::Done) => {}
+                Some(ProcessStatus::Finish) => {
+                    self.finished = true;
+                    break;
+                }
+                None => return Err(SimulatorErrorCode::InternalError),
             }
-            ready = again;
         }
         Ok(())
     }
@@ -336,16 +345,20 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.step_events(executor, time, Vec::new(), Vec::new())
+        self.step_round(executor, time, Vec::new(), Vec::new())?;
+        executor.finish_timed_step(time);
+        Ok(Some(time))
     }
 
-    fn step_events<E>(
+    /// Apply `events_to_process`, run `ready_processes`, and settle the
+    /// edges they cause.
+    fn step_round<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         events_to_process: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
-    ) -> Result<Option<u64>, SimulatorErrorCode>
+    ) -> Result<(), SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -576,8 +589,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        executor.finish_timed_step(current_time);
-        Ok(Some(current_time))
+        Ok(())
     }
 
     pub fn time(&self) -> u64 {

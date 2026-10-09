@@ -148,10 +148,12 @@ module.process(vec![Statement::Forever {
 
 process は時刻付きの `Simulation` でだけ実行されます。各 process は再開可能な
 kernel に compile され、delay が満了すると simulation の scheduler が再開
-します。同じ時刻に再開する process は宣言順に実行されます。0 の delay は、
-その時刻の他の process の後に再び実行されます。process が見るのは前の時刻で
+します。同じ時刻に再開する process は宣言順に実行されます。process が見るのは前の時刻で
 settle した state です。process が起こした clock や reset の edge は、
-schedule された event と同様にその時刻の register を trigger します。
+schedule された event と同様にその時刻の register を trigger します。0 の delay
+を置くと、process は同じ時刻のうちに、他の process が実行され、その edge が
+trigger した register が settle した後で再開します。そのため 0 の delay で区切った
+pulse も edge になります。
 
 process が書けるのは、continuous assignment や register が駆動していない
 output と internal signal です。同じ signal を複数の process が書いても

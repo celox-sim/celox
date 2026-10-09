@@ -455,7 +455,8 @@ pub enum Statement {
     /// value; other logic sees it once the process suspends.
     Assign { target: SignalSlice, value: ExprId },
     /// Run `then_body` when `condition` is nonzero, otherwise `else_body`.
-    /// A condition with unknown bits counts as false.
+    /// A condition is nonzero when some bit is a known one; one whose truth
+    /// is unknown counts as false.
     If {
         condition: ExprId,
         then_body: Vec<Statement>,
@@ -470,8 +471,8 @@ pub enum Statement {
     /// Run `body` forever.
     Forever { body: Vec<Statement> },
     /// Suspend the process for `amount` time units. Unknown bits of the
-    /// amount count as zero; a zero delay lets the other processes of the
-    /// same time run first.
+    /// amount count as zero; a zero delay resumes at the same time, after
+    /// the other processes and the registers their edges trigger.
     Delay { amount: ExprId },
     /// End the simulation.
     Finish,
