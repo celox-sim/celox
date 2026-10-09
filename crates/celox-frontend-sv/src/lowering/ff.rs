@@ -392,14 +392,50 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(result)
     }
 
+    /// Run `f` in a block entered only where `cond` holds.
+    fn when<T>(
+        &mut self,
+        cond: RegisterId,
+        f: impl FnOnce(&mut Self) -> Result<T, sv::AnalyzerError>,
+    ) -> Result<T, sv::AnalyzerError> {
+        let taken = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (taken, Vec::new()),
+            false_block: (join, Vec::new()),
+        });
+        self.b.switch_to_block(taken);
+        let result = f(self)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
+        Ok(result)
+    }
+
     /// Run `then_f` and `else_f` where the arms of a conditional operator
-    /// are evaluated.
+    /// are evaluated; an ambiguous condition evaluates both (IEEE 1800-2023
+    /// 11.4.11).
     fn mux_arms<A, B>(
         &mut self,
         condition: &sv::ir::Expr,
         then_f: impl FnOnce(&mut Self) -> Result<A, sv::AnalyzerError>,
         else_f: impl FnOnce(&mut Self) -> Result<B, sv::AnalyzerError>,
     ) -> Result<(A, B), sv::AnalyzerError> {
+        if self.m.four_state {
+            let mut arena = SLTNodeArena::new();
+            let mut consts = ConstCache::default();
+            let node = self.expr_slt(condition, None, &mut arena)?;
+            let truth = slt_truth(&mut arena, node)?;
+            let unknown = slt_truth_unknown(&mut arena, &mut consts, node)?;
+            let then_cond = slt_or(&mut arena, &mut consts, truth, unknown)?;
+            let not_truth = slt_not(&mut arena, &mut consts, truth)?;
+            let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
+            let then_cond = self.lower_slt(&arena, then_cond)?;
+            let else_cond = self.lower_slt(&arena, else_cond)?;
+            let then_result = self.when(then_cond, then_f)?;
+            let else_result = self.when(else_cond, else_f)?;
+            return Ok((then_result, else_result));
+        }
         let (truth, _) = self.eval_truth(condition)?;
         let then_block = self.b.new_block();
         let else_block = self.b.new_block();

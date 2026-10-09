@@ -788,10 +788,11 @@ impl<'p, 'a> Comb<'p, 'a> {
         let condition_value = self.eval(store, frames, condition, None)?;
         let truth = slt_truth(self.arena, condition_value.0)?;
         let unknown = if self.m.four_state {
-            let known = self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, condition_value.0))?;
-            let is_known =
-                self.alloc(SLTNode::Binary(condition_value.0, BinaryOp::EqCase, known))?;
-            Some(slt_not(self.arena, &mut self.consts, is_known)?)
+            Some(slt_truth_unknown(
+                self.arena,
+                &mut self.consts,
+                condition_value.0,
+            )?)
         } else {
             None
         };
@@ -2636,6 +2637,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         );
 
         if !effects.is_empty() {
+            // The events follow every value the iterations depend on, such
+            // as the bounds, even when no output does.
+            self.effect_sensitivity.extend(sources.iter().copied());
             // A runner repeats the loop to emit its events, iteration by
             // iteration, with the loop-carried state of each iteration.
             let result = match carried.first() {

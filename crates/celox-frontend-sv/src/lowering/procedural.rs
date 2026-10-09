@@ -1254,6 +1254,26 @@ pub(super) fn slt_truth<A: std::hash::Hash + Eq + Clone>(
         .map_err(slt_error)
 }
 
+/// Whether the truth of a condition is ambiguous: no bit is one and some
+/// bit is unknown (IEEE 1800-2023 11.4.11). A condition with a known one is
+/// true even when other bits are unknown.
+pub(super) fn slt_truth_unknown<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    consts: &mut ConstCache,
+    condition: NodeId,
+) -> Result<NodeId, sv::AnalyzerError> {
+    let any = arena
+        .alloc(SLTNode::Unary(UnaryOp::Or, condition))
+        .map_err(slt_error)?;
+    let known = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, any))
+        .map_err(slt_error)?;
+    let is_known = arena
+        .alloc(SLTNode::Binary(any, BinaryOp::EqCase, known))
+        .map_err(slt_error)?;
+    slt_not(arena, consts, is_known)
+}
+
 /// Whether a value is not logically false: some bit is one or unknown. The
 /// second operand of `&&` is skipped only when the first is false
 /// (IEEE 1800-2023 11.4.7); an ambiguous first operand still evaluates it.
