@@ -3075,6 +3075,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_widths,
             arg_signed,
             arg_is_string,
+            location: None,
         });
         let mut preceding_writes = Vec::new();
         for (id, range) in store.iter() {

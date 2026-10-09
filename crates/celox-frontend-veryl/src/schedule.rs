@@ -30,6 +30,7 @@ pub fn schedule_symbolic_rtl(
         symbolic,
         module_ir,
         source_id_maps,
+        process_storage,
     } = source;
     let root_id = symbolic.root_id;
     let root = module_ir.get(&root_id).copied();
@@ -62,7 +63,7 @@ pub fn schedule_symbolic_rtl(
         .unwrap_or_default();
     let fused_ff_factory =
         super::lowering::global_ff::VerylFusedFfFactory::new(&module_ir, &source_id_maps, *config);
-    let output = assembly::schedule_symbolic_rtl(
+    let mut output = assembly::schedule_symbolic_rtl(
         symbolic,
         Some(&fused_ff_factory),
         ignored_loops,
@@ -131,7 +132,7 @@ pub fn schedule_symbolic_rtl(
         components.append(&mut instance_components);
         component_bindings.append(&mut instance_bindings);
     }
-    let testbench_source = VerylTestbenchSource {
+    let mut testbench_source = VerylTestbenchSource {
         id_map: VerylIdMap {
             module_variables: source_id_maps,
         },
@@ -159,11 +160,23 @@ pub fn schedule_symbolic_rtl(
         component_bindings,
         component_libraries: Vec::new(),
         component_file_base: None,
+        kernels: false,
     };
+    if config.testbench_kernels && !testbench_source.is_empty() {
+        super::lowering::process::lower_testbench_kernels(
+            &mut output.scheduled,
+            &testbench_source,
+            &module_ir,
+            &process_storage,
+            config,
+        )?;
+        testbench_source.kernels = true;
+    }
     // Use the exact elaborated module, including parameter specialization, for
     // each process owner. Resolving by root/module name loses child scopes.
     let mut dynamic_for_diagnostics = Vec::new();
     for source in testbench_source.sources() {
+        let lookup = &output.scheduled.frontend_lookup;
         let instance = source.base_instance(lookup);
         let module = module_ir[&lookup.instance_module[&instance]];
         dynamic_for_diagnostics.extend(super::check_elaborated_dynamic_for_bounds(

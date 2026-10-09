@@ -148,7 +148,7 @@ fn native_image_roundtrip_preserves_concurrent_processes_and_periods() {
             .build_native_from_image(image)
             .unwrap();
         let tb = compile_initial_testbench(&restored).unwrap();
-        assert!(tb.processes().count() >= 2);
+        assert!(restored.program().runtime_schema.processes.len() >= 2);
         assert_eq!(
             run_compiled_testbench_to_finish(&mut restored, &tb),
             TestResult::Pass

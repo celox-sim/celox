@@ -12,9 +12,9 @@ use std::path::Path;
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
     InitialStateData, InitialStateValue, ModuleId, PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH,
-    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    PROCESS_RELEASE_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp,
+    VarAtomBase, WORKING_REGION,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
@@ -2010,7 +2010,10 @@ fn lower_initial_processes(
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
                 clock: declare("clock", PROCESS_CLOCK_WIDTH),
+                release: declare("release", PROCESS_RELEASE_WIDTH),
                 clocks: Vec::new(),
+                releases: Vec::new(),
+                host_requests: Vec::new(),
             }
         })
         .collect();

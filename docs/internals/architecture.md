@@ -239,9 +239,31 @@ optimizer does not yet optimize kernels, but it treats their accesses like
 those of FF domains, so identity aliasing and dead-store elimination keep
 the state they use.
 
+The `initial` blocks of a Veryl `#[test]` module are compiled into process
+kernels in the same way (the `testbench_kernels` option, on by default). The
+Veryl frontend lowers each block with its procedural expression lowering
+over the elaborated instance's stable state; a hierarchical reference becomes
+a synthetic variable of the module that addresses the child's state. A loop
+keeps its counter and bounds in hidden state, so a wait inside its body can
+suspend the kernel, and each block has its own copy of the module's
+function-local variables, so a call that waits keeps its arguments. Because
+a kernel writes design state directly, a statement that reads design state
+after a store first reports a `settle` status, which has the runtime settle
+the combinational logic and resume the kernel at once. `clk.next(n)` is a
+clock wait; `rst.assert(n)` is a clock wait with a release, a write the
+scheduler makes when the wait ends, so the reset is deasserted even when the
+tick budget is spent. Random numbers and the methods of host components are
+host requests: the kernel stores the arguments in scratch state, reports the
+request's index, and the host serves it through the scratch state before
+resuming the kernel. `$assert` emits a runtime event on both outcomes, so the
+detailed test result lists every evaluation with its source location.
+Formatted `%t` is the scheduler time, in which the default process clock has
+period 2.
+
 A running simulator retains the elaborated design, source lookup, runtime schema,
-bound testbench bytecode, and compiled backend. The backend owns the finalized
-layout. Frontend and optimizer state are discarded after compilation.
+bound testbench components, and compiled backend. The backend owns the
+finalized layout. Frontend and optimizer state are discarded after
+compilation.
 
 ## Public API boundary
 

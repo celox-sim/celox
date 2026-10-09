@@ -27,6 +27,10 @@ pub struct VerylSymbolicRtl<'a> {
     pub symbolic: crate::symbolic::artifact::SymbolicRtl,
     pub module_ir: HashMap<celox_design::ModuleId, &'a veryl_analyzer::ir::Module>,
     pub source_id_maps: HashMap<celox_design::ModuleId, HashMap<VarId, SourceVarId>>,
+    /// Hidden state of each module's `initial` blocks when they are
+    /// compiled into process kernels.
+    pub process_storage:
+        HashMap<celox_design::ModuleId, crate::lowering::process::ModuleProcessStorage>,
 }
 
 #[derive(Clone)]
@@ -291,6 +295,7 @@ pub(crate) fn project_module_with_ids(
     (
         crate::symbolic::artifact::SimModule,
         HashMap<VarId, SourceVarId>,
+        crate::lowering::process::ModuleProcessStorage,
     ),
     ParserError,
 > {
@@ -298,7 +303,7 @@ pub(crate) fn project_module_with_ids(
     source_variables.sort_unstable_by_key(|(id, _)| **id);
 
     let mut source_texts = HashMap::default();
-    let variables = source_variables
+    let mut variables = source_variables
         .into_iter()
         .map(|(id, variable)| {
             let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(ir, *id)?;
@@ -347,6 +352,11 @@ pub(crate) fn project_module_with_ids(
             ))
         })
         .collect::<Result<HashMap<_, _>, ParserError>>()?;
+    let process_storage = if config.testbench_kernels {
+        crate::lowering::process::declare_storage(ir, &ids, &mut variables)?
+    } else {
+        Default::default()
+    };
 
     let mut arena = SLTNodeArena::new();
     let mut cache = HashMap::default();
@@ -488,6 +498,7 @@ pub(crate) fn project_module_with_ids(
             processes: Vec::new(),
         },
         ids,
+        process_storage,
     ))
 }
 

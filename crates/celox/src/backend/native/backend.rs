@@ -379,12 +379,15 @@ struct NativeRuntimeOptions {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct NativeRuntimeSchema {
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     /// Extern functions the code calls, resolved when the image is attached.
     pub(crate) extern_functions: Vec<celox_design::ExternFunction>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
+    #[serde(serialize_with = "celox_design::serde_sorted::set")]
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
+    #[serde(serialize_with = "celox_design::serde_sorted::set")]
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
@@ -403,8 +406,11 @@ pub struct NativeProgramImage {
     /// Entry offset of each process kernel.
     process_offsets: Vec<usize>,
     required_native_features: u8,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
@@ -431,6 +437,15 @@ impl NativeProgramImage {
     ) -> Result<(), E> {
         if let Some(testbench) = &mut self.testbench {
             testbench.try_map_paths(&mut map)?;
+        }
+        for site in &mut self.runtime_schema.runtime_event_sites {
+            if let Some(location) = &mut site.location
+                && !location.file.is_empty()
+            {
+                location.file = map(std::path::Path::new(&location.file))?
+                    .to_string_lossy()
+                    .into_owned();
+            }
         }
         Ok(())
     }

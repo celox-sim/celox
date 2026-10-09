@@ -116,6 +116,7 @@ fn runtime_event_site_for_assert(
             .iter()
             .map(|arg| arg.0.comptime().r#type.is_string())
             .collect(),
+        location: None,
     }
 }
 
@@ -593,7 +594,7 @@ fn variable_access_width(
     }
 }
 
-enum TestbenchRead {
+pub(crate) enum TestbenchRead {
     Root(VarId),
     Hierarchical(Box<HierVarRef>),
 }
@@ -702,7 +703,7 @@ fn collect_instance_testbench_observability(
     Ok((sites, reads))
 }
 
-fn collect_statement_reads(
+pub(crate) fn collect_statement_reads(
     stmts: &[Statement],
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
@@ -1057,7 +1058,7 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
     }
 }
 
-struct ExprCompiler<'a> {
+pub(crate) struct ExprCompiler<'a> {
     lookup: &'a FrontendLookup,
     id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
@@ -1967,7 +1968,7 @@ impl ExprCompiler<'_> {
         Self::validate_target_bounds_parts(info, &destination.index, &destination.select)
     }
 
-    fn validate_target_bounds_parts(
+    pub(crate) fn validate_target_bounds_parts(
         info: &VariableInfo,
         index: &VarIndex,
         select: &VarSelect,
@@ -3593,6 +3594,9 @@ pub fn compile_semantic_testbench(
     let mut site_end = runtime_event_site_count.saturating_sub(total_sites);
     let mut processes = Vec::new();
     for source in sources {
+        if source.kernels {
+            break;
+        }
         let initial_stmts = source.initial_statements.as_ref().unwrap();
         validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
         site_end += count_assert_statements(initial_stmts, &source.functions);

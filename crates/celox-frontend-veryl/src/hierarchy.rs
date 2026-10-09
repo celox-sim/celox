@@ -308,6 +308,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                 .collect(),
         );
     }
+    let mut process_storage = HashMap::default();
     for (module_id, mut sim_module) in parsed_modules {
         let ir_module = module_ir[&module_id];
         if let Some(symbols) = &symbols
@@ -332,10 +333,11 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                 .collect();
         }
         let id_map = source_id_maps[&module_id].clone();
-        let (sim_module, id_map) =
+        let (sim_module, id_map, storage) =
             project_module_with_ids(&sim_module, ir_module, config, id_map, &source_id_maps)?;
         modules.insert(module_id, sim_module);
         source_id_maps.insert(module_id, id_map);
+        process_storage.insert(module_id, storage);
     }
 
     Ok(VerylSymbolicRtl {
@@ -346,6 +348,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
         },
         module_ir,
         source_id_maps,
+        process_storage,
     })
 }
 

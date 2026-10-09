@@ -1827,47 +1827,6 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
         .build()
         .unwrap();
     let testbench = celox::testbench::compile_initial_testbench(&simulator).unwrap();
-    let semantic_reset = simulator
-        .program()
-        .testbench
-        .as_ref()
-        .unwrap()
-        .statements()
-        .iter()
-        .find_map(|statement| match statement {
-            celox_testbench::TestbenchStatement::ResetAssert {
-                reset_signal,
-                clock_event,
-                duration,
-                assert_value,
-                deassert_value,
-                ..
-            } => Some(celox_testbench::TestbenchStatement::ResetAssert {
-                reset_signal: *reset_signal,
-                reset_event: None,
-                clock_event: *clock_event,
-                duration: duration.clone(),
-                period: 2,
-                assert_value: *assert_value,
-                deassert_value: *deassert_value,
-            }),
-            _ => None,
-        })
-        .unwrap();
-    let isolated = celox_testbench::TestbenchProgram::new(vec![semantic_reset]);
-    let bound = celox_runtime::bind_testbench_program(
-        simulator.backend_ref(),
-        isolated,
-        &fxhash::FxHashSet::default(),
-    )
-    .unwrap();
-    assert!(matches!(
-        bound.statements().first(),
-        Some(celox_testbench::TestbenchStatement::ResetAssert {
-            reset_event: None,
-            ..
-        })
-    ));
     assert_eq!(
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
         TestResult::Pass
@@ -2908,7 +2867,9 @@ fn component_finish_hook_observes_final_testbench_time() {
             .unwrap(),
         TestResult::Pass
     );
-    assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
+    // The finish hook sees the scheduler time: ten edges of the default
+    // clock (period 2) end at time 18, and the process resumes at 20.
+    assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 20);
     for period in [2, 10] {
         let code = code
             .replace(

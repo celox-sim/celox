@@ -3198,7 +3198,7 @@ impl<'a> FfParser<'a> {
         })
     }
 
-    pub(super) fn op_load<A>(
+    pub(crate) fn op_load<A>(
         &mut self,
         var_id: VarId,
         index: &VarIndex,
@@ -3210,7 +3210,9 @@ impl<'a> FfParser<'a> {
     ) -> Result<(), ParserError> {
         let is_local_let = {
             let variable = &self.module.variables[&var_id];
-            variable.affiliation == Affiliation::AlwaysFf && variable.kind == VarKind::Let
+            variable.affiliation == Affiliation::AlwaysFf
+                && variable.kind == VarKind::Let
+                && !matches!(domain, Domain::Process)
         };
         if is_local_let && let Some(&value) = self.local_let_values.get(&var_id) {
             let selected = self.emit_register_select(
@@ -3265,7 +3267,7 @@ impl<'a> FfParser<'a> {
         }
         let is_internal = self.local_working_vars.contains(&var_id)
             || self.inline_function_locals.contains(&var_id);
-        let load_region = if is_internal {
+        let load_region = if is_internal && !matches!(domain, Domain::Process) {
             WORKING_REGION
         } else {
             STABLE_REGION
@@ -3298,7 +3300,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn op_store<A>(
+    pub(crate) fn op_store<A>(
         &mut self,
         dst: &AssignDestination,
         targets: &mut Vec<VarAtomBase<A>>,
@@ -3314,6 +3316,7 @@ impl<'a> FfParser<'a> {
             let variable = &self.module.variables[&dst.id];
             variable.affiliation == Affiliation::AlwaysFf
                 && variable.kind == VarKind::Let
+                && !matches!(domain, Domain::Process)
                 && dst.index.0.is_empty()
                 && dst.select.0.is_empty()
                 && dst.select.1.is_none()
@@ -3378,10 +3381,11 @@ impl<'a> FfParser<'a> {
         if self.inline_function_locals.contains(&dst.id) {
             // Inline function storage is blocking and call-private, so it
             // bypasses the FF target, seed, and commit bookkeeping.
+            let region = domain.region();
             emit_guarded_store(
                 ir_builder,
                 &guard,
-                || convert(dst.id, WORKING_REGION),
+                || convert(dst.id, region),
                 offset,
                 target_width,
                 src_reg,
@@ -3737,7 +3741,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn parse_assign_statement<A>(
+    pub(crate) fn parse_assign_statement<A>(
         &mut self,
         assign_statement: &AssignStatement,
         targets: &mut Vec<VarAtomBase<A>>,
@@ -4308,14 +4312,26 @@ impl<'a> FfParser<'a> {
                 }
             }
             Factor::HierVariable(reference) => {
-                return Err(ParserError::illegal_context(
-                    "hierarchical variable reference",
-                    format!(
-                        "`{}` is only valid in a native testbench block",
-                        reference.var_path
-                    ),
-                    Some(&reference.comptime.token),
-                ));
+                let key = (reference.inst_path.clone(), reference.var_path.clone());
+                let Some(&var_id) = self.hierarchical_vars.get(&key) else {
+                    return Err(ParserError::illegal_context(
+                        "hierarchical variable reference",
+                        format!(
+                            "`{}` is only valid in a native testbench block",
+                            reference.var_path
+                        ),
+                        Some(&reference.comptime.token),
+                    ));
+                };
+                self.op_load(
+                    var_id,
+                    &reference.index,
+                    &reference.select,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
             }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =
@@ -5154,7 +5170,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn parse_expression<A>(
+    pub(crate) fn parse_expression<A>(
         &mut self,
         expr: &Expression,
         targets: &mut Vec<VarAtomBase<A>>,

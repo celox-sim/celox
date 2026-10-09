@@ -246,13 +246,13 @@ fn execution_random_seed(seed: Option<u64>) -> u64 {
 
 // Keep the generator, seed derivation, and range sampling byte-for-byte
 // compatible with Veryl's `$tb::random` runtime.
-struct RandomTable {
+pub(crate) struct RandomTable {
     base_seed: u64,
     rngs: HashMap<String, (Pcg64, u64)>,
 }
 
 impl RandomTable {
-    fn new(base_seed: u64) -> Self {
+    pub(crate) fn new(base_seed: u64) -> Self {
         Self {
             base_seed,
             rngs: HashMap::default(),
@@ -1027,6 +1027,8 @@ async fn exec_for_loop_async<B: SimBackend, F: Future<Output = ExecResult>>(
     ExecResult::Continue
 }
 
+pub(crate) mod kernels;
+
 pub(crate) fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
@@ -1040,6 +1042,9 @@ fn run_testbench_limited<B: SimBackend>(
     tick_limit: Option<u64>,
     require_finish: bool,
 ) -> LimitedTestbenchResult {
+    if kernels::enabled(sim) {
+        return kernels::run_limited(sim, testbench, tick_limit, require_finish);
+    }
     let test_name = root_testbench_name(sim);
     let use_4state = sim.backend.layout().four_state;
     let initial_writes = match sim.components.initialize(
@@ -1187,6 +1192,9 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
 ) -> TestResultDetailed {
+    if kernels::enabled(sim) {
+        return kernels::run_detailed(sim, testbench);
+    }
     let test_name = root_testbench_name(sim);
     let use_4state = sim.backend.layout().four_state;
     let initial_writes = match sim.components.initialize(
@@ -1437,6 +1445,13 @@ fn drain_runtime_assertions<B: SimBackend>(
                     passed: false,
                     message: Some(message),
                     location: None,
+                });
+            }
+            RuntimeEvent::AssertPass { message } => {
+                ctx.assertions.push(AssertionResult {
+                    passed: true,
+                    message: Some(message),
+                    location: location.cloned(),
                 });
             }
             RuntimeEvent::Display { message } => forward_display(&message, true),
@@ -2524,20 +2539,19 @@ mod tests {
             }
         "#;
         let sim = Simulator::builder(code, "t").build_with_trace().unwrap();
-        let tb = compile_initial_testbench(&sim).unwrap();
+        compile_initial_testbench(&sim).unwrap();
 
-        assert!(matches!(
-            tb.statements().first(),
-            Some(GenericTestbenchStatement::Display { newline: true, .. })
-        ));
-        assert!(matches!(
-            tb.statements().get(1),
-            Some(GenericTestbenchStatement::Display { newline: false, .. })
-        ));
-        assert!(matches!(
-            tb.statements().get(2),
-            Some(GenericTestbenchStatement::Finish)
-        ));
+        // The initial block is one process kernel whose output goes through
+        // runtime event sites.
+        assert_eq!(sim.program().runtime_schema.processes.len(), 1);
+        let kinds: Vec<_> = sim
+            .program()
+            .runtime_schema
+            .runtime_event_sites
+            .iter()
+            .map(|site| format!("{:?}", site.kind))
+            .collect();
+        assert_eq!(kinds, vec!["Display", "Write"]);
     }
 
     #[test]

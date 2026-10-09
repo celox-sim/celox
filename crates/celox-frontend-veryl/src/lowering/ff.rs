@@ -21,7 +21,7 @@ use num_traits::{ToPrimitive, Zero};
 use veryl_analyzer::ir::{
     AssertKind, CaseStatement, Expression, FfDeclaration, FfReset, ForBound, ForRange,
     ForStatement, IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
-    SystemFunctionInput, SystemFunctionKind, TypeKind, VarId,
+    SystemFunctionInput, SystemFunctionKind, TypeKind, VarId, VarPath,
 };
 use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
@@ -340,11 +340,16 @@ mod inline_call;
 
 pub enum Domain {
     Ff, // TODO: add clock
+    /// A process kernel: blocking statements over stable state only, so
+    /// every variable, including locals and loop variables, lives in the
+    /// stable region and survives the kernel's suspensions.
+    Process,
 }
 impl Domain {
     pub fn region(&self) -> u32 {
         match self {
             Domain::Ff => WORKING_REGION,
+            Domain::Process => STABLE_REGION,
         }
     }
 }
@@ -422,10 +427,13 @@ pub struct FfParser<'a> {
     runtime_error_code_map: Option<HashMap<i64, i64>>,
     runtime_event_site_base: u32,
     config: BuildConfig,
+    /// Hierarchical references a process may make, as synthetic variables
+    /// of the module (see `lowering::process`).
+    hierarchical_vars: HashMap<(Vec<veryl_parser::resource_table::StrId>, VarPath), VarId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControlFlow {
+pub(crate) enum ControlFlow {
     Continue,
     Break,
 }
@@ -467,7 +475,59 @@ impl<'a> FfParser<'a> {
             runtime_error_code_map: None,
             runtime_event_site_base: 0,
             config,
+            hierarchical_vars: HashMap::default(),
         }
+    }
+
+    /// Resolve hierarchical references through synthetic variables of the
+    /// module, keyed by instance path and variable path.
+    pub(crate) fn with_hierarchical_vars(
+        mut self,
+        vars: HashMap<(Vec<veryl_parser::resource_table::StrId>, VarPath), VarId>,
+    ) -> Self {
+        self.hierarchical_vars = vars;
+        self
+    }
+
+    /// The synthetic variable of a hierarchical reference.
+    pub(crate) fn hierarchical_var(
+        &self,
+        key: &(Vec<veryl_parser::resource_table::StrId>, VarPath),
+    ) -> Option<&VarId> {
+        self.hierarchical_vars.get(key)
+    }
+
+    /// Where the runtime event sites this parser registers start.
+    pub(crate) fn with_runtime_event_site_base(mut self, base: u32) -> Self {
+        self.runtime_event_site_base = base;
+        self
+    }
+
+    /// The runtime event sites registered so far, for annotation.
+    pub(crate) fn runtime_event_sites_mut(&mut self) -> &mut Vec<RuntimeEventSite> {
+        &mut self.runtime_event_sites
+    }
+
+    /// The value the last expression lowering produced.
+    pub(crate) fn pop_value(&mut self) -> RegisterId {
+        self.stack.pop_back().expect("an expression value")
+    }
+
+    /// Make `value` the value a following store consumes.
+    pub(crate) fn push_value(&mut self, value: RegisterId) {
+        self.stack.push_back(value);
+    }
+
+    /// Forget values cached in registers: after a kernel suspension, no
+    /// register survives.
+    pub(crate) fn clear_register_cache(&mut self) {
+        self.local_let_values.clear();
+        self.stack.clear();
+    }
+
+    /// The blocks a `break` in the process lowering leaves to.
+    pub(crate) fn loop_exit_blocks_mut(&mut self) -> &mut Vec<BlockId> {
+        &mut self.loop_exit_blocks
     }
 
     pub fn with_relocated_runtime_ids(
@@ -503,7 +563,7 @@ impl<'a> FfParser<'a> {
         &self.runtime_event_sites
     }
 
-    fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
+    pub(crate) fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
         let local_code = self.next_runtime_error_code;
         self.next_runtime_error_code += 1;
         let code = self
@@ -521,7 +581,7 @@ impl<'a> FfParser<'a> {
         code
     }
 
-    fn static_string_expr(expr: &Expression) -> Option<String> {
+    pub(crate) fn static_string_expr(expr: &Expression) -> Option<String> {
         if !expr.comptime().r#type.is_string() {
             return None;
         }
@@ -529,7 +589,7 @@ impl<'a> FfParser<'a> {
         byte_value_to_string(value)
     }
 
-    fn register_runtime_event_site(
+    pub(crate) fn register_runtime_event_site(
         &mut self,
         kind: RuntimeEventKind,
         args: &[SystemFunctionInput],
@@ -564,6 +624,7 @@ impl<'a> FfParser<'a> {
                 .iter()
                 .map(|arg| arg.0.comptime().r#type.is_string())
                 .collect(),
+            location: None,
         };
         let id = self
             .runtime_event_site_base
@@ -573,7 +634,7 @@ impl<'a> FfParser<'a> {
         id
     }
 
-    fn parse_runtime_event_expression<A>(
+    pub(crate) fn parse_runtime_event_expression<A>(
         &mut self,
         expr: &Expression,
         targets: &mut Vec<VarAtomBase<A>>,
@@ -601,7 +662,7 @@ impl<'a> FfParser<'a> {
         result
     }
 
-    fn emit_runtime_event<A>(
+    pub(crate) fn emit_runtime_event<A>(
         &mut self,
         site_id: u32,
         args: &[SystemFunctionInput],
@@ -634,7 +695,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    fn prepare_effectful_runtime_event_args<A>(
+    pub(crate) fn prepare_effectful_runtime_event_args<A>(
         &mut self,
         args: &[SystemFunctionInput],
         targets: &mut Vec<VarAtomBase<A>>,
@@ -679,7 +740,7 @@ impl<'a> FfParser<'a> {
             .collect()
     }
 
-    fn emit_runtime_event_with_prepared_args<A>(
+    pub(crate) fn emit_runtime_event_with_prepared_args<A>(
         &mut self,
         site_id: u32,
         args: &[SystemFunctionInput],
@@ -718,7 +779,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    fn parse_system_task_statement<A>(
+    pub(crate) fn parse_system_task_statement<A>(
         &mut self,
         call: &SystemFunctionCall,
         targets: &mut Vec<VarAtomBase<A>>,
@@ -926,7 +987,7 @@ impl<'a> FfParser<'a> {
         eval_constexpr(expr)?.to_u64()
     }
 
-    fn get_constant_procedural_truth(expr: &Expression) -> Option<bool> {
+    pub(crate) fn get_constant_procedural_truth(expr: &Expression) -> Option<bool> {
         let comptime = expr.comptime();
         let is_value = matches!(expr, Expression::Term(factor) if matches!(factor.as_ref(), veryl_analyzer::ir::Factor::Value(_)));
         if !(comptime.is_const || is_value && comptime.evaluated) {
@@ -947,7 +1008,7 @@ impl<'a> FfParser<'a> {
             .flatten()
     }
 
-    fn lower_procedural_condition<A>(
+    pub(crate) fn lower_procedural_condition<A>(
         &self,
         condition: RegisterId,
         ir_builder: &mut SIRBuilder<A>,
@@ -996,7 +1057,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn cast_reg_width_ext<A>(
+    pub(crate) fn cast_reg_width_ext<A>(
         &self,
         ir_builder: &mut SIRBuilder<A>,
         reg: RegisterId,
@@ -1040,7 +1101,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn get_expression_width(&self, expr: &Expression) -> usize {
+    pub(crate) fn get_expression_width(&self, expr: &Expression) -> usize {
         crate::context_width::get_expr_width(expr)
             .or_else(|| expr.comptime().r#type.total_width())
             .unwrap_or(64)
@@ -1049,7 +1110,7 @@ impl<'a> FfParser<'a> {
     // expression / function-call lowering is split into submodules:
     // - parser/ff/expression.rs
     // - parser/ff/function_call.rs
-    fn parse_statement_list<A>(
+    pub(crate) fn parse_statement_list<A>(
         &mut self,
         stmts: &[Statement],
         targets: &mut Vec<VarAtomBase<A>>,
@@ -1619,7 +1680,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn parse_for_bound<A>(
+    pub(crate) fn parse_for_bound<A>(
         &mut self,
         bound: &ForBound,
         canonical_width: usize,

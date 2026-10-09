@@ -87,8 +87,11 @@ impl RuntimeInstance {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeDesign {
     semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     instances: HashMap<InstanceId, RuntimeInstance>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     instance_ids: HashMap<InstancePath, InstanceId>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     variables: HashMap<AbsoluteAddr, RuntimeVariable>,
 }
 
@@ -723,6 +726,13 @@ fn collect_comb_writes(program: &mut OptimizedSir) {
 
 fn rebuild_rtl_writes(program: &mut OptimizedSir) {
     let mut rtl_writes = crate::HashSet::default();
+    // The kernels of a Veryl testbench drive signals as the testbench, not
+    // as RTL; the processes of an SV design are RTL.
+    let processes = if program.runtime.testbench.is_some() {
+        &[][..]
+    } else {
+        &program.sir.processes[..]
+    };
     for unit in program
         .sir
         .eval_comb
@@ -738,7 +748,7 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
-        .chain(&program.sir.processes)
+        .chain(processes)
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {

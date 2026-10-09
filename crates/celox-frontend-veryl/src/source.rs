@@ -73,6 +73,9 @@ pub struct VerylTestbenchSource {
     pub component_bindings: Vec<VerylComponentBinding>,
     pub component_libraries: Vec<celox_testbench::ComponentLibrary>,
     pub component_file_base: Option<std::path::PathBuf>,
+    /// The `initial` blocks were compiled into process kernels: the
+    /// testbench program carries only the components.
+    pub kernels: bool,
 }
 
 impl VerylTestbenchSource {

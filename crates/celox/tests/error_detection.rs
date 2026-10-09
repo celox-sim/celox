@@ -679,7 +679,9 @@ fn test_selected_testbench_destination_out_of_range_is_rejected() {
 }
 
 #[test]
-fn test_expression_testbench_function_selected_destination_is_rejected() {
+fn test_expression_testbench_function_selected_destination_runs() {
+    // A part-select store in an expression-form helper runs in the process
+    // kernel; the bytecode interpreter rejected it.
     let code = r#"
         module Driver (source: output logic<8>) {
             assign source = 8'h05;
@@ -704,18 +706,10 @@ fn test_expression_testbench_function_selected_destination_is_rejected() {
         }
     "#;
 
-    let err = Simulator::builder(code, "t")
-        .build()
-        .expect_err("selected destination in an expression helper must be rejected");
-    match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
-            assert_eq!(
-                *feature,
-                "selected destination in expression testbench function"
-            );
-        }
-        other => panic!("expected expression helper selected destination error, got {other:?}"),
-    }
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        celox::TestResult::Pass
+    );
 }
 
 #[test]

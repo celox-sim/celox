@@ -2343,7 +2343,7 @@ pub(crate) fn readmem_image(
         };
         index
     };
-    if depth <= 1 {
+    if depth == 0 || var.r#type.array.iter().count() == 0 {
         return Err(ParserError::illegal_context(
             "$readmemh destination",
             "destination must be an unpacked array",

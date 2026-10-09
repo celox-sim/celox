@@ -449,6 +449,7 @@ impl NativeProgramInstance {
             )),
             RuntimeEvent::Display { .. }
             | RuntimeEvent::Write { .. }
+            | RuntimeEvent::AssertPass { .. }
             | RuntimeEvent::AssertContinue { .. }
             | RuntimeEvent::Finish => None,
         }) {

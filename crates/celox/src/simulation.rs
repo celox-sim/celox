@@ -120,6 +120,20 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         !self.components.has_scheduled_components()
     }
 
+    fn host_request(
+        &mut self,
+        process: usize,
+        request: usize,
+        time: u64,
+    ) -> Result<bool, RuntimeErrorCode> {
+        crate::testbench::kernels::serve_host_request(self, process, request, time).map_err(
+            |message| RuntimeErrorCode::Runtime {
+                message,
+                signals: Vec::new(),
+            },
+        )
+    }
+
     fn stage_external_event(
         &mut self,
         event: B::Event,
@@ -134,13 +148,42 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         event: B::Event,
         timestamp: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        let writes = self
-            .components
-            .fire(event.id(), timestamp)
-            .map_err(|message| RuntimeErrorCode::Runtime {
-                message,
-                signals: Vec::new(),
-            })?;
+        // A testbench holds its resets through releases; while one is
+        // asserted, its components take reset cycles.
+        if !self.program.runtime_schema.processes.is_empty() {
+            for reset_event in self.components.reset_event_ids() {
+                let address = self.backend.id_to_addr_slice()[reset_event];
+                let Some(release) = self
+                    .program
+                    .runtime_schema
+                    .processes
+                    .iter()
+                    .flat_map(|slots| &slots.releases)
+                    .find(|release| release.signal == address)
+                else {
+                    continue;
+                };
+                let signal = self.backend.resolve_signal(&address);
+                if self.backend.get(signal) == release.value.into() {
+                    continue;
+                }
+                match release
+                    .clock
+                    .and_then(|clock| self.backend.resolve_event_opt(&clock))
+                {
+                    Some(clock) => self
+                        .components
+                        .begin_reset_clock_cycles(clock.id(), Some(reset_event)),
+                    None => self.components.begin_reset_cycles(Some(reset_event)),
+                }
+            }
+        }
+        let fired = self.components.fire(event.id(), timestamp);
+        self.components.end_reset_cycles();
+        let writes = fired.map_err(|message| RuntimeErrorCode::Runtime {
+            message,
+            signals: Vec::new(),
+        })?;
         for write in writes {
             write.apply(&mut self.backend);
             self.dirty = true;
@@ -271,6 +314,16 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
             status: simulator.backend.resolve_signal(&slots.status),
             delay: simulator.backend.resolve_signal(&slots.delay),
             clock: simulator.backend.resolve_signal(&slots.clock),
+            release: simulator.backend.resolve_signal(&slots.release),
+            releases: slots
+                .releases
+                .iter()
+                .map(|release| celox_runtime::ProcessReleaseRef {
+                    signal: simulator.backend.resolve_signal(&release.signal),
+                    event: simulator.backend.resolve_event_opt(&release.signal),
+                    value: release.value,
+                })
+                .collect(),
             clocks: slots
                 .clocks
                 .iter()
