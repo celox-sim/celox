@@ -66,9 +66,9 @@ fn comb_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
+    const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
-    parameter_literals: &HashMap<String, Expr>,
+    parameter_literals: &SharedMap<Expr>,
     processes: &mut Vec<CombProcess>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<(), AnalyzerError> {
@@ -91,9 +91,9 @@ fn comb_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
+    const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
-    parameter_literals: &HashMap<String, Expr>,
+    parameter_literals: &SharedMap<Expr>,
     processes: &mut Vec<CombProcess>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<(), AnalyzerError> {
@@ -121,9 +121,8 @@ fn comb_processes_from_module_common_item(
             );
         }
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
-            let mut local_packed_dimensions = packed_dimensions.clone();
-            local_packed_dimensions.const_env = const_env.clone().into();
-            local_packed_dimensions.parameter_values = parameter_literals.clone().into();
+            let local_packed_dimensions =
+                always_dimensions(packed_dimensions, const_env, parameter_literals);
             if let Some(process) = comb_process_from_always_construct(
                 always,
                 condition,
@@ -162,6 +161,19 @@ fn comb_processes_from_module_common_item(
         _ => {}
     }
     Ok(())
+}
+
+fn always_dimensions(
+    dimensions: &PackedDimensions,
+    const_env: &SharedMap<i128>,
+    literals: &SharedMap<Expr>,
+) -> PackedDimensions {
+    let mut local = dimensions.clone();
+    // Preserve the same replacements while sharing their immutable contents.
+    // Body-local constant declarations detach their own tables on mutation.
+    local.const_env = const_env.clone();
+    local.parameter_values = literals.clone();
+    local
 }
 
 fn net_declaration_assignments(
@@ -321,4 +333,42 @@ fn comb_process_from_always_construct(
         condition,
         body,
     )))
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn always_context_shares_large_inputs_and_detaches_body_local_mutations() {
+        let env: SharedMap<i128> = (0..4096)
+            .map(|i| (format!("P{i}"), i))
+            .collect::<HashMap<_, _>>()
+            .into();
+        let literals: SharedMap<Expr> = (0..4096)
+            .map(|i| (format!("P{i}"), Expr::Literal(i.to_string())))
+            .collect::<HashMap<_, _>>()
+            .into();
+        let mut dimensions = PackedDimensions {
+            scope_types_complete: true,
+            ..PackedDimensions::default()
+        };
+        dimensions.const_env.insert("inherited".into(), 99);
+        dimensions
+            .parameter_values
+            .insert("inherited".into(), Expr::Literal("99".into()));
+        let mut local = always_dimensions(&dimensions, &env, &literals);
+        assert_eq!(local.const_env.identity(), env.identity());
+        assert_eq!(local.parameter_values.identity(), literals.identity());
+        assert!(!local.const_env.contains_key("inherited"));
+        assert!(!local.parameter_values.contains_key("inherited"));
+        assert!(local.scope_types_complete);
+        local.const_env.insert("P0".into(), 7);
+        local
+            .parameter_values
+            .insert("P0".into(), Expr::Literal("7".into()));
+        assert_eq!(env["P0"], 0);
+        assert_eq!(literals["P0"], Expr::Literal("0".into()));
+        assert_eq!(dimensions.const_env["inherited"], 99);
+    }
 }

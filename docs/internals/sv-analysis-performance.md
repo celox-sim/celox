@@ -381,23 +381,52 @@ and operation-count regressions establish the eliminated repeated work without
 using wall-clock thresholds. These probes exclude backend compilation and simulation.
 
 The final combined tree also includes master `2d4d82603`, adapting the collectors
-to its shared module/package declaration representation. Both probes were rerun
-on that tree; these later samples show substantial shared-machine variation:
+to its shared module/package declaration representation. The `always_comb` path
+now also passes shared numeric and literal snapshots through its collectors,
+instead of copying their contents per process. Its body-local writes detach those
+tables. A 4,096-entry snapshot regression checks the shared identities and isolated
+mutations. This preserves the previous environment replacements, including their
+handling of protected outer bindings.
 
-| Signals | Parse (ms) | AST (ms) | IR (ms) | Parse with assignments (ms) | AST with assignments (ms) | IR with assignments (ms) |
+The final source was measured in all three modes. `--always` emits one
+`always_comb` per signal and checks the same names, widths and process counts:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example generate_dependencies -- --always 128 256 512 1024 2048 4096
+```
+
+| Signals | AST: declarations (ms) | AST: assignments (ms) | AST: always_comb (ms) |
+| --- | ---: | ---: | ---: |
+| 128 | 36.819 | 41.625 | 42.006 |
+| 256 | 74.010 | 83.129 | 87.931 |
+| 512 | 148.488 | 166.917 | 184.854 |
+| 1,024 | 318.319 | 332.597 | 395.054 |
+| 2,048 | 659.970 | 765.664 | 699.383 |
+| 4,096 | 1,371.800 | 1,413.936 | 1,350.127 |
+
+Expanding these inputs 32x (128→4,096) increases AST time about 37x, 34x and 32x,
+respectively. The final 1,024-signal declaration sample is about 43x faster than
+`a7fbb309e`. These flat probes retain O(N log N) scheduling/sorting and do not
+establish strictly linear behavior for every supported input.
+
+The other phases, recorded in the same final runs:
+
+| Signals | Parse: declarations (ms) | IR: declarations (ms) | Parse: assignments (ms) | IR: assignments (ms) | Parse: always_comb (ms) | IR: always_comb (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 26.576 | 66.657 | 0.072 | 82.969 | 77.493 | 0.167 |
-| 256 | 90.290 | 336.197 | 0.132 | 233.984 | 335.563 | 0.317 |
-| 512 | 253.926 | 373.904 | 0.274 | 195.088 | 401.775 | 0.727 |
-| 1,024 | 234.480 | 829.758 | 0.537 | 515.555 | 916.015 | 1.696 |
-| 2,048 | 441.699 | 1,633.141 | 0.994 | 1,551.187 | 2,071.680 | 4.116 |
-| 4,096 | 937.956 | 3,580.860 | 6.140 | 1,651.616 | 3,584.016 | 6.938 |
+| 128 | 10.701 | 0.042 | 20.621 | 0.094 | 25.811 | 0.067 |
+| 256 | 20.760 | 0.088 | 39.838 | 0.163 | 45.085 | 0.139 |
+| 512 | 39.302 | 0.160 | 81.414 | 0.323 | 111.659 | 0.246 |
+| 1,024 | 84.659 | 0.329 | 173.564 | 0.652 | 234.837 | 0.488 |
+| 2,048 | 197.389 | 0.548 | 376.525 | 1.676 | 417.511 | 0.842 |
+| 4,096 | 407.947 | 1.035 | 808.031 | 3.173 | 794.149 | 1.696 |
 
-Across the larger final inputs (512→4,096, an eightfold increase), AST time grows
-about 9.6x without assignments and 8.9x with assignments. The final 1,024-signal
-AST sample is about 16x faster than `a7fbb309e`. Timing ratios describe these
-specific inputs; operation-count regressions and source inspection establish
-which repeated work was removed. No timing threshold is part of the tests.
+A preceding combined-tree run, before the shared `always_comb` handoff, measured
+1,024/4,096 plain declarations at 829.758/3,580.860 ms and continuous assignments
+at 916.015/3,584.016 ms. Its declaration parsing was 234.480/937.956 ms and IR was
+0.537/6.140 ms. This variation in paths unaffected by that handoff demonstrates
+shared-machine timing variability. Source inspection and operation-count
+regressions establish the eliminated repeated work; no wall-clock threshold is
+part of the tests. All three probes exclude backend compilation and simulation.
 
 ## Remaining boundaries
 

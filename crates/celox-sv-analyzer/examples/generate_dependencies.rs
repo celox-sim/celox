@@ -17,7 +17,8 @@ fn main() {
     if scheduler {
         args.remove(0);
     }
-    let assignments = args.first().is_some_and(|arg| arg == "--assignments");
+    let always = args.first().is_some_and(|arg| arg == "--always");
+    let assignments = always || args.first().is_some_and(|arg| arg == "--assignments");
     if assignments {
         args.remove(0);
     }
@@ -44,7 +45,11 @@ fn main() {
         for i in 0..count {
             writeln!(code, "logic [7:0] s{i};").unwrap();
             if assignments {
-                writeln!(code, "assign s{i} = 8'h5a;").unwrap();
+                if always {
+                    writeln!(code, "always_comb s{i} = 8'h5a;").unwrap();
+                } else {
+                    writeln!(code, "assign s{i} = 8'h5a;").unwrap();
+                }
             }
         }
         code.push_str("end endmodule\n");

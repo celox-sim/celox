@@ -10,7 +10,7 @@ pub(in crate::ast) struct ScopeViews<'a> {
     // Retain borrowers of every keyed snapshot. Pointer identities cannot be
     // recycled while an entry exists, even when nested scopes interrupt siblings.
     views: HashMap<Key, (&'a Item<'a>, PackedDimensions)>,
-    literal_views: HashMap<Key, (&'a Item<'a>, HashMap<String, Expr>)>,
+    literal_views: HashMap<Key, (&'a Item<'a>, SharedMap<Expr>)>,
 }
 
 impl<'a> ScopeViews<'a> {
@@ -38,7 +38,7 @@ impl<'a> ScopeViews<'a> {
             .1
     }
 
-    pub fn get(&mut self, item: &'a Item<'a>) -> (&PackedDimensions, &HashMap<String, Expr>) {
+    pub fn get(&mut self, item: &'a Item<'a>) -> (&PackedDimensions, &SharedMap<Expr>) {
         let dimensions = &self
             .views
             .entry(key(item))
@@ -47,7 +47,7 @@ impl<'a> ScopeViews<'a> {
         let literals = &self
             .literal_views
             .entry(key(item))
-            .or_insert_with(|| (item, item.parameter_literals(self.literals)))
+            .or_insert_with(|| (item, item.parameter_literals(self.literals).into()))
             .1;
         (dimensions, literals)
     }
@@ -125,7 +125,7 @@ mod tests {
         for item in active.iter().chain(&changed) {
             let (cached_dimensions, cached_literals) = views.get(item);
             assert_eq!(cached_dimensions, &item.dimensions(&dimensions));
-            assert_eq!(cached_literals, &item.parameter_literals(&inherited));
+            assert_eq!(&**cached_literals, &item.parameter_literals(&inherited));
         }
         assert_eq!(views.views.len(), 8);
         assert_eq!(views.literal_views.len(), 8);
@@ -134,7 +134,7 @@ mod tests {
         let other = HashMap::from_iter([("P".into(), Expr::Literal("7".into()))]);
         let mut other_views = ScopeViews::with_literals(&dimensions, &other);
         let (_, literals) = other_views.get(original);
-        assert_eq!(literals, &original.parameter_literals(&other));
-        assert_ne!(literals, &original.parameter_literals(&inherited));
+        assert_eq!(&**literals, &original.parameter_literals(&other));
+        assert_ne!(&**literals, &original.parameter_literals(&inherited));
     }
 }
