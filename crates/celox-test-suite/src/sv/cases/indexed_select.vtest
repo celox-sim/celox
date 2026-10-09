@@ -582,6 +582,37 @@
       (assert_eq wide (+ row 2)))
     (assert_eq registered (<< 1 sum))))
 
+(case signed_index_expressions_wrap_at_their_own_width
+  ; A signed index is evaluated at its own width too: `i >> 1` shifts zeros
+  ; in from bit 1, and `-2 + -1` wraps to 1. (A negative index is left out:
+  ; Verilator 5.052 selects bit 3 for -1.)
+  (source "signed_index_width.sv" #"
+                module Top(input logic signed [1:0] i, input logic signed [1:0] k,
+                           output logic [3:0] shifted, output logic [3:0] sum_shifted,
+                           output logic [3:0] sum);
+                    always_comb begin
+                        shifted = 4'd0;
+                        shifted[i >> 1] = 1'b1;
+                        sum_shifted = 4'd0;
+                        sum_shifted[(i + k) >> 1] = 1'b1;
+                        sum = 4'd0;
+                        sum[i + k] = 1'b1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set i 3) (set k 0))
+  (assert_eq shifted 2)
+  (assert_eq sum_shifted 2)
+  (modify (set i 2) (set k 3))
+  (assert_eq shifted 2)
+  (assert_eq sum_shifted 1)
+  (assert_eq sum 2)
+  (modify (set i 1) (set k 0))
+  (assert_eq shifted 1)
+  (assert_eq sum_shifted 1)
+  (assert_eq sum 2))
+
 (case runtime_indexed_base_may_select_a_parameter_bit
   (source "selected_runtime_base.sv" #"
                 module Top #(parameter logic [3:0] BASE = 4'b1010)(

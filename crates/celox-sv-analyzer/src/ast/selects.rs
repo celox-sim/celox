@@ -1955,10 +1955,14 @@ fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> Con
         op,
         right: Box::new(right),
     };
-    let masked = binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
     if !signed {
-        return masked;
+        return binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
     }
+    // A signed index is computed with its operands sign-extended to the
+    // offsets' width, which leaves its low bits as they are except under a
+    // logical right shift: shift in zeros from the operand's own width.
+    let index = zero_extend_logical_shifts(index, dimensions);
+    let masked = binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
     // Sign-extend from the top bit: (x ^ s) - s.
     let sign = literal(1 << (width - 1));
     binary(
@@ -1966,4 +1970,48 @@ fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> Con
         BinaryOp::Sub,
         sign,
     )
+}
+
+/// `expr` with the left operand of each logical right shift reduced to its own
+/// width, so that a wider signed context does not shift its sign bits in.
+fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+    let go = |expr: Box<ConstExpr>| Box::new(zero_extend_logical_shifts(*expr, dimensions));
+    match expr {
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Shr,
+            right,
+        } => {
+            let left = zero_extend_logical_shifts(*left, dimensions);
+            let left = match self_determined_type(&left, dimensions) {
+                Some((width, true)) if width < 32 => ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::BitAnd,
+                    right: Box::new(ConstExpr::Literal(((1i128 << width) - 1).to_string())),
+                },
+                _ => left,
+            };
+            ConstExpr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Shr,
+                right,
+            }
+        }
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op,
+            right: go(right),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary { op, expr: go(expr) },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition,
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+        expr => expr,
+    }
 }
