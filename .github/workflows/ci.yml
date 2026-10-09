@@ -266,12 +266,11 @@ jobs:
         run: |
           # The runner returns 1 for retained failures as well as regressions.
           # The next step checks the complete fresh report and the exit status.
-          rm -f "$RUNNER_TEMP/external-suite/report.json"
+          rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
           if nix develop --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --jobs 2 \
-            --output "$RUNNER_TEMP/external-suite/logs" \
-            --report "$RUNNER_TEMP/external-suite/report.json"; then
+            --output "$RUNNER_TEMP/external-suite/logs"; then
             task_verify_status=0
           else
             task_verify_status=$?
@@ -285,7 +284,7 @@ jobs:
         run: >-
           nix develop --no-update-lock-file --command
           node scripts/check-external-suite-report.mjs
-          "$RUNNER_TEMP/external-suite/report.json" "$VERIFY_BASELINE"
+          "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
           "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
 
       - name: Retain results and failure diagnostics
@@ -296,7 +295,6 @@ jobs:
           # Keep evidence rather than hundreds of generated simulator binaries.
           path: |
             ${{ runner.temp }}/external-suite/catalogue.json
-            ${{ runner.temp }}/external-suite/report.json
             ${{ runner.temp }}/external-suite/logs/**/*.json
             ${{ runner.temp }}/external-suite/logs/**/*.log
             ${{ runner.temp }}/external-suite/logs/**/*.veryl
