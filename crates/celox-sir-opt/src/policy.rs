@@ -159,7 +159,21 @@ pub struct OptimizeOptions {
     enabled: HashSet<SirPass>,
     disabled: HashSet<SirPass>,
     max_native_memory_width: usize,
+    parallel_lanes: u32,
+    parallel_partition: ParallelPartition,
     pub diagnostics: SirDiagnostics,
+}
+
+/// How the compiler decides whether a phase gets a lane-partitioned kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParallelPartition {
+    /// Partition a phase only when its estimated speedup outweighs the cost
+    /// of dispatching and synchronizing lanes.
+    #[default]
+    Estimated,
+    /// Partition every phase that has independent work, regardless of the
+    /// estimate. Intended for testing and experiments.
+    Always,
 }
 
 impl Default for OptimizeOptions {
@@ -180,6 +194,8 @@ impl OptimizeOptions {
             } else {
                 64
             },
+            parallel_lanes: 1,
+            parallel_partition: ParallelPartition::Estimated,
             diagnostics: SirDiagnostics::default(),
         }
     }
@@ -223,6 +239,32 @@ impl OptimizeOptions {
 
     pub fn max_native_memory_width(&self) -> usize {
         self.max_native_memory_width
+    }
+
+    /// Request lane-partitioned alternatives of the hot simulation phases for
+    /// `lanes` concurrent workers. One lane (the default) compiles only the
+    /// sequential kernels.
+    pub fn with_parallel_lanes(mut self, lanes: u32) -> Self {
+        self.set_parallel_lanes(lanes);
+        self
+    }
+
+    pub fn set_parallel_lanes(&mut self, lanes: u32) {
+        self.parallel_lanes = lanes.max(1);
+    }
+
+    /// Number of simulation lanes requested for partitioned execution.
+    pub fn parallel_lanes(&self) -> u32 {
+        self.parallel_lanes.max(1)
+    }
+
+    pub fn with_parallel_partition(mut self, partition: ParallelPartition) -> Self {
+        self.parallel_partition = partition;
+        self
+    }
+
+    pub fn parallel_partition(&self) -> ParallelPartition {
+        self.parallel_partition
     }
 
     /// Query whether a specific pass is active.

@@ -4,7 +4,7 @@ These exclusions keep normal external verification usable while preserving the s
 
 The manifest is [`src/veryl/verification/limitations.json`](src/veryl/verification/limitations.json). The runner reports `ignored`, never `passed`, before compiling an excluded fixture. `--include-ignored` reruns the original checks and returns their actual result, including a nonzero exit on failure. Exclusions are not promises about later tool versions; recheck them when upgrading.
 
-The retained pre-exclusion reports contain [73 Verilator-path failures](verification/limitations/verilator.json) and [186 Icarus-path failures](verification/limitations/icarus.json). These include failures in Veryl before any simulator starts. The original [ten conformance exclusions](MISMATCH_REVIEW.md) remain separate. Verilator's 110 four-state cases, including the zero-divisor and missing-return cases, report `unsupported`.
+The retained pre-exclusion reports contain [73 Verilator-path failures](verification/limitations/verilator.json) and [186 Icarus-path failures](verification/limitations/icarus.json); a [focused modport-import recheck](verification/repros/modport_import_icarus.json) retains 3 more Icarus failures, and a [focused interface recheck](verification/repros/interface_coverage_icarus.json) 20 more. These include failures in Veryl before any simulator starts. The original [ten conformance exclusions](MISMATCH_REVIEW.md) remain separate. Verilator's 110 four-state cases, including the zero-divisor and missing-return cases, report `unsupported`.
 
 ## State modes
 
@@ -37,7 +37,8 @@ Categories describe the observed blocker. A compilation rejection is not automat
 | [icarus_assignment_patterns](#icarus-assignment-patterns) | compile | 0 | 27 |
 | [icarus_case_break_crash](#icarus-case-break-crash) | execute | 0 | 1 |
 | [icarus_function_outputs](#icarus-function-outputs) | compile | 0 | 48 |
-| [icarus_interfaces](#icarus-interfaces) | compile | 0 | 5 |
+| [icarus_interfaces](#icarus-interfaces) | compile | 0 | 25 |
+| [icarus_modport_functions](#icarus-modport-functions) | compile | 0 | 3 |
 | [icarus_instance_array_unpacked_port](#icarus-instance-array-unpacked-port) | compile | 0 | 1 |
 | [icarus_package_types](#icarus-package-types) | compile | 0 | 6 |
 | [icarus_sparse_memory_timeout](#icarus-sparse-memory-timeout) | compile | 0 | 1 |
@@ -130,9 +131,17 @@ Affected cases: icarus 48. See the manifest for exact IDs.
 
 Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.
 
-Category: `simulator_compile_limitation`. Observed stage: `compile`. Versions: Veryl 0.21.0; Verilator 5.052 / Icarus 13.0.
+Category: `simulator_compile_limitation`. Observed stage: `compile`. Versions: Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0.
 
-Affected cases: icarus 5. See the manifest for exact IDs.
+Affected cases: icarus 25. See the manifest for exact IDs. The 20 added `interface` cases were observed in a [focused recheck](verification/repros/interface_coverage_icarus.json); the corresponding Verilator runs pass, except the four-state case, which Verilator reports as unsupported. The two added interface cases without modport ports (`test_interface_member_access_in_comb_and_ff`, `test_proto_interface_generic_module`) pass on Icarus.
+
+## icarus-modport-functions
+
+Icarus 13.0 reports `sorry: modport task/function ports are not yet supported` for the emitted modport `import` declarations; the interface/modport port declarations are also rejected. The corresponding Verilator runs pass.
+
+Category: `simulator_unsupported`. Observed stage: `compile`. Versions: Veryl 0.22.0; Verilator 5.052 / Icarus 13.0.
+
+Affected cases: icarus 3. See the manifest and the [focused recheck](verification/repros/modport_import_icarus.json).
 
 ## icarus-instance-array-unpacked-port
 
@@ -344,16 +353,29 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 | `sv_icarus_generate_forward_reference` | execute | icarus | 1 | Icarus 13.0 resolves a name used before its declaration in the same generate block to the enclosing scope. Verilator (which warns VARHIDDEN) and Celox resolve it to the block's own declaration. |
 | `sv_icarus_generate_case_context` | execute | icarus | 1 | Icarus 13.0 compares a case-generate selector without the common width and signedness of the selector and all labels; IEEE 1800-2023 12.5 makes the comparison unsigned when any operand is unsigned. Verilator agrees with the expected value. |
 | `sv_icarus_input_port_width` | execute | icarus | 1 | Icarus 13.0 evaluates an input port connection at its self-determined width before padding, losing the carry; IEEE 1800-2023 10.8 and 11.8.2 widen the operands to the port first. Verilator agrees with the expected value. |
-| `sv_icarus_syntax` | compile | icarus | 6 | Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases. |
-| `sv_icarus_packed_array_parameters` | compile | icarus | 2 | Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported. |
+| `sv_icarus_syntax` | compile | icarus | 8 | Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases. |
+| `sv_icarus_packed_array_parameters` | compile | icarus | 3 | Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported. |
+| `sv_icarus_unpacked_array_parameters` | compile | icarus | 1 | Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case. |
 | `sv_icarus_internal_error` | compile | icarus | 3 | Icarus 13.0 crashes on these designs: a segmentation fault while compiling, or a vvp assertion (vthread.cc of_DISABLE_FLOW) while running. Verilator passes these cases. |
 | `sv_icarus_generate_function_scope` | execute | icarus | 1 | Icarus 13.0 evaluates a size query in a generate block with a function from another scope and reaches a $fatal in an active branch. Verilator agrees with the expected value. |
 | `sv_icarus_unknown_generate_condition` | compile | icarus | 1 | Icarus 13.0 rejects a loop-generate condition with unknown bits; Verilator accepts it, and Celox treats an unknown condition as false, as for if-generate (IEEE 1800-2023 12.4, 27.5). |
 | `sv_icarus_function_outputs` | compile | icarus | 1 | Icarus 13.0 rejects output and inout function arguments (function port is not an input port). |
 | `sv_icarus_instance_array_unpacked_port` | compile | icarus | 4 | Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases. |
 | `sv_icarus_instance_array_fill_literal` | compile | icarus | 1 | Icarus 13.0 accepts a one-bit '0 connected to a wider port of an instance array, which IEEE 1800-2023 23.3.3.5 makes an error. Verilator rejects it. |
+| `sv_icarus_inside` | compile | icarus | 1 | Icarus 13.0 does not support inside expressions ("sorry: inside expressions not supported yet"). Verilator passes the case. |
+| `sv_icarus_packed_element_size` | execute | icarus | 1 | Icarus 13.0 returns 2 for $size of an element of a multidimensional packed struct member (value.m[0] of logic [1:0][3:0]); IEEE 1800-2023 20.7 makes it the element's size, 4. Verilator agrees with the expected value. |
+| `sv_icarus_type_size_queries` | compile | icarus | 1 | Icarus 13.0 rejects a data type as the argument of $size ("Type names are not valid expressions here"), which IEEE 1800-2023 20.7 permits. Verilator passes the case. |
+| `sv_icarus_mixed_state_struct_members` | execute | icarus | 1 | Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values. |
+| `sv_icarus_unary_plus_unknown` | execute | icarus | 1 | Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values. |
+| `sv_icarus_runtime_packed_subselect` | compile | icarus | 1 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array (t[k][j], t[k][2:1]: "Array index expressions must be constant here"). Verilator passes the case. |
+| `sv_icarus_interfaces` | compile | icarus | 11 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. |
+| `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
+| `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
+| `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_verilator_constant_unknown_bits` | execute | verilator | 1 | Verilator 5.052 is two-state: unknown bits in constant system function arguments ($onehot(2'bx1)) are not kept unknown, so a generate condition differs from IEEE 1800-2023 20.9. Icarus agrees with the expected values. |
 | `sv_verilator_generate_case_unknown_label` | compile | verilator | 1 | Verilator 5.052 rejects an x or ? digit in a case-generate label ("no such thing as generate casez"). Icarus passes the case. |
 | `sv_verilator_self_determined_index` | execute | verilator | 1 | Verilator 5.052 does not wrap a self-determined index expression (2'd3 + 2'd1) to its width before selecting; IEEE 1800-2023 11.5.1 and 11.6.1 make the index 0. Icarus agrees with the expected value. |
 | `sv_verilator_function_outputs` | compile | verilator | 1 | Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments. |
 | `sv_verilator_generate_name_collision` | compile | verilator | 1 | Verilator 5.052 rejects a generate block named like a port with an "Unsupported" diagnostic instead of a duplicate-name error, so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 5.6.1, 23.9) and Icarus rejects it as a duplicate declaration. |
+| `sv_verilator_part_select_write_overhang` | execute | verilator | 1 | Verilator 5.052 writes the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) into bit 7 instead of discarding it; IEEE 1800-2023 11.5.1 ignores writes to out-of-range bits. Icarus agrees with the expected value. |
+| `sv_verilator_unpacked_array_extension` | compile | verilator | 2 | Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through "EXTEND unexpected in assignment to unpacked array" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8). |

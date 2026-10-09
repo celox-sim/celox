@@ -18,6 +18,18 @@ struct ProofBackend {
     rejected: bool,
     rejection_message: Option<String>,
 }
+/// Celox refused a construct it does not implement yet (a typed `Unsupported`
+/// lowering error). It is not a source rejection, so a `CompilationError` case
+/// still fails, and not a backend fault: the case fails with this message and
+/// the coverage gate accepts it only as a reviewed `celox_unsupported` exception.
+#[derive(Debug)]
+struct FrontendUnsupported(String);
+impl std::fmt::Display for FrontendUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for FrontendUnsupported {}
 fn path(p: &SignalPath) -> Value {
     json!({"name":p.name,"instances":p.instances.iter().map(|i|json!({"name":i.name,"index":i.index})).collect::<Vec<_>>()})
 }
@@ -25,7 +37,9 @@ impl ProofBackend {
     fn exchange(&mut self, value: Value) -> Result<Value> {
         let result = self.exchange_raw(value);
         if let Err(error) = &result {
-            if error.downcast_ref::<CompilationRejected>().is_none() {
+            if error.downcast_ref::<CompilationRejected>().is_none()
+                && error.downcast_ref::<FrontendUnsupported>().is_none()
+            {
                 self.sticky.lock().unwrap().push(error.to_string());
             }
         }
@@ -49,6 +63,11 @@ impl ProofBackend {
                 self.rejected = true;
                 self.rejection_message = Some(error.to_string());
                 return Err(CompilationRejected(error.to_string()).into());
+            }
+            if command == "compile" && reply["frontend_unsupported"] == true {
+                self.rejected = true;
+                self.rejection_message = Some(error.to_string());
+                return Err(FrontendUnsupported(error.to_string()).into());
             }
             self.sticky.lock().unwrap().push(error.to_string());
             return Err(error.to_string().into());
@@ -126,8 +145,9 @@ impl Backend for ProofBackend {
 }
 impl Drop for ProofBackend {
     fn drop(&mut self) {
-        // Expected compile rejection already returned as its typed marker; closing
-        // that unconstructed backend must not turn it into a runtime success.
+        // A compile rejection or frontend Unsupported already returned as its typed
+        // marker; closing that unconstructed backend must not turn it into a
+        // runtime success.
         let _ = writeln!(self.input, "{{\"command\":\"close\"}}");
         let _ = self.input.flush();
         let mut line = String::new();
@@ -161,18 +181,16 @@ fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.as_slice() == ["--list"] {
-        // `script` is the parsed case (design sources and stimulus); the
-        // coverage gate pins its hash so edited cases need a new review.
+        // The coverage gate hashes each case's text from `source` onward, so
+        // edited cases need a new review.
         let listed = cases()
             .map(|c| {
-                let script = c.script();
                 let group = c.name.split("::").next().unwrap_or(c.name);
                 json!({
                     "case": c.name,
                     "expectation": format!("{:?}", c.expectation),
                     "category": format!("{:?}", c.category),
-                    "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": script.pos.line},
-                    "script": format!("{script:?}"),
+                    "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": c.script().pos.line},
                 })
             })
             .collect::<Vec<_>>();

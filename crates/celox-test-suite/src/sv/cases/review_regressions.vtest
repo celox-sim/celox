@@ -70,7 +70,8 @@
     (assert_eq low_y (& value 0xf))
     (assert_eq ascending_y (>> value 4))
     (assert_eq inherited_y (>> value 4))
-    (assert_eq signed_y (trunc 16 (sext 8 value)))
+    ; A packed array of signed elements is unsigned (IEEE 1800-2023 7.4.1).
+    (assert_eq signed_y value)
     (assert_eq sizes 0x3ff)))
 
 (case preserves_size_cast_dimensions_in_declarations_and_selections
@@ -237,3 +238,360 @@
   (for value (list 1 2 4 8 0xf 0)
     (modify (set data value))
     (assert_eq y value)))
+
+(case preserves_use_site_dimensions_in_parameter_alias_types
+  (source "parameter_alias_use_site_dimensions.sv" #"
+                module Top #(parameter N = 2)(
+                    output logic [7:0] p, l, filled,
+                    output logic [15:0] signed_y, sized_y);
+                    typedef logic [3:0] nibble_t;
+                    typedef logic signed [3:0] signed_nibble_t;
+                    parameter nibble_t [1:0] P = 8'hab;
+                    localparam nibble_t [2:1] L = P;
+                    localparam nibble_t [1:0] F = '1;
+                    localparam signed_nibble_t [1:0] S = 8'hab;
+                    parameter nibble_t [N-1:0] R = 16'hcdef;
+                    always_comb begin
+                        p = P;
+                        l = L;
+                        filled = F;
+                        signed_y = S;
+                        sized_y = R;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (parameter N 4)
+  (eval)
+  (expand (name expected) ((p 0xab) (l 0xab) (filled 0xff) (signed_y 0xab) (sized_y 0xcdef))
+    (assert_eq {name} {expected} "{name}")))
+
+(case body_parameters_are_local_with_a_parameter_port_list
+  ; IEEE 1800-2023 6.20.1: with a parameter port list, a `parameter` in the
+  ; module body is a localparam and cannot be overridden.
+  (source "body_parameter_override.sv" #"
+                module Top #(parameter N = 2)(output logic [7:0] p);
+                    parameter P = 8'hab;
+                    assign p = P + N;
+                endmodule
+            "#)
+  (top Top)
+  (parameter P 0xcd)
+  (expect reject))
+
+(case preserves_four_state_arithmetic_case_constants
+  (four_state)
+  (source "four_state_arithmetic_case_constants.sv" #"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx + 1'b0) 1'bx: y0 = a; endcase
+                        case (2'b1z - 4'b0001) 4'bxxxx: y1 = a; endcase
+                        case (4'b0000 * 2'b1x) 4'bxxxx: y2 = a; endcase
+                        case (2'b1z / 2'b01) 2'bxx: y3 = a; endcase
+                        case (2'b1x % 2'b01) 2'bxx: y4 = a; endcase
+                        case (-(2'b1z)) 2'bxx: y5 = a; endcase
+                        case ((2'b11 + 2'b01) + 2'b0x) 2'bxx: y6 = a; endcase
+                        case ((2'b1x + 2'b01) & 2'b00) 2'b00: y7 = a; endcase
+                        case (1'bx) (1'bx + 1'b0): y8 = a; endcase
+                        case (2'b01 / 2'b1x) 2'bxx: y9 = a; endcase
+                        case (2'b01 % 2'b1z) 2'bxx: y10 = a; endcase
+                        case (+(2'b1z)) 2'bxx: y11 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11)
+      (assert_eq {y} value "{y}"))))
+
+(case preserves_four_state_shift_and_bit_select_constants
+  (four_state)
+  (source "shift_and_select_constants.sv" #"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
+                    always_comb begin
+                        case (2'bx0 >> 1) 2'b0x: y0 = a; endcase
+                        case (4'sbz101 >>> 2) 4'b00z1: y1 = a; endcase
+                        case (4'b10xz << 1) 4'b0xz0: y2 = a; endcase
+                        case ({2'bx0}[1]) 1'bx: y3 = a; endcase
+                        case (1'bz) ({2'bz0}[1]): y4 = a; endcase
+                        case (4'bxxxx) (4'b0000 << 1'bz): y5 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3 y4 y5)
+      (assert_eq {y} value "{y}"))))
+
+(case preserves_four_state_reduction_case_constants
+  (four_state)
+  (source "four_state_reduction_case_constants.sv" #"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (&1'bx) 1'bx: y0 = a; endcase
+                        case (|1'bz) 1'bx: y1 = a; endcase
+                        case (^2'b1x) 1'bx: y2 = a; endcase
+                        case (&3'b1z0) 1'b0: y3 = a; endcase
+                        case (|3'b0z1) 1'b1: y4 = a; endcase
+                        case (~&2'b1z) 1'bx: y5 = a; endcase
+                        case (~|2'b0x) 1'bx: y6 = a; endcase
+                        case (~^2'b1z) 1'bx: y7 = a; endcase
+                        case (^~2'b1x) 1'bx: y8 = a; endcase
+                        case (1'bx) (&1'bx): y9 = a; endcase
+                        case (^'1) 1'b1: y10 = a; endcase
+                        case (&'z) 1'bx: y11 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11)
+      (assert_eq {y} value "{y}"))))
+
+(case preserves_four_state_relational_case_selectors
+  (four_state)
+  (source "four_state_relational_case_selectors.sv" #"
+                module Top(input logic a, output logic y0, y1, y2, y3);
+                    always_comb begin
+                        case (1'bx < 1'b1) 1'bx: y0 = a; endcase
+                        case (1'bz <= 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b1x > 2'b00) 1'bx: y2 = a; endcase
+                        case (2'b0z >= 2'b10) 1'bx: y3 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3)
+      (assert_eq {y} value "{y}"))))
+
+(case folds_compound_four_state_case_labels
+  (four_state)
+  (source "compound_four_state_case_labels.sv" #"
+                module Top(input logic s, a, b,
+                    output logic constant_y, concat_y, function_y, dynamic_y);
+                    function automatic logic label(); return 1'bx | 1'b0; endfunction
+                    always_comb begin
+                        case (1'bx) (1'bx | 1'b0): constant_y = a; endcase
+                        case (2'bxz) {1'bx, 1'bz}: concat_y = a; endcase
+                        case (1'bx) label(): function_y = a; endcase
+                        case (s)
+                            (1'b0 & 1'b1): dynamic_y = a;
+                            (1'b1 | 1'b0): dynamic_y = b;
+                            (1'bx | 1'b0): dynamic_y = a ^ b;
+                            (1'bx ? 1'bz : 1'bz): dynamic_y = ~a;
+                        endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for inputs (range 0 4)
+    (let av (bit inputs 0))
+    (let bv (bit inputs 1))
+    (for (value mask expected) (list (0 0 av) (1 0 bv) (1 1 (^ av bv)) (0 1 (! av)))
+      (modify
+        (set a av)
+        (set b bv)
+        (set s (fourstate value mask)))
+      (expand name (constant_y concat_y function_y)
+        (assert_eq {name} av "{name}"))
+      (assert_eq dynamic_y expected))))
+
+(case preserves_four_state_equality_case_selectors
+  (four_state)
+  (source "four_state_equality_case_selectors.sv" #"
+                module Top(input logic a,
+                    output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx == 1'bx) 1'bx: y0 = a; endcase
+                        case (1'bz != 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b0x == 2'b1x) 1'b0: y2 = a; endcase
+                        case (2'b0z != 2'b1x) 1'b1: y3 = a; endcase
+                        case (!(1'bx == 1'b0)) 1'bx: y4 = a; endcase
+                        case ((1'bx != 1'bz) && 1'b1) 1'bx: y5 = a; endcase
+                        case ((1'bx && 1'b1) == 1'bx) 1'bx: y6 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'b0 : 1'b1) 1'bx: y7 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'bz : 1'bz) 1'bz: y8 = a; endcase
+                        case (1'sbx == 2'b1x) 1'b0: y9 = a; endcase
+                        case (1'sbx != 2'sb1x) 1'bx: y10 = a; endcase
+                        case (8'hff == '1) 1'b1: y11 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11)
+      (assert_eq {y} value "{y}"))))
+
+(case preserves_constant_case_selector_context
+  (four_state)
+  (source "constant_case_context.sv" #"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
+                    always_comb begin
+                        case (1'bx && 1'b1) 1'bx: y0 = a; endcase
+                        case (1'b0 || 1'bz) 1'bx: y1 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'sb00) 2'b01: y2 = a; endcase
+                        case (1'b0 ? 2'sb00 : 1'sb1) 2'b01: y3 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'b00) 2'b01: y4 = a; endcase
+                        case (1'b1 ? 1'sbx : 2'sb00) 2'b0x: y5 = a; endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 1 0 1)
+    (modify (set a value))
+    (expand y (y0 y1 y2 y3 y4 y5)
+      (assert_eq {y} value "{y}"))))
+
+(case default_pattern_fills_each_element_of_unpacked_subarrays
+  ; IEEE 1800-2023 10.9.1: `default:` applies recursively to each element of
+  ; an unmatched subarray, evaluated in the context of the element type,
+  ; unless the value matches the subarray type.
+  (source "nested_default_pattern.sv" #"
+                module Top(input logic [7:0] d,
+                           output logic [7:0] y00, y01, y10, y11,
+                           output logic [31:0] z00, z01, z10, z11);
+                    logic signed [7:0] a [2][2];
+                    int b [2];
+                    int c [2][2];
+                    always_comb begin
+                        a = '{default: 4'sh8};
+                        if (d[0]) a = '{1: '{default: d[3:0]}, default: 8'sh7f};
+                        y00 = a[0][0];
+                        y01 = a[0][1];
+                        y10 = a[1][0];
+                        y11 = a[1][1];
+                    end
+                    always_comb begin
+                        b = '{32'(d), 32'(d) + 1};
+                        c = '{default: b};
+                        z00 = c[0][0];
+                        z01 = c[0][1];
+                        z10 = c[1][0];
+                        z11 = c[1][1];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set d 0x20))
+  (expand y (y00 y01 y10 y11)
+    (assert_eq {y} 0xf8 "{y}"))
+  (assert_eq z00 0x20)
+  (assert_eq z01 0x21)
+  (assert_eq z10 0x20)
+  (assert_eq z11 0x21)
+  (modify (set d 0x35))
+  (assert_eq y00 0x7f)
+  (assert_eq y01 0x7f)
+  (assert_eq y10 0x05)
+  (assert_eq y11 0x05))
+
+(case int_parameters_are_signed_in_comparisons_and_loop_bounds
+  ; IEEE 1800-2023 6.20.2 and 6.11: a parameter declared `int` has that
+  ; signed type, so comparing it with a signed operand is a signed
+  ; comparison (11.8.1).
+  (source "signed_int_parameter.sv" #"
+                module Top #(parameter int S = 2, parameter int unsigned U = 2)
+                           (input logic clk, input int lo,
+                            output logic lt_s, lt_u,
+                            output int unsigned cs, cu, fs, fu);
+                    always_comb begin
+                        lt_s = lo < S;
+                        lt_u = lo < U;
+                        cs = 0;
+                        for (int j = lo; j < S; j++) cs += 1;
+                        cu = 0;
+                        for (int j = lo; j < U; j++) cu += 1;
+                    end
+                    always_ff @(posedge clk) begin
+                        int unsigned c;
+                        c = 0;
+                        for (int j = lo; j < S; j++) c += 1;
+                        fs <= c;
+                        c = 0;
+                        for (int j = lo; j < U; j++) c += 1;
+                        fu <= c;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set lo (- 0x100000000 2)))
+  (tick clk)
+  (assert_eq lt_s 1)
+  (assert_eq lt_u 0)
+  (assert_eq cs 4)
+  (assert_eq cu 0)
+  (assert_eq fs 4)
+  (assert_eq fu 0)
+  (modify (set lo 1))
+  (tick clk)
+  (assert_eq lt_s 1)
+  (assert_eq lt_u 1)
+  (assert_eq cs 1)
+  (assert_eq cu 1)
+  (assert_eq fs 1)
+  (assert_eq fu 1))
+
+(case run_time_for_condition_uses_the_relational_operand_context
+  ; IEEE 1800-2023 11.6.1 and 11.8.2: the operands of a relational operator
+  ; are sized to the larger of the two, so `j < b + 8'd1` with an `int` j
+  ; adds at 32 bits and b = 255 runs 256 iterations.
+  (source "for_condition_context.sv" #"
+                module Top(input logic clk, input logic [7:0] b,
+                           output logic [31:0] y0, y1, y2, f0);
+                    always_comb begin
+                        y0 = 0;
+                        for (int j = 0; j < b + 8'd1; j++) y0 = y0 + 1;
+                    end
+                    always_comb begin
+                        y1 = 0;
+                        for (int j = 0; j <= b + 8'd1; j++) y1 = y1 + 1;
+                    end
+                    always_comb begin
+                        y2 = 0;
+                        for (int j = b + 8'd1; j > 0; j--) y2 = y2 + 1;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [31:0] c;
+                        c = 0;
+                        for (int j = 0; j < b + 8'd1; j++) c = c + 1;
+                        f0 <= c;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 1 254 255)
+    (modify (set b value))
+    (tick clk)
+    (assert_eq y0 (+ value 1) "y0")
+    (assert_eq y1 (+ value 2) "y1")
+    (assert_eq y2 (+ value 1) "y2")
+    (assert_eq f0 (+ value 1) "f0")))
+
+(case size_of_a_type_uses_the_dimension_argument
+  ; IEEE 1800-2023 20.7: $size(t, n) is the number of elements of dimension
+  ; n of t, numbered from the slowest varying dimension (1); an integer
+  ; type is a packed array with a single [n-1:0] dimension.
+  (source "size_type_dimension.sv" #"
+                module Top(output int p1, p2, t1, t2, t3, d);
+                    typedef logic [3:0][5:0] pair_t;
+                    assign p1 = $size(logic [9:0][19:0], 1);
+                    assign p2 = $size(logic [9:0][19:0], 2);
+                    assign t1 = $size(pair_t, 1);
+                    assign t2 = $size(pair_t, 2);
+                    assign t3 = $size(shortint, 1);
+                    assign d = $size(logic [9:0][19:0]);
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq p1 10)
+  (assert_eq p2 20)
+  (assert_eq t1 4)
+  (assert_eq t2 6)
+  (assert_eq t3 16)
+  (assert_eq d 10))

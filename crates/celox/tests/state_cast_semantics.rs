@@ -7,29 +7,28 @@ mod test_utils;
 all_backends! {
     fn type_cast_clears_unknown_bits_in_comb_and_ff(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "state_cast_semantics::type_cast_clears_unknown_bits_in_comb_and_ff";
     }
 
     fn constant_type_cast_clears_unknown_bits(sim) {
         @omit_veryl;
+        // SV frontend rejects a cast of an X/Z-valued constant in a localparam initializer:
+        // "constant cast expression" (#88).
         @ignore_on(sv);
         @case "state_cast_semantics::constant_type_cast_clears_unknown_bits";
     }
 
     fn function_formal_type_clears_unknown_bits(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "state_cast_semantics::function_formal_type_clears_unknown_bits";
     }
 
     fn signed_four_state_function_formal_preserves_unknown_bits(sim) {
-        @ignore_on(sv);
         @case "state_cast_semantics::signed_four_state_function_formal_preserves_unknown_bits";
     }
 
     fn implicit_assignment_to_bit_clears_unknowns_without_mutating_source(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "state_cast_semantics::implicit_assignment_to_bit_clears_unknowns_without_mutating_source";
     }
 }

@@ -1,14 +1,19 @@
 name: CI
 
+# No push trigger: the merge queue already validated the exact tree that lands
+# on master or develop. The daily full runs keep those branches' caches warm.
 on:
-  push:
-    branches: [master, develop]
   pull_request:
   merge_group:
+  # Full validation also runs without a change filter, including quiet periods.
+  schedule:
+    - cron: "17 1 * * *"
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push must not cancel the daily full run halfway through its corpus.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'changes' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -21,9 +26,10 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     env:
-      STABLE_LANE: ${{ (github.event_name == 'push' && github.ref_name == 'master') || (github.event_name == 'pull_request' && github.base_ref == 'master') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
+      STABLE_LANE: ${{ github.ref_name == 'master' || github.base_ref == 'master' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
+      release: ${{ steps.classify.outputs.release }}
       javascript: ${{ steps.classify.outputs.javascript }}
       napi: ${{ steps.classify.outputs.napi }}
       napi_arm64: ${{ steps.classify.outputs.napi_arm64 }}
@@ -39,6 +45,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
       - name: Reject development dependencies from the stable lane
@@ -72,7 +81,7 @@ jobs:
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
     runs-on: ubuntu-latest
     env:
-      VERYL_LANE: ${{ ((github.event_name == 'push' && github.ref_name == 'develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'detect' || 'stable' }}
+      VERYL_LANE: ${{ (github.ref_name == 'develop' || github.base_ref == 'develop' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'detect' || 'stable' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -148,6 +157,10 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.scripts == 'true'
         run: node --test scripts/*.test.mjs
 
+      - name: Check CI runtime dependency exclusions
+        if: needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.scripts != 'true'
+        run: node --test scripts/ci-changes.test.mjs
+
   rust-tests:
     name: Rust Tests
     needs: changes
@@ -173,12 +186,25 @@ jobs:
       - name: Install Z3 for lydite solver tests
         run: python -m pip install z3-solver==5.1.0
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.144
+
       # Enable the frontend and suite features together so common integration
       # tests run once, rather than once per Cargo feature combination.
+      # nextest schedules tests from all binaries on one pool; `cargo test`
+      # runs the binaries one after another.
       - name: Run workspace tests with CI features
         run: >-
           Z3_BIN="$(command -v z3)"
-          cargo test --locked --workspace
+          cargo nextest run --locked --workspace --profile ci
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+
+      # nextest does not run documentation tests.
+      - name: Run workspace documentation tests with CI features
+        run: >-
+          cargo test --locked --workspace --doc
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
 
       - name: Verify default-feature library and documentation tests
@@ -191,6 +217,136 @@ jobs:
           CELOX_COCOTB_PYTHON="$(command -v python)" \
             cargo test --locked -p celox-vpi --test cocotb_e2e \
             cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
+
+  external-suites:
+    name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
+    needs: changes
+    # Scheduled and manual runs compare even when change detection fails. A
+    # merge group that cuts a release also compares before it can merge.
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [veryl, sv]
+        tool: [verilator, icarus]
+    env:
+      VERIFY_TOOL: ${{ matrix.tool }}
+      VERIFY_SUITE: ${{ matrix.suite }}
+      VERIFY_BIN: ${{ matrix.suite == 'sv' && format('verify-sv-{0}', matrix.tool) || format('verify-{0}', matrix.tool) }}
+      VERIFY_BASELINE: ${{ matrix.suite == 'sv' && format('crates/celox-test-suite/verification/sv/{0}.json', matrix.tool) || format('crates/celox-test-suite/verification/{0}.json', matrix.tool) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Use the same locked tool versions as the retained exclusion evidence.
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+
+      - name: Test live simulator adapters
+        if: matrix.suite == 'veryl'
+        run: >-
+          nix develop --no-update-lock-file --command
+          cargo test --locked -p celox-test-suite --features "$VERIFY_TOOL"
+          --test oracles -- --ignored
+
+      - name: Catalogue every shared case
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/external-suite"
+          nix develop --no-update-lock-file --command \
+            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
+            --bin "$VERIFY_BIN" -- --list > "$RUNNER_TEMP/external-suite/catalogue.json"
+
+      - name: Verify every shared case against the external simulator
+        id: verify
+        if: ${{ !cancelled() }}
+        run: |
+          # The runner returns 1 for retained failures as well as regressions.
+          # The next step checks the complete fresh report and the exit status.
+          rm -f "$RUNNER_TEMP/external-suite/report.json"
+          if nix develop --no-update-lock-file --command \
+            cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
+            --bin "$VERIFY_BIN" -- --jobs 2 \
+            --output "$RUNNER_TEMP/external-suite/logs" \
+            --report "$RUNNER_TEMP/external-suite/report.json"; then
+            task_verify_status=0
+          else
+            task_verify_status=$?
+          fi
+          echo "exit_status=$task_verify_status" >> "$GITHUB_OUTPUT"
+
+      - name: Reject new or changed external verification failures
+        if: ${{ !cancelled() }}
+        env:
+          VERIFY_EXIT_STATUS: ${{ steps.verify.outputs.exit_status }}
+        run: >-
+          nix develop --no-update-lock-file --command
+          node scripts/check-external-suite-report.mjs
+          "$RUNNER_TEMP/external-suite/report.json" "$VERIFY_BASELINE"
+          "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
+
+      - name: Retain results and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: external-suite-${{ matrix.suite }}-${{ matrix.tool }}
+          # Keep evidence rather than hundreds of generated simulator binaries.
+          path: |
+            ${{ runner.temp }}/external-suite/catalogue.json
+            ${{ runner.temp }}/external-suite/report.json
+            ${{ runner.temp }}/external-suite/logs/**/*.json
+            ${{ runner.temp }}/external-suite/logs/**/*.log
+            ${{ runner.temp }}/external-suite/logs/**/*.veryl
+            ${{ runner.temp }}/external-suite/logs/**/*.sv
+            ${{ runner.temp }}/external-suite/logs/**/*.v
+            ${{ runner.temp }}/external-suite/logs/**/*.svh
+            ${{ runner.temp }}/external-suite/logs/**/*.vh
+            ${{ runner.temp }}/external-suite/logs/**/harness.cpp
+            ${{ runner.temp }}/external-suite/logs/**/vpi_bits.hpp
+          if-no-files-found: error
+          retention-days: 14
+
+  sv-tests:
+    name: sv-tests conformance
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch the pinned sv-tests revision
+        run: |
+          revision="$(cat conformance/sv-tests/revision)"
+          git init -q "$RUNNER_TEMP/sv-tests"
+          git -C "$RUNNER_TEMP/sv-tests" fetch -q --depth 1 \
+            https://github.com/chipsalliance/sv-tests.git "$revision"
+          git -C "$RUNNER_TEMP/sv-tests" checkout -q FETCH_HEAD
+
+      # Any change from the retained results fails, improvements included, so
+      # that the expectations follow the frontend.
+      - name: Compare elaboration results with the retained expectations
+        run: >-
+          cargo run --locked --release -p celox --features systemverilog
+          --example sv_tests -- "$RUNNER_TEMP/sv-tests/tests"
+          --expected conformance/sv-tests/expected.tsv
+          --report "$RUNNER_TEMP/sv-tests-report.tsv"
+
+      - name: Retain the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sv-tests-report
+          path: ${{ runner.temp }}/sv-tests-report.tsv
+          if-no-files-found: ignore
+          retention-days: 14
 
   napi-linux:
     name: NAPI Build (Linux x64)
@@ -292,15 +448,21 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, napi-linux, napi-wasm]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    needs: [changes, rust-tests, sv-tests, napi-linux, napi-wasm, external-suites]
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
+      SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
+      NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
+      # Only a release merge group gates on the comparisons. Full runs report
+      # them through report-full-validation instead.
+      RELEASE_REQUIRED: ${{ needs.changes.outputs.release }}
+      EXTERNAL_RESULT: ${{ needs.external-suites.result }}
     steps:
       - name: Check tests and builds
         run: |
@@ -308,13 +470,25 @@ jobs:
           if [ "$RUST_REQUIRED" != false ] || [ "$RUST_RESULT" != skipped ]; then
             test "$RUST_RESULT" = success
           fi
-          test "$NATIVE_RESULT" = success
-          test "$WASM_RESULT" = success
+          if [ "$RUST_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
+            test "$SV_TESTS_RESULT" = success
+          fi
+          if [ "$NAPI_REQUIRED" != false ] || [ "$NATIVE_RESULT" != skipped ]; then
+            test "$NATIVE_RESULT" = success
+          fi
+          if [ "$NAPI_REQUIRED" != false ] || [ "$WASM_RESULT" != skipped ]; then
+            test "$WASM_RESULT" = success
+          fi
+          if [ "$RELEASE_REQUIRED" != false ]; then
+            test "$EXTERNAL_RESULT" = success
+          fi
 
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    # Platform jobs run in merge groups and full runs, not on pull requests.
+    # They almost never fail alone; dispatch ci.yml on a branch to run them.
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -351,7 +525,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -387,7 +561,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -474,7 +648,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -545,3 +719,44 @@ jobs:
       - name: Run Playground browser tests
         timeout-minutes: 5
         run: pnpm --filter @celox-sim/playground exec playwright test
+
+  # Full runs are not merge gates, so a failure must reach someone. Keep one
+  # issue per branch open while full CI fails and close it once it passes.
+  report-full-validation:
+    name: Report full validation
+    needs:
+      [
+        changes,
+        docs,
+        lint,
+        rust-tests,
+        sv-tests,
+        external-suites,
+        napi-linux,
+        napi-wasm,
+        rust,
+        arm64-backend,
+        napi-windows,
+        napi-linux-arm64,
+        js-ubuntu,
+        js-windows,
+        playground-browser,
+      ]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
+      - name: Open, update, or close the full CI issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/report-full-ci.mjs

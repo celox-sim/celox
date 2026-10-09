@@ -50,6 +50,20 @@ pub enum ParserError {
         detail: String,
         source_location: Option<SourceLocation>,
     },
+    #[error("Invalid $readmemh input: {detail}")]
+    MemoryFile {
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
+    #[error(
+        "DPI-C imports linked to `{name}` have different prototypes: `{first}` and `{second}` \
+         (IEEE 1800-2023 35.5.4)"
+    )]
+    ExternSignatureMismatch {
+        name: String,
+        first: String,
+        second: String,
+    },
     #[error("Top module `{name}` not found in IR")]
     TopNotFound { name: String },
     #[error("Top module `{name}` is generic and cannot be used as a top-level module")]

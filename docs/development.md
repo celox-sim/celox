@@ -27,7 +27,8 @@ nix develop --command cargo test --locked -p celox-vpi --test cocotb_e2e \
   cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
 ```
 
-The shell sets `CELOX_COCOTB_PYTHON` to its Python with cocotb. It includes
+The shell sets `CELOX_COCOTB_PYTHON` to its Python with cocotb and `Z3_BIN`
+to its Z3 for the lydite solver tests. It includes
 `wasm32-unknown-unknown` for browser Rust builds. The separate NAPI WASI
 cross-build still needs the WASI target and SDK used by CI; these are not
 part of this native development shell.

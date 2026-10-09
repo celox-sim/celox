@@ -1,20 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    RelocationModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    FfPart, RelocationModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
-    HashSet, InstancePath, ParserError, ScheduledRtl, ScheduledRtlOutput, SourceAddr,
-    SourceLocation, SourceVarId, VariableInfo, flattening,
+    HashSet, InstancePath, ParallelScheduleOptions, ParserError, ScheduledRtl, ScheduledRtlOutput,
+    SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
-    BitAccess, DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId,
-    ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
-    TriggerSet, VarAtomBase, VariableMetadata,
+    BitAccess, DomainKind, ElaboratedDesign, EventTopology, ExternFunction, InitialStateValue,
+    InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
+    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata,
 };
-use celox_sir::{BasicBlock, ExecutionUnit, SIRInstruction, SIRTerminator, SirProgram};
+use celox_sir::{
+    BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
+    SirProgram,
+};
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
     scheduler::{self, SchedulerError},
@@ -288,6 +291,7 @@ pub fn schedule_symbolic_rtl(
         usize,
     )],
     four_state: bool,
+    parallel: &ParallelScheduleOptions,
     trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
@@ -350,6 +354,7 @@ pub fn schedule_symbolic_rtl(
         "unify_clock_domains",
         unify_clock_domains(&expanded, &instance_modules, &modules)
     );
+    let mut parallel_ff_units = HashMap::default();
     let (
         mut global_arena,
         mut eval_apply_ffs,
@@ -361,6 +366,7 @@ pub fn schedule_symbolic_rtl(
         mut comb_observers,
         mut runtime_errors,
         runtime_event_sites,
+        extern_functions,
         next_runtime_error_code,
     ) = timed_sub!(
         "relocate_units",
@@ -373,6 +379,7 @@ pub fn schedule_symbolic_rtl(
             &global_boundaries,
             &unpacked_element_widths,
             &clock_domains,
+            parallel.enabled().then_some(&mut parallel_ff_units),
             trace_opts,
             &mut trace,
         )
@@ -576,6 +583,22 @@ pub fn schedule_symbolic_rtl(
         None
     };
 
+    // Stores to event signals update shared trigger bytes; their writers stay
+    // in one lane of a partitioned schedule.
+    let lane0_objects = parallel.enabled().then(|| {
+        let events = topological_clocks.iter().copied().collect::<HashSet<_>>();
+        events
+            .iter()
+            .copied()
+            .chain(
+                clock_domains
+                    .iter()
+                    .filter(|(_, canonical)| events.contains(canonical))
+                    .map(|(alias, _)| *alias),
+            )
+            .collect::<HashSet<_>>()
+    });
+    let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
         comb_blocks,
@@ -616,6 +639,69 @@ pub fn schedule_symbolic_rtl(
             });
         }
     };
+    let object_sizes = super::parallel::ObjectSizes {
+        widths: &var_widths,
+        element_widths: &unpacked_element_widths,
+    };
+    let parallel_comb = match parallel_comb_blocks {
+        Some(paths) => {
+            let first_code = runtime_errors
+                .keys()
+                .chain(schedule.runtime_errors.keys())
+                .copied()
+                .max()
+                .map_or(next_runtime_error_code, |code| code + 1)
+                .max(next_runtime_error_code);
+            let options = scheduler::LanePartitionOptions {
+                lanes: parallel.lanes,
+                synchronization_cost: parallel.synchronization_cost,
+                lane0_targets: lane0_objects.clone().unwrap_or_default(),
+                minimum_speedup_percent: parallel.minimum_speedup_percent,
+                hierarchy: Some({
+                    let parents = instance_parents(&expanded);
+                    let extra_costs = super::parallel::instance_ff_costs(
+                        &parallel_ff_units,
+                        parents.len(),
+                        object_sizes,
+                    );
+                    scheduler::InstanceHierarchy {
+                        instance_of: |address: &AbsoluteAddr| address.instance_id.0,
+                        parents,
+                        extra_costs,
+                    }
+                }),
+            };
+            let partitioned = scheduler::sort_lanes(
+                paths,
+                &global_arena,
+                &ignored_loops,
+                &true_loops,
+                four_state,
+                &var_widths,
+                &unpacked_element_widths,
+                first_code,
+                &options,
+            )
+            .map_err(|error| {
+                ParserError::illegal_context(
+                    "lane-partitioned combinational schedule",
+                    format!("{error}"),
+                    None,
+                )
+            })?;
+            if let Some(partitioned) = &partitioned {
+                tracing::debug!(
+                    "[parallel] comb lanes={} units={} estimated_makespan={} total_cost={}",
+                    parallel.lanes,
+                    partitioned.units.len(),
+                    partitioned.estimated_makespan,
+                    partitioned.total_cost
+                );
+            }
+            partitioned
+        }
+        None => None,
+    };
     // The comb schedule no longer refers to SLT nodes. Release its arena before
     // constructing the clock-fused schedules, whose arena already owns its
     // remapped nodes.
@@ -624,39 +710,50 @@ pub fn schedule_symbolic_rtl(
         tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
+    let stable_unit = |eu: ExecutionUnit<AbsoluteAddr>| ExecutionUnit {
+        entry_block_id: eu.entry_block_id,
+        blocks: eu
+            .blocks
+            .into_iter()
+            .map(|(id, bb)| {
+                (
+                    id,
+                    BasicBlock {
+                        id: bb.id,
+                        params: bb.params,
+                        instructions: bb
+                            .instructions
+                            .into_iter()
+                            .map(|inst| {
+                                inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                    region: STABLE_REGION,
+                                    instance_id: addr.instance_id,
+                                    var_id: addr.var_id,
+                                })
+                            })
+                            .collect(),
+                        terminator: bb.terminator,
+                    },
+                )
+            })
+            .collect(),
+        register_map: eu.register_map,
+    };
     let eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = schedule
         .execution_units
         .into_iter()
-        .map(|eu| ExecutionUnit {
-            entry_block_id: eu.entry_block_id,
-            blocks: eu
-                .blocks
-                .into_iter()
-                .map(|(id, bb)| {
-                    (
-                        id,
-                        BasicBlock {
-                            id: bb.id,
-                            params: bb.params,
-                            instructions: bb
-                                .instructions
-                                .into_iter()
-                                .map(|inst| {
-                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
-                                        region: STABLE_REGION,
-                                        instance_id: addr.instance_id,
-                                        var_id: addr.var_id,
-                                    })
-                                })
-                                .collect(),
-                            terminator: bb.terminator,
-                        },
-                    )
-                })
-                .collect(),
-            register_map: eu.register_map,
-        })
+        .map(stable_unit)
         .collect();
+    let parallel_eval_comb = parallel_comb
+        .map(|partitioned| {
+            runtime_errors.extend(partitioned.runtime_errors);
+            partitioned
+                .units
+                .into_iter()
+                .map(|unit| LaneUnit::new(unit.lane, stable_unit(unit.unit)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -757,6 +854,40 @@ pub fn schedule_symbolic_rtl(
         .filter(|units| !units.is_empty())
         .count();
     let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    let parallel_sir = parallel.enabled().then(|| {
+        let mut events = eval_apply_ffs
+            .iter()
+            .filter(|(_, units)| !units.is_empty())
+            .map(|(event, _)| *event)
+            .collect::<Vec<_>>();
+        events.sort_unstable();
+        let eval_apply_ffs = super::parallel::plan_parallel_ff_kernels(
+            &events,
+            parallel_ff_units,
+            lane0_objects
+                .as_ref()
+                .expect("parallel scheduling computes lane-0 objects"),
+            &parallel_eval_comb,
+            object_sizes,
+            parallel,
+        );
+        for (event, kernel) in &eval_apply_ffs {
+            let lanes = kernel
+                .units()
+                .map(|unit| unit.lane)
+                .collect::<BTreeSet<_>>();
+            tracing::debug!(
+                "[parallel] event={event} evaluations={} applications={} lanes={lanes:?}",
+                kernel.evaluations.len(),
+                kernel.applications.len(),
+            );
+        }
+        ParallelSirProgram {
+            lanes: parallel.lanes,
+            eval_comb: parallel_eval_comb,
+            eval_apply_ffs,
+        }
+    });
     let (eval_only_ffs, apply_ffs) = if needs_split_path {
         (eval_only_ffs, apply_ffs)
     } else {
@@ -811,6 +942,7 @@ pub fn schedule_symbolic_rtl(
         eval_only_ffs,
         apply_ffs,
         eval_comb,
+        parallel: parallel_sir,
     };
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
@@ -836,7 +968,10 @@ pub fn schedule_symbolic_rtl(
         var_id: source_to_state[&source.absolute_addr()].var_id,
     };
 
-    let sir = source_sir.into_map_addr(project, project_regioned);
+    let mut sir = source_sir.into_map_addr(project, project_regioned);
+    if !four_state {
+        celox_sir::two_state::canonicalize_program(&mut sir);
+    }
     let state_objects: HashMap<StateAddr, VariableMetadata> = state_objects
         .into_iter()
         .map(|(address, metadata)| (project(address), metadata))
@@ -973,6 +1108,7 @@ pub fn schedule_symbolic_rtl(
         runtime_schema: RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
+            extern_functions,
             comb_observers,
             testbench_read_roots: Default::default(),
             rtl_writes,
@@ -1028,6 +1164,25 @@ fn module_variables(
         path_index.insert(*id, paths);
     }
     (res, path_index)
+}
+
+/// The parent of every expanded instance, indexed by instance id, with
+/// `usize::MAX` for the root.
+fn instance_parents(expanded: &HashMap<InstancePath, InstanceId>) -> Vec<usize> {
+    let count = expanded
+        .values()
+        .map(|instance| instance.0 + 1)
+        .max()
+        .unwrap_or(0);
+    let mut parents = vec![usize::MAX; count];
+    for (path, instance) in expanded {
+        if let Some((_, parent_path)) = path.0.split_last()
+            && let Some(parent) = expanded.get(&InstancePath(parent_path.to_vec()))
+        {
+            parents[instance.0] = parent.0;
+        }
+    }
+    parents
 }
 
 fn expand_hierarchy(
@@ -1225,6 +1380,7 @@ fn relocate_executation_unit_with_errors<A, B>(
     f: &impl Fn(&A) -> B,
     runtime_error_codes: &HashMap<i64, i64>,
     runtime_event_sites: &HashMap<u32, u32>,
+    extern_functions: &HashMap<u32, u32>,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -1263,6 +1419,13 @@ fn relocate_executation_unit_with_errors<A, B>(
                                     fatal_error_code: *fatal_error_code,
                                     consume_enabled: *consume_enabled,
                                 },
+                                SIRInstruction::ExternCall { dst, func, args } => {
+                                    SIRInstruction::ExternCall {
+                                        dst: *dst,
+                                        func: extern_functions[func],
+                                        args: args.clone(),
+                                    }
+                                }
                                 _ => inst.map_addr(f),
                             })
                             .collect(),
@@ -1497,6 +1660,9 @@ fn relocate_units(
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    parallel_ff_units: Option<
+        &mut HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
+    >,
     trace_opts: &crate::FrontendTraceOptions,
     trace: &mut Option<&mut crate::FrontendTrace>,
 ) -> Result<
@@ -1511,6 +1677,7 @@ fn relocate_units(
         Vec<CombObserver<AbsoluteAddr>>,
         HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
         Vec<RuntimeEventSite>,
+        Vec<ExternFunction>,
         i64,
     ),
     ParserError,
@@ -1529,7 +1696,10 @@ fn relocate_units(
     let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
+    let mut extern_functions = Vec::<ExternFunction>::new();
+    let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
+    let mut parallel_ff_units = parallel_ff_units;
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -1628,6 +1798,27 @@ fn relocate_units(
                 event_site_base: runtime_event_site_base,
             },
         );
+        // Extern functions are shared by C symbol name across instances, and
+        // every import of one name must declare the same prototype.
+        let mut extern_function_map = HashMap::default();
+        for (local, function) in sim_module.extern_functions.iter().enumerate() {
+            let global = match extern_function_indices.get(&function.name).copied() {
+                Some(global) if extern_functions[global] != *function => {
+                    return Err(ParserError::ExternSignatureMismatch {
+                        name: function.name.clone(),
+                        first: extern_functions[global].to_string(),
+                        second: function.to_string(),
+                    });
+                }
+                Some(global) => global,
+                None => {
+                    extern_function_indices.insert(function.name.clone(), extern_functions.len());
+                    extern_functions.push(function.clone());
+                    extern_functions.len() - 1
+                }
+            };
+            extern_function_map.insert(local as u32, global as u32);
+        }
         let mut runtime_event_site_map = HashMap::default();
         let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
@@ -1636,6 +1827,59 @@ fn relocate_units(
             let mut site = site.clone();
             site.scope = Some(scope.clone());
             runtime_event_sites.push(site);
+        }
+
+        // Lane-partitioning units of every trigger group: its independently
+        // lowered parts when present, otherwise its whole evaluate/apply pair.
+        if let Some(parallel_ff_units) = parallel_ff_units.as_deref_mut() {
+            let relocate = |unit: &ExecutionUnit<RegionedVarAddr>| {
+                relocate_executation_unit_with_errors(
+                    unit,
+                    &|addr| RegionedAbsoluteAddr {
+                        region: addr.region,
+                        instance_id: *id,
+                        var_id: addr.var_id,
+                    },
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                    &extern_function_map,
+                )
+            };
+            let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
+            trigger_sets.sort_unstable();
+            for trigger_set in trigger_sets {
+                let parts = match sim_module.parallel_ff_parts.get(trigger_set) {
+                    Some(parts) => parts
+                        .iter()
+                        .map(|part| part.map_units(relocate))
+                        .collect::<Vec<_>>(),
+                    None => {
+                        let Some(apply) = sim_module.apply_ff_blocks.get(trigger_set) else {
+                            continue;
+                        };
+                        vec![FfPart {
+                            evaluate: relocate(&sim_module.eval_only_ff_blocks[trigger_set]),
+                            apply: relocate(apply),
+                        }]
+                    }
+                };
+                let canonical = |var_id| {
+                    let address = AbsoluteAddr {
+                        instance_id: *id,
+                        var_id,
+                    };
+                    clock_domains.get(&address).copied().unwrap_or(address)
+                };
+                let events = std::iter::once(canonical(trigger_set.clock))
+                    .chain(trigger_set.resets.iter().map(|&reset| canonical(reset)))
+                    .collect::<BTreeSet<_>>();
+                for event in events {
+                    parallel_ff_units
+                        .entry(event)
+                        .or_default()
+                        .extend(parts.iter().cloned().map(|part| (*id, part)));
+                }
+            }
         }
 
         let arena_start = global_arena.len();
@@ -1682,6 +1926,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -1704,6 +1949,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -1728,6 +1974,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -1750,6 +1997,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -1774,6 +2022,7 @@ fn relocate_units(
                     },
                     &runtime_error_codes,
                     &runtime_event_site_map,
+                    &extern_function_map,
                 ),
             );
 
@@ -1796,6 +2045,7 @@ fn relocate_units(
                         },
                         &runtime_error_codes,
                         &runtime_event_site_map,
+                        &extern_function_map,
                     ),
                 );
             }
@@ -1838,6 +2088,7 @@ fn relocate_units(
         comb_observers,
         runtime_errors,
         runtime_event_sites,
+        extern_functions,
         next_runtime_error_code,
     ))
 }

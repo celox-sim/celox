@@ -399,6 +399,7 @@ fn analyze(
         ));
         diagnostics
     };
+    celox_frontend_veryl::lower_interface_captures(&mut ir);
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled
     // entry cannot execute the same store across multiple iterations.
@@ -416,6 +417,7 @@ fn analyze(
     if let Some(rt) = reset_type {
         build_config.reset_type = rt;
     }
+    build_config.parallel_lanes = optimize_options.parallel_lanes();
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
             &top,
@@ -615,6 +617,7 @@ fn compile_frontend_to_sir_with_layout_mode(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace_out.is_some().then_some(&mut frontend_trace),
     )
@@ -1201,6 +1204,8 @@ mod host {
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
+        /// Where the C functions of DPI-C imports are found.
+        pub dpi: crate::DpiSymbols,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1299,7 +1304,9 @@ mod host {
 
         // Safety: callers either produced the image in this process or loaded
         // it from an explicitly trusted native-image artifact.
-        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+        let backend = unsafe {
+            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+        };
         initialize_native_backend(
             backend,
             program.into_runtime(),
@@ -1382,6 +1389,7 @@ mod host {
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
+                dpi: crate::DpiSymbols::default(),
             }
         }
     }
@@ -1433,6 +1441,15 @@ mod host {
         /// Replace the builder's SystemVerilog source set.
         #[cfg(feature = "systemverilog")]
         pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
+            self.sv_sources = sources;
+            self
+        }
+
+        /// Replace the builder's Veryl sources with SystemVerilog sources,
+        /// keeping its configuration.
+        #[cfg(feature = "systemverilog")]
+        pub fn into_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
+            self.sources.clear();
             self.sv_sources = sources;
             self
         }
@@ -1529,7 +1546,11 @@ mod host {
         /// Set the overall optimization level. Sets defaults for SIR passes,
         /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
         pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
-            self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
+            let lanes = self.options.optimize_options.parallel_lanes();
+            let partition = self.options.optimize_options.parallel_partition();
+            self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
+                .with_parallel_lanes(lanes)
+                .with_parallel_partition(partition);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -1562,11 +1583,15 @@ mod host {
         /// Enable or disable all SIRT optimization passes at once.
         /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
         pub fn optimize(mut self, enable: bool) -> Self {
+            let lanes = self.options.optimize_options.parallel_lanes();
+            let partition = self.options.optimize_options.parallel_partition();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
                 crate::optimizer::OptimizeOptions::none()
-            };
+            }
+            .with_parallel_lanes(lanes)
+            .with_parallel_partition(partition);
             self
         }
 
@@ -1574,7 +1599,59 @@ mod host {
         pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
             self.options.cranelift_options.tail_call_split =
                 options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
-            self.options.optimize_options = options;
+            // A thread count or partition mode requested separately survives
+            // an options reset.
+            let lanes = if options.parallel_lanes() > 1 {
+                options.parallel_lanes()
+            } else {
+                self.options.optimize_options.parallel_lanes()
+            };
+            let partition = if options.parallel_partition() == crate::ParallelPartition::Always {
+                crate::ParallelPartition::Always
+            } else {
+                self.options.optimize_options.parallel_partition()
+            };
+            self.options.optimize_options = options
+                .with_parallel_lanes(lanes)
+                .with_parallel_partition(partition);
+            self
+        }
+
+        /// Evaluate the design on up to `threads` worker threads, the calling
+        /// thread included.
+        ///
+        /// Compilation partitions the combinational settle and the sequential
+        /// update of each clock event into one lane per thread, using the
+        /// scheduler's dependency graph. Every state object written by a lane
+        /// lives in that lane's own memory segment. A phase whose estimated
+        /// speedup is too small keeps its sequential kernel, and so does every
+        /// phase on backends without parallel execution. `1` (the default)
+        /// compiles only the sequential kernels. Native force support keeps
+        /// sequential execution.
+        pub fn threads(mut self, threads: usize) -> Self {
+            let lanes = if self.options.native_force_support {
+                1
+            } else {
+                u32::try_from(threads)
+                    .unwrap_or(u32::MAX)
+                    .clamp(1, crate::MAX_SIMULATION_THREADS)
+            };
+            self.options.optimize_options.set_parallel_lanes(lanes);
+            self
+        }
+
+        /// Choose how [`Self::threads`] decides which phases to partition.
+        ///
+        /// The default partitions a phase only when its estimated speedup
+        /// outweighs lane synchronization. [`crate::ParallelPartition::Always`]
+        /// partitions every phase with independent work; it exists for
+        /// testing and measurement.
+        pub fn parallel_partition(mut self, partition: crate::ParallelPartition) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_parallel_partition(partition);
             self
         }
 
@@ -1619,6 +1696,38 @@ mod host {
         /// Enable or disable the Cranelift IR verifier.
         pub fn enable_verifier(mut self, enable: bool) -> Self {
             self.options.cranelift_options.enable_verifier = enable;
+            self
+        }
+
+        /// Link DPI-C imports to the C functions of a shared library.
+        ///
+        /// Libraries are searched in the order they are added, after the
+        /// functions registered with [`Self::dpi_function`]. A library stays
+        /// loaded for the rest of the process.
+        ///
+        /// # Safety
+        ///
+        /// Loading the library runs its initializers. Every C function a
+        /// DPI-C import is linked to must have the signature that import
+        /// declares (IEEE 1800-2023 35.5.6).
+        pub unsafe fn dpi_library(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.options.dpi.add_library(path.into());
+            self
+        }
+
+        /// Link the DPI-C import whose C name is `name` to `function`.
+        ///
+        /// Registering `name` again replaces the earlier function.
+        ///
+        /// # Safety
+        ///
+        /// `function` must be a C function with the signature its DPI-C
+        /// import declares (IEEE 1800-2023 35.5.6), and must stay valid while
+        /// any simulator built from this builder exists.
+        pub unsafe fn dpi_function(mut self, name: impl Into<String>, function: *const ()) -> Self {
+            self.options
+                .dpi
+                .add_function(name.into(), function as usize);
             self
         }
 
@@ -2046,6 +2155,12 @@ mod host {
                 }
             }
 
+            // Link DPI-C imports before code generation, so a missing C
+            // function fails the build early; the backends reuse the result.
+            self.options
+                .dpi
+                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+
             Ok((
                 laid_out,
                 warnings,
@@ -2214,6 +2329,12 @@ mod host {
         ///
         /// Used by tests to make promotion timing deterministic; `compile`
         /// runs on the background worker thread.
+        /// The optimizer options this builder will compile with.
+        #[cfg(test)]
+        pub(crate) fn optimize_options_for_test(&self) -> &crate::optimizer::OptimizeOptions {
+            &self.options.optimize_options
+        }
+
         #[cfg(test)]
         pub(crate) fn build_tiered_with_compiler<F>(
             self,
@@ -2424,7 +2545,9 @@ mod host {
             let program = image.runtime_program();
             // Safety: the caller is explicitly loading a trusted native-image
             // artifact, and `from_image` validates its structure first.
-            let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+            let backend = unsafe {
+                crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+            };
             initialize_native_backend(
                 backend,
                 program,
@@ -2877,5 +3000,33 @@ mod component_library_tests {
             component_library_target_name(dir.path()).as_deref(),
             Some("actual_component")
         );
+    }
+}
+
+#[cfg(test)]
+mod parallel_option_tests {
+    use crate::{OptLevel, OptimizeOptions, ParallelPartition};
+
+    #[test]
+    fn optimization_setters_keep_thread_and_partition_requests() {
+        let builders = [
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .opt_level(OptLevel::O2),
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .optimize(false),
+            crate::Simulator::builder("", "Top")
+                .threads(4)
+                .parallel_partition(ParallelPartition::Always)
+                .optimize_options(OptimizeOptions::default()),
+        ];
+        for builder in builders {
+            let options = builder.optimize_options_for_test();
+            assert_eq!(options.parallel_lanes(), 4);
+            assert_eq!(options.parallel_partition(), ParallelPartition::Always);
+        }
     }
 }

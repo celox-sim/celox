@@ -69,6 +69,31 @@
   "reason": "Instance arrays are unsupported by the Celox Veryl frontend; Celox ignores this case on every backend (crates/celox/tests/hierarchy.rs).",
   "panic": "compile hierarchy::test_instance_array_broadcast_and_unpacked_array_connection: lower: IllegalContext { feature: \"output port destination\", detail: \"destination slice 0..8 does not fit output width 4\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\nmodule Child (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>\\n) {\\nassign y = if en ? ~a : a;\\n}\\nmodule Top (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>[2]\\n) {\\ninst u: Child [2] (\\na,\\nen,\\ny,\\n);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(210), length: 1 } }) }"
  },
+ "interface::test_generic_interface_port": {
+  "kind": "celox_unsupported",
+  "reason": "The Celox frontend reports generic interface ports as Unsupported (#1088): the analyzer IR keeps them abstract, so their forwarding connections cannot be lowered.",
+  "panic": "compile interface::test_generic_interface_port: lower: Unsupported { issue: 1088, phase: SimulatorParser, feature: \"generic interface port\", detail: \"module ClientPass port bus\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\ninterface Link {\\n    var req : logic<8>;\\n    var resp: logic<8>;\\n    modport client {\\n        req : output,\\n        resp: input,\\n    }\\n    modport server {\\n        ..converse(client)\\n    }\\n}\\nmodule Client (\\n    bus : modport Link::client,\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    assign bus.req = x;\\n    assign resp    = bus.resp;\\n}\\nmodule ClientPass (\\n    bus : interface::client,\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    inst u: Client (bus, x, resp);\\n}\\nmodule Server (\\n    bus: modport Link::server,\\n) {\\n    assign bus.resp = ~bus.req;\\n}\\nmodule ServerPass (\\n    bus: interface,\\n) {\\n    inst u: Server (bus);\\n}\\nmodule Top (\\n    x   : input  logic<8>,\\n    resp: output logic<8>,\\n) {\\n    inst l: Link;\\n    inst c: ClientPass (bus: l, x, resp);\\n    inst s: ServerPass (bus: l);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(362), length: 10 } }) }"
+ },
+ "interface::test_interface_always_comb_packed_array_member": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_always_comb_packed_array_member at 142:3: assert_eq q: expected 0x11, got 0x0"
+ },
+ "interface::test_interface_always_ff_on_member_clock": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_always_ff_on_member_clock at 200:3: assert_eq count: expected 0x3, got 0x0"
+ },
+ "interface::test_interface_continuous_assign_logic": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_continuous_assign_logic at 92:3: assert_eq total: expected 0x12c, got 0x0"
+ },
+ "interface::test_interface_param_and_const": {
+  "kind": "known_celox_failure",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "panic": "interface::test_interface_param_and_const at 1124:3: assert_eq f12: expected 0x1, got 0x0"
+ },
  "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops": {
   "kind": "veryl_language_restriction",
   "reason": "Veryl rejects a negative constant for-range bound (InvalidForRange::NegativeBound).",
@@ -93,15 +118,5 @@
   "kind": "veryl_language_restriction",
   "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
   "panic": "compile system_function::test_direct_ff_onehot_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$onehot\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    clk: input clock,\\\\n    d: input logic<8>,\\\\n    q: output logic,\\\\n) {\\\\n    always_ff (clk) {\\\\n        q = $onehot(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(126), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
- },
- "veryl_context_regressions::case_compares_each_label_as_an_if_does": {
-  "kind": "known_celox_failure",
-  "reason": "Celox returns 0 rather than 2 for the mixed-sign y7 case; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
-  "panic": "veryl_context_regressions::case_compares_each_label_as_an_if_does at 521:3: assert_eq y7: expected 0x2, got 0x0 (output y7)"
- },
- "veryl_context_regressions::folded_const_select_keeps_its_sign": {
-  "kind": "known_celox_failure",
-  "reason": "Celox returns 0 rather than 0xfffb for the runtime-selected y5; Celox ignores this case on every backend (crates/celox/tests/veryl_context_regressions.rs).",
-  "panic": "veryl_context_regressions::folded_const_select_keeps_its_sign at 372:3: assert_eq y5: expected 0xfffb, got 0x0 (output y5)"
  }
 }

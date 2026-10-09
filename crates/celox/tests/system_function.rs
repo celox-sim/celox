@@ -16,12 +16,10 @@ all_backends! {
     }
 
     fn test_direct_comb_bits_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_bits_system_function";
     }
 
     fn test_direct_comb_size_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_size_system_function";
     }
 
@@ -31,12 +29,11 @@ all_backends! {
     }
 
     fn test_comb_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_comb_function_body_clog2_system_function";
     }
 
     fn test_comb_function_body_bits_size_system_functions(sim) {
-        @ignore_on(sv);
         @case "system_function::test_comb_function_body_bits_size_system_functions";
     }
 
@@ -53,47 +50,38 @@ all_backends! {
     }
 
     fn test_comb_function_body_signed_unsigned_system_functions(sim) {
-        @ignore_on(sv);
         @case "system_function::test_comb_function_body_signed_unsigned_system_functions";
     }
 
     fn test_direct_comb_bits_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_comb_bits_type_system_function";
     }
 
     fn test_direct_ff_bits_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_system_function";
     }
 
     fn test_direct_ff_bits_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_type_system_function";
     }
 
     fn test_direct_ff_bits_array_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_array_system_function";
     }
 
     fn test_direct_ff_size_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_system_function";
     }
 
     fn test_direct_ff_size_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_type_system_function";
     }
 
     fn test_direct_ff_size_packed_multidimensional_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_system_function";
     }
 
     fn test_direct_ff_size_packed_multidimensional_type_system_function(sim) {
-        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_type_system_function";
     }
 
@@ -103,7 +91,7 @@ all_backends! {
     }
 
     fn test_ff_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "system_function::test_ff_function_body_clog2_system_function";
     }
 
@@ -201,4 +189,56 @@ module Top (clk: input clock) {
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Finish]
     );
+}
+
+/// Runtime events of several instances on one edge keep the sequential order
+/// when the FF update runs in partitioned lanes.
+#[test]
+fn test_partitioned_ff_runtime_events_keep_sequential_order() {
+    let code = r#"
+module Child #(param ID: u32 = 0) (clk: input clock, d: input logic<8>) {
+    var r: logic<8>;
+    always_ff (clk) {
+        r = d + ID;
+        $display("child %0d r=%0d", ID, r);
+    }
+}
+module Quiet (clk: input clock, d: input logic<8>) {
+    var r: logic<8>;
+    always_ff (clk) {
+        r = r + d;
+    }
+}
+module Top (clk: input clock, d: input logic<8>) {
+    inst q0: Quiet (clk, d);
+    inst q1: Quiet (clk, d);
+    inst q2: Quiet (clk, d);
+    inst q3: Quiet (clk, d);
+    inst c0: Child #(ID: 0) (clk, d);
+    inst c1: Child #(ID: 1) (clk, d);
+    inst c2: Child #(ID: 2) (clk, d);
+    inst c3: Child #(ID: 3) (clk, d);
+    inst c4: Child #(ID: 4) (clk, d);
+    inst c5: Child #(ID: 5) (clk, d);
+}
+"#;
+    let run = |threads: usize| {
+        let mut sim = Simulator::builder(code, "Top")
+            .threads(threads)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build()
+            .unwrap();
+        let clk = sim.event("clk");
+        let d = sim.signal("d");
+        let mut events = Vec::new();
+        for value in 0..4u8 {
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            events.push(sim.drain_runtime_events());
+        }
+        events
+    };
+    let sequential = run(1);
+    assert_eq!(sequential[1].len(), 6);
+    assert_eq!(run(4), sequential);
 }

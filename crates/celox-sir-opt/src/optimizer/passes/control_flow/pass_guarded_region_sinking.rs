@@ -1743,10 +1743,16 @@ fn merge_single_predecessor_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteA
         }
         claimed.insert(pred_id);
         claimed.insert(*successor);
-        pairs.push((pred_id, *successor, arguments.clone()));
+        pairs.push((pred_id, *successor));
     }
 
-    for (pred_id, successor_id, arguments) in pairs {
+    for (pred_id, successor_id) in pairs {
+        // Read the arguments now: an earlier merge may have replaced a
+        // parameter that this edge passes on.
+        let SIRTerminator::Jump(_, arguments) = &eu.blocks[&pred_id].terminator else {
+            unreachable!("planned predecessor still ends in its jump");
+        };
+        let arguments = arguments.clone();
         let mut successor = eu
             .blocks
             .remove(&successor_id)
@@ -1785,57 +1791,11 @@ fn replace_register_uses_in_instruction(
     old: RegisterId,
     new: RegisterId,
 ) {
-    let replace = |register: &mut RegisterId| {
+    instruction.for_each_use_mut(|register| {
         if *register == old {
             *register = new;
         }
-    };
-    let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => replace(register),
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            replace(index);
-            if let Some(offset) = dynamic_bit_offset {
-                replace(offset);
-            }
-        }
-    };
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs);
-            replace(rhs);
-        }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
-            replace(source)
-        }
-        SIRInstruction::Load(_, _, offset, _) => replace_offset(offset),
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_offset(offset);
-            replace(source);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => replace_offset(offset),
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                replace(arg);
-            }
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            replace(condition);
-            replace(true_value);
-            replace(false_value);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            replace(old);
-            replace(new);
-        }
-    }
+    });
 }
 
 fn replace_register_uses_in_terminator(
@@ -3542,58 +3502,17 @@ fn clone_pure_instruction(
     dst: RegisterId,
     replacements: &HashMap<RegisterId, RegisterId>,
 ) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
-    let mapped = |value: RegisterId| replacements.get(&value).copied().unwrap_or(value);
-    Some(match inst {
-        SIRInstruction::Imm(_, value) => SIRInstruction::Imm(dst, value.clone()),
-        SIRInstruction::Binary(_, lhs, op, rhs) => {
-            SIRInstruction::Binary(dst, mapped(*lhs), *op, mapped(*rhs))
+    if inst.has_side_effects() {
+        return None;
+    }
+    let mut clone = inst.clone();
+    clone.for_each_use_mut(|value| {
+        if let Some(&replacement) = replacements.get(value) {
+            *value = replacement;
         }
-        SIRInstruction::Unary(_, op, source) => SIRInstruction::Unary(dst, *op, mapped(*source)),
-        SIRInstruction::Concat(_, args) => {
-            SIRInstruction::Concat(dst, args.iter().copied().map(mapped).collect())
-        }
-        SIRInstruction::Slice(_, source, lsb, width) => {
-            SIRInstruction::Slice(dst, mapped(*source), *lsb, *width)
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => SIRInstruction::Mux(
-            dst,
-            mapped(*condition),
-            mapped(*true_value),
-            mapped(*false_value),
-        ),
-        SIRInstruction::Load(_, address, offset, width) => SIRInstruction::Load(
-            dst,
-            *address,
-            match offset {
-                SIROffset::Static(offset) => SIROffset::Static(*offset),
-                SIROffset::Dynamic(offset) => SIROffset::Dynamic(mapped(*offset)),
-                SIROffset::Element {
-                    index,
-                    element_width,
-                    bit_offset,
-                    dynamic_bit_offset,
-                } => SIROffset::Element {
-                    index: mapped(*index),
-                    element_width: *element_width,
-                    bit_offset: *bit_offset,
-                    dynamic_bit_offset: dynamic_bit_offset.map(mapped),
-                },
-                SIROffset::PackedElements {
-                    bit_offset,
-                    element_width,
-                } => SIROffset::PackedElements {
-                    bit_offset: *bit_offset,
-                    element_width: *element_width,
-                },
-            },
-            *width,
-        ),
-        SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => return None,
-    })
+    });
+    *clone.defined_register_mut()? = dst;
+    Some(clone)
 }
 
 fn instruction_is_same_predicate_region_value(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
@@ -4180,14 +4099,7 @@ fn instruction_is_movable(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
 }
 
 fn instruction_has_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::Store(..)
-            | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    inst.has_side_effects()
 }
 
 #[cfg(test)]
@@ -4227,6 +4139,81 @@ mod tests {
                 terminator,
             },
         );
+    }
+
+    #[test]
+    fn single_predecessor_merge_reads_arguments_after_earlier_merges() {
+        // b0 -> b1(r1) passes r0; b2 -> b3(r2) passes b1's parameter r1.
+        // Merging b1 first replaces r1 with r0, so the b2 -> b3 merge must
+        // bind r2 to r0, not to the eliminated r1.
+        let mut register_map = HashMap::default();
+        for reg in 0..=3 {
+            register_map.insert(RegisterId(reg), bit(1));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            Vec::new(),
+            vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+            SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            vec![RegisterId(1)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(2), Vec::new()),
+                false_block: (BlockId(4), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(1)]),
+        );
+        insert_block(
+            &mut blocks,
+            3,
+            vec![RegisterId(2)],
+            vec![SIRInstruction::Store(
+                address(10),
+                SIROffset::Static(0),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Return,
+        );
+        insert_block(
+            &mut blocks,
+            4,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        merge_single_predecessor_jump_blocks(&mut eu);
+        eu.verify_result().unwrap();
+        let stored = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, _, source, _, _) => Some(*source),
+                _ => None,
+            });
+        assert_eq!(stored, Some(RegisterId(0)));
     }
 
     fn shared_dag_unit() -> ExecutionUnit<RegionedAbsoluteAddr> {

@@ -46,7 +46,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .iter()
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
-    let builder = Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state);
+    let builder = design.parameters.iter().fold(
+        Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),
+        |builder, (name, value)| builder.param(name, *value),
+    );
     // Only language errors satisfy a rejection case; an unsupported construct
     // or a code generation failure fails it.
     let rejected = |error: celox::SimulatorError| -> celox_test_suite::Error {
@@ -65,6 +68,20 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     Ok(match backend {
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
         "cranelift" => Box::new(CeloxBackend(builder.build_cranelift().map_err(rejected)?)),
+        "native-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_native()
+                .map_err(rejected)?,
+        )),
+        "cranelift-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_cranelift()
+                .map_err(rejected)?,
+        )),
         "wasm" => Box::new(CeloxBackend(builder.build_wasm().map_err(rejected)?)),
         _ => return Err(format!("unknown backend: {backend}").into()),
     })

@@ -8,18 +8,18 @@ See [investigation notes](../VERIFICATION_REPORT.md) for limitations and unresol
 
 | Result | Verilator | Icarus |
 | --- | ---: | ---: |
-| `passed` | 499 | 493 |
+| `passed` | 528 | 499 |
 | `rejected` | 1 | 8 |
 | `unexpected_accept` | 0 | 0 |
 | `mismatch` | 0 | 0 |
 | `emission_error` | 0 | 0 |
-| `compile_error` | 1 | 8 |
+| `compile_error` | 1 | 11 |
 | `runtime_error` | 0 | 0 |
-| `unsupported` | 113 | 0 |
-| `ignored` | 91 | 196 |
-| Total | 705 | 705 |
+| `unsupported` | 116 | 0 |
+| `ignored` | 91 | 219 |
+| Total | 737 | 737 |
 
-385 cases pass both simulators; 607 pass at least one. A pass in one tool does not resolve a disagreement with the other.
+389 cases pass both simulators; 638 pass at least one. A pass in one tool does not resolve a disagreement with the other.
 
 ## Assertion disagreements and execution errors
 
@@ -58,7 +58,8 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [icarus_function_inout](../LIMITATIONS.md#icarus-function-inout) | compile | 0 | 2 |
 | [icarus_function_outputs](../LIMITATIONS.md#icarus-function-outputs) | compile | 0 | 48 |
 | [icarus_instance_array_unpacked_port](../LIMITATIONS.md#icarus-instance-array-unpacked-port) | compile | 0 | 1 |
-| [icarus_interfaces](../LIMITATIONS.md#icarus-interfaces) | compile | 0 | 5 |
+| [icarus_interfaces](../LIMITATIONS.md#icarus-interfaces) | compile | 0 | 25 |
+| [icarus_modport_functions](../LIMITATIONS.md#icarus-modport-functions) | compile | 0 | 3 |
 | [icarus_package_types](../LIMITATIONS.md#icarus-package-types) | compile | 0 | 6 |
 | [icarus_sparse_memory_timeout](../LIMITATIONS.md#icarus-sparse-memory-timeout) | compile | 0 | 1 |
 | [icarus_two_state_zero_division](../LIMITATIONS.md#icarus-two-state-zero-division) | execute | 0 | 1 |

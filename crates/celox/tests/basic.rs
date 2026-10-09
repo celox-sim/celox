@@ -63,7 +63,6 @@ all_backends! {
     }
 
     fn test_always_comb_read_before_write_uses_previous_value(sim) {
-        @ignore_on(sv);
         @case "basic::test_always_comb_read_before_write_uses_previous_value";
     }
 
@@ -76,7 +75,6 @@ all_backends! {
     }
 
     fn test_comb_function_call_partial_write_local_temp(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_partial_write_local_temp";
     }
 
@@ -85,22 +83,18 @@ all_backends! {
     }
 
     fn test_comb_function_call_constant_folded_if_return(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_constant_folded_if_return";
     }
 
     fn test_comb_function_call_return_inside_for(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_return_inside_for";
     }
 
     fn test_comb_function_call_break_inside_for(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_break_inside_for";
     }
 
     fn test_comb_function_call_break_inside_dynamic_for(sim) {
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     count: input logic<3>,
@@ -144,7 +138,6 @@ module Top (
     }
 
     fn test_comb_function_call_nested_break_inside_dynamic_for(sim) {
-        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     count: input logic<3>,
@@ -195,157 +188,140 @@ module Top (
     }
 
     fn test_comb_function_call_statement_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_with_output_argument";
     }
 
     fn test_comb_function_call_expression_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_with_output_argument";
     }
 
     fn test_comb_function_call_expression_output_is_visible_to_later_operand(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_output_is_visible_to_later_operand";
     }
 
     fn test_comb_function_call_expression_with_constant_input_keeps_output_write(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_with_constant_input_keeps_output_write";
     }
 
     fn test_comb_function_call_expression_output_survives_system_function_wrapper(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_expression_output_survives_system_function_wrapper";
     }
 
     fn test_comb_function_call_with_output_argument_in_display_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_display_argument";
     }
 
     fn test_comb_function_call_with_output_argument_in_index_expression(sim) {
+        // SV frontend rejects a function call in a select index:
+        // "select index `f(sel, q_output)`" (#88).
         @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_index_expression";
     }
 
     fn test_comb_function_call_with_output_argument_in_destination_index(sim) {
+        // SV frontend rejects a destination index that calls a function with an output
+        // argument: "assignment target `data`" (#88).
         @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_destination_index";
     }
 
     fn test_comb_function_call_expression_output_is_guarded_by_ternary(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_is_guarded_by_ternary";
     }
 
     fn test_comb_function_call_expression_output_respects_short_circuit(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_respects_short_circuit";
     }
 
     fn test_comb_function_call_with_output_argument_in_if_condition(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_if_condition";
     }
 
     fn test_comb_function_call_with_output_argument_in_case_target(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_case_target";
     }
 
     fn test_comb_function_call_with_output_argument_in_loop_condition(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_loop_condition";
     }
 
     fn test_comb_nested_function_output_call_in_function_condition(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_nested_function_output_call_in_function_condition";
     }
 
     fn test_comb_case_target_output_call_is_evaluated_once(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_case_target_output_call_is_evaluated_once";
     }
 
     fn test_comb_loop_bound_output_call_writes_back_once(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_loop_bound_output_call_writes_back_once";
     }
 
     fn test_comb_value_system_function_statement_applies_argument_outputs(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_value_system_function_statement_applies_argument_outputs";
     }
 
     fn test_comb_value_system_function_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_value_system_function_after_dynamic_break_stays_inactive";
     }
 
     fn test_comb_effectful_if_condition_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_effectful_if_condition_after_dynamic_break_stays_inactive";
     }
 
     fn test_statement_call_inputs_follow_output_writeback_order(sim) {
-        @ignore_on(sv);
         @case "basic::test_statement_call_inputs_follow_output_writeback_order";
     }
 
     fn test_comb_effectful_case_after_dynamic_break_stays_inactive(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_effectful_case_after_dynamic_break_stays_inactive";
     }
 
     fn test_comb_function_condition_output_is_guarded_after_early_return(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "basic::test_comb_function_condition_output_is_guarded_after_early_return";
     }
 
     fn test_comb_function_call_statement_ignores_return_value(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_ignores_return_value";
     }
 
     fn test_comb_returning_output_function_reads_current_caller_store(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_returning_output_function_reads_current_caller_store";
     }
 
     fn test_comb_returning_output_function_allows_nested_output_call(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_returning_output_function_allows_nested_output_call";
     }
 
     fn test_comb_function_call_statement_preserves_return_control_flow(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_return_control_flow";
     }
 
     fn test_comb_function_call_statement_preserves_conditional_return_control_flow(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_conditional_return_control_flow";
     }
 
     fn test_comb_nested_function_call_statement_with_output_argument(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_nested_function_call_statement_with_output_argument";
     }
 
     fn test_comb_function_call_output_reads_current_caller_store(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_output_reads_current_caller_store";
     }
 
     fn test_comb_function_call_statement_with_output_argument_in_loop(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_with_output_argument_in_loop";
     }
 
     fn test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits";
     }
 
@@ -485,6 +461,77 @@ module test_o2_dse_preserves_signals_read_by_native_testbench {
     .unwrap();
 
     assert_eq!(result, TestResult::Pass);
+}
+
+#[test]
+fn test_dse_keeps_stores_read_through_identity_aliases() {
+    // Each child reads its enable port only combinationally, so the port
+    // shares the parent's wire as an identity alias and the parent never
+    // loads that wire itself. Lane partitioning puts the parent's store and
+    // the child's load into different units: dead-store elimination must
+    // count the load of the alias as a read of the shared home.
+    let code = r#"
+module Counter (
+    clk: input clock,
+    i_en: input logic,
+    i_mask: input logic,
+    o_count: output logic<8>,
+) {
+    var count: logic<8>;
+    let advance: logic = i_en & i_mask;
+    always_ff {
+        if advance {
+            count = count + 8'd1;
+        }
+    }
+    assign o_count = count;
+}
+
+module Top (
+    clk: input clock,
+    a: input logic<4>,
+    b: input logic<4>,
+    mask: input logic,
+    c0: output logic<8>,
+    c1: output logic<8>,
+    c2: output logic<8>,
+    c3: output logic<8>,
+) {
+    let en0: logic = a[0] ^ b[0];
+    let en1: logic = a[1] ^ b[1];
+    let en2: logic = a[2] ^ b[2];
+    let en3: logic = a[3] ^ b[3];
+    inst u0: Counter (clk, i_en: en0, i_mask: mask, o_count: c0);
+    inst u1: Counter (clk, i_en: en1, i_mask: mask, o_count: c1);
+    inst u2: Counter (clk, i_en: en2, i_mask: mask, o_count: c2);
+    inst u3: Counter (clk, i_en: en3, i_mask: mask, o_count: c3);
+}
+"#;
+    for threads in [1, 4] {
+        let mut sim = Simulator::builder(code, "Top")
+            .opt_level(OptLevel::O2)
+            .threads(threads)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build()
+            .unwrap();
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let mask = sim.signal("mask");
+        let counts = ["c0", "c1", "c2", "c3"].map(|name| sim.signal(name));
+
+        sim.modify(|io| {
+            io.set(a, 0b1111u8);
+            io.set(b, 0b0101u8);
+            io.set(mask, 1u8);
+        })
+        .unwrap();
+        for _ in 0..3 {
+            sim.tick(clk).unwrap();
+        }
+        let observed = counts.map(|count| sim.get_as::<u8>(count));
+        assert_eq!(observed, [0, 3, 0, 3], "threads={threads}");
+    }
 }
 
 #[test]

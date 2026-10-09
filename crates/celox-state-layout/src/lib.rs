@@ -16,7 +16,7 @@ pub use trace::{TRACE_GROUP_BYTES, TraceLayout};
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
-pub const STATE_HEADER_SIZE: usize = 32;
+pub const STATE_HEADER_SIZE: usize = 40;
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
 /// Remaining iterations for an in-function native tick loop.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -25,6 +25,8 @@ pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
 pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
+/// Address of the table of extern function pointers called by `ExternCall`.
+pub const STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET: usize = 32;
 /// Runtime-event write sequence observed when a native tick batch starts.
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
@@ -114,6 +116,41 @@ impl<A> LayoutRequirements<A> {
     }
 }
 
+/// Alignment of a lane's storage segment. Two 64-byte lines keep segments of
+/// different lanes out of each other's spatial-prefetch pairs and out of
+/// shared 128-byte lines on targets that use them.
+pub const LANE_SEGMENT_ALIGN: usize = 128;
+/// Minimum gap after a lane segment. Native code may widen a sub-word
+/// read-modify-write past the end of an object (up to eight bytes for a
+/// dynamic store plus its trailing byte); the gap keeps such accesses inside
+/// storage owned by the same lane.
+pub const LANE_SEGMENT_GUARD: usize = 16;
+
+/// Lanes that write each state home in lane-partitioned kernels, as a bit
+/// set per object. An absent object is not written by any partitioned unit.
+#[derive(Debug, Clone)]
+pub struct LaneWriters<A> {
+    pub stable: HashMap<A, u64>,
+    pub working: HashMap<A, u64>,
+    pub sparse: HashMap<A, u64>,
+}
+
+impl<A> Default for LaneWriters<A> {
+    fn default() -> Self {
+        Self {
+            stable: HashMap::default(),
+            working: HashMap::default(),
+            sparse: HashMap::default(),
+        }
+    }
+}
+
+impl<A> LaneWriters<A> {
+    pub fn is_empty(&self) -> bool {
+        self.stable.is_empty() && self.working.is_empty() && self.sparse.is_empty()
+    }
+}
+
 /// Complete, backend-independent input to physical layout construction.
 ///
 /// The compiler facade adapts its phase artifacts into this value. Layout
@@ -129,6 +166,10 @@ pub struct LayoutInput<A> {
     pub ff_referenced_addresses: HashSet<A>,
     pub num_events: usize,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Writer lanes of state homes in lane-partitioned kernels. Homes written
+    /// by exactly one lane are placed in that lane's segment; homes written by
+    /// several lanes are isolated in their own segment.
+    pub lane_writers: LaneWriters<A>,
 }
 
 /// Adapter implemented by the phase artifact that precedes physical layout.
@@ -189,6 +230,62 @@ fn sort_layout_objects<A: Copy + Ord>(objects: &mut [PhysicalLayoutObject<A>]) {
     });
 }
 
+/// Place sorted objects of one region starting at `start`.
+///
+/// Objects written by no lane-partitioned unit are packed first. Every lane's
+/// objects then follow in their own segment, and every object written by more
+/// than one lane gets a segment of its own. A segment starts on a
+/// [`LANE_SEGMENT_ALIGN`] boundary at least [`LANE_SEGMENT_GUARD`] bytes after
+/// the previous one, and the region ends with the same gap, so no access
+/// widened past one lane's object reaches storage written by another lane.
+/// Without writer information this is the ordinary packed placement.
+fn place_region<A: Copy + Eq + Hash>(
+    objects: Vec<PhysicalLayoutObject<A>>,
+    writers: &HashMap<A, u64>,
+    start: usize,
+    mut extent: impl FnMut(&PhysicalLayoutObject<A>) -> usize,
+    mut place: impl FnMut(&PhysicalLayoutObject<A>, usize),
+) -> usize {
+    let mut common = Vec::new();
+    let mut lanes: Vec<Vec<PhysicalLayoutObject<A>>> = Vec::new();
+    let mut isolated = Vec::new();
+    for object in objects {
+        match writers.get(&object.0).copied().unwrap_or(0) {
+            0 => common.push(object),
+            mask if mask.is_power_of_two() => {
+                let lane = mask.trailing_zeros() as usize;
+                if lanes.len() <= lane {
+                    lanes.resize_with(lane + 1, Vec::new);
+                }
+                lanes[lane].push(object);
+            }
+            _ => isolated.push(object),
+        }
+    }
+    let mut current = start;
+    let mut place_run = |current: &mut usize, run: Vec<PhysicalLayoutObject<A>>| {
+        for object in run {
+            *current = align_up(*current, object.4);
+            place(&object, *current);
+            *current += extent(&object);
+        }
+    };
+    place_run(&mut current, common);
+    let segments = lanes
+        .into_iter()
+        .filter(|run| !run.is_empty())
+        .chain(isolated.into_iter().map(|object| vec![object]))
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return current;
+    }
+    for run in segments {
+        current = align_up(current + LANE_SEGMENT_GUARD, LANE_SEGMENT_ALIGN);
+        place_run(&mut current, run);
+    }
+    align_up(current + LANE_SEGMENT_GUARD, LANE_SEGMENT_ALIGN)
+}
+
 impl<A> MemoryLayout<A>
 where
     A: Copy + Eq + Hash + Ord,
@@ -207,6 +304,7 @@ where
             ff_referenced_addresses,
             num_events,
             runtime_event_sites,
+            lane_writers,
         } = input;
 
         let mut stable_objects = state_objects
@@ -243,17 +341,18 @@ where
                 .unwrap_or(0)
                 * 8;
 
-        let mut current_offset = STATE_HEADER_SIZE;
-        for (address, width, is_4state, size, alignment) in stable_objects {
-            current_offset = align_up(current_offset, alignment);
-            offsets.insert(address, current_offset);
-            widths.insert(address, width);
-            is_4states.insert(address, is_4state);
-            current_offset += size;
-            if four_state {
-                current_offset += size;
-            }
-        }
+        let plane_count = if four_state { 2 } else { 1 };
+        let current_offset = place_region(
+            stable_objects,
+            &lane_writers.stable,
+            STATE_HEADER_SIZE,
+            |object| object.3 * plane_count,
+            |&(address, width, is_4state, _, _), offset| {
+                offsets.insert(address, offset);
+                widths.insert(address, width);
+                is_4states.insert(address, is_4state);
+            },
+        );
 
         let mut working_objects = working_addresses
             .iter()
@@ -273,15 +372,17 @@ where
         sort_layout_objects(&mut working_objects);
 
         let mut working_offsets = HashMap::default();
-        let mut working_size = 0;
-        for (address, _, _, size, alignment) in working_objects {
-            working_size = align_up(working_size, alignment);
-            working_offsets.insert(address, working_size);
-            working_size += size;
-            if four_state {
-                working_size += size;
-            }
-        }
+        // Working offsets are relative to a base aligned below; a segment
+        // boundary relative to that base keeps lane segments line-aligned.
+        let working_size = place_region(
+            working_objects,
+            &lane_writers.working,
+            0,
+            |object| object.3 * plane_count,
+            |&(address, ..), offset| {
+                working_offsets.insert(address, offset);
+            },
+        );
 
         let mut sparse_objects = sparse_addresses
             .iter()
@@ -301,24 +402,50 @@ where
         sort_layout_objects(&mut sparse_objects);
 
         let mut sparse_offsets = HashMap::default();
-        let mut sparse_size = 0usize;
-        for (address, _, _, size, alignment) in sparse_objects {
-            sparse_size = align_up(sparse_size, alignment);
-            sparse_offsets.insert(address, sparse_size);
-            let plane_count = if four_state { 2 } else { 1 };
-            let final_chunk_size = align_up(size, 8);
-            let physical_extent = (plane_count - 1) * size + final_chunk_size;
-            sparse_size += align_up(physical_extent, 8);
-        }
+        let sparse_size = place_region(
+            sparse_objects,
+            &lane_writers.sparse,
+            0,
+            |&(_, _, _, size, _)| {
+                let final_chunk_size = align_up(size, 8);
+                let physical_extent = (plane_count - 1) * size + final_chunk_size;
+                align_up(physical_extent, 8)
+            },
+            |&(address, ..), offset| {
+                sparse_offsets.insert(address, offset);
+            },
+        );
 
-        let working_base_offset = align_up(current_offset, 8);
-        let sparse_base_offset = align_up(working_base_offset + working_size, 8);
+        // Region bases keep segment alignment when lanes partition them.
+        let region_alignment = if lane_writers.is_empty() {
+            8
+        } else {
+            LANE_SEGMENT_ALIGN
+        };
+        let working_base_offset = align_up(current_offset, region_alignment);
+        let sparse_base_offset = align_up(working_base_offset + working_size, region_alignment);
         let mut sparse_metadata_offset = align_up(sparse_base_offset + sparse_size, 8);
         let mut sparse_layouts = HashMap::default();
         let mut sparse_order = sparse_addresses;
-        sparse_order.sort_unstable();
+        // Group per-object dirty/summary words by writer lane so one lane's
+        // metadata words do not share lines with another lane's.
+        let sparse_lane = |address: &A| {
+            lane_writers
+                .sparse
+                .get(address)
+                .copied()
+                .filter(|mask| mask.is_power_of_two())
+                .map_or(u32::MAX, u64::trailing_zeros)
+        };
+        sparse_order.sort_unstable_by_key(|address| (sparse_lane(address), *address));
+        let mut previous_sparse_lane = None;
         let sparse_active_capacity = sparse_order.len();
         for (active_index, address) in sparse_order.into_iter().enumerate() {
+            let lane = sparse_lane(&address);
+            if !lane_writers.is_empty() && previous_sparse_lane != Some(lane) {
+                sparse_metadata_offset = align_up(sparse_metadata_offset, LANE_SEGMENT_ALIGN);
+                previous_sparse_lane = Some(lane);
+            }
             let chunk_count = unpacked_arrays
                 .get(&address)
                 .map(|layout| layout.plane_size.div_ceil(8))
@@ -625,12 +752,111 @@ mod tests {
                     ff_referenced_addresses: HashSet::default(),
                     num_events: 0,
                     runtime_event_sites: Vec::new(),
+                    lane_writers: Default::default(),
                 }
             }
         }
 
         let layout = MemoryLayout::build(&AliasLayoutSource, false, MemoryLayoutMode::Packed);
         assert_eq!(layout.offsets[&1], layout.offsets[&2]);
+    }
+
+    #[test]
+    fn lane_writers_separate_homes_into_guarded_segments() {
+        struct LaneLayoutSource;
+
+        impl LayoutSource<u32> for LaneLayoutSource {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                let mut lane_writers = LaneWriters::default();
+                // 1: lane 0, 2: lane 1, 3: lanes 0 and 1, 4: no parallel writer.
+                lane_writers.stable.insert(1, 0b01);
+                lane_writers.stable.insert(2, 0b10);
+                lane_writers.stable.insert(3, 0b11);
+                lane_writers.working.insert(5, 0b10);
+                let object = |address, width| StateObjectLayout {
+                    address,
+                    width,
+                    is_4state: false,
+                };
+                LayoutInput {
+                    state_objects: vec![
+                        object(1, 24),
+                        object(2, 24),
+                        object(3, 8),
+                        object(4, 8),
+                        object(5, 40),
+                    ],
+                    working_addresses: vec![5],
+                    sparse_addresses: Vec::new(),
+                    unpacked_arrays: HashMap::default(),
+                    requirements: LayoutRequirements::default(),
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 0,
+                    runtime_event_sites: Vec::new(),
+                    lane_writers,
+                }
+            }
+        }
+
+        let layout = MemoryLayout::build(&LaneLayoutSource, false, MemoryLayoutMode::Packed);
+        let span = |address: u32| {
+            let start = layout.offsets[&address];
+            (start, start + layout.plane_size(&address))
+        };
+        // Unpartitioned objects stay packed after the header.
+        assert!(span(4).0 < span(1).0 && span(5).0 < span(1).0);
+        for address in [1, 2, 3] {
+            assert_eq!(span(address).0 % LANE_SEGMENT_ALIGN, 0);
+        }
+        // Every pair of segments is separated by at least the guard.
+        let mut segments = [span(1), span(2), span(3)];
+        segments.sort_unstable();
+        for pair in segments.windows(2) {
+            assert!(pair[0].1 + LANE_SEGMENT_GUARD <= pair[1].0, "{segments:?}");
+        }
+        // The next region starts after the trailing guard of the last segment.
+        assert!(segments[2].1 + LANE_SEGMENT_GUARD <= layout.working_base_offset);
+        assert_eq!(layout.working_base_offset % LANE_SEGMENT_ALIGN, 0);
+        assert_eq!(layout.working_offsets[&5] % LANE_SEGMENT_ALIGN, 0);
+    }
+
+    #[test]
+    fn layout_without_lane_writers_is_unchanged_by_partitioning_support() {
+        struct PackedSource;
+
+        impl LayoutSource<u32> for PackedSource {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                LayoutInput {
+                    state_objects: (0..6)
+                        .map(|address| StateObjectLayout {
+                            address,
+                            width: 8 + 7 * address as usize,
+                            is_4state: false,
+                        })
+                        .collect(),
+                    working_addresses: vec![1, 3],
+                    sparse_addresses: vec![2],
+                    unpacked_arrays: HashMap::default(),
+                    requirements: LayoutRequirements::default(),
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 9,
+                    runtime_event_sites: Vec::new(),
+                    lane_writers: LaneWriters::default(),
+                }
+            }
+        }
+
+        let layout = MemoryLayout::build(&PackedSource, false, MemoryLayoutMode::Packed);
+        // Objects remain tightly packed: the stable region ends right after
+        // the last object instead of after a lane guard.
+        let end = layout
+            .offsets
+            .keys()
+            .map(|address| layout.offsets[address] + layout.plane_size(address))
+            .max()
+            .unwrap();
+        assert_eq!(layout.total_size, end);
+        assert_eq!(layout.working_base_offset, align_up(end, 8));
     }
 
     #[test]
@@ -648,6 +874,7 @@ mod tests {
                     ff_referenced_addresses: HashSet::default(),
                     num_events: 3,
                     runtime_event_sites: Vec::new(),
+                    lane_writers: Default::default(),
                 }
             }
         }
@@ -680,7 +907,11 @@ mod tests {
                 STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
                     <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
             );
-            assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= STATE_HEADER_SIZE);
+            assert!(
+                STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8
+                    <= STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET
+            );
+            assert!(STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET + 8 <= STATE_HEADER_SIZE);
         }
     }
 }

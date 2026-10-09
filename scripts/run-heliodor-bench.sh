@@ -57,6 +57,7 @@ fi
 HELIODOR_COMPILE_ONLY="${HELIODOR_COMPILE_ONLY:-${HELIODOR_CELOX_COMPILE_ONLY:-0}}"
 HELIODOR_COMPILE_TIMEOUT_SEC="${HELIODOR_COMPILE_TIMEOUT_SEC:-${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
+HELIODOR_CELOX_THREADS="${HELIODOR_CELOX_THREADS:-$(nproc 2>/dev/null || echo 2)}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.3}"
 VERYL_BIN="${VERYL_BIN:-}"
@@ -111,11 +112,14 @@ Environment:
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
-                       Celox runners: celox, celox-cranelift, celox-interpreter, celox-tiered
+                       Celox runners: celox, celox-cranelift, celox-interpreter, celox-tiered,
+                       celox-parallel (native with HELIODOR_CELOX_THREADS threads)
                        Split-timing runners: veryl-cc-sync, veryl-cc-tiered
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
+  HELIODOR_CELOX_THREADS
+                       simulation threads of the celox-parallel runner (default: nproc)
   CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
@@ -1406,7 +1410,7 @@ timeout_sec_for() {
         printf '%s\n' "$HELIODOR_TIMEOUT_SEC"
         return
     fi
-    if [[ ("$runner" == celox || "$runner" == celox-tiered) \
+    if [[ ("$runner" == celox || "$runner" == celox-tiered || "$runner" == celox-parallel) \
         && -n "${BASELINE_ELAPSED_NS[$test]:-}" ]]; then
         local baseline_ns="${BASELINE_ELAPSED_NS[$test]}"
         local timeout_sec
@@ -1557,6 +1561,14 @@ run_one() {
                 process_status="$?"
             fi
             ;;
+        celox-parallel)
+            run_in_heliodor "$timeout_sec" "$log" \
+                "${celox_execution_command[@]}" \
+                --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
+                --threads "$HELIODOR_CELOX_THREADS"
+            process_status="$?"
+            ;;
         celox-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
@@ -1646,6 +1658,12 @@ run_one() {
                 result_valid=0
                 echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
             fi
+            if [[ "$runner" == celox-parallel && "$semantic_status" == pass ]] \
+                && ! grep -Fxq "CELOX_TEST_THREADS test=$test threads=$HELIODOR_CELOX_THREADS" "$log"; then
+                echo "error: celox-parallel log does not record $HELIODOR_CELOX_THREADS threads" >&2
+                semantic_status=invalid
+                result_valid=0
+            fi
             if [[ "$runner" == celox-tiered && "$semantic_status" == pass && -n "${HELIODOR_PUBLISH_ARCH:-}" ]]; then
                 if ! validate_gate_tiered_stats "$log" "$test"; then
                     semantic_status=invalid
@@ -1715,8 +1733,14 @@ run_all() {
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
+    if runner_enabled celox-parallel \
+        && { ! is_uint "$HELIODOR_CELOX_THREADS" || ((HELIODOR_CELOX_THREADS < 2)); }; then
+        echo "error: HELIODOR_CELOX_THREADS must be at least 2 for celox-parallel" >&2
+        return 2
+    fi
     if runner_enabled celox || runner_enabled celox-cranelift \
-        || runner_enabled celox-interpreter || runner_enabled celox-tiered; then
+        || runner_enabled celox-interpreter || runner_enabled celox-tiered \
+        || runner_enabled celox-parallel; then
         build_celox_runner
     fi
     if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then

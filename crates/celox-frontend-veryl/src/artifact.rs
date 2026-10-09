@@ -37,6 +37,10 @@ pub struct VerylSimModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    /// Independently evaluated parts of each FF trigger group, lowered only
+    /// for lane-partitioned builds.
+    pub parallel_ff_parts:
+        HashMap<TriggerSet<VarId>, Vec<crate::symbolic::artifact::FfPart<RegionedVarAddr>>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     /// Source instance declarations that explicitly have an array dimension.
     pub indexed_instance_names: crate::HashSet<StrId>,
@@ -410,6 +414,19 @@ pub(crate) fn project_module_with_ids(
             eval_only_ff_blocks: map_units(&module.eval_only_ff_blocks),
             apply_ff_blocks: map_units(&module.apply_ff_blocks),
             eval_apply_ff_blocks: map_units(&module.eval_apply_ff_blocks),
+            parallel_ff_parts: module
+                .parallel_ff_parts
+                .iter()
+                .map(|(trigger, parts)| {
+                    (
+                        map_trigger(trigger, &ids),
+                        parts
+                            .iter()
+                            .map(|part| part.map_units(|unit| map_execution_unit(unit, &ids)))
+                            .collect(),
+                    )
+                })
+                .collect(),
             glue_blocks: module
                 .glue_blocks
                 .iter()
@@ -448,6 +465,7 @@ pub(crate) fn project_module_with_ids(
                 })
                 .collect(),
             runtime_event_sites: module.runtime_event_sites.clone(),
+            extern_functions: Vec::new(),
             initial_memory_values: module
                 .initial_memory_values
                 .iter()

@@ -47,7 +47,6 @@ fn rejects_invalid_or_unsupported_struct_shapes() {
         "struct packed { logic a; } value; assign y = value.missing;",
         "struct packed { logic [3:0] a; } value; assign y = value.a[index];",
         "struct packed { logic a; } value[2]; assign y = value[0].a;",
-        "typedef struct packed { logic a; } t; t value; function automatic logic f(input t arg); return arg.a; endfunction assign y = f(value);",
         "typedef struct packed { logic a; logic b; } t; localparam t P = 2'b10; if (P.b) assign y = 1; else assign y = 0;",
     ] {
         let source = format!("module Top(input bit index, output logic y); {body} endmodule");
@@ -130,8 +129,9 @@ fn preserves_packed_dimensions_on_struct_aliases() {
     )
     .unwrap();
     for (name, width, signed) in [
-        ("pair", 16, true),
-        ("triple", 48, true),
+        // A packed array of signed structs is unsigned (IEEE 1800-2023 7.4.1).
+        ("pair", 16, false),
+        ("triple", 48, false),
         ("nested", 17, false),
     ] {
         let ty = ir.modules()[0]

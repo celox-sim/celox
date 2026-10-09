@@ -67,6 +67,7 @@ macro_rules! outputs_now {
 all_backends! {
     fn restore_replays_the_same_cycles(sim) {
         @omit_veryl;
+        // SV frontend rejects a part-select used as an index: "select index `c[1:0]`" (#88).
         @ignore_on(sv);
         @build Simulator::builder(DESIGN, "Top");
         run_cycles!(sim, 0..5);
@@ -82,7 +83,6 @@ all_backends! {
 
     fn restore_keeps_four_state_values(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @build Simulator::builder(
             r#"
             module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
@@ -106,7 +106,6 @@ all_backends! {
 
     fn restore_replays_runtime_events(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @build Simulator::builder(
             r#"
             module Top (clk: input clock, a: input logic<8>, q: output logic<8>) {

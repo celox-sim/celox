@@ -71,6 +71,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             signed: r#type.is_signed,
             is_2state: r#type.kind == TypeKind::Bit,
             members: r#type.members.clone(),
+            signed_element_depth: r#type.signed_element_depth,
         },
     );
     result
@@ -151,7 +152,9 @@ pub(in crate::ast) fn member_first_dimension_width(
                 syntax_tree,
                 &dimensions.const_env,
                 &dimensions.type_aliases,
-            )?;
+            )
+            .ok()
+            .flatten()?;
             eval_ast_const_expr(&expr, &dimensions.const_env)
         };
         return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
@@ -173,9 +176,11 @@ pub(in crate::ast) fn variable_member(
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
-) -> Option<LValue> {
-    let path = variable_path(node, select, syntax_tree)?;
-    let (offset, r#type) = selected_member(&path, dimensions)?;
+) -> Converted<LValue> {
+    let path = variable_path(node, select, syntax_tree)
+        .ok_or_else(|| unsupported("member access through an indexed structure"))?;
+    let (offset, r#type) = selected_member(&path, dimensions)
+        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
     let mut leaf_select = select.clone();
     leaf_select.nodes.0 = None;
     let relative = super::super::selects::lvalue_from_select(
@@ -185,7 +190,12 @@ pub(in crate::ast) fn variable_member(
         &member_dimensions(&path[0], r#type, dimensions),
         true,
     )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions)
+    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+        unsupported(format!(
+            "select of structure member `{}` outside the member",
+            path.join(".")
+        ))
+    })
 }
 
 pub(in crate::ast) fn net_member(
@@ -193,24 +203,26 @@ pub(in crate::ast) fn net_member(
     select: &sv_parser::ConstantSelect,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
-) -> Option<LValue> {
-    let mut path = hierarchical_path(node, syntax_tree)?;
+) -> Converted<LValue> {
+    let indexed = || unsupported("member access through an indexed structure");
+    let mut path = hierarchical_path(node, syntax_tree).ok_or_else(indexed)?;
     if let Some((members, _, last)) = &select.nodes.0 {
         for (_, name, indices) in members {
             if !indices.nodes.0.is_empty() {
-                return None;
+                return Err(indexed());
             }
-            path.push(identifier_text(
-                RefNode::MemberIdentifier(name),
-                syntax_tree,
-            )?);
+            path.push(
+                identifier_text(RefNode::MemberIdentifier(name), syntax_tree)
+                    .ok_or_else(|| unsupported("structure member name"))?,
+            );
         }
-        path.push(identifier_text(
-            RefNode::MemberIdentifier(last),
-            syntax_tree,
-        )?);
+        path.push(
+            identifier_text(RefNode::MemberIdentifier(last), syntax_tree)
+                .ok_or_else(|| unsupported("structure member name"))?,
+        );
     }
-    let (offset, r#type) = selected_member(&path, dimensions)?;
+    let (offset, r#type) = selected_member(&path, dimensions)
+        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
     let mut leaf_select = select.clone();
     leaf_select.nodes.0 = None;
     let relative = super::super::selects::lvalue_from_constant_select(
@@ -220,5 +232,10 @@ pub(in crate::ast) fn net_member(
         &member_dimensions(&path[0], r#type, dimensions),
         true,
     )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions)
+    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+        unsupported(format!(
+            "select of structure member `{}` outside the member",
+            path.join(".")
+        ))
+    })
 }

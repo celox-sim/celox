@@ -96,6 +96,9 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
     if backend == "veryl" {
+        if !design.parameters.is_empty() {
+            return Err("the veryl-simulator adapter cannot set top parameters".into());
+        }
         return Ok(Box::new(VerylBackend(
             super::veryl_sim::build_veryl_adapter(&sources, &design.top, design.four_state),
         )));
@@ -104,16 +107,34 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     if backend == "sv" {
         return build_sv(design, &sources);
     }
-    let builder = Simulator::from_sources(sources, &design.top)
-        .four_state(design.four_state)
-        .allow_always_ff_function_effects(true);
+    let builder = design.parameters.iter().fold(
+        Simulator::from_sources(sources, &design.top)
+            .four_state(design.four_state)
+            .allow_always_ff_function_effects(true),
+        |builder, (name, value)| builder.param(name, *value),
+    );
     Ok(match backend {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         "native" => Box::new(CeloxBackend(
             builder.build_native().map_err(classify_build_error)?,
         )),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        "native-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_native()
+                .map_err(classify_build_error)?,
+        )),
         "cranelift" => Box::new(CeloxBackend(
             builder.build_cranelift().map_err(classify_build_error)?,
+        )),
+        "cranelift-parallel" => Box::new(CeloxBackend(
+            builder
+                .threads(4)
+                .parallel_partition(celox::ParallelPartition::Always)
+                .build_cranelift()
+                .map_err(classify_build_error)?,
         )),
         "wasm" => Box::new(CeloxBackend(
             builder.build_wasm().map_err(classify_build_error)?,
@@ -153,8 +174,14 @@ pub fn classify_build_error(error: SimulatorError) -> celox_test_suite::Error {
 fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box<dyn Backend>> {
     let emitted = super::veryl_sv::emit_veryl_sources(sources);
     Ok(Box::new(CeloxBackend(
-        Simulator::from_sv_sources(emitted.as_sv_sources(), &design.top)
-            .four_state(design.four_state)
+        design
+            .parameters
+            .iter()
+            .fold(
+                Simulator::from_sv_sources(emitted.as_sv_sources(), &design.top)
+                    .four_state(design.four_state),
+                |builder, (name, value)| builder.param(name, *value),
+            )
             .build()
             .map_err(classify_build_error)?,
     )))

@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**684 actual passes / 705** and 21 recorded exceptions. The raw test executable
+**713 actual passes / 737** and 24 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 684 passes comprise 673 observation-checked cases, three smoke-only cases and
+The 713 passes comprise 702 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.
@@ -87,7 +87,7 @@ jobs/tests may separately use external solvers; they are not this path.
 ## Coverage and audit contract
 
 `coverage-manifest.json` pins every case, expectation/category, source
-location and parsed-script hash, actual design/protocol identity, read/operation counts, and exact
+location and a hash of its script text, actual design/protocol identity, read/operation counts, and exact
 compiler-rejection disposition. It contains hashes and counts, not expected
 hardware output tables. Protocol hashes may indirectly reflect read-dependent
 stimuli; they are execution-coverage drift guards requiring review, not independent
@@ -107,8 +107,14 @@ and exact failure message:
   unsynthesizable (veryl-lang/veryl#2604).
 - `unsupported_by_proof_backend`: twelve cases drive their design from a native
   Veryl testbench (`Backend::run_testbench`), which this backend does not run.
-- `known_celox_failure`: three cases that the Celox frontend gets wrong today and
-  that Celox's own tests also ignore on every backend.
+- `known_celox_failure`: five cases that the Celox frontend gets wrong today and
+  that Celox's own tests also ignore on every backend. Four of them depend on
+  logic declared inside an interface, which the Veryl analyzer IR drops.
+- `celox_unsupported`: one case whose design the Celox frontend refuses with a
+  typed `Unsupported` error (generic interface ports, #1088). The bridge reports
+  it as `frontend_unsupported`, which is neither a source rejection nor a
+  backend fault: a `CompilationError` case cannot pass through it, and the gate
+  accepts it only under this exception kind.
 
 A different failure, a legal-source mutation, or an unexpected success fails the
 stale exception, which must then be reviewed. There is no catch-all skip or

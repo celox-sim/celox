@@ -1,6 +1,7 @@
 //! Source-language-independent symbolic lowering and scheduling.
 
 mod error;
+pub mod memory_file;
 mod sdk;
 pub mod shared;
 pub mod symbolic;
@@ -15,6 +16,7 @@ pub use shared::{
 pub use trace::{FrontendTrace, FrontendTraceOptions, TraceSimModule};
 
 pub use symbolic::flattening;
+pub use symbolic::parallel::ParallelScheduleOptions;
 
 pub(crate) type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub(crate) type HashSet<T> = fxhash::FxHashSet<T>;

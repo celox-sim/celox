@@ -11,11 +11,15 @@ pub use celox_design::{BinaryOp, DomainKind, TriggerIdWithKind, UnaryOp};
 pub mod analysis;
 pub mod builder;
 pub mod cfg;
+pub mod effects;
+pub mod extern_abi;
 mod serde_helpers;
 pub mod transform;
+pub mod two_state;
 pub mod verify;
 
 pub use builder::SIRBuilder;
+pub use effects::MemoryAccess;
 pub use transform::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs,
     merge_sir_eu_refs_with_provenance, merge_sir_eus,
@@ -34,6 +38,118 @@ pub struct SirProgram<EventAddr, StateAddr> {
     pub eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    /// Lane-partitioned alternatives of the hot phases, present only when
+    /// compilation requested more than one simulation lane.
+    pub parallel: Option<ParallelSirProgram<EventAddr, StateAddr>>,
+}
+
+/// One execution unit of a lane-partitioned kernel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
+pub struct LaneUnit<A> {
+    /// Worker lane that executes the unit.
+    pub lane: u32,
+    pub unit: ExecutionUnit<A>,
+}
+
+impl<A> LaneUnit<A> {
+    pub fn new(lane: u32, unit: ExecutionUnit<A>) -> Self {
+        Self { lane, unit }
+    }
+
+    fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> LaneUnit<B> {
+        LaneUnit {
+            lane: self.lane,
+            unit: self.unit.into_map_addr(map),
+        }
+    }
+}
+
+/// Lane-partitioned alternative of one FF event.
+///
+/// Running every evaluation and then every application in list order is
+/// equivalent to the event's sequential evaluate-and-apply kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelFfKernel<A> {
+    /// Next-state evaluations. They publish only staged (working or sparse)
+    /// state.
+    pub evaluations: Vec<LaneUnit<A>>,
+    /// Publications of staged state.
+    pub applications: Vec<LaneUnit<A>>,
+}
+
+impl<A> ParallelFfKernel<A> {
+    /// Units in their sequential order.
+    pub fn units(&self) -> impl Iterator<Item = &LaneUnit<A>> {
+        self.evaluations.iter().chain(&self.applications)
+    }
+
+    pub fn units_mut(&mut self) -> impl Iterator<Item = &mut LaneUnit<A>> {
+        self.evaluations.iter_mut().chain(&mut self.applications)
+    }
+}
+
+/// Lane-partitioned alternatives of the hot simulation phases.
+///
+/// Every unit list is a valid sequential order: running its units one after
+/// another is equivalent to the corresponding sequential kernel. A unit's lane
+/// is a placement decision. The happens-before relation used for concurrent
+/// execution is derived later from the units' final memory effects.
+#[derive(Debug, Clone)]
+pub struct ParallelSirProgram<EventAddr, StateAddr> {
+    pub lanes: u32,
+    /// Partitioned combinational settle. Empty when partitioning the
+    /// combinational schedule was not profitable.
+    pub eval_comb: Vec<LaneUnit<StateAddr>>,
+    pub eval_apply_ffs: HashMap<EventAddr, ParallelFfKernel<StateAddr>>,
+}
+
+impl<EventAddr, StateAddr> ParallelSirProgram<EventAddr, StateAddr> {
+    /// Every unit of every partitioned kernel.
+    pub fn units(&self) -> impl Iterator<Item = &LaneUnit<StateAddr>> {
+        self.eval_comb.iter().chain(
+            self.eval_apply_ffs
+                .values()
+                .flat_map(ParallelFfKernel::units),
+        )
+    }
+
+    pub fn units_mut(&mut self) -> impl Iterator<Item = &mut LaneUnit<StateAddr>> {
+        self.eval_comb.iter_mut().chain(
+            self.eval_apply_ffs
+                .values_mut()
+                .flat_map(ParallelFfKernel::units_mut),
+        )
+    }
+}
+
+impl<A> ExecutionUnit<A> {
+    /// Consume the unit while replacing its address identities.
+    pub fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> ExecutionUnit<B> {
+        ExecutionUnit {
+            entry_block_id: self.entry_block_id,
+            blocks: self
+                .blocks
+                .into_iter()
+                .map(|(id, block)| {
+                    (
+                        id,
+                        BasicBlock {
+                            id: block.id,
+                            params: block.params,
+                            instructions: block
+                                .instructions
+                                .into_iter()
+                                .map(|instruction| instruction.into_map_addr(&mut *map))
+                                .collect(),
+                            terminator: block.terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map: self.register_map,
+        }
+    }
 }
 
 impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
@@ -53,29 +169,7 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
             unit: ExecutionUnit<A>,
             map: &mut impl FnMut(A) -> B,
         ) -> ExecutionUnit<B> {
-            ExecutionUnit {
-                entry_block_id: unit.entry_block_id,
-                blocks: unit
-                    .blocks
-                    .into_iter()
-                    .map(|(id, block)| {
-                        (
-                            id,
-                            BasicBlock {
-                                id: block.id,
-                                params: block.params,
-                                instructions: block
-                                    .instructions
-                                    .into_iter()
-                                    .map(|instruction| instruction.into_map_addr(&mut *map))
-                                    .collect(),
-                                terminator: block.terminator,
-                            },
-                        )
-                    })
-                    .collect(),
-                register_map: unit.register_map,
-            }
+            unit.into_map_addr(map)
         }
 
         fn map_groups<E, NE, A, B>(
@@ -114,6 +208,35 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
             ),
             eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
             apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
+            parallel: self.parallel.map(|parallel| ParallelSirProgram {
+                lanes: parallel.lanes,
+                eval_comb: parallel
+                    .eval_comb
+                    .into_iter()
+                    .map(|unit| unit.into_map_addr(&mut map_state))
+                    .collect(),
+                eval_apply_ffs: parallel
+                    .eval_apply_ffs
+                    .into_iter()
+                    .map(|(event, kernel)| {
+                        (
+                            map_event(event),
+                            ParallelFfKernel {
+                                evaluations: kernel
+                                    .evaluations
+                                    .into_iter()
+                                    .map(|unit| unit.into_map_addr(&mut map_state))
+                                    .collect(),
+                                applications: kernel
+                                    .applications
+                                    .into_iter()
+                                    .map(|unit| unit.into_map_addr(&mut map_state))
+                                    .collect(),
+                            },
+                        )
+                    })
+                    .collect(),
+            }),
         }
     }
 }
@@ -458,6 +581,9 @@ impl SIROffset {
     }
 }
 
+/// The largest number of arguments an [`SIRInstruction::ExternCall`] passes.
+pub const MAX_EXTERN_CALL_ARGUMENTS: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(serialize = "Addr: Serialize", deserialize = "Addr: Deserialize<'de>"))]
 pub enum SIRInstruction<Addr> {
@@ -500,6 +626,20 @@ pub enum SIRInstruction<Addr> {
         old: RegisterId,
         new: RegisterId,
         sites: Vec<u32>,
+    },
+    /// Calls an external function through the platform C ABI (a
+    /// SystemVerilog DPI-C import).
+    ///
+    /// `func` indexes the design's extern function table. Each argument and
+    /// the result are C integers whose type follows from the register: a
+    /// `Bit { width, signed }` register is an integer of that width and
+    /// signedness, and a one-bit `Logic` register is an `svLogic` holding
+    /// `value | mask << 1`. A call takes at most
+    /// [`MAX_EXTERN_CALL_ARGUMENTS`] arguments.
+    ExternCall {
+        dst: Option<RegisterId>,
+        func: u32,
+        args: Vec<RegisterId>,
     },
 }
 
@@ -605,27 +745,23 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     old.0, new.0, sites
                 )
             }
+            SIRInstruction::ExternCall { dst, func, args } => {
+                if let Some(dst) = dst {
+                    write!(f, "r{} = ", dst.0)?;
+                }
+                write!(f, "ExternCall(func={}, args=[", func)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "r{}", arg.0)?;
+                }
+                write!(f, "])")
+            }
         }
     }
 }
 impl<A> SIRInstruction<A> {
-    pub fn defined_register(&self) -> Option<RegisterId> {
-        match self {
-            SIRInstruction::Imm(dst, _)
-            | SIRInstruction::Binary(dst, _, _, _)
-            | SIRInstruction::Unary(dst, _, _)
-            | SIRInstruction::Load(dst, _, _, _)
-            | SIRInstruction::Concat(dst, _)
-            | SIRInstruction::Slice(dst, _, _, _)
-            | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-            SIRInstruction::Store(..)
-            | SIRInstruction::Commit(..)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
-        }
-    }
-
     pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B> {
         match self {
             SIRInstruction::Imm(register_id, value) => SIRInstruction::Imm(register_id, value),
@@ -663,6 +799,9 @@ impl<A> SIRInstruction<A> {
             },
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
+            }
+            SIRInstruction::ExternCall { dst, func, args } => {
+                SIRInstruction::ExternCall { dst, func, args }
             }
         }
     }
@@ -720,6 +859,11 @@ impl<A> SIRInstruction<A> {
                     sites: sites.clone(),
                 }
             }
+            SIRInstruction::ExternCall { dst, func, args } => SIRInstruction::ExternCall {
+                dst: *dst,
+                func: *func,
+                args: args.clone(),
+            },
         }
     }
 }
@@ -948,6 +1092,7 @@ mod program_mapping_tests {
             eval_comb_apply_ffs: HashMap::default(),
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
+            parallel: None,
         };
 
         let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);

@@ -143,6 +143,10 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                 "Bit select expressions must be a constant integral value."
                     | "Indexed part select base expression must be a constant integral value in this context."
                     | "Output port expression must support a continuous assignment."
+                    // IEEE 1800-2023 6.22.2 and 7.6: unpacked arrays of
+                    // nonequivalent element types or different sizes.
+                    | "Element types are not compatible in array assignment."
+                    | "Unpacked dimensions are not compatible in array assignment."
             ) || (error.starts_with("A reference to a net or variable (`")
                 && error.ends_with("') is not allowed in a constant expression."))
                 || (error.starts_with("Array ") && error.ends_with(" needs an array index here."))
@@ -151,7 +155,12 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     && error.ends_with("' has already been declared in this scope."))
                 // IEEE 1800-2023 23.3.3.5: an instance array connection width.
                 || (error.starts_with("Port expression width ")
-                    && error.contains(" does not match expected width "));
+                    && error.contains(" does not match expected width "))
+                // IEEE 1800-2023 6.20.1: an override of a localparam.
+                || (error.starts_with("Cannot override parameter `")
+                    && error.ends_with(
+                        "Parameter cannot be overridden in the scope it has been declared in.",
+                    ));
             if invalid_source {
                 rejected = true;
             } else if !(error.starts_with("Function ") && error.ends_with(" is not an input port."))

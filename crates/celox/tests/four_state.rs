@@ -16,7 +16,7 @@ fn test_four_state_initial_and_set(sim) {
 }
 
 fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "four_state::test_ff_struct_logic_to_bit_coercion_clears_mask";
 }
 
@@ -110,7 +110,6 @@ fn test_four_state_always_comb_chain(sim) {
 // always_ff: X captured in FF, reset clears X
 // ==========================================================================
 fn test_four_state_ff_capture_and_reset(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_ff_capture_and_reset";
 }
 
@@ -278,7 +277,6 @@ fn test_four_state_width_widening_with_x(sim) {
 // P2: FF with conditional assignment + X
 // ==========================================================================
 fn test_four_state_ff_conditional_with_x(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_ff_conditional_with_x";
 }
 
@@ -475,7 +473,6 @@ fn test_four_state_concat_chunk_boundary_x(sim) {
 // FF: synchronous reset + X
 // ==========================================================================
 fn test_four_state_ff_sync_reset_with_x(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_ff_sync_reset_with_x";
 }
 

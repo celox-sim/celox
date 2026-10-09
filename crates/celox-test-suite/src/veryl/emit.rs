@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use veryl_analyzer::{Analyzer, Context, attribute_table, ir::Ir, symbol_table};
+use veryl_analyzer::{Analyzer, Context, ir::Ir, symbol_table};
 use veryl_emitter::Emitter;
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
@@ -76,15 +76,31 @@ pub fn emit_verification_sources(sources: &[(&str, &Path)], top: &str) -> Emitte
     emit_sources(sources, Some(top))
 }
 
-fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSources {
-    symbol_table::clear();
-    attribute_table::clear();
+/// Whether an analyzer error blocks emission. Celox's Veryl tests may
+/// authorize combinational loops per path, and the emitted SystemVerilog
+/// expresses such a loop directly; every other error blocks emission.
+fn blocks_emission(error: &veryl_analyzer::AnalyzerError, testbench: Option<&str>) -> bool {
+    error.is_error()
+        && (testbench.is_some()
+            || !matches!(
+                error,
+                veryl_analyzer::AnalyzerError::CombinationalLoop { .. }
+            ))
+}
 
+fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSources {
     let mut metadata = Metadata::create_default("prj").unwrap();
     // In-memory test designs name their top module without a project prefix.
     metadata.build.omit_project_prefix = true;
     metadata.build.strip_comments = true;
 
+    // The analyzer's tables are thread-local and the external runners emit
+    // several designs on one worker thread. Reset all of them (not only the
+    // symbol and attribute tables): a type DAG left by an earlier design makes
+    // `analyze_post_pass1` panic on a later design reusing the same names.
+    // `Analyzer::new` registers project symbols, so clear before creating the
+    // analyzer that is used.
+    Analyzer::new(&metadata).clear();
     let analyzer = Analyzer::new(&metadata);
     let mut parsed_sources = Vec::with_capacity(sources.len());
 
@@ -112,14 +128,14 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
     for (_, _, parsed) in &parsed_sources {
         let errors = analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
         assert!(
-            !errors.iter().any(|error| error.is_error()),
+            !errors.iter().any(|error| blocks_emission(error, testbench)),
             "Veryl analyze_pass2 errors: {errors:?}"
         );
     }
 
     let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(
-        !errors.iter().any(|error| error.is_error()),
+        !errors.iter().any(|error| blocks_emission(error, testbench)),
         "Veryl analyze_post_pass2 errors: {errors:?}"
     );
 
@@ -272,6 +288,7 @@ impl crate::Frontend for VerylFrontend {
             outputs: module.outputs.clone(),
             edges: edges.clone(),
             max_width: emitted.max_width(),
+            parameters: design.parameters.clone(),
             arrays: module
                 .arrays
                 .iter()

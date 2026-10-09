@@ -282,6 +282,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::UnoptimizedSir {
         &[],
         &[],
         false,
+        &celox_frontend_core::ParallelScheduleOptions::default(),
         &celox_frontend_core::FrontendTraceOptions::default(),
         None,
     )

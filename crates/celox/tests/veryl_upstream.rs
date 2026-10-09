@@ -5,8 +5,6 @@ mod test_utils;
 
 all_backends! {
     fn constant_arrays_initialize_comb_and_ff_reads(sim) {
-        // SV frontend issue #64: constant arrays and four-state FF event signals.
-        @ignore_on(sv);
         @case "veryl_regressions::constant_arrays_initialize_comb_and_ff_reads";
     }
 
@@ -15,15 +13,14 @@ all_backends! {
     }
 
     fn inside_outside_range_endpoints(sim) {
-        // SV frontend issue #64: unsupported set-membership assignment expressions.
-        @ignore_on(sv);
         @case "veryl_language::inside_outside_range_endpoints";
     }
     fn parameter_expression_type_cast_widths(sim) {
         @case "veryl_language::parameter_expression_type_cast_widths";
     }
     fn packed_union_members_alias(sim) {
-        // SV frontend issue #64: unsupported packed struct/union types.
+        // SV frontend does not support packed unions:
+        // "unpacked struct, union, or unsupported packed struct member" (#440).
         @ignore_on(sv);
         @case "veryl_language::packed_union_members_alias";
     }
@@ -43,7 +40,8 @@ all_backends! {
         @case "veryl_regressions::wide_ternary_narrow_branch_no_spill";
     }
     fn nested_array_index_const_array(sim) {
-        // SV frontend issue #64 rejects the constant-array assignment expression.
+        // SV frontend rejects `mem[A[idx]]` (index read from an unpacked-array localparam):
+        // "combinational expression assigned to `nested`" (#88).
         @ignore_on(sv);
         @case "veryl_regressions::nested_array_index_const_array";
     }
@@ -51,8 +49,6 @@ all_backends! {
         @case "veryl_regressions::inst_port_default_value_connected_not_folded";
     }
     fn inlined_function_per_callsite_scratch_in_continuous_assign(sim) {
-        // SV frontend issue #64: unsupported cast expressions.
-        @ignore_on(sv);
         @case "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign";
     }
 }

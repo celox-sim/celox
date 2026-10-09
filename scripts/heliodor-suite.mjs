@@ -18,9 +18,19 @@ export const workloads = [
   "test_soc_71v_linux_boot",
 ];
 export const runners = ["veryl-cc-sync", "celox", "celox-tiered", "veryl-cc-tiered"];
+// Multi-threaded Celox runs only on SMP workloads, in its own group so the
+// existing comparison groups keep their time budgets.
+export const parallelRunner = "celox-parallel";
+export const allRunners = [...runners, parallelRunner];
+const isSmp = test => /_smp_linux_boot_\d+hart$/.test(test);
 const hosts = { x86_64: "ubuntu-24.04", aarch64: "ubuntu-24.04-arm" };
 
 function backendGroups(test, arch) {
+  const parallel = isSmp(test) ? [{ group: "parallel", runners: [parallelRunner] }] : [];
+  return [...comparisonGroups(test, arch), ...parallel];
+}
+
+function comparisonGroups(test, arch) {
   // Recent complete N=8 boots total 10–13 hours on x86 and 17–18 on ARM.
   // Even pairs can exceed the hosted job limit, so keep those runs separate.
   if (test.endsWith("8hart")) return runners.map(r => ({ group: r, runners: [r] }));
@@ -44,12 +54,12 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
   }
   const selected = runner.trim().split(/\s+/).filter(Boolean);
   for (const value of selected) {
-    if (!runners.includes(value)) throw new Error(`Unknown suite runner: ${value}`);
+    if (!allRunners.includes(value)) throw new Error(`Unknown suite runner: ${value}`);
   }
   if (new Set(selected).size !== selected.length) throw new Error("Duplicate suite runner");
   // Run each comparison group sequentially on one VM. Selection narrows a
   // group; it never combines long runs that were deliberately split apart.
-  const requested = selected.length ? selected : runners;
+  const requested = selected.length ? selected : allRunners;
   return { include: Object.entries(hosts).flatMap(([a, os]) =>
     workloads.flatMap(t => backendGroups(t, a).map(g => ({
       arch: a, os, test: t, group: g.group,

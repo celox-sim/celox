@@ -23,6 +23,8 @@ host-runtime = [
     "celox-sir-opt/timing",
 ]
 systemverilog = ["dep:celox-frontend-sv"]
+# Accept SystemVerilog DPI-C imports, linked to C functions at build time.
+sv-dpi = ["systemverilog", "celox-frontend-sv/dpi"]
 arm64-codegen = ["host-runtime", "dep:celox-backend-arm64"]
 x86_64-codegen = [
     "host-runtime",
@@ -84,6 +86,7 @@ libc.workspace = true
 
 [dev-dependencies]
 celox-test-suite = { workspace = true, features = ["emit"] }
+celox-sv-analyzer = { workspace = true }
 insta      = "1.46"
 libc.workspace = true
 criterion  = "0.8"
@@ -113,6 +116,11 @@ name = "systemverilog"
 path = "tests/systemverilog.rs"
 required-features = ["systemverilog"]
 
+[[test]]
+name = "sv_dpi"
+path = "tests/sv_dpi.rs"
+required-features = ["sv-dpi"]
+
 [[bench]]
 name = "compilation"
 harness = false
@@ -121,6 +129,11 @@ bench = false
 [[bench]]
 name = "tiered"
 harness = false
+
+[[example]]
+name = "sv_tests"
+path = "examples/sv_tests.rs"
+required-features = ["systemverilog"]
 
 [[example]]
 name = "frontend_binary"

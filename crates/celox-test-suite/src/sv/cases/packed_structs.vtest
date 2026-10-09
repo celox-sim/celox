@@ -104,3 +104,159 @@
     (assert_eq high (fourstate (>> value 8) (>> mask 8)))
     (assert_eq low (fourstate (& value 255) (& mask 255)))
     (assert_eq widths 34)))
+
+(case packed_struct_layout_and_nested_fields
+  (source "packed_struct_layout.sv" #"
+                module Top(input logic [15:0] raw, output logic [7:0] payload,
+                           output logic [3:0] tag, output logic signed [7:0] delta,
+                           output logic [15:0] whole, output logic [1:0] part);
+                    typedef struct packed { logic [3:0] tag; logic signed [3:0] delta; } header_t;
+                    typedef struct packed { header_t header; logic [7:0] payload; } packet_t;
+                    packet_t packet;
+                    assign packet = raw;
+                    assign payload = packet.payload;
+                    assign tag = packet.header.tag;
+                    assign delta = packet.header.delta;
+                    assign part = packet.payload[5:4];
+                    assign whole = packet;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 0x1234 0xa8ff 0xffff)
+    (modify (set raw value))
+    (assert_eq payload (trunc 8 value))
+    (assert_eq tag (>> value 12))
+    ; A signed 4-bit field, sign-extended to 8 bits.
+    (assert_eq delta (trunc 8 (sext 4 (slice value 11 8))))
+    (assert_eq part (slice value 5 4))
+    (assert_eq whole value)))
+
+(case packed_struct_mixed_state_members
+  (four_state)
+  (source "packed_struct_mixed_state.sv" #"
+                module Top(input bit clk, input logic [7:0] raw, input logic [3:0] data,
+                           output logic [7:0] whole, signed_field, comb_result,
+                           output logic [7:0] ff_result, continuous_result, compound_result);
+                    typedef struct packed { logic [3:0] four; bit signed [3:0] two; } mixed_t;
+                    mixed_t read_value, comb_value, ff_value, continuous_value, compound_value;
+                    assign read_value = raw;
+                    assign whole = read_value;
+                    assign signed_field = read_value.two;
+                    always_comb begin
+                        comb_value = 'x;
+                        comb_value.two = data;
+                    end
+                    always_ff @(posedge clk) begin
+                        ff_value <= 'x;
+                        ff_value.two <= data;
+                    end
+                    assign continuous_value.four = 4'h0;
+                    assign continuous_value.two = data;
+                    assign comb_result = comb_value;
+                    assign ff_result = ff_value;
+                    assign continuous_result = continuous_value;
+                    always_comb begin
+                        compound_value = 'x;
+                        compound_value.two += 4'd1;
+                    end
+                    assign compound_result = compound_value;
+                endmodule
+            "#)
+  (top Top)
+  (for mask (range 0 16)
+    (for value (range 0 16)
+      (modify
+        (set raw (fourstate (| 0xa0 value) (| 0xf0 mask)))
+        (set data (fourstate value mask)))
+      (tick clk)
+      (let known (& value (~ mask)))
+      (assert_eq whole (fourstate (| 0xa0 value) (| 0xf0 mask)))
+      (assert_eq signed_field (trunc 8 (sext 4 known)))
+      (expand name (comb_result ff_result)
+        (assert_eq {name} (fourstate (| 0xf0 known) 0xf0) "{name}"))
+      (assert_eq continuous_result known)
+      (assert_eq compound_result (fourstate 0xf1 0xf0)))))
+
+(case packed_struct_parameterized_ports
+  (source "packed_struct_ports.sv" #"
+                module Child #(parameter W = 8)(
+                    input struct packed { logic [3:0] tag; logic [W-1:0] data; } request,
+                    output struct packed { logic [W-1:0] data; logic [3:0] tag; } response);
+                    assign response.data = request.data;
+                    assign response.tag = request.tag;
+                endmodule
+                module Top(input logic [11:0] raw8, input logic [15:0] raw12,
+                           output logic [11:0] out8, output logic [15:0] out12);
+                    typedef struct packed { logic [3:0] tag; logic [7:0] data; } request_t;
+                    request_t request;
+                    assign request = raw8;
+                    Child child8(.request(request), .response(out8));
+                    Child #(.W(12)) child12(.request(raw12), .response(out12));
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 0x1234 0xa8ff 0xffff)
+    (modify
+      (set raw8 (& value 0xfff))
+      (set raw12 value))
+    (assert_eq out8 (| (<< (& value 0xff) 4) (slice value 11 8)))
+    (assert_eq out12 (| (trunc 16 (<< value 4)) (>> value 12)))))
+
+(case packed_struct_bounds_and_type_queries
+  (source "packed_struct_bounds.sv" #"
+                module Top(input logic [15:0] raw, output logic [3:0] asc,
+                           output logic [1:0] desc, multi, output logic [31:0] widths,
+                           output logic [15:0] updated);
+                    typedef struct packed { logic [1:4] a; logic [7:4] d; logic [1:0][3:0] m; } original_t;
+                    typedef original_t alias_t;
+                    alias_t value, changed;
+                    assign value = raw;
+                    assign asc = value.a;
+                    assign desc = value.d[6:5];
+                    assign multi = value.m[1][2:1];
+                    always_comb begin
+                        changed = value;
+                        changed.a[2:3] = 2'b01;
+                    end
+                    localparam BITS = $bits(alias_t) + $bits(value.a) + $bits(value.m) + $size(value.m) + $size(value.m[0]);
+                    assign widths = BITS;
+                    assign updated = changed;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 0x1234 0xa8ff 0xffff)
+    (modify (set raw value))
+    (assert_eq asc (>> value 12))
+    (assert_eq desc (slice value 10 9))
+    (assert_eq multi (slice value 6 5))
+    (assert_eq widths 34)
+    (assert_eq updated (| (& value (~ 0x6000)) 0x2000))))
+
+(case packed_struct_whole_value_signedness
+  (four_state)
+  (source "packed_struct_signing.sv" #"
+                module Top(input logic [7:0] raw, output logic [15:0] signed_whole,
+                           unsigned_whole, signed_member, output logic [7:0] known);
+                    typedef struct packed signed { logic [3:0] high, low; } signed_t;
+                    typedef struct packed { logic signed [3:0] high; logic [3:0] low; } unsigned_t;
+                    typedef struct packed { bit [3:0] high, low; } bits_t;
+                    signed_t s;
+                    unsigned_t u;
+                    bits_t b;
+                    assign s = raw;
+                    assign u = raw;
+                    assign b = raw;
+                    assign signed_whole = s;
+                    assign unsigned_whole = u;
+                    assign signed_member = u.high;
+                    assign known = b;
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 256)
+    (modify (set raw value))
+    (assert_eq signed_whole (trunc 16 (sext 8 value)))
+    (assert_eq unsigned_whole value)
+    (assert_eq signed_member (trunc 16 (>> (sext 8 value) 4))))
+  (modify (set raw (fourstate 0xff 0xf0)))
+  (assert_eq known 15))

@@ -529,6 +529,7 @@ pub fn parse(
             ignored_loops,
             true_loops,
             four_state,
+            &crate::optimizer::parallel_schedule_options(optimize_options),
             &frontend_trace_options,
             trace.is_some().then_some(&mut frontend_trace),
         )
@@ -596,6 +597,7 @@ pub fn parse_sv(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )
@@ -633,6 +635,10 @@ fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
             error.to_string(),
             None,
         ),
+        celox_frontend_sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
+            detail,
+            source_location: None,
+        },
         error => ParserError::illegal_context("systemverilog analysis", error.to_string(), None),
     }
 }
@@ -753,6 +759,7 @@ pub fn parse_with_external_hierarchy(
         ignored_loops,
         true_loops,
         four_state,
+        &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )?;
@@ -887,6 +894,7 @@ mod fused_hint_tests {
                 .collect(),
                 eval_only_ffs: Default::default(),
                 apply_ffs: Default::default(),
+                parallel: None,
             },
             design: Default::default(),
             frontend_lookup: Default::default(),

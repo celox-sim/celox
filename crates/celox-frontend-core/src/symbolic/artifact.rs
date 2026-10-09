@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventSite, TriggerSet, VariableMetadata,
+    ExternFunction, InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VariableMetadata,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -25,6 +25,24 @@ pub struct SymbolicVariable {
     pub module_affiliated: bool,
 }
 
+/// One independently evaluated part of an FF trigger group.
+#[derive(Clone, Debug)]
+pub struct FfPart<A> {
+    /// Seeds and next-state stores of the part's targets.
+    pub evaluate: ExecutionUnit<A>,
+    /// Publication of the part's staged targets.
+    pub apply: ExecutionUnit<A>,
+}
+
+impl<A> FfPart<A> {
+    pub fn map_units<B>(&self, map: impl Fn(&ExecutionUnit<A>) -> ExecutionUnit<B>) -> FfPart<B> {
+        FfPart {
+            evaluate: map(&self.evaluate),
+            apply: map(&self.apply),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SimModule {
     pub name: String,
@@ -34,6 +52,10 @@ pub struct SimModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
+    /// Lane-partitioning alternative of `eval_only_ff_blocks` and
+    /// `apply_ff_blocks`: a trigger group split into parts which may be
+    /// evaluated concurrently. Empty unless several lanes were requested.
+    pub parallel_ff_parts: HashMap<TriggerSet<SourceVarId>, Vec<FfPart<SymbolicRegionedAddr>>>,
     pub glue_blocks: HashMap<String, Vec<SymbolicGlueBlock>>,
     pub indexed_instance_names: HashSet<String>,
     /// The index of the first glue block of an instance name, when it is not
@@ -43,6 +65,8 @@ pub struct SimModule {
     pub comb_observers: Vec<CombObserver<SourceVarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// Extern functions the module calls; its `ExternCall`s index this list.
+    pub extern_functions: Vec<ExternFunction>,
     pub initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,

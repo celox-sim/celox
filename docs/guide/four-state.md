@@ -24,6 +24,8 @@ const sim = Simulation.create(MyModule, { fourState: true });
 
 ::: warning
 Without `fourState: true`, all signals behave as 2-state. X values cannot be written or read.
+An X or Z produced inside the design, such as an `'x` literal or a read through an
+out-of-range or unknown array index, reads as 0, as in a 4-state to 2-state conversion.
 :::
 
 ## Veryl Types and 4-State

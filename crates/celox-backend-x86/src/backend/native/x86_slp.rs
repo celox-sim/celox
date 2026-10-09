@@ -873,6 +873,9 @@ pub(crate) fn clobbers_xmm(inst: &MInst, register: X86PhysVec) -> bool {
         MInst::PackedLaneCompare { .. } => register.0 <= 5,
         MInst::PackedByteAffineCompare { .. } => register.0 <= 4,
         MInst::MemCopy { .. } => register.0 == 0,
+        // A C function may clobber every vector register; values must not
+        // stay in them across the call.
+        MInst::CallExtern { .. } => true,
         _ => false,
     }
 }

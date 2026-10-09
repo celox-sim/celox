@@ -24,6 +24,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("indexed_select.vtest"),
     },
     Group {
+        file: "src/sv/cases/interfaces.vtest",
+        text: include_str!("interfaces.vtest"),
+    },
+    Group {
         file: "src/sv/cases/literals.vtest",
         text: include_str!("literals.vtest"),
     },
@@ -34,6 +38,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/packed_structs.vtest",
         text: include_str!("packed_structs.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/procedural.vtest",
+        text: include_str!("procedural.vtest"),
     },
     Group {
         file: "src/sv/cases/review_regressions.vtest",

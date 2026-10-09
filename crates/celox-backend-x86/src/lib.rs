@@ -50,6 +50,10 @@ pub struct X86BackendOptions {
     pub baseline: bool,
     pub slp: bool,
     pub native_tick_loop: bool,
+    /// Physical state offset where the function's private spill, scratch,
+    /// and save arena begins. `None` places it directly after the semantic
+    /// state. Functions that may run concurrently need disjoint arenas.
+    pub arena_base: Option<usize>,
     pub diagnostics: NativeDiagnostics,
 }
 
@@ -59,6 +63,7 @@ impl Default for X86BackendOptions {
             slp: true,
             native_tick_loop: true,
             baseline: false,
+            arena_base: None,
             diagnostics: NativeDiagnostics::default(),
         }
     }
@@ -93,7 +98,14 @@ const _: () = {
         celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
             <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
     );
-    assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= celox_state_layout::STATE_HEADER_SIZE);
+    assert!(
+        STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET
+    );
+    assert!(
+        celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_SIZE
+    );
 };
 
 pub mod timing {

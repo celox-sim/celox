@@ -3,53 +3,48 @@
 #[allow(unused_macros)]
 mod test_utils;
 
-// The SV frontend does not lower these function bodies; `sv` is excluded
-// throughout. The Veryl reference simulator mis-evaluates an output bound to
-// a concatenation and does not model X for a missing return value.
+// The Veryl reference simulator mis-evaluates an output bound to a
+// concatenation and does not model X for a missing return value.
 all_backends! {
 
 fn test_dynamic_index_write_to_function_local(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_dynamic_index_write_to_function_local";
 }
 
 fn test_out_of_range_dynamic_write_to_function_local_is_ignored(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_out_of_range_dynamic_write_to_function_local_is_ignored";
 }
 
 fn test_concatenated_destination_in_function_body(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_concatenated_destination_in_function_body";
 }
 
 fn test_nested_output_to_concat_and_dynamic_local(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "function_bodies::test_nested_output_to_concat_and_dynamic_local";
 }
 
 fn test_path_without_return_yields_unknown(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "function_bodies::test_path_without_return_yields_unknown";
 }
 
 fn test_runtime_select_of_expression_bound_formal(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_runtime_select_of_expression_bound_formal";
 }
 
 fn test_runtime_bounded_loop_in_function(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_runtime_bounded_loop_in_function";
 }
 
 fn test_runtime_effects_nested_in_function_statements(sim) {
+    // SV frontend rejects a destination index that calls a function with `$display`
+    // (`r[traced(idx)]`): "assignment target `r@7`" (#88).
     @ignore_on(sv);
     @case "function_bodies::test_runtime_effects_nested_in_function_statements";
 }
 
 fn test_runtime_bounded_loop_function_reentry(sim) {
-    @ignore_on(sv);
     @case "function_bodies::test_runtime_bounded_loop_function_reentry";
 }
 

@@ -201,6 +201,7 @@ impl script::ScriptCase {
                 .collect(),
             top: self.top.clone(),
             four_state: self.four_state,
+            parameters: self.parameters.clone(),
         }
     }
 }

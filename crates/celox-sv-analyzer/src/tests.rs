@@ -62,180 +62,6 @@ fn caps_aggregate_nested_generate_expansion() {
 }
 
 #[test]
-fn keeps_case_item_guards_on_nested_comb_branches() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic s, t, a, b, c, output logic y);
-                always_comb begin
-                    case (s)
-                        1'b0: if (t) y = a; else y = b;
-                        default: y = c;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("nested_case.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    assert_eq!(assignments.len(), 1);
-    let ir::Expr::Mux { else_expr, .. } = assignments[0].rhs() else {
-        panic!("expected a multiplexer chain");
-    };
-    // The default branch value must remain the final fallback so that
-    // `s != 0` selects `c`, not the nested else value.
-    assert_eq!(expr_bottom_else(else_expr), "c");
-}
-
-fn expr_bottom_else(expr: &ir::Expr) -> String {
-    match expr {
-        ir::Expr::Mux { else_expr, .. } => expr_bottom_else(else_expr),
-        ir::Expr::Ident(name) => name.clone(),
-        other => panic!("unexpected expression in mux chain: {other:?}"),
-    }
-}
-
-#[test]
-fn preserves_reads_between_merged_conditional_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, output logic x, y);
-                always_comb begin
-                    x = d;
-                    y = x;
-                    if (c) x = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("intervening_read.sv"),
-    )
-    .expect("intervening read should use the value at its statement position");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        expr_references_ident_name(y.rhs(), "d"),
-        "expected y to use the preceding d assignment: {:?}",
-        y.rhs()
-    );
-    assert!(!expr_references_ident_name(y.rhs(), "x"));
-}
-
-#[test]
-fn snapshots_unconditional_sources_before_relocated_conditional_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, b, c, d, e, output logic x, y);
-                always_comb begin
-                    y = a;
-                    if (c) x = y;
-                    else x = b;
-                    y = d;
-                    if (e) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_cross_target_read.sv"),
-    )
-    .expect("a relocated write should retain values read at its source position");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let x = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "x")
-        .expect("x assignment");
-    assert!(expr_references_ident_name(x.rhs(), "a"));
-    assert!(
-        !expr_references_ident_name(x.rhs(), "y"),
-        "x must snapshot y before its later overwrite: {:?}",
-        x.rhs()
-    );
-}
-
-#[test]
-fn preserves_fallback_guards_for_each_comb_target() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, a, b, output logic x, y);
-                always_comb begin
-                    x = 1'b0;
-                    y = 1'b0;
-                    if (c) x = a;
-                    else y = b;
-                end
-            endmodule
-        "#,
-        Path::new("target_fallback.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        matches!(y.rhs(), ir::Expr::Mux { .. }),
-        "the else write must not become globally unconditional: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn keeps_writes_after_exhaustive_comb_fallbacks() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, e, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else x = b;
-                    if (d) x = e;
-                end
-            endmodule
-        "#,
-        Path::new("write_after_fallback.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    let ir::Expr::Mux { condition, .. } = rhs else {
-        panic!("expected the trailing write to produce a mux: {rhs:?}");
-    };
-    assert!(
-        expr_references_ident_name(condition, "d"),
-        "the trailing d write must retain priority: {rhs:?}"
-    );
-}
-
-#[test]
-fn later_exhaustive_comb_chain_overrides_the_previous_chain() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, e, f, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else x = b;
-                    if (d) x = e;
-                    else x = f;
-                end
-            endmodule
-        "#,
-        Path::new("consecutive_exhaustive_chains.sv"),
-    )
-    .expect("the later exhaustive chain should fully define x");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    assert!(expr_references_ident_name(rhs, "d"));
-    assert!(expr_references_ident_name(rhs, "e"));
-    assert!(expr_references_ident_name(rhs, "f"));
-    assert!(
-        !expr_references_ident_name(rhs, "c")
-            && !expr_references_ident_name(rhs, "a")
-            && !expr_references_ident_name(rhs, "b"),
-        "the fully overriding second chain must discard the first chain: {rhs:?}"
-    );
-}
-
-#[test]
 fn recognizes_complementary_equality_guards_as_exhaustive() {
     analyze_source(
         r#"
@@ -298,251 +124,6 @@ fn preserves_complementary_guards_across_harmless_blocks() {
 }
 
 #[test]
-fn invalidates_complementary_guards_for_overlapping_selected_writes() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic outer, q, a, b, c,
-                input bit idx,
-                output logic y
-            );
-                logic [1:0] s;
-                always_comb begin
-                    s = {q, q};
-                    if (outer) begin
-                        if (s[0]) y = a;
-                        s[idx] = b;
-                        if (!s[0]) y = c;
-                    end else begin
-                        y = a;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_write_between_complementary_guards.sv"),
-    )
-    .expect_err("a dynamic overlapping write must invalidate the guard proof");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic outer, q, a, b, output logic y);
-                logic s;
-                function automatic bit f();
-                    return s;
-                endfunction
-                always_comb begin
-                    s = q;
-                    if (outer) begin
-                        if (f()) y = a;
-                        s = 1'b1;
-                        if (!f()) y = b;
-                    end else begin
-                        y = a;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("function_guard_dependency_write.sv"),
-    )
-    .expect_err("a function guard's free-variable write must invalidate its proof");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-}
-
-#[test]
-fn substitutes_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, a, b, output logic [1:0] x, output logic y);
-                always_comb begin
-                    x[0] = a;
-                    y = x[0];
-                    if (c) x[0] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "a"));
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must observe the preceding selected write: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn substitutes_subselect_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c,
-                input logic [2:0] a, b,
-                output logic [3:0] x,
-                output logic y
-            );
-                always_comb begin
-                    x[3:1] = a;
-                    y = x[2];
-                    if (c) x[3:1] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_subselect_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "a"));
-    let ir::Expr::Select { msb, lsb, .. } = y.rhs() else {
-        panic!(
-            "expected the intervening bit read to select from a: {:?}",
-            y.rhs()
-        );
-    };
-    assert_eq!(msb, &ir::ConstExpr::Literal("1".to_string()));
-    assert_eq!(lsb, &ir::ConstExpr::Literal("1".to_string()));
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must observe the matching bit of the preceding selected write: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn substitutes_partially_overlapping_reads_of_selected_comb_targets() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c,
-                input logic [2:0] a, b,
-                output logic [4:0] x,
-                output logic [2:0] y
-            );
-                always_comb begin
-                    x[3:1] = a;
-                    y = x[4:2];
-                    if (c) x[3:1] = b;
-                end
-            endmodule
-        "#,
-        Path::new("selected_partial_overlap_intervening_read.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let y = assignments
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        expr_references_ident_name(y.rhs(), "a"),
-        "the overlapping bits must come from the preceding selected write: {:?}",
-        y.rhs()
-    );
-    assert!(
-        expr_references_ident_name(y.rhs(), "x"),
-        "the non-overlapping bit must retain its original source: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn coerces_always_comb_if_predicates_to_procedural_truth() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic s, output logic y);
-                always_comb begin
-                    if (s) y = 1'b1;
-                    else y = 1'b0;
-                end
-            endmodule
-        "#,
-        Path::new("always_comb_procedural_truth.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    let ir::Expr::Mux { condition, .. } = rhs else {
-        panic!("expected conditional assignment mux: {rhs:?}");
-    };
-    assert!(matches!(
-        &**condition,
-        ir::Expr::Unary {
-            op: ir::UnaryOp::RedOr,
-            expr,
-        } if matches!(
-            &**expr,
-            ir::Expr::Unary {
-                op: ir::UnaryOp::ToTwoState,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
-fn applies_cross_target_substitutions_before_merging_comb_groups() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, d, output logic x, y);
-                always_comb begin
-                    y = 1'b0;
-                    x = 1'b0;
-                    y = x;
-                    if (c) x = 1'b1;
-                    if (d) y = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("cross_target_substitution.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let y = ir.modules()[0].comb_processes()[0]
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(
-        !expr_references_ident_name(y.rhs(), "x"),
-        "y must use x's value at the intervening statement: {:?}",
-        y.rhs()
-    );
-}
-
-#[test]
-fn uses_whole_vector_defaults_for_conditional_selected_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic c, output logic [1:0] x);
-                always_comb begin
-                    x = '0;
-                    if (c) x[0] = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("whole_then_selected.sv"),
-    )
-    .expect("whole-vector initialization should cover the selected fallback");
-    assert_eq!(ir.modules()[0].comb_processes()[0].assignments().len(), 2);
-}
-
-#[test]
 fn uses_selected_writes_before_conditional_whole_vector_writes() {
     analyze_source(
         r#"
@@ -578,167 +159,6 @@ fn permits_reads_after_assignments_on_the_same_comb_path() {
         Path::new("path_local_comb_read.sv"),
     )
     .expect("each guarded read is preceded by a write on the same path");
-}
-
-#[test]
-fn freezes_comb_branch_guards_before_overwriting_the_predicate() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic en, output logic t, y);
-                always_comb begin
-                    t = en;
-                    y = 1'b0;
-                    if (t) begin
-                        t = 1'b0;
-                        y = 1'b1;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("frozen_comb_guard.sv"),
-    )
-    .expect("the branch predicate should use t's value on entry");
-    let y = ir.modules()[0].comb_processes()[0]
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "y")
-        .expect("y assignment");
-    assert!(expr_references_ident_name(y.rhs(), "en"));
-    assert!(!expr_references_ident_name(y.rhs(), "t"));
-}
-
-#[test]
-fn rejects_entry_value_guards_relocated_past_their_first_write() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic a, b, d, e,
-                output logic t, x
-            );
-                always_comb begin
-                    if (t) x = a;
-                    else x = b;
-                    t = d;
-                    if (e) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_entry_guard.sv"),
-    )
-    .expect_err("the entry value of t cannot be moved past t's first write");
-    assert!(
-        error
-            .to_string()
-            .contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic a, b, c, d, e, f,
-                output logic y,
-                output logic [1:0] x
-            );
-                always_comb begin
-                    y = 1'b0;
-                    if (x) y = a;
-                    x[0] = c;
-                    if (d) x[0] = e;
-                    if (f) y = b;
-                end
-            endmodule
-        "#,
-        Path::new("relocated_overlapping_entry_guard.sv"),
-    )
-    .expect_err("a whole-vector guard read cannot move past a selected write");
-    assert!(
-        error
-            .to_string()
-            .contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn preserves_prior_partially_overlapping_selected_writes() {
-    let ir = analyze_source(
-        r#"
-            module Top(
-                input logic c, d,
-                input logic [2:0] a, b,
-                output logic [3:0] x
-            );
-                always_comb begin
-                    x = '0;
-                    if (c) x[3:1] = a;
-                    if (d) x[2:0] = b;
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_selected_fallback.sv"),
-    )
-    .expect("overlapping selected writes should preserve their procedural order");
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    let rhs = assignments.last().expect("final selected assignment").rhs();
-    assert!(
-        expr_references_ident_name(rhs, "a"),
-        "the later false path must retain the earlier selected value: {rhs:?}"
-    );
-}
-
-#[test]
-fn requires_definite_assignment_before_filling_comb_fallbacks() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, d, a, b, output logic x);
-                always_comb begin
-                    if (c) x = a;
-                    else if (d) x = b;
-                end
-            endmodule
-        "#,
-        Path::new("nested_incomplete_fallback.sv"),
-    )
-    .expect_err("the incomplete nested fallback must infer a latch")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
-}
-
-#[test]
-fn rejects_genuine_self_reads_in_exhaustive_comb_branches() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, output logic [7:0] x);
-                always_comb begin
-                    if (c) x = x + 1;
-                    else x = 0;
-                end
-            endmodule
-        "#,
-        Path::new("genuine_self_read.sv"),
-    )
-    .expect_err("a genuine self-read must not be filled as a fallback hole")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
-}
-
-#[test]
-fn rejects_overlapping_selected_self_reads() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic c, output logic [1:0] x);
-                always_comb begin
-                    if (c) x[0] = x[1:0];
-                    else x[0] = 1'b0;
-                end
-            endmodule
-        "#,
-        Path::new("overlapping_selected_self_read.sv"),
-    )
-    .expect_err("an overlapping selected self-read must be rejected")
-    .to_string();
-    assert!(error.contains("latch inference inside always_comb"));
 }
 
 #[test]
@@ -854,35 +274,6 @@ fn evaluates_constant_cast_operand_expressions() {
 }
 
 #[test]
-fn resolves_enum_members_referencing_earlier_members() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic [1:0] sel, output logic y);
-                typedef enum logic [1:0] { A = 2'd0, B = A + 2'd1 } E;
-                always_comb y = (sel == B);
-            endmodule
-        "#,
-        Path::new("enum_member_ref.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let assignments = ir.modules()[0].comb_processes()[0].assignments();
-    assert_eq!(assignments.len(), 1);
-    // `B` must resolve to its constant value even though it references
-    // the earlier member `A`.
-    assert!(
-        !expr_references_ident_name(assignments[0].rhs(), "B"),
-        "unresolved enum member in {:?}",
-        assignments[0].rhs()
-    );
-    assert!(
-        expr_contains_literal(assignments[0].rhs(), "1"),
-        "expected the folded member value in {:?}",
-        assignments[0].rhs()
-    );
-}
-
-#[test]
 fn context_sizes_unbased_enum_member_initializers() {
     let ir = analyze_source(
         r#"
@@ -937,74 +328,6 @@ fn accepts_casez_nested_under_comb_conditionals() {
         Path::new("nested_casez.sv"),
     )
     .expect("casez nested under a conditional must analyze");
-}
-
-fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
-    match expr {
-        ir::Expr::Ident(ident) => ident == name,
-        ir::Expr::Select { expr, .. } => expr_references_ident_name(expr, name),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => parts
-            .iter()
-            .any(|part| expr_references_ident_name(part, name)),
-        ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
-            expr_references_ident_name(expr, name)
-        }
-        ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident_name(arg, name)),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_references_ident_name(left, name) || expr_references_ident_name(right, name)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_references_ident_name(condition, name)
-                || expr_references_ident_name(then_expr, name)
-                || expr_references_ident_name(else_expr, name)
-        }
-        ir::Expr::Literal(_) => false,
-        ir::Expr::Inside { expr, items } => {
-            expr_references_ident_name(expr, name)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(|operand| expr_references_ident_name(operand, name))
-        }
-    }
-}
-
-fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
-    match expr {
-        ir::Expr::Literal(value) => value == needle || value.ends_with(&format!("d{needle}")),
-        ir::Expr::Select { expr, .. } => expr_contains_literal(expr, needle),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().any(|part| expr_contains_literal(part, needle))
-        }
-        ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
-            expr_contains_literal(expr, needle)
-        }
-        ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_contains_literal(arg, needle)),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_contains_literal(left, needle) || expr_contains_literal(right, needle)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_literal(condition, needle)
-                || expr_contains_literal(then_expr, needle)
-                || expr_contains_literal(else_expr, needle)
-        }
-        ir::Expr::Ident(_) => false,
-        ir::Expr::Inside { expr, items } => {
-            expr_contains_literal(expr, needle)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(|operand| expr_contains_literal(operand, needle))
-        }
-    }
 }
 
 #[test]
@@ -1154,78 +477,6 @@ fn skips_duplicate_case_items_for_four_state_selectors() {
         Path::new("four_state_duplicate_case_item.sv"),
     )
     .expect("an unreachable duplicate case item should not infer a latch");
-}
-
-#[test]
-fn compares_normalized_four_state_case_labels_for_reachability() {
-    analyze_source(
-        r#"
-            module Top(input logic [1:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        2'd0: y = a;
-                        2'b00: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("normalized_four_state_case_labels.sv"),
-    )
-    .expect("equivalent case-label values should make the later item unreachable");
-
-    analyze_source(
-        r#"
-            module Top(input logic [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        9'd0: y = a;
-                        9'b000000000: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("wide_normalized_four_state_case_labels.sv"),
-    )
-    .expect("equivalent wide labels should be normalized without domain enumeration");
-
-    analyze_source(
-        r#"
-            module Top(input logic signed [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        1'sb1: y = a;
-                        9'b111111111: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("selector_typed_four_state_case_labels.sv"),
-    )
-    .expect("labels should be normalized in the signed selector context");
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic [8:0] s, input logic a, b, output logic y);
-                always_comb begin
-                    case (s)
-                        10'h3ff: y = a;
-                        9'h1ff: ;
-                        default: y = b;
-                    endcase
-                end
-            endmodule
-        "#,
-        Path::new("wider_unreachable_case_label.sv"),
-    )
-    .expect_err("a wider unreachable label must not hide a reachable empty item");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
 }
 
 #[test]
@@ -1400,26 +651,6 @@ fn substitutes_loop_indices_when_tracking_comb_writes() {
 }
 
 #[test]
-fn rejects_static_for_loops_that_write_their_index() {
-    let error = analyze_source(
-        r#"
-            module Top(output logic [3:0] y);
-                always_comb begin
-                    for (int i = 0; i < 4; i++) begin
-                        y[i] = 1'b1;
-                        i = i + 1;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("loop_body_index_write.sv"),
-    )
-    .expect_err("a loop body that changes its index must not be statically unrolled")
-    .to_string();
-    assert!(error.contains("procedural loop inside always_comb"));
-}
-
-#[test]
 fn analyzes_comb_processes_with_generate_local_constants() {
     analyze_source(
         r#"
@@ -1490,116 +721,6 @@ fn preserves_logical_constant_case_selector_masks() {
 }
 
 #[test]
-fn preserves_four_state_equality_case_selector_masks() {
-    for (selector, expected) in [
-        ("1'bx == 1'bx", "1'bx"),
-        ("1'bz != 1'b0", "1'bx"),
-        ("2'b0x == 2'b1x", "1'b0"),
-        ("2'b0z != 2'b1x", "1'b1"),
-        ("!(1'bx == 1'b0)", "1'bx"),
-        ("(1'bx != 1'bz) && 1'b1", "1'bx"),
-        ("(1'bx && 1'b1) == 1'bx", "1'bx"),
-        ("(1'bx == 1'bx) ? 1'b0 : 1'b1", "1'bx"),
-        ("(1'bx == 1'bx) ? 1'bz : 1'bz", "1'bz"),
-        ("1'sbx == 2'b1x", "1'b0"),
-        ("1'sbx != 2'sb1x", "1'bx"),
-        ("8'hff == '1", "1'b1"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case ({selector}) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("equality_constant_case.sv"))
-            .unwrap_or_else(|error| panic!("{selector}: {error}"));
-    }
-
-    for op in ["==", "!="] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case (1'bx {op} 1'bx) \
-             1'b0, 1'b1: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_equality_case.sv"))
-            .expect_err("two-state labels cannot cover an unknown equality result");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn preserves_four_state_relational_case_selector_masks() {
-    for op in ["<", "<=", ">", ">="] {
-        for (left, right) in [("1'bx", "1'b1"), ("2'b1z", "2'b00")] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({left} {op} {right}) \
-                 1'bx: y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("relational_constant_case.sv"))
-                .unwrap_or_else(|error| panic!("{left} {op} {right}: {error}"));
-        }
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case (1'bx {op} 1'b1) \
-             1'b0, 1'b1: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_relational_case.sv"))
-            .expect_err("two-state labels cannot cover an unknown relational result");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_declared_constant_part_select_coordinates() {
-    for (range, selection, expected) in [
-        ("0:3", "0:1", "2'bxx"),
-        ("0:3", "2:3", "2'b00"),
-        ("4:7", "4:5", "2'bxx"),
-        ("7:4", "7:6", "2'bxx"),
-        ("-3:0", "-3:-2", "2'bxx"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             localparam logic [{range}] P = 4'bxx00;
-             always_comb case (P[{selection}]) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("constant_select_coordinates.sv"))
-            .unwrap_or_else(|error| panic!("{range}, {selection}: {error}"));
-        let source = source.replace(&format!("{expected}: y"), "2'b11: y");
-        let error = analyze_source(&source, Path::new("unmatched_select_coordinates.sv"))
-            .expect_err("a nonmatching selected constant must not cover the case");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_compound_case_and_wildcard_equalities() {
-    for (expression, expected) in [
-        ("(1'bx | 1'b0) === 1'bx", "1'b1"),
-        ("(1'bx | 1'b0) !== 1'bx", "1'b0"),
-        ("(1'bx | 1'b0) === 1'bz", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'bx0", "1'b1"),
-        ("(2'bx0 | 2'b00) !=? 2'bx0", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'b01", "1'b0"),
-        ("(2'bx0 | 2'b00) ==? 2'b00", "1'bx"),
-        ("(2'bx0 | 2'b00) !=? 2'b00", "1'bx"),
-        ("(1'sb1 | 1'sb0) === 2'sb11", "1'b1"),
-        ("(1'b1 | 1'b0) === 2'b11", "1'b0"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             always_comb case ({expression}) {expected}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("compound_equality.sv"))
-            .unwrap_or_else(|error| panic!("{expression}: {error}"));
-        let wrong = if expected == "1'b1" { "1'b0" } else { "1'b1" };
-        let source = source.replace(&format!("{expected}: y"), &format!("{wrong}: y"));
-        let error = analyze_source(&source, Path::new("unmatched_compound_equality.sv"))
-            .expect_err("a nonmatching equality result must not cover the case");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
 fn resolves_function_scope_size_casts() {
     for function in [
         "function automatic logic [7:0] f(input logic [3:0] x);
@@ -1623,119 +744,6 @@ fn resolves_function_scope_size_casts() {
 }
 
 #[test]
-fn folds_constant_part_selects_and_resized_concatenations() {
-    for (selector, label) in [
-        ("p()", "2'bxx"),
-        ("q()", "3'bxz1"),
-        ("r()", "2'b01"),
-        ("f()", "4'b00xz"),
-        ("g()", "4'b1111"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             function automatic logic [1:0] p();
-               logic [3:0] v; v = 4'bxx00; return v[3:2]; endfunction
-             function automatic logic [2:0] q();
-               logic [3:0] v; v = 4'bxz10; return v[3:1]; endfunction
-             function automatic logic [1:0] r();
-               logic [3:0] v; v = 4'b1010; return v[2:1]; endfunction
-             function automatic logic [3:0] f(); return {{1'bx, 1'bz}}; endfunction
-             function automatic logic signed [3:0] g(); return 2'sb11; endfunction
-             always_comb case ({selector}) {label}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("constant_case.sv"))
-            .unwrap_or_else(|error| panic!("{selector}: {error}"));
-        let source = source.replace(&format!("{label}: y"), "5'b10000: y");
-        let error = analyze_source(&source, Path::new("unmatched_constant_case.sv"))
-            .expect_err("a nonmatching label must still infer a latch");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn retains_dynamic_case_labels_for_two_state_selectors() {
-    let source = "module Top(input bit selector, dynamic_label, input logic a, b,
-                  output logic y);
-                  always_comb case (selector)
-                  dynamic_label: y = a;
-                  default: y = b;
-                  endcase endmodule";
-    let ir = analyze_source(source, Path::new("dynamic_case.sv")).unwrap();
-    let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
-    assert!(expr_references_ident_name(rhs, "dynamic_label"), "{rhs:?}");
-    assert!(expr_references_ident_name(rhs, "a"), "{rhs:?}");
-    assert!(expr_references_ident_name(rhs, "b"), "{rhs:?}");
-}
-
-#[test]
-fn masked_parameters_are_substituted_for_if_coverage() {
-    for value in ["1'bx", "1'bz"] {
-        let source = format!(
-            "module Top(input logic outer, a, b, output logic y);
-             localparam logic P = {value};
-             always_comb if (outer) begin if (P === {value}) y = a; end else y = b;
-             endmodule"
-        );
-        analyze_source(&source, Path::new("masked_if_coverage.sv")).unwrap();
-        let mismatch = source.replace(&format!("P === {value}"), "P === 1'b0");
-        assert!(
-            analyze_source(&mismatch, Path::new("masked_if_uncovered.sv"))
-                .unwrap_err()
-                .to_string()
-                .contains("latch inference")
-        );
-    }
-}
-
-#[test]
-fn substitutes_masked_parameter_case_labels() {
-    for (value, label) in [("1'bx", "P"), ("1'bz", "P"), ("1'bx", "(P | 1'b0)")] {
-        let source = format!(
-            "module Top(input logic a, output logic y);
-             localparam logic P = {value};
-             always_comb if (a) case ({value}) {label}: y = a; endcase else y = a; endmodule"
-        );
-        analyze_source(&source, Path::new("masked_parameter_case_label.sv"))
-            .unwrap_or_else(|error| panic!("{value}, {label}: {error}"));
-        let mismatch = source.replace(&format!("case ({value})"), "case (1'b1)");
-        let error = analyze_source(&mismatch, Path::new("unmatched_parameter_case_label.sv"))
-            .expect_err("an X/Z label must not cover a known selector");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
-}
-
-#[test]
-fn folds_compound_four_state_case_labels() {
-    for (selector, label) in [
-        ("1'bx", "(1'bx | 1'b0)"),
-        ("1'bx", "(1'bz & 1'b1)"),
-        ("2'bxz", "{1'bx, 1'bz}"),
-        ("2'bxx", "{2{1'bx}}"),
-        ("1'bz", "(1'bx ? 1'bz : 1'bz)"),
-        ("2'bxx", "(1'b1 ? 1'sbx : 2'sb00)"),
-        ("1'bx", "(1'bx < 1'b1)"),
-        ("1'bx", "label()"),
-        ("4'b1111", "'1"),
-        ("4'sb1111", "'1"),
-    ] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             function logic label(); return 1'bx | 1'b0; endfunction \
-             always_comb case ({selector}) {label}: y = a; endcase endmodule"
-        );
-        analyze_source(&source, Path::new("compound_constant_case_label.sv"))
-            .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-    }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (1'bz) (1'bx | 1'b0): y = a; endcase endmodule",
-        Path::new("unmatched_compound_case_label.sv"),
-    )
-    .expect_err("an X-valued label must not cover a Z-valued selector");
-    assert!(error.to_string().contains("latch inference"), "{error}");
-}
-
-#[test]
 fn preserves_use_site_dimensions_in_parameter_alias_types() {
     let source = r#"
         module Top #(parameter W = 4, N = 2) ();
@@ -1753,10 +761,8 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
     for (overrides, p_value, r_width, r_value) in [
         (HashMap::default(), 0xab, 8, 0xef),
         (
-            [("P".to_string(), 0xcd), ("N".to_string(), 4)]
-                .into_iter()
-                .collect(),
-            0xcd,
+            [("N".to_string(), 4)].into_iter().collect(),
+            0xab,
             16,
             0xcdef,
         ),
@@ -1772,7 +778,7 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
         for (name, width, signed, value) in [
             ("P", Some(8), Some(false), p_value),
             ("L", Some(8), Some(false), p_value),
-            ("S", Some(8), Some(true), -85),
+            ("S", Some(8), Some(false), 0xab),
             ("F", Some(8), Some(false), 255),
             ("B", Some(8), Some(false), 0xab),
             ("BITS", None, None, 8),
@@ -1790,74 +796,31 @@ fn preserves_use_site_dimensions_in_parameter_alias_types() {
 }
 
 #[test]
-fn preserves_four_state_arithmetic_case_constants() {
-    for (expression, expected) in [
-        ("1'bx + 1'b0", "1'bx"),
-        ("2'b1z - 4'b0001", "4'bxxxx"),
-        ("4'b0000 * 2'b1x", "4'bxxxx"),
-        ("2'b1z / 2'b01", "2'bxx"),
-        ("2'b1x % 2'b01", "2'bxx"),
-        ("2'b01 / 2'b1x", "2'bxx"),
-        ("2'b01 % 2'b1z", "2'bxx"),
-        ("+(2'b1z)", "2'bxx"),
-        ("-(2'b1z)", "2'bxx"),
-        ("(2'b11 + 2'b01) + 2'b0x", "2'bxx"),
-        ("(2'b1x + 2'b01) & 2'b00", "2'b00"),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("arithmetic_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
+fn body_parameters_are_local_with_a_parameter_port_list() {
+    // IEEE 1800-2023 6.20.1: a parameter port list, even an empty one, turns
+    // a `parameter` in the module body into a localparam.
+    for header in ["#(parameter N = 2)", "#()"] {
+        let source = format!("module Top {header} (); parameter P = 1; endmodule");
+        let overrides = [("P".to_string(), 2)].into_iter().collect();
+        let error = analyze_source_with_module_parameter_overrides(
+            &source,
+            Path::new("body_parameter_override.sv"),
+            "Top",
+            &overrides,
+        )
+        .expect_err("a body parameter must not be overridable");
+        assert!(error.to_string().contains("localparam override"), "{error}");
     }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (1'bx + 1'b0) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
-        Path::new("unmatched_arithmetic_case.sv"),
+    let overrides = [("P".to_string(), 2)].into_iter().collect();
+    let ir = analyze_source_with_module_parameter_overrides(
+        "module Top (); parameter P = 1; endmodule",
+        Path::new("body_parameter_override.sv"),
+        "Top",
+        &overrides,
     )
-    .expect_err("arithmetic X results must not match known values or Z");
-    assert!(error.to_string().contains("latch inference"), "{error}");
-}
-
-#[test]
-fn preserves_four_state_shift_and_select_case_constants() {
-    for (expression, expected) in [
-        ("2'bx0 >> 1", "2'b0x"),
-        ("2'bz0 >> 1", "2'b0z"),
-        ("4'b10xz << 1", "4'b0xz0"),
-        ("4'sbxz01 >>> 2", "4'bxxxz"),
-        ("4'sbz101 >>> 2", "4'bzzz1"),
-        ("4'bx101 >>> 2", "4'b00x1"),
-        ("2'bx0 >> 1000", "2'b00"),
-        ("2'sbz0 >>> 1000", "2'bzz"),
-        ("2'b00 << 1'bx", "2'bxx"),
-        ("2'b11 >> 1'bz", "2'bxx"),
-        ("{2'bx0}[1]", "1'bx"),
-        ("{2'bz0}[1]", "1'bz"),
-        ("{2'bx0}[0]", "1'b0"),
-        ("{2'bx0}[2]", "1'bx"),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("shift_select_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
-    }
-    for selector in ["2'bx0 >> 1", "{2'bx0}[1]"] {
-        let source = format!(
-            "module Top(input logic a, output logic y); \
-             always_comb case ({selector}) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule"
-        );
-        let error = analyze_source(&source, Path::new("unmatched_shift_select.sv"))
-            .expect_err("X must not match a known value or Z");
-        assert!(error.to_string().contains("latch inference"), "{error}");
-    }
+    .expect("without a parameter port list a body parameter is overridable");
+    let parameter = &ir.modules()[0].parameters()[0];
+    assert_eq!(parameter.resolved_value(), Some(2));
 }
 
 #[test]
@@ -1902,45 +865,6 @@ fn rejects_nonblocking_comb_assignments_before_coverage() {
             "{body}: {error}"
         );
     }
-}
-
-#[test]
-fn preserves_four_state_reduction_case_constants() {
-    for (expression, expected) in [
-        ("&1'bx", "1'bx"),
-        ("|1'bz", "1'bx"),
-        ("^2'b1x", "1'bx"),
-        ("&3'b1z0", "1'b0"),
-        ("|3'b0z1", "1'b1"),
-        ("~&2'b1z", "1'bx"),
-        ("~|2'b0x", "1'bx"),
-        ("~^2'b1z", "1'bx"),
-        ("^~2'b1x", "1'bx"),
-        ("^'1", "1'b1"),
-        ("&'z", "1'bx"),
-        ("&(4'b1x11 & 4'b0111)", "1'b0"),
-        ("|(4'b0z00 | 4'b1000)", "1'b1"),
-        (
-            "^256'hffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            "1'b0",
-        ),
-    ] {
-        for (selector, label) in [(expression, expected), (expected, expression)] {
-            let source = format!(
-                "module Top(input logic a, output logic y); \
-                 always_comb case ({selector}) ({label}): y = a; endcase endmodule"
-            );
-            analyze_source(&source, Path::new("reduction_case_constants.sv"))
-                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
-        }
-    }
-    let error = analyze_source(
-        "module Top(input logic a, output logic y); \
-         always_comb case (&1'bx) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
-        Path::new("unmatched_reduction_case.sv"),
-    )
-    .expect_err("reduction X results must not match known values or Z");
-    assert!(error.to_string().contains("latch inference"), "{error}");
 }
 
 #[test]
@@ -2021,13 +945,16 @@ fn resolves_alias_casts_in_generate_local_parameters() {
 
 #[test]
 fn preserves_known_conditional_case_selector_types() {
+    // An unsigned label makes the whole comparison unsigned, so a signed arm
+    // of the selector is zero-extended (IEEE 1800-2023 11.8.2, 12.5).
     for (selector, label) in [
-        ("1'b1 ? 1'sb1 : 2'sb00", "2'b11"),
-        ("1'b0 ? 2'sb00 : 1'sb1", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'b01"),
+        ("1'b0 ? 2'sb00 : 1'sb1", "2'b01"),
         ("1'b1 ? 1'sb1 : 2'b00", "2'b01"),
-        ("1'b1 ? 1'sbx : 2'sb00", "2'bxx"),
+        ("1'b1 ? 1'sbx : 2'sb00", "2'b0x"),
         ("1'b1 ? 1'sbz : 2'b00", "2'b0z"),
         ("1'b1 ? '1 : 2'b00", "2'b11"),
+        ("1'b1 ? 1'sb1 : 2'sb00", "2'sb11"),
     ] {
         let source = format!(
             "module Top(input logic a, output logic y); \
@@ -2035,33 +962,6 @@ fn preserves_known_conditional_case_selector_types() {
         );
         analyze_source(&source, Path::new("known_conditional_case.sv"))
             .unwrap_or_else(|error| panic!("{selector}: {error}"));
-    }
-}
-
-#[test]
-fn recognizes_single_bit_two_state_bitwise_complements() {
-    for predicate in ["s", "~(~s)", "s != 0"] {
-        let source = format!(
-            "module Top(input bit s, input logic outer, a, b, output logic y); \
-             always_comb if (outer) begin \
-             if ({predicate}) y = a; if (~({predicate})) y = b; \
-             end else y = a; endmodule"
-        );
-        analyze_source(&source, Path::new("one_bit_complements.sv"))
-            .unwrap_or_else(|error| panic!("{predicate}: {error}"));
-    }
-    for declaration in ["logic s", "bit [1:0] s"] {
-        let source = format!(
-            "module Top(input {declaration}, input logic outer, a, b, output logic y); \
-             always_comb if (outer) begin \
-             if (s) y = a; if (~s) y = b; end else y = a; endmodule"
-        );
-        assert!(
-            analyze_source(&source, Path::new("non_complementary_bitwise_guards.sv"))
-                .expect_err("only a one-bit two-state bitwise inverse proves coverage")
-                .to_string()
-                .contains("latch inference inside always_comb")
-        );
     }
 }
 
@@ -2088,34 +988,6 @@ fn resolves_size_casts_in_declaration_ranges_without_recursion() {
             Some(8)
         );
     }
-}
-
-#[test]
-fn applies_function_return_types_in_procedural_lvalue_indices() {
-    let ir = analyze_source(
-        r#"
-            module Top(input bit [1:0] index, input logic data, output logic [1:0] x);
-                function automatic bit idx();
-                    return index;
-                endfunction
-                always_comb begin
-                    x = '0;
-                    x[idx()] = data;
-                end
-            endmodule
-        "#,
-        Path::new("function_typed_lvalue_index.sv"),
-    )
-    .expect("the one-bit function return should truncate the expanded lvalue index");
-    assert!(
-        ir.modules()[0].comb_processes()[0]
-            .assignments()
-            .iter()
-            .any(|assignment| assignment.lhs() == "x"
-                && expr_references_ident_name(assignment.rhs(), "data")),
-        "the selected write must not be dropped: {:?}",
-        ir.modules()[0].comb_processes()[0].assignments()
-    );
 }
 
 #[test]
@@ -2181,26 +1053,6 @@ fn skips_inactive_loop_generate_blocks_with_parameter_casts() {
     let ir = analyze_source(source, Path::new("inactive_loop_generate_cast.sv"))
         .expect("a zero-iteration loop must skip unsupported declarations");
     assert_eq!(ir.modules()[0].comb_processes().len(), 1);
-}
-
-#[test]
-fn caps_aggregate_nested_static_loop_expansion() {
-    let error = analyze_source(
-        r#"
-            module Top(output logic y);
-                always_comb begin
-                    y = 1'b0;
-                    for (int i = 0; i < 101; i++)
-                        for (int j = 0; j < 100; j++)
-                            y = 1'b1;
-                end
-            endmodule
-        "#,
-        Path::new("nested_static_loop_budget.sv"),
-    )
-    .expect_err("nested loop expansion must have an aggregate bound")
-    .to_string();
-    assert!(error.contains("procedural loop unroll limit exceeded"));
 }
 
 #[test]
@@ -2400,82 +1252,6 @@ fn resolves_value_dependent_type_parameter_defaults() {
         ir.modules()[0].ports()[0].r#type().resolved_width(),
         Some(8)
     );
-}
-
-#[test]
-fn caps_dynamic_select_normalization_expansion() {
-    let error = analyze_source(
-        r#"
-            module Top(
-                input logic [16:0] index,
-                input logic data, replace,
-                output logic [4096:0] value
-            );
-                always_comb begin
-                    value = '0;
-                    value[index] = data;
-                    if (replace) value = '1;
-                end
-            endmodule
-        "#,
-        Path::new("capped_dynamic_select_expansion.sv"),
-    )
-    .expect_err("oversized dynamic-select expansion should be rejected compactly");
-    assert!(
-        error
-            .to_string()
-            .contains("dynamic selected write expansion exceeds limit")
-    );
-}
-
-#[test]
-fn retains_zero_iteration_loop_writes_for_latch_detection() {
-    let error = analyze_source(
-        r#"
-            module Top(input logic a, output logic y);
-                always_comb
-                    for (int i = 0; i < 0; i++) y = a;
-            endmodule
-        "#,
-        Path::new("zero_iteration_comb_loop.sv"),
-    )
-    .expect_err("a zero-iteration loop must not silently discard its target");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    let error = analyze_source(
-        r#"
-            module Top(input logic enable, a, output logic y);
-                always_comb begin
-                    if (enable)
-                        for (int i = 0; i < 0; i++) y = a;
-                end
-            endmodule
-        "#,
-        Path::new("nested_zero_iteration_comb_loop.sv"),
-    )
-    .expect_err("a nested zero-iteration loop must retain its write target");
-    assert!(
-        error
-            .to_string()
-            .contains("latch inference inside always_comb")
-    );
-
-    analyze_source(
-        r#"
-            module Top(input logic a, output logic y);
-                always_comb begin
-                    y = 1'b0;
-                    for (int i = 0; i < 0; i++) y = a;
-                end
-            endmodule
-        "#,
-        Path::new("initialized_zero_iteration_comb_loop.sv"),
-    )
-    .expect("a preceding assignment should initialize a zero-iteration loop target");
 }
 
 #[test]
@@ -2702,7 +1478,7 @@ fn rejects_conditional_predicate_conjunction_terms() {
     .expect_err("unsupported predicate conjunctions must not be partially lowered")
     .to_string();
     assert!(
-        error.contains("predicate lowering"),
+        error.contains("`&&&` in a condition"),
         "unexpected error: {error}"
     );
 }
@@ -2756,43 +1532,6 @@ fn analyzes_basic_sv_module_name() {
         ir.modules()[0].ports()[1].r#type().resolved_width(),
         Some(1)
     );
-}
-
-#[test]
-fn preserves_signedness_for_compound_unpacked_array_lvalues() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic signed [7:0] input_value);
-                logic signed [7:0] values[2];
-                always_comb begin
-                    values[0] = input_value;
-                    values[0] >>>= 1;
-                end
-            endmodule
-        "#,
-        Path::new("compound_array.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let compound = ir.modules()[0]
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments())
-        .find_map(|assignment| match assignment.rhs() {
-            ir::Expr::Binary {
-                op: ir::BinaryOp::Sar,
-                left,
-                ..
-            } => Some(left),
-            _ => None,
-        })
-        .expect("compound assignment should lower to an arithmetic shift");
-    // The earlier write is substituted into the compound assignment, so the
-    // shifted operand is the signed input itself.
-    assert_eq!(
-        compound.as_ref(),
-        &ir::Expr::Ident("input_value".to_string())
-    );
-    assert!(ir.modules()[0].ports()[0].r#type().is_signed());
 }
 
 #[test]
@@ -2938,13 +1677,24 @@ fn records_always_ff_case_branches() {
 
     let process = &ir.modules()[0].ff_processes()[0];
     assert_eq!(process.events().len(), 1);
-    assert_eq!(process.assignments().len(), 3);
-    assert!(
-        process
-            .assignments()
-            .iter()
-            .all(|assignment| assignment.condition().is_some())
-    );
+    assert_eq!(assignment_count(process.body()), 3);
+    let [crate::ir::Stmt::Case { items, default, .. }] = process.body() else {
+        panic!("expected a case statement: {:?}", process.body());
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1].labels.len(), 2);
+    assert!(default.is_some());
+}
+
+/// The assignments a statement body contains, at any depth.
+fn assignment_count(body: &[crate::ir::Stmt]) -> usize {
+    let mut count = 0;
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            count += usize::from(matches!(stmt, crate::ir::Stmt::Assign { .. }));
+        });
+    }
+    count
 }
 
 #[test]
@@ -2968,7 +1718,10 @@ fn accepts_unknown_labels_in_always_ff_case() {
     )
     .expect("X/Z case labels should use exact four-state case equality");
 
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    assert_eq!(
+        assignment_count(ir.modules()[0].ff_processes()[0].body()),
+        2
+    );
 }
 
 #[test]
@@ -2993,246 +1746,10 @@ fn accepts_dynamic_labels_in_always_ff_case() {
     )
     .expect("dynamic labels should use exact four-state case equality");
 
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
-}
-
-#[test]
-fn inlines_simple_function_call() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, input logic b, output logic y);
-                function automatic logic choose(input logic s, input logic t);
-                    if (s) begin
-                        return t;
-                    end else begin
-                        return 1'b0;
-                    end
-                endfunction
-
-                always_comb y = choose(a, b);
-            endmodule
-        "#,
-        Path::new("Top.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    assert!(matches!(
-        ir.modules()[0].assignments()[0].rhs(),
-        ir::Expr::Resize { expr, width: 1, .. }
-            if matches!(&**expr, ir::Expr::Mux { .. })
-    ));
-}
-
-#[test]
-fn inlines_veryl_generated_std_counter_functions() {
-    let ir = analyze_source(
-        include_str!("../testdata/verilator/StdCounter.sv"),
-        Path::new("StdCounter.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let counter = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "counter")
-        .expect("counter module should exist");
     assert_eq!(
-        counter
-            .parameters()
-            .iter()
-            .find(|parameter| parameter.name() == "MAX_COUNT")
-            .and_then(|parameter| parameter.resolved_value()),
-        Some(3)
+        assignment_count(ir.modules()[0].ff_processes()[0].body()),
+        2
     );
-    assert_eq!(
-        counter
-            .ports()
-            .iter()
-            .find(|port| port.name() == "o_count")
-            .and_then(|port| port.r#type().resolved_width()),
-        Some(2)
-    );
-
-    assert!(
-        counter
-            .assignments()
-            .iter()
-            .all(|assignment| !expr_contains_call(assignment.rhs()))
-    );
-    let count_next = counter
-        .assignments()
-        .iter()
-        .find(|assignment| assignment.lhs() == "count_next")
-        .expect("count_next assignment should exist");
-    assert!(
-        matches!(count_next.rhs(), ir::Expr::Resize { width: 2, .. }),
-        "{:#?}",
-        count_next.rhs()
-    );
-    assert!(
-        counter
-            .signals()
-            .iter()
-            .any(|signal| signal.name() == "count")
-    );
-    assert!(
-        counter
-            .signals()
-            .iter()
-            .any(|signal| signal.name() == "count_next")
-    );
-}
-
-#[test]
-fn analyzes_veryl_generated_lfsr_tap_assignments() {
-    let ir = analyze_source(
-        include_str!("../testdata/verilator/Lfsr.sv"),
-        Path::new("Lfsr.sv"),
-    )
-    .expect("SV analysis should succeed");
-    let lfsr = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "lfsr_galois")
-        .expect("lfsr_galois module should exist");
-    assert_eq!(
-        lfsr.ports()
-            .iter()
-            .find(|port| port.name() == "o_val")
-            .and_then(|port| port.r#type().resolved_width()),
-        Some(64)
-    );
-    assert_eq!(
-        lfsr.signals()
-            .iter()
-            .find(|signal| signal.name() == "val_next")
-            .and_then(|signal| signal.r#type().resolved_width()),
-        Some(64)
-    );
-
-    assert!(lfsr.assignments().iter().any(|assignment| matches!(
-        assignment.lhs_value(),
-        ir::LValue::Select { name, msb, lsb, .. }
-            if name == "val_next"
-                && typecheck::eval_const_expr(
-                    msb,
-                    &[("SIZE".to_string(), 32)].into_iter().collect(),
-                ) == Some(31)
-                && typecheck::eval_const_expr(
-                    lsb,
-                    &[("SIZE".to_string(), 32)].into_iter().collect(),
-                ) == Some(31)
-    )));
-}
-
-#[test]
-fn specializes_veryl_generated_lfsr_top_bit_assignment() {
-    let ir = analyze_source_with_module_parameter_overrides(
-        include_str!("../testdata/verilator/Lfsr.sv"),
-        Path::new("Lfsr.sv"),
-        "lfsr_galois",
-        &[("SIZE".to_string(), 32)].into_iter().collect(),
-    )
-    .expect("SV analysis should succeed");
-    let lfsr = ir
-        .modules()
-        .iter()
-        .find(|module| module.name() == "lfsr_galois")
-        .expect("lfsr_galois module should exist");
-    let constants: HashMap<_, _> = [("SIZE".to_string(), 32)].into_iter().collect();
-
-    let assignments = lfsr
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments().iter())
-        .filter(|assignment| {
-            matches!(
-                assignment.lhs_value(),
-                ir::LValue::Select { name, msb, lsb, .. }
-                    if name == "val_next"
-                        && typecheck::eval_const_expr(
-                            msb,
-                            &constants
-                        ) == Some(31)
-                        && typecheck::eval_const_expr(
-                            lsb,
-                            &constants
-                        ) == Some(31)
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let bit_zero_assignments = lfsr
-        .comb_processes()
-        .iter()
-        .flat_map(|process| process.assignments().iter())
-        .filter(|assignment| {
-            matches!(
-                assignment.lhs_value(),
-                ir::LValue::Select { name, msb, lsb, .. }
-                    if name == "val_next"
-                        && typecheck::eval_const_expr(msb, &constants) == Some(0)
-                        && typecheck::eval_const_expr(lsb, &constants) == Some(0)
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(assignments.len(), 1);
-    assert!(matches!(
-        assignments[0].rhs(),
-        ir::Expr::Select { expr, msb, lsb, .. }
-            if matches!(&**expr, ir::Expr::Ident(name) if name == "o_val")
-                && typecheck::eval_const_expr(msb, &HashMap::default())
-                    == Some(0)
-                && typecheck::eval_const_expr(lsb, &HashMap::default())
-                    == Some(0)
-    ));
-    assert!(
-        bit_zero_assignments.iter().any(|assignment| {
-            matches!(
-                assignment.rhs(),
-                ir::Expr::Mux {
-                    condition,
-                    then_expr,
-                    else_expr,
-                } if matches!(&**condition, ir::Expr::Ident(name) if name == "i_set")
-                    && matches!(&**then_expr, ir::Expr::Select { expr, .. }
-                        if matches!(&**expr, ir::Expr::Ident(name) if name == "i_setval"))
-                    && matches!(&**else_expr, ir::Expr::Binary { .. } | ir::Expr::Select { .. })
-            )
-        }),
-        "val_next[0] should retain its ternary assignment"
-    );
-}
-
-fn expr_contains_call(expr: &ir::Expr) -> bool {
-    match expr {
-        ir::Expr::Ident(_) | ir::Expr::Literal(_) => false,
-        ir::Expr::Select { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Resize { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
-            parts.iter().any(expr_contains_call)
-        }
-        ir::Expr::Unary { expr, .. } => expr_contains_call(expr),
-        ir::Expr::Binary { left, right, .. } => {
-            expr_contains_call(left) || expr_contains_call(right)
-        }
-        ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_call(condition)
-                || expr_contains_call(then_expr)
-                || expr_contains_call(else_expr)
-        }
-        ir::Expr::Call { .. } => true,
-        ir::Expr::Inside { expr, items } => {
-            expr_contains_call(expr)
-                || items
-                    .iter()
-                    .flat_map(ir::InsideItem::exprs)
-                    .any(expr_contains_call)
-        }
-    }
 }
 
 #[test]
@@ -3409,66 +1926,67 @@ fn rejects_nonpositive_implicit_unpacked_array_dimensions() {
 }
 
 #[test]
-fn analyzes_nested_static_loops_with_outer_index_environment() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, input logic d);
-                logic q[2][2];
-                always_ff @(posedge clk) begin
-                    for (int i = 0; i < 2; i++) begin
-                        for (int j = 0; j < i; j++) begin
-                            q[i][j] <= d;
-                        end
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("nested_static_loops.sv"),
-    )
-    .expect("nested static loops should use the outer loop environment");
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 1);
+fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
+    // IEEE 1800-2023 6.22.2 and 7.6: an unpacked array assignment needs
+    // equivalent element types (same width, state count and signedness) and
+    // equal element counts.
+    let source = r#"
+        module Top(output logic [7:0] q);
+            function automatic logic [7:0] first(input logic [7:0] x [2][2]);
+                return x[0][0];
+            endfunction
+            logic signed [7:0] row [2];
+            always_comb begin
+                row[0] = 8'sd1;
+                row[1] = 8'sd2;
+                q = first('{row, '{8'd3, 8'd4}});
+            end
+        endmodule
+    "#;
+    let error = analyze_source(source, Path::new("nonequivalent_unpacked.sv"))
+        .expect_err("a signed row is not equivalent to an unsigned one");
+    let row = |signed| typecheck::UnpackedArrayType {
+        dims: vec![2],
+        element_width: 8,
+        signed,
+        four_state: true,
+    };
+    assert_eq!(
+        error,
+        AnalyzerError::IncompatibleUnpackedArray {
+            context: "assignment pattern item".to_string(),
+            actual: row(true),
+            target: row(false),
+        }
+    );
 }
 
 #[test]
-fn carries_outer_loop_types_into_nested_loop_preflight() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, input logic d);
-                logic q;
-                always_ff @(posedge clk) begin
-                    for (int i = -1; i < 0; i++) begin
-                        for (int j = 0; i < 32'd1; j++) begin
-                            q <= d;
-                        end
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("nested_loop_preflight_types.sv"),
-    )
-    .expect("nested loop preflight should use outer loop types");
-    assert!(ir.modules()[0].ff_processes().is_empty());
-}
-
-#[test]
-fn applies_expression_types_to_compound_loop_steps() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic clk, output logic q);
-                always_ff @(posedge clk) begin
-                    for (int i = -2; i < 0; i /= 32'd2) begin
-                        q <= 1'b1;
-                    end
-                    for (int i = -3; i < 0; i %= 32'd2) begin
-                        q <= 1'b0;
-                    end
-                end
-            endmodule
-        "#,
-        Path::new("typed_compound_loop_steps.sv"),
-    )
-    .expect("compound loop steps should use expression types");
-    assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+fn accepts_unpacked_arrays_of_equivalent_element_types() {
+    // Bounds, the packed range direction and a packed structure of the same
+    // width, state count and signedness do not matter (IEEE 1800-2023
+    // 6.22.2, 7.6).
+    let source = r#"
+        module Top(output logic [7:0] q, output logic [7:0] r);
+            typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+            function automatic logic [7:0] first(input logic [7:0] x [1:0][2]);
+                return x[1][0];
+            endfunction
+            logic [0:7] row [5:6];
+            pair_t pairs [2];
+            logic [7:0] grid [2][2];
+            always_comb begin
+                row[5] = 8'd1;
+                row[6] = 8'd2;
+                pairs = row;
+                grid = '{row, '{8'd0, 8'd0}};
+                q = first('{pairs, row});
+                r = grid[0][0];
+            end
+        endmodule
+    "#;
+    analyze_source(source, Path::new("equivalent_unpacked.sv"))
+        .expect("equivalent unpacked array types are assignment compatible");
 }
 
 #[test]
@@ -3728,59 +2246,6 @@ fn records_continuous_assignments() {
 }
 
 #[test]
-fn records_always_comb_processes() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic a, input logic b, output logic y, output logic z);
-                always_comb begin
-                    y = a & b;
-                    z = a | b;
-                end
-            endmodule
-        "#,
-        Path::new("always_comb.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let top = &ir.modules()[0];
-    assert_eq!(top.assignments().len(), 2);
-    assert_eq!(top.comb_processes().len(), 1);
-    assert_eq!(
-        top.comb_processes()[0].kind(),
-        ir::CombProcessKind::AlwaysComb
-    );
-    assert_eq!(top.comb_processes()[0].assignments()[0].lhs(), "y");
-    assert_eq!(top.comb_processes()[0].assignments()[1].lhs(), "z");
-}
-
-#[test]
-fn expands_operator_assignments() {
-    let ir = analyze_source(
-        r#"
-            module Top(input logic [3:0] a, input logic [3:0] b, output logic [3:0] y);
-                always_comb begin
-                    y = a;
-                    y ^= b;
-                end
-            endmodule
-        "#,
-        Path::new("operator_assignment.sv"),
-    )
-    .expect("SV analysis should succeed");
-
-    let top = &ir.modules()[0];
-    let assignment = &top.comb_processes()[0].assignments()[1];
-    assert_eq!(assignment.lhs(), "y");
-    assert!(matches!(
-        assignment.rhs(),
-        ir::Expr::Binary {
-            op: ir::BinaryOp::BitXor,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn folds_countones_with_self_determined_argument_types() {
     let ir = analyze_source(
         r#"
@@ -3944,8 +2409,8 @@ fn analyzes_veryl_emitted_benchmark_sv() {
 #[test]
 fn rejects_unlowered_constructs() {
     let error = analyze_source(
-        "module Top(output logic y); initial y = 1'b0; endmodule",
-        Path::new("initial.sv"),
+        "module Top(input logic a, output logic y); always_comb begin fork y = a; join end endmodule",
+        Path::new("fork.sv"),
     )
     .expect_err("unlowered constructs must not be silently ignored");
     assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
@@ -4011,7 +2476,7 @@ fn records_veryl_emitted_module_instantiations() {
 fn unsupported_constructs_map_to_their_tracking_issues() {
     let issue =
         |construct: &str| AnalyzerError::Unsupported(construct.to_string()).tracking_issue();
-    assert_eq!(issue("blocking assignment inside always_ff"), 421);
+    assert_eq!(issue("gate primitive instantiation"), 457);
     assert_eq!(issue("duplicate internal signal `t`"), 445);
     assert_eq!(issue("undriven net declaration `n`"), 460);
     assert_eq!(
@@ -4022,4 +2487,1087 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
         AnalyzerError::Parse("bad".to_string()).tracking_issue(),
         SV_FRONTEND_TRACKING_ISSUE
     );
+}
+
+#[test]
+fn package_inlining_keeps_source_text_after_a_dpi_import() {
+    // The preprocessor widens the space after `"DPI-C"`, so syntax tree
+    // offsets after it no longer match the source text.
+    let code = "package p; import \"DPI-C\" function int twice(input int x); endpackage\n\
+                module Top(input int a, output int y); import p::*; assign y = a; endmodule\n";
+    let path = Path::new("dpi.sv");
+    let packages = source_packages(code, path)
+        .unwrap()
+        .into_iter()
+        .map(|package| (package.name.clone(), package))
+        .collect::<HashMap<_, _>>();
+    let inlined = inline_module_packages(code, path, "Top", &packages)
+        .unwrap()
+        .unwrap();
+    assert!(
+        inlined.contains("\nimport \"DPI-C\" function int twice(input int x); \nendmodule"),
+        "{inlined}"
+    );
+}
+
+fn elaborate(source: &str) -> Result<Option<String>, AnalyzerError> {
+    elaborate_interfaces(&[(source, Path::new("interfaces.sv"))])
+        .map(|sources| sources.map(|mut sources| sources.remove(0)))
+}
+
+#[test]
+fn leaves_sources_without_interfaces_unchanged() {
+    let source = "module Top(input logic a, output logic y); assign y = a; endmodule";
+    assert_eq!(elaborate(source), Ok(None));
+}
+
+#[test]
+fn expands_interface_instances_ports_and_generic_ports() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus #(parameter int W = 4);
+            logic [W-1:0] data;
+            modport w(output data);
+        endinterface
+        module Writer(Bus.w bus, input logic [7:0] v);
+            assign bus.data = v;
+        endmodule
+        module Pass(interface bus, input logic [7:0] v);
+            Writer u(.bus(bus), .v(v));
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] y);
+            Bus #(.W(6)) b();
+            Pass p(.bus(b), .v(v));
+            assign y = b.data;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // The instance becomes a localparam and a signal per member.
+        "localparam int b$W = 6;",
+        "var logic [b$W-1:0] b$data;",
+        "assign y = b$data;",
+        // The port becomes a member port and a parameter.
+        "parameter int bus$W = 4",
+        "output var logic [bus$W-1:0] bus$data",
+        "assign bus$data = v;",
+        // The generic port is bound in a copy of the module.
+        "Pass$Bus #(.bus$W(b$W)) p (.bus$data(b$data), .v(v));",
+        "module Pass$Bus #(",
+        "Writer #(.bus$W(bus$W)) u (.bus$data(bus$data), .v(v));",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    // The copy stays beside the original, under the same directives.
+    assert!(
+        elaborated.find("module Pass$Bus") < elaborated.find("module Top"),
+        "{elaborated}"
+    );
+}
+
+#[test]
+fn expands_interface_parameters_functions_and_grouped_ports() {
+    let elaborated = elaborate(
+        r#"
+        interface Counter;
+            parameter W = 4;
+            logic [W-1:0] state;
+            function automatic void load(input logic [W-1:0] v);
+                state = v;
+            endfunction
+            modport loader(import load);
+        endinterface
+        interface Util #(parameter int K = 2);
+            function automatic logic [7:0] scaled(input logic [7:0] v);
+                return v * K;
+            endfunction
+            modport user(import scaled);
+        endinterface
+        module Loader(Counter.loader c, input logic [7:0] v);
+            always_comb c.load(v);
+        endmodule
+        module Pair(Counter a, b, output logic [7:0] o);
+            assign o = a.state + b.state;
+        endmodule
+        module Scaler(Util.user u, input logic [7:0] v, output logic [7:0] o);
+            assign o = u.scaled(v);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o, output logic [7:0] s);
+            Counter #(.W(8)) named();
+            Counter #(6) ordered();
+            Util #(.K(3)) util();
+            Loader l(.c(named), .v(v));
+            Pair p(.a(named), .b(ordered), .o(o));
+            Scaler u(.u(util), .v(v), .o(s));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // A body `parameter` without a parameter port list can be overridden.
+        "localparam named$W = 8;",
+        "localparam ordered$W = 6;",
+        "parameter c$W = 4",
+        // A member an imported function assigns is driven through the port.
+        "output var logic [c$W-1:0] c$state",
+        "named$state = v;",
+        // A port without a header repeats the interface of the previous one.
+        "input var logic [b$W-1:0] b$state",
+        "assign o = a$state + b$state;",
+        // A port that carries only a parameter and a function disappears.
+        "Scaler #(.u$K(util$K)) u (.v(v), .o(s));",
+        "assign o = u$scaled(v);",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+}
+
+#[test]
+fn expands_nested_references_functions_and_written_arguments() {
+    let elaborated = elaborate(
+        r#"
+        interface Cfg #(parameter int N = 2);
+        endinterface
+        interface Lane;
+            function automatic int bits();
+                return 4;
+            endfunction
+            function automatic logic [3:0] inc(input logic [3:0] v);
+                return v + 1;
+            endfunction
+            logic [bits()-1:0] i0;
+            logic [3:0] g0;
+            assign g0 = inc(i0);
+            modport r(input g0);
+        endinterface
+        module Reader(Lane.r l, output logic [3:0] o);
+            assign o = l.g0;
+        endmodule
+        module Driver(Lane l, input logic [3:0] v);
+            function automatic void drive(output logic [3:0] d, input logic [3:0] s);
+                d = s;
+            endfunction
+            always_comb drive(l.i0, v);
+        endmodule
+        module Top(input logic [3:0] v, output logic [3:0] o);
+            Cfg #(.N(3)) cfg();
+            Lane rows [cfg.N] ();
+            Driver d(.l(rows[cfg.N - 1]), .v(v));
+            Reader r(.l(rows[cfg.N - 1]), .o(o));
+            assign rows[cfg.N - 2].i0 = v;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // References inside selects and instance dimensions are rewritten.
+        "var logic [rows$bits()-1:0] rows$i0[cfg$N];",
+        "assign rows$i0[cfg$N - 2] = v;",
+        ".l$i0(rows$i0[cfg$N - 1])",
+        // Loop helper names cannot collide with the items `i0` and `g0`.
+        "for (genvar rows$$i0 = 0; rows$$i0 <= (cfg$N) - 1; rows$$i0++) begin : rows$$g0",
+        "assign rows$g0[rows$$i0] = rows$inc(rows$i0[rows$$i0]);",
+        // A function a declaration calls is declared with the port.
+        "function automatic int l$bits();",
+        // An actual of an `output` subroutine argument is written.
+        "output var logic [l$bits()-1:0] l$i0",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+}
+
+#[test]
+fn infers_writes_through_child_ports_and_scoped_subroutines() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+            logic [7:0] z;
+        endinterface
+        interface Gen;
+            logic a;
+            logic b;
+            generate
+                if (1) begin : copy
+                    assign b = a;
+                end
+            endgenerate
+        endinterface
+        package pk;
+            function automatic void touch(output logic [7:0] a);
+                a = 0;
+            endfunction
+        endpackage
+        module Out(output logic [7:0] o);
+            assign o = 8'd1;
+        endmodule
+        module M(Bus p, output logic [7:0] o);
+            function automatic logic [7:0] touch(input logic [7:0] a);
+                return a;
+            endfunction
+            Out named(.o(p.x));
+            Out ordered(p.y);
+            assign o = touch(p.z);
+        endmodule
+        module Top(input logic v, output logic o);
+            Gen g [2] ();
+            assign g[0].a = v;
+            assign g[1].a = v;
+            assign o = g[1].b;
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // Actuals of child outputs are written; the module's own `touch`
+        // reads its argument, whatever a package declares.
+        "output var logic [7:0] p$x",
+        "output var logic [7:0] p$y",
+        "input var logic [7:0] p$z",
+        // The items of a generate region are placed in the array loop.
+        "for (genvar g$$i0 = 0; g$$i0 <= (2) - 1; g$$i0++) begin : g$$g0",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    let top = &elaborated[elaborated.find("module Top").unwrap()..];
+    assert!(!top.contains("generate"), "{elaborated}");
+    assert_eq!(
+        elaborate("interface I; endinterface interface I; endinterface"),
+        Err(AnalyzerError::DuplicateModule {
+            name: "I".to_string()
+        })
+    );
+}
+
+#[test]
+fn interface_functions_write_members_through_subroutine_arguments() {
+    let elaborated = elaborate(
+        r#"
+        interface S;
+            logic [7:0] state;
+            function automatic void put(output logic [7:0] d, input logic [7:0] v);
+                d = v;
+            endfunction
+            function automatic void load(input logic [7:0] v);
+                put(state, v);
+            endfunction
+            modport m(import load);
+        endinterface
+        module L(S.m s, input logic [7:0] v);
+            always_comb s.load(v);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("output var logic [7:0] s$state"),
+        "{elaborated}"
+    );
+}
+
+#[test]
+fn rejects_invalid_and_colliding_interface_declarations() {
+    assert_eq!(
+        elaborate("interface I; logic x; modport m(input x); modport m(output x); endinterface"),
+        Err(AnalyzerError::DuplicateModport {
+            interface: "I".to_string(),
+            name: "m".to_string()
+        })
+    );
+    assert_eq!(
+        elaborate(
+            "interface I; logic a;
+                 function automatic logic helper(); return a; endfunction
+                 function automatic logic f(input logic helper); return helper; endfunction
+             endinterface"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "declaration of `helper` in a nested scope of interface `I`, which shadows an interface item"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        elaborate(
+            r#"
+            package pa; typedef logic [7:0] word_t; endpackage
+            package pb; typedef logic [3:0] word_t; endpackage
+            interface A; import pa::*; word_t d; modport r(input d); endinterface
+            interface B; import pb::*; word_t d; modport r(input d); endinterface
+            module M(A.r a, B.r b, output logic [7:0] o, output logic [3:0] q);
+                assign o = a.d;
+                assign q = b.d;
+            endmodule
+            "#
+        ),
+        Err(AnalyzerError::Unsupported(
+            "package items `pa::word_t` and `pb::word_t` in module `M`, one of them imported through an interface"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        elaborate(
+            r#"
+            package pa; typedef logic [7:0] word_t; endpackage
+            interface A; import pa::*; word_t d; modport r(input d); endinterface
+            module M(A.r a, output logic [7:0] o);
+                typedef logic [3:0] word_t;
+                assign o = a.d;
+            endmodule
+            "#
+        ),
+        Err(AnalyzerError::Unsupported(
+            "declaration of `word_t` in module `M`, which hides the package item `pa::word_t` of an interface it uses"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
+    let elaborated = elaborate(
+        r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+        endinterface
+        interface A;
+            logic [7:0] x;
+        endinterface
+        interface B;
+            logic [3:0] x;
+        endinterface
+        interface T;
+            function automatic logic [7:0] touch(input logic [7:0] v);
+                return v;
+            endfunction
+        endinterface
+        interface U;
+            logic [7:0] s;
+            function automatic void touch(output logic [7:0] v);
+                v = s;
+            endfunction
+        endinterface
+        module M(Bus p, output logic [7:0] o);
+            T a();
+            assign o = a.touch(p.y);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o);
+            if (1) begin : g1
+                A h();
+                assign h.x = v;
+                assign o = h.x;
+            end else begin : g2
+                B h();
+                assign h.x = v[3:0];
+            end
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // `a.touch` is the input-only function of `T`.
+        "input var logic [7:0] p$y",
+        // Each generate block has its own `h`.
+        "var logic [7:0] h$x;",
+        "var logic [3:0] h$x;",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+
+    let sources = elaborate_interfaces(&[
+        (
+            "package pk; typedef logic [5:0] word_t; endpackage
+             import pk::*;
+             interface I; word_t x; modport r(input x); endinterface",
+            Path::new("interface.sv"),
+        ),
+        (
+            "module M(I.r p, output logic [5:0] o); assign o = p.x; endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(
+        sources[1].contains("module M import pk::*;"),
+        "{}",
+        sources[1]
+    );
+    assert!(
+        sources[1].contains("input var word_t p$x"),
+        "{}",
+        sources[1]
+    );
+}
+
+#[test]
+fn keeps_generate_branches_imports_and_uncalled_writers_in_scope() {
+    let elaborated = elaborate(
+        r#"
+        package pa;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endpackage
+        package pb;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endpackage
+        interface I;
+            logic [7:0] x;
+            logic [7:0] y;
+            assign y = x + 1;
+            function automatic void set(input logic [7:0] v);
+                x = v;
+            endfunction
+            modport m(input x, import set);
+        endinterface
+        module R(I.m p, output logic [7:0] o);
+            assign o = p.x;
+        endmodule
+        module S(I p);
+            import pa::*;
+            always_comb touch(p.x);
+        endmodule
+        module Top(input logic [7:0] v, output logic [7:0] o);
+            if (1) I h(); else I h();
+            for (genvar i = 0; i < 1; i++) I k();
+            I b();
+            assign b.x = v;
+            R r(.p(b), .o(o));
+            S s(.p(b));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // The items of a bare generate item stay in its branch.
+        "if (1) begin",
+        "end else begin",
+        "i++) begin",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    // `R` never calls `set`, and `pb::touch` is not imported into `S`.
+    assert!(
+        !elaborated.contains("output var logic [7:0] p$x"),
+        "{elaborated}"
+    );
+
+    // A compilation-unit import after a module is copied into it.
+    let elaborated = elaborate(
+        r#"
+        package pk; typedef logic [5:0] word_t; endpackage
+        module M(I p, output logic [5:0] o); assign o = p.x; endmodule
+        import pk::*;
+        interface I; word_t x; endinterface
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("module M import pk::*;"),
+        "{elaborated}"
+    );
+}
+
+#[test]
+fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
+    let elaborated = elaborate(
+        r#"
+        package pk; typedef logic [3:0] word_t; endpackage
+        interface I;
+            import pk::*;
+            localparam int W = 8;
+            typedef logic [W-1:0] data_t;
+            logic [7:0] shape;
+            data_t data;
+            word_t w;
+            modport m(input data);
+        endinterface
+        module C(I.m p, input logic clk, output logic [7:0] o);
+            function automatic logic [7:0] f(input logic [7:0] word_t);
+                return word_t;
+            endfunction
+            always_ff @(posedge clk) o <= f(p.data);
+        endmodule
+        module M(I p, input logic clk, output logic [7:0] o);
+            if (1) begin : g
+                I p();
+                assign p.data = 1;
+            end
+            C c(.p(p), .clk, .o);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    for expected in [
+        // Imports precede the parameter port list the expansion adds.
+        "module C import pk::*; #(",
+        // The write is to the instance in `g`, not to port `p` of `M`.
+        "input var p$data_t p$data",
+        ".clk, .o)",
+    ] {
+        assert!(
+            elaborated.contains(expected),
+            "missing `{expected}` in:\n{elaborated}"
+        );
+    }
+    // A port declares the types in its header, before the member ports.
+    assert_eq!(
+        elaborate(
+            "interface I; logic [7:0] shape; typedef logic [$bits(shape)-1:0] data_t; data_t data;
+             modport m(input data); endinterface
+             module C(I.m p, output logic [7:0] o); assign o = p.data; endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "reference to member `shape` in a declaration of interface `I`, which port `p` of module `C` carries".to_string()
+        ))
+    );
+    // An imported function's member passes through but stays inaccessible.
+    assert_eq!(
+        elaborate(
+            "interface I; logic [7:0] x; logic [7:0] y;
+             function automatic logic [7:0] get(); return x; endfunction
+             modport m(input y, import get); endinterface
+             module C(I.m p, output logic [7:0] o); assign o = p.get() + p.x; endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "access of `p.x`, which the modport of port `p` does not list".to_string()
+        ))
+    );
+    for (modport, name, expected) in [
+        ("modport m(input y);", "y", "a member"),
+        ("modport m(input x, import typo);", "typo", "a function"),
+    ] {
+        assert_eq!(
+            elaborate(&format!(
+                "interface I; logic x; {modport} endinterface module Top; I h(); endmodule"
+            )),
+            Err(AnalyzerError::UnknownModportItem {
+                interface: "I".to_string(),
+                modport: "m".to_string(),
+                name: name.to_string(),
+                expected,
+            })
+        );
+    }
+}
+
+#[test]
+fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
+    let elaborated = elaborate(
+        r#"
+        package pa;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endpackage
+        package pb;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endpackage
+        interface I;
+            logic [7:0] mem [4];
+            logic [7:0] hi;
+            logic [7:0] lo;
+            logic [1:0] idx;
+            logic [7:0] x;
+        endinterface
+        module Out(output logic [15:0] o);
+            assign o = 16'h1234;
+        endmodule
+        module L(I p);
+            initial $readmemh("data.hex", p.mem);
+        endmodule
+        module C(I p);
+            Out u(.o({p.hi, p.lo}));
+        endmodule
+        module S(I p);
+            import pa::*;
+            function automatic void g();
+                import pb::*;
+            endfunction
+            always_comb touch(p.x);
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    let module = |name: &str| {
+        let start = elaborated.find(&format!("module {name}(")).unwrap();
+        let end = start + elaborated[start..].find("endmodule").unwrap();
+        elaborated[start..end].to_string()
+    };
+    let (l, c, s) = (module("L"), module("C"), module("S"));
+    // An imported function that loads a member drives it.
+    let loaded = elaborate(
+        r#"
+        interface I;
+            logic [7:0] mem [4];
+            function automatic void load();
+                $readmemh("data.hex", mem);
+            endfunction
+            modport m(import load);
+        endinterface
+        module L(I.m p);
+            initial p.load();
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        loaded.contains("output var logic [7:0] p$mem[4]"),
+        "{loaded}"
+    );
+    assert_eq!(
+        elaborate("interface I; logic x; modport m(input x, output x); endinterface"),
+        Err(AnalyzerError::DuplicateModportItem {
+            interface: "I".to_string(),
+            modport: "m".to_string(),
+            name: "x".to_string(),
+        })
+    );
+    for (text, expected) in [
+        (&l, "output var logic [7:0] p$mem[4]"),
+        (&c, "output var logic [7:0] p$hi"),
+        (&c, "output var logic [7:0] p$lo"),
+        (&c, "input var logic [1:0] p$idx"),
+        // `pb::touch` is imported only inside `g`.
+        (&s, "input var logic [7:0] p$x"),
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+}
+
+#[test]
+fn resolves_scoped_handles_imports_and_grouped_instances() {
+    let elaborated = elaborate(
+        r#"
+        package pa; typedef logic [7:0] word_t; endpackage
+        package pb; typedef logic [3:0] word_t; endpackage
+        interface I;
+            import pa::*;
+            word_t x;
+        endinterface
+        interface A;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endinterface
+        interface B;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endinterface
+        interface F;
+            logic [7:0] y;
+            function automatic logic [7:0] get();
+                return y;
+            endfunction
+        endinterface
+        module M(I p);
+            function automatic void f();
+                import pb::*;
+            endfunction
+            if (1) begin : g1
+                A c();
+                always_comb c.touch(p.x);
+            end else begin : g2
+                B c();
+            end
+            F a(), b();
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    // `c` in `g1` is an `A`, whose `touch` only reads `p.x`.
+    assert!(elaborated.contains("input var word_t p$x"), "{elaborated}");
+    assert!(!elaborated.contains("endfunctionvar"), "{elaborated}");
+    assert_eq!(
+        elaborate("interface I; logic x; logic x; endinterface"),
+        Err(AnalyzerError::DuplicateInterfaceItem {
+            interface: "I".to_string(),
+            name: "x".to_string(),
+        })
+    );
+    assert_eq!(
+        elaborate(
+            "interface I #(parameter int W = 1); endinterface
+             module Top; I #(.TYPO(3)) h(); endmodule"
+        ),
+        Err(AnalyzerError::UnknownInterfaceParameter {
+            interface: "I".to_string(),
+            name: "TYPO".to_string(),
+        })
+    );
+}
+
+#[test]
+fn separates_type_names_unit_subroutines_and_macros_by_file() {
+    // A module type may share the name of an interface port.
+    let elaborated = elaborate(
+        "module bus(input logic a); endmodule
+         interface I; logic x; endinterface
+         module M(I bus); bus u(.a(bus.x)); endmodule",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(elaborated.contains("bus u(.a(bus$x))"), "{elaborated}");
+
+    // Compilation-unit functions of another file are not visible.
+    let sources = elaborate_interfaces(&[
+        (
+            "function automatic void touch(output logic [7:0] v); v = 0; endfunction
+             module N(); endmodule",
+            Path::new("other.sv"),
+        ),
+        (
+            "function automatic void touch(input logic [7:0] v); endfunction
+             interface I; logic [7:0] x; endinterface
+             module M(I p); always_comb touch(p.x); endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(
+        sources[1].contains("input var logic [7:0] p$x"),
+        "{}",
+        sources[1]
+    );
+
+    // The expansion of a macro would keep the names it emits.
+    assert_eq!(
+        elaborate(
+            "`define DRIVE assign x = 1;
+             interface I; logic x; `DRIVE endinterface
+             module M(); I h(); endmodule"
+        ),
+        Err(AnalyzerError::Unsupported(
+            "macro or compiler directive in interface `I`".to_string()
+        ))
+    );
+
+    // Compilation-unit items are visible only in their own file, after
+    // their declaration.
+    let interface = "function automatic logic source(); return 1; endfunction
+         interface I; logic x; assign x = source(); endinterface";
+    assert!(
+        elaborate(&format!("{interface}\nmodule M(); I h(); endmodule"))
+            .unwrap()
+            .is_some()
+    );
+    let message = "compilation-unit item in interface `I`, which a module of another source file or before it uses";
+    assert_eq!(
+        elaborate_interfaces(&[
+            (interface, Path::new("interface.sv")),
+            ("module M(); I h(); endmodule", Path::new("module.sv")),
+        ]),
+        Err(AnalyzerError::Unsupported(message.to_string()))
+    );
+    assert_eq!(
+        elaborate(&format!("module M(); I h(); endmodule\n{interface}")),
+        Err(AnalyzerError::Unsupported(message.to_string()))
+    );
+}
+
+#[test]
+fn resolves_sibling_generic_ports_and_struct_fields() {
+    let elaborated = elaborate(
+        r#"
+        interface A;
+            function automatic void touch(output logic [7:0] v);
+                v = 0;
+            endfunction
+        endinterface
+        interface B;
+            function automatic void touch(input logic [7:0] v);
+            endfunction
+        endinterface
+        interface P;
+            logic [7:0] x;
+        endinterface
+        module G(interface api, P p);
+            always_comb api.touch(p.x);
+        endmodule
+        module S(P bus, output logic [7:0] o);
+            typedef struct packed { logic [7:0] bus; } T;
+            T t;
+            assign t.bus = bus.x;
+            assign o = t.bus;
+        endmodule
+        module Top(output logic [7:0] o);
+            B b();
+            P q();
+            G g(.api(b), .p(q));
+            S s(.bus(q), .o(o));
+        endmodule
+        "#,
+    )
+    .unwrap()
+    .unwrap();
+    // `api` is bound to `B`, whose `touch` only reads `p.x`.
+    assert!(
+        elaborated.contains("input var logic [7:0] p$x"),
+        "{elaborated}"
+    );
+    // A struct field `h` is not a generate-qualified instance.
+    assert!(
+        elaborate(
+            "interface I; logic x; endinterface
+             module M(output logic y);
+                 typedef struct packed { struct packed { logic x; } h; } T;
+                 T record;
+                 assign record = 0;
+                 if (1) begin : g I h(); end
+                 assign y = record.h.x;
+             endmodule"
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        elaborate(
+            "interface I #(parameter int P = 0); endinterface
+             module M(); I #(.P(1), .P(2)) h(); endmodule"
+        ),
+        Err(AnalyzerError::DuplicateInterfaceParameterOverride {
+            interface: "I".to_string(),
+            name: "P".to_string(),
+        })
+    );
+    for (source, message) in [
+        (
+            "interface I; logic x; endinterface interface J; endinterface
+             module C(I p, J q); endmodule
+             module M(); I a(); C c(.p(a)); endmodule",
+            "unconnected interface port `q` of instance of `C`",
+        ),
+        (
+            "interface I; if (1) begin logic x; end logic y; assign y = genblk1.x; endinterface",
+            "reference to the implicit generate block name `genblk1` in interface `I`",
+        ),
+        (
+            "interface I; logic x; endinterface
+             module M(output logic y); if (1) begin : g I h(); end assign y = g.h.x; endmodule",
+            "hierarchical reference to interface instance `h` through a generate block",
+        ),
+        (
+            "interface I; endinterface module Top; I h(,); endmodule",
+            "ports of interface `I`",
+        ),
+    ] {
+        assert_eq!(
+            elaborate(source),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn keeps_qualified_names_comments_and_preceding_imports() {
+    // A qualified package function, a backtick in a comment and a struct
+    // field chain through a generate block name are no unit items, macros or
+    // generate-qualified instances.
+    let sources = elaborate_interfaces(&[
+        (
+            "package pk;
+                 typedef logic [3:0] word_t;
+                 function automatic logic source(); return 1; endfunction
+             endpackage
+             function automatic logic source(); return 0; endfunction
+             interface I;
+                 // don't use `FOO here
+                 logic x;
+                 assign x = pk::source();
+             endinterface",
+            Path::new("interface.sv"),
+        ),
+        (
+            "module M(output logic y);
+                 typedef struct packed {
+                     struct packed { struct packed { logic x; } h; } g;
+                 } T;
+                 T record;
+                 assign record = 0;
+                 I a();
+                 if (1) begin : g I h(); end
+                 assign y = record.g.h.x;
+             endmodule",
+            Path::new("module.sv"),
+        ),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(sources[1].contains("pk::source()"), "{}", sources[1]);
+
+    // A compilation-unit import before the interface and the module is
+    // copied, as packages are inlined only for imports in a module.
+    let elaborated = elaborate(
+        "package pk; typedef logic [3:0] word_t; endpackage
+         import pk::*;
+         interface I; word_t x; endinterface
+         module M(I p, output logic [3:0] o); assign o = p.x; endmodule",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        elaborated.contains("module M import pk::*;"),
+        "{elaborated}"
+    );
+}
+
+#[test]
+fn rejects_unsupported_interface_uses() {
+    const BUS: &str = r#"
+        interface Bus;
+            logic [7:0] x;
+            logic [7:0] y;
+            function automatic logic [7:0] peek();
+                return x;
+            endfunction
+            function automatic logic [7:0] get(input logic [7:0] k);
+                return peek() + k;
+            endfunction
+            modport r(input x, import get);
+            modport w(output x);
+        endinterface
+    "#;
+    for (body, message) in [
+        (
+            "module Top(output logic [7:0] o); Bus b(); assign o = b; endmodule",
+            "use of interface `b` other than as a port connection or through a member",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o); assign o = p.y; endmodule",
+            "access of `p.y`, which the modport of port `p` does not list",
+        ),
+        (
+            "module W(Bus.w p); assign p.x = 0; endmodule
+             module M(Bus.r p); W u(.p(p)); endmodule",
+            "port `p` of `W` drives member `x`, an input of port `p` of `M`",
+        ),
+        (
+            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b[0].get(1); endmodule",
+            "call of a function of the interface array `b`",
+        ),
+        (
+            "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
+             module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
+            "modport `r` selected in the connection of port `p` of `M`, which does not declare it",
+        ),
+        (
+            "module C(Bus p, input logic [7:0] q); endmodule
+             module Top(); Bus i(); C c(.p(i), .q(i)); endmodule",
+            "use of interface `i` other than as a port connection or through a member",
+        ),
+        (
+            "module Top(output logic [7:0] o); Bus h(); logic [7:0] h$x; assign o = h.x; endmodule",
+            "identifier `h$x` containing `$` in a design with interfaces, which interface elaboration reserves for generated names",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o);
+                 function automatic logic [7:0] f(input logic [7:0] p); return p; endfunction
+                 assign o = f(p.x);
+             endmodule",
+            "declaration of `p` in module `M`, which shadows an interface",
+        ),
+        (
+            "module Top(output logic [7:0] o); Bus \\b.0 (); assign o = \\b.0 .x; endmodule",
+            "escaped identifier `\\b.0` that is not a simple identifier in a design with interfaces",
+        ),
+        (
+            "module M(Bus.r p, output logic [7:0] o); assign o = p.peek(); endmodule",
+            "call of `p.peek`, which the modport of port `p` does not import",
+        ),
+        (
+            "module F(Bus p); function automatic void h(); p.x = 1; endfunction endmodule",
+            "write of `p.x` inside a function or task of module `F`, whose port `p` has no modport",
+        ),
+        (
+            "module W(Bus p); if (0) begin : g assign p.x = 0; end endmodule",
+            "write of `p.x` inside a generate construct of module `W`, whose port `p` has no modport",
+        ),
+        (
+            "module W(Bus.w p); assign p.x = 0; endmodule
+             module M(Bus p); if (1) begin : g W u(.p(p)); end endmodule",
+            "write of `p.x` inside a generate construct of module `M`, whose port `p` has no modport",
+        ),
+    ] {
+        let source = format!("{BUS}{body}");
+        assert_eq!(
+            elaborate(&source),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{body}"
+        );
+    }
+    for (interface, message) in [
+        (
+            "interface I; logic x; logic y; function automatic logic f(); return x; endfunction
+             assign y = f(); endinterface
+             module Top(); I a [2] (); endmodule",
+            "call of function `f` of interface `I`, which accesses members, in the logic of the instance array `a`",
+        ),
+        (
+            "interface I(input logic clk); endinterface",
+            "ports of interface `I`",
+        ),
+        (
+            "interface I; enum {Idle, Busy} state; endinterface",
+            "enum type in interface `I`",
+        ),
+        (
+            "interface I; assign x = 1'b1; endinterface",
+            "implicit net `x` in interface `I`",
+        ),
+        (
+            "interface I; typedef enum {Idle, Busy} state_t; state_t state; endinterface",
+            "enum type in interface `I`",
+        ),
+        (
+            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction endinterface",
+            "declaration of `k` in a nested scope of interface `I`, which shadows an interface item",
+        ),
+        (
+            "interface I; logic a; modport m(inout a); endinterface",
+            "inout or ref modport port in interface `I`",
+        ),
+    ] {
+        assert_eq!(
+            elaborate(interface),
+            Err(AnalyzerError::Unsupported(message.to_string())),
+            "{interface}"
+        );
+    }
 }

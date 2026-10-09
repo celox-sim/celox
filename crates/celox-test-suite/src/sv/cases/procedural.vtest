@@ -1,0 +1,120 @@
+(group procedural (category control_flow))
+
+(case always_comb_case_compares_at_the_common_width
+  (source "case_width.sv" #"
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    always_comb begin
+                        case (a + 8'h10)
+                            9'h105: y = 8'd2;
+                            default: y = 8'd0;
+                        endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0xf5))
+  (assert_eq y 2)
+  (modify (set a 0x05))
+  (assert_eq y 0))
+
+(case always_ff_blocking_assignments_and_run_time_loops
+  (source "ff_loops.sv" #"
+                module Top(input logic clk, input logic [3:0] n, input logic [7:0] d,
+                           output logic [7:0] sum, output logic [7:0] shifted, output logic [7:0] q);
+                    always_ff @(posedge clk) begin
+                        logic [7:0] acc;
+                        logic [3:0] i;
+                        acc = 8'd0;
+                        i = 4'd0;
+                        while (i < n) begin
+                            acc = acc + d;
+                            i = i + 4'd1;
+                        end
+                        sum <= acc;
+                        acc = d;
+                        repeat (n) acc = acc << 1;
+                        shifted <= acc;
+                        q = d;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (count data) (list (0 7) (1 7) (3 5) (9 3))
+    (modify (set n count) (set d data))
+    (tick clk)
+    (assert_eq sum (trunc 8 (* count data)))
+    (assert_eq shifted (trunc 8 (<< data count)))
+    (assert_eq q data)))
+
+(case constant_functions_size_parameters_and_ports
+  (source "constant_functions.sv" #"
+                module Child #(parameter int unsigned ENTRIES = 2,
+                               localparam int unsigned W = width(ENTRIES))
+                              (input logic [W-1:0] sel, output logic [7:0] y);
+                    function automatic int unsigned width(input int unsigned entries);
+                        return (entries >= 2) ? $clog2(entries) : 1;
+                    endfunction
+                    assign y = 8'(W);
+                endmodule
+                module Top(output logic [7:0] w1, output logic [7:0] w5, output logic [7:0] k);
+                    function automatic logic [7:0] classify(input byte n);
+                        logic [7:0] r;
+                        case (n)
+                            -1: r = 1;
+                            default: r = (n >= -8 && n <= -2) ? 8'd3 : 8'd2;
+                        endcase
+                        return r;
+                    endfunction
+                    localparam logic [7:0] K = classify(-5);
+                    Child #(.ENTRIES(1)) one(.sel(1'b0), .y(w1));
+                    Child #(.ENTRIES(5)) five(.sel(3'b0), .y(w5));
+                    assign k = K;
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq w1 1)
+  (assert_eq w5 3)
+  (assert_eq k 3))
+
+(case aggregate_parameters_are_constant_tables
+  (source "tables.sv" #"
+                module Top(input logic clk, input logic [1:0] index,
+                           output logic [2:0] comb, output logic [2:0] registered,
+                           output logic [2:0] nested, output logic [3:0] member);
+                    typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+                    localparam logic [2:0] TABLE [4] = '{3'd7, 3'd2, 3'd5, 3'd1};
+                    localparam logic [2:0] NESTED [2][2] = '{'{1, 2}, '{3, 4}};
+                    localparam pair_t PAIR = pair_t'{hi: 4'd9, lo: 4'd6};
+                    always_comb comb = TABLE[index];
+                    always_comb nested = NESTED[index[1]][index[0]];
+                    always_comb member = index[0] ? PAIR.hi : PAIR.lo;
+                    always_ff @(posedge clk) registered <= TABLE[index];
+                endmodule
+            "#)
+  (top Top)
+  (for (i value pair nest) (list (0 7 6 1) (1 2 9 2) (2 5 6 3) (3 1 9 4))
+    (modify (set index i))
+    (tick clk)
+    (assert_eq comb value)
+    (assert_eq registered value)
+    (assert_eq nested nest)
+    (assert_eq member pair)))
+
+(case initial_blocks_define_the_initial_state
+  (source "initial.sv" #"
+                module Top(input logic [1:0] index, output logic [7:0] y, output logic [7:0] z);
+                    logic [7:0] mem [4];
+                    logic [7:0] seed;
+                    initial begin
+                        for (int i = 0; i < 4; i++) mem[i] = 8'(i * 3 + 1);
+                        seed = 8'h5a;
+                    end
+                    assign y = mem[index];
+                    assign z = seed;
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq y (+ (* i 3) 1))
+    (assert_eq z 0x5a)))

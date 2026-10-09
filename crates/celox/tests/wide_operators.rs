@@ -103,7 +103,6 @@ all_backends! {
 
     // 128-bit XNOR in always_comb.
     fn test_wide_comb_bitxnor(sim) {
-        @ignore_on(sv);
         @case "wide_operators::test_wide_comb_bitxnor";
     }
 

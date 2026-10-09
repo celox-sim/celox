@@ -9,6 +9,7 @@ pub mod cfg_order;
 pub mod dag_schedule;
 pub mod dependence;
 pub mod interval;
+pub mod lanes;
 pub mod memory;
 pub mod memory_ssa;
 pub mod ssa;

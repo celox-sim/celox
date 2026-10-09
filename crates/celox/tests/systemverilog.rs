@@ -23,6 +23,17 @@ macro_rules! sv_backends {
                 crate::suite::run_case($case, "cranelift");
             }
 
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            fn native_parallel() {
+                crate::suite::run_case($case, "native-parallel");
+            }
+
+            #[test]
+            fn cranelift_parallel() {
+                crate::suite::run_case($case, "cranelift-parallel");
+            }
+
             #[test]
             fn wasm() {
                 crate::suite::run_case($case, "wasm");
@@ -57,6 +68,19 @@ macro_rules! sv_backends {
                 $($body)*
             }
 
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            #[allow(unused_mut, unused_variables)]
+            fn native_parallel() {
+                $($setup)*
+                let mut $sim = { $builder }
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap();
+                $($body)*
+            }
+
             #[test]
             #[allow(unused_mut, unused_variables)]
             fn wasm() {
@@ -77,6 +101,8 @@ mod generate;
 mod hierarchy;
 #[path = "frontends/systemverilog/indexed_select.rs"]
 mod indexed_select;
+#[path = "frontends/systemverilog/interfaces.rs"]
+mod interfaces;
 #[path = "frontends/systemverilog/literals.rs"]
 mod literals;
 #[path = "frontends/systemverilog/mixed.rs"]
@@ -85,6 +111,8 @@ mod mixed;
 mod operators;
 #[path = "frontends/systemverilog/packed_structs.rs"]
 mod packed_structs;
+#[path = "frontends/systemverilog/procedural.rs"]
+mod procedural;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
 #[path = "frontends/systemverilog/suite.rs"]

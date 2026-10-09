@@ -8,7 +8,6 @@ all_backends! {
     }
 
     fn parent_context_and_self_determined_boundaries_match_between_comb_and_ff(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::parent_context_and_self_determined_boundaries_match_between_comb_and_ff";
     }
 
@@ -37,24 +36,19 @@ all_backends! {
     }
 
     fn aggregate_results_consume_the_unary_parent_context(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::aggregate_results_consume_the_unary_parent_context";
     }
 
     fn system_function_results_obey_ternary_width_contexts(sim) {
-        // The SV frontend cannot lower this assignment expression.
-        @ignore_on(sv);
         @case "expression_semantics::system_function_results_obey_ternary_width_contexts";
     }
 
     fn short_circuit_operators_skip_effectful_operands(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @case "expression_semantics::short_circuit_operators_skip_effectful_operands";
     }
 
     fn numeric_cast_preserves_four_state_sign_extension(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::numeric_cast_preserves_four_state_sign_extension";
     }
 

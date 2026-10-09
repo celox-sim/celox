@@ -15,27 +15,57 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
+mod parsed;
+pub mod procedural;
 pub mod symbol;
 pub mod syntax;
+pub mod system_functions;
 pub mod typecheck;
 
 pub use ast::packages::PackageSource;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
+pub use parsed::ParsedSource;
 
 /// Internal marker used to defer division-by-zero state handling until the
 /// simulator's two-state/four-state mode is known.
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
 /// Errors reported by the SystemVerilog analyzer.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalyzerError {
     #[error("SystemVerilog parse error: {0}")]
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A memory file read by `$readmemh` or `$readmemb` is missing or invalid.
+    #[error("Invalid $readmemh input: {0}")]
+    MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
+    #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
+    DuplicateModport { interface: String, name: String },
+    #[error("Duplicate declaration in interface `{interface}`: {name}")]
+    DuplicateInterfaceItem { interface: String, name: String },
+    #[error("Interface `{interface}` has no parameter `{name}`")]
+    UnknownInterfaceParameter { interface: String, name: String },
+    #[error("Parameter `{name}` of interface `{interface}` is overridden more than once")]
+    DuplicateInterfaceParameterOverride { interface: String, name: String },
+    #[error("Modport `{modport}` of interface `{interface}` lists `{name}` more than once")]
+    DuplicateModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+    },
+    #[error(
+        "Modport `{modport}` of interface `{interface}` names `{name}`, which is not {expected}"
+    )]
+    UnknownModportItem {
+        interface: String,
+        modport: String,
+        name: String,
+        expected: &'static str,
+    },
     #[error("Duplicate port declaration in module `{module}`: {name}")]
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]
@@ -44,6 +74,28 @@ pub enum AnalyzerError {
     DuplicateInstance { module: String, name: String },
     #[error("Generate block `{name}` in module `{module}` has the name of another declaration")]
     DuplicateGenerateScope { module: String, name: String },
+    #[error("unknown top-level parameter override `{name}`")]
+    UnknownParameterOverride { name: String },
+    #[error("localparam override `{name}`")]
+    LocalParameterOverride { name: String },
+    /// A `$name` call that is not a system task or function Celox knows.
+    #[error("unknown system task or function `{name}`")]
+    UnknownSystemTf { name: String },
+    /// A call of a system task or function that is not valid where it is,
+    /// such as a task used as a value or a wrong number of arguments.
+    #[error("invalid call of `{name}`: {detail}")]
+    InvalidSystemTfCall { name: String, detail: String },
+    /// An unpacked array assigned, passed as a subroutine argument, connected
+    /// to a port, or used as an assignment pattern item where its type is not
+    /// assignment compatible with the target array (IEEE 1800-2023 7.6, 10.8).
+    #[error(
+        "{context}: an unpacked array of type `{actual}` is not assignment compatible with `{target}`"
+    )]
+    IncompatibleUnpackedArray {
+        context: String,
+        actual: typecheck::UnpackedArrayType,
+        target: typecheck::UnpackedArrayType,
+    },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -55,8 +107,6 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 /// Dedicated tracking issues, keyed by the leading text of the construct name
 /// carried by [`AnalyzerError::Unsupported`].
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
-    ("blocking assignment inside always_ff", 421),
-    ("initial construct", 425),
     ("non-ANSI module port declarations", 426),
     ("ref port direction", 427),
     ("always and always_latch processes", 431),
@@ -66,23 +116,20 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
         "unpacked struct, union, or unsupported packed struct member",
         440,
     ),
-    ("procedural loop inside always_ff", 441),
     ("wildcard port connection", 442),
     ("mixed clock-edge polarities for one signal", 443),
     ("delayed continuous assignment", 444),
     ("duplicate internal signal", 445),
+    ("streaming concatenation", 447),
     ("loop-generate unroll limit exceeded", 448),
-    ("concatenated always_ff assignment target", 450),
     ("iff-qualified always_ff event", 452),
     ("nonblocking assignment inside always_comb", 453),
     ("genvar update operator", 455),
     ("reduction operator in parameter expression", 456),
     ("gate primitive instantiation", 457),
-    ("procedural loop inside always_comb", 459),
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
-    ("selected or composite assignment inside function", 466),
     ("mixed reset-edge polarities for one signal", 471),
 ];
 
@@ -97,6 +144,14 @@ impl AnalyzerError {
             .find(|(prefix, _)| construct.starts_with(prefix))
             .map_or(SV_FRONTEND_TRACKING_ISSUE, |&(_, issue)| issue)
     }
+}
+
+/// Rewrite `sources` so that they no longer declare or use interfaces, or
+/// return `None` when no source declares one. See [`ast::interfaces`].
+pub fn elaborate_interfaces(
+    sources: &[(&str, &Path)],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces(sources)
 }
 
 /// Parse and analyze a SystemVerilog source string.
@@ -168,18 +223,11 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
     parameter_overrides: &HashMap<String, ir::ConstExpr>,
     interfaces: &ModuleInterfaces,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let parameter_overrides = parameter_overrides
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone().into()))
-        .collect();
-    let source = ast::Source::from_syntax_module_with_parameter_expr_overrides(
-        &syntax_tree,
+    ParsedSource::parse(code, path)?.analyze_module_with_parameter_expr_overrides(
         module_name,
-        &parameter_overrides,
-        &interfaces.clone().into_iter().collect(),
-    )?;
-    analyze::analyze_source(source)
+        parameter_overrides,
+        interfaces,
+    )
 }
 
 /// The positional interface (ports and overridable parameters) of every

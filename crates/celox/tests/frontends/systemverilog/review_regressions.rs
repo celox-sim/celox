@@ -20,39 +20,54 @@ fn four_state_cranelift_build_error(source: &str) -> String {
 }
 
 #[test]
-fn rejects_cross_lhs_read_before_write_in_always_comb() {
-    let error = cranelift_build_error(
-        r#"
+fn reads_previous_values_before_later_writes_in_always_comb() {
+    // A variable written by an always_comb block is not in its implicit
+    // sensitivity list (IEEE 1800-2023 9.2.2.2.1): a read before the write
+    // observes the value from the previous evaluation.
+    let source = r#"
         module Top(input logic b, output logic a, output logic c);
             always_comb begin
                 c = a;
                 a = b;
             end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("read_before_write.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let b = sim.signal("b");
+    let a = sim.signal("a");
+    let c = sim.signal("c");
+    sim.modify(|io| io.set(b, 1u8)).unwrap();
+    assert_eq!(sim.get(a), 1u8.into());
+    assert_eq!(sim.get(c), 0u8.into());
+    sim.modify(|io| io.set(b, 0u8)).unwrap();
+    assert_eq!(sim.get(c), 1u8.into());
 }
 
 #[test]
-fn rejects_same_vector_slice_read_before_write_in_always_comb() {
-    let error = cranelift_build_error(
-        r#"
+fn reads_previous_slice_values_before_later_writes_in_always_comb() {
+    let source = r#"
         module Top(input logic a, output logic [1:0] y);
             always_comb begin
                 y[0] = y[1];
                 y[1] = a;
             end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("read-before-write dependency inside always_comb"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("slice_read_before_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0b10u8.into());
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0b01u8.into());
 }
 
 #[test]
@@ -785,8 +800,7 @@ fn compile_sv_to_sir_forwards_parameter_overrides() {
         module Top #(parameter ENABLE_UNSUPPORTED = 0)
                    (input logic clk, d, output logic q);
             if (ENABLE_UNSUPPORTED) begin
-                always_ff @(posedge clk)
-                    assert (d) q <= 1'b1; else q <= 1'b0;
+                always_ff @(posedge clk) fork q <= d; join
             end else begin
                 assign q = d;
             end
@@ -808,7 +822,7 @@ fn compile_sv_to_sir_forwards_parameter_overrides() {
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("procedural assertion statement"), "{error}");
+    assert!(error.contains("fork-join block"), "{error}");
 }
 
 #[test]
@@ -1007,21 +1021,27 @@ fn preserves_named_zero_cast_width() {
 }
 
 #[test]
-fn rejects_loop_substituted_out_of_range_array_indices() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic clk);
+fn ignores_loop_substituted_out_of_range_array_writes() {
+    // A write through an index outside the declared range is ignored
+    // (IEEE 1800-2023 7.4.6).
+    let source = r#"
+        module Top(input logic clk, output logic [7:0] y);
             logic [7:0] a[0:1][0:2];
             always_ff @(posedge clk) begin
-                for (int i = 3; i < 4; i++) a[0][i] <= 8'hff;
+                a[0][2] <= 8'h11;
+                for (int i = 2; i < 4; i++) a[0][i] <= 8'hff;
             end
+            assign y = a[0][2];
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("always_ff assignment lowering"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("out_of_range_loop_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
 }
 
 #[test]
@@ -1075,7 +1095,7 @@ fn rejects_out_of_range_packed_array_element_indices() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("index 2 of `a` outside its declared range"),
         "unexpected error: {error}"
     );
 }
@@ -1090,7 +1110,7 @@ fn rejects_out_of_range_packed_array_part_select_bounds() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("part-select of `a` outside its declared range"),
         "unexpected error: {error}"
     );
 }
@@ -1114,16 +1134,22 @@ fn preserves_signedness_in_loop_conditions() {
 }
 
 #[test]
-fn rejects_extra_loop_index_declarations() {
-    cranelift_build_error(
-        r#"
+fn scopes_extra_loop_index_declarations() {
+    // `J` declared by the loop shadows the parameter inside the loop.
+    let source = r#"
         module Top #(parameter J = 1) (input logic clk, output logic [1:0] q);
             always_ff @(posedge clk) begin
+                q <= 2'b00;
                 for (int i = 0, J = 0; i < 1; i++) q[J] <= 1'b1;
             end
         endmodule
-        "#,
-    );
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("loop_declarations.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0b01u8.into());
 }
 
 #[test]
@@ -1349,7 +1375,7 @@ fn returns_unknown_for_invalid_runtime_array_read_indices() {
         io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
     })
     .unwrap();
-    let all_x = (BigUint::default(), BigUint::from(0xffu16));
+    let all_x = (BigUint::from(0xffu16), BigUint::from(0xffu16));
     assert_eq!(sim.get_four_state(combinational), all_x);
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get_four_state(registered), all_x);
@@ -1426,7 +1452,7 @@ fn returns_unknown_for_invalid_inner_runtime_array_indices() {
     .unwrap();
     assert_eq!(
         sim.get_four_state(selected),
-        (BigUint::default(), BigUint::from(0xffu16))
+        (BigUint::from(0xffu16), BigUint::from(0xffu16))
     );
 }
 
@@ -1679,13 +1705,13 @@ fn ignores_unknown_dynamic_array_write_indices() {
 }
 
 #[test]
-fn rejects_dynamic_array_writes_after_partial_array_assignments() {
-    let error = cranelift_build_error(
-        r#"
+fn applies_dynamic_array_writes_after_partial_array_assignments() {
+    let source = r#"
         module Top(
             input logic [1:0] sel,
             input logic [7:0] data,
-            output logic [7:0] value
+            output logic [7:0] value,
+            output logic [7:0] first
         );
             logic [7:0] values[4];
             always_comb begin
@@ -1693,13 +1719,25 @@ fn rejects_dynamic_array_writes_after_partial_array_assignments() {
                 values[sel] = data;
             end
             assign value = values[sel];
+            assign first = values[0];
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("dynamic unpacked-array assignment after an earlier partial assignment"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("partial_then_dynamic.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 0x5au8.into());
+    assert_eq!(sim.get(sim.signal("first")), 0u8.into());
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 0x5au8.into());
+    assert_eq!(sim.get(sim.signal("first")), 0x5au8.into());
 }
 
 #[test]
@@ -2380,8 +2418,9 @@ fn produces_unknown_for_four_state_division_by_zero() {
 }
 
 #[test]
-fn rejects_incomplete_cases_for_potential_two_state_division_by_zero() {
-    let error = cranelift_build_error(
+fn rejects_incomplete_cases_for_potential_four_state_division_by_zero() {
+    // In four-state simulation, a division by zero is X and matches no item.
+    let error = four_state_cranelift_build_error(
         r#"
         module Top(input bit a, b, output logic y);
             always_comb begin
@@ -4075,11 +4114,14 @@ fn preserves_masked_parameter_guards_before_latch_detection() {
 
 #[test]
 fn coerces_whole_unpacked_array_writes_to_the_flattened_width() {
+    // The element types are equivalent, as an unpacked array assignment
+    // requires (IEEE 1800-2023 6.22.2, 7.6); signed elements must not
+    // extend into the neighboring element.
     let source = r#"
         module Top(
             input logic c,
             input logic signed [7:0] a[2], b[2],
-            output logic [7:0] x[2]
+            output logic signed [7:0] x[2]
         );
             always_comb begin
                 if (c)
@@ -4283,9 +4325,8 @@ fn does_not_treat_wildcard_equality_as_inherently_two_state() {
 }
 
 #[test]
-fn rejects_reads_before_a_later_definite_fallback_write() {
-    let error = cranelift_build_error(
-        r#"
+fn reads_previous_values_before_a_later_definite_fallback_write() {
+    let source = r#"
         module Top(
             input logic c, d, a, b, e,
             output logic x, y
@@ -4302,12 +4343,34 @@ fn rejects_reads_before_a_later_definite_fallback_write() {
                 end
             end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("inside always_comb"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("fallback_read.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let [c, d, a, b, e, x, y] = ["c", "d", "a", "b", "e", "x", "y"].map(|name| sim.signal(name));
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+    // `y = x` reads the value `x` held before this evaluation.
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(d, 0u8);
+        io.set(e, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| {
+        io.set(d, 1u8);
+        io.set(b, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    assert_eq!(sim.get(x), 0u8.into());
 }
 
 #[test]
@@ -5127,7 +5190,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 logic [7:0] values [0:1][0:2];
@@ -5136,28 +5199,12 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 localparam J = 3;
                 logic [7:0] values [0:1][0:2];
                 assign y = values[0][J];
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported statement inside always_comb",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb $display("%0d", a);
-            endmodule
-        "#,
-        ),
-        (
-            "blocking assignment inside always_ff",
-            r#"
-            module Top(input logic clk, d, output logic q);
-                always_ff @(posedge clk) q = d;
             endmodule
         "#,
         ),
@@ -5168,18 +5215,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural assertion statement",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb begin
-                    y = a;
-                    assert (a);
-                end
-            endmodule
-        "#,
-        ),
-        (
-            "named port connection expression",
+            "streaming concatenation",
             r#"
             module Child(input logic a); endmodule
             module Top(input logic [3:0] x);
@@ -5205,7 +5241,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_ff predicate lowering",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
                 always_ff @(posedge clk) begin
@@ -5216,7 +5252,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_ff case selector lowering",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, output logic [3:0] q);
                 always_ff @(posedge clk) begin
@@ -5229,17 +5265,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_ff assignment lowering",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
                 always_ff @(posedge clk) q <= {<<{a}};
             endmodule
-        "#,
-        ),
-        (
-            "initial construct",
-            r#"
-            module Top(output logic y); initial y = 1'b1; endmodule
         "#,
         ),
         (
@@ -5323,45 +5353,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural loop inside always_ff",
-            r#"
-            module Top(input logic clk, d, output logic q);
-                always_ff @(posedge clk) repeat (1) q <= d;
-            endmodule
-        "#,
-        ),
-        (
-            "procedural loop inside always_ff",
-            r#"
-            module Top(input logic clk, d, output logic q);
-                integer i;
-                always_ff @(posedge clk) begin
-                    for (i = 0; i < 2; i = i + 1) q <= d;
-                end
-            endmodule
-        "#,
-        ),
-        (
-            "procedural loop inside always_ff",
-            r#"
-            module Top(input logic clk, d, output logic q);
-                always_ff @(posedge clk) begin
-                    for (logic signed [1:0] i = 2; i < 0; i++) q <= d;
-                end
-            endmodule
-        "#,
-        ),
-        (
-            "procedural loop inside always_ff",
-            r#"
-            module Top(input logic clk, d, output logic q);
-                always_ff @(posedge clk) begin
-                    for (int i = 0; i < 4; i++, i++) q <= d;
-                end
-            endmodule
-        "#,
-        ),
-        (
             "delayed continuous assignment",
             r#"
             module Top(input logic a, output wire y); assign #5 y = a; endmodule
@@ -5377,7 +5368,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
@@ -5385,42 +5376,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unpacked dimension",
-            r#"
-            module Top(input logic [7:0] value, output logic [7:0] y);
-                function automatic logic [7:0] pick(input logic [7:0] values [2]);
-                    return values[1];
-                endfunction
-                assign y = pick('{default: value});
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported function local data type",
-            r#"
-            module Top(input logic [7:0] value, output logic [7:0] y);
-                function automatic logic [7:0] pick(input logic [7:0] value);
-                    logic [7:0] tmp [2];
-                    return value;
-                endfunction
-                assign y = pick(value);
-            endmodule
-        "#,
-        ),
-        (
-            "unpacked dimension",
-            r#"
-            module Top(input logic [7:0] value, output logic [7:0] y);
-                typedef logic [7:0] pair_t [2];
-                function automatic pair_t make_pair();
-                    return value;
-                endfunction
-                assign y = value;
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported function conditional predicate",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
@@ -5432,7 +5388,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic [3:0] y);
                 function automatic logic [3:0] square(input logic [3:0] value);
@@ -5445,7 +5401,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function case selector",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
@@ -5459,7 +5415,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function case item expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, b, output logic y);
                 function automatic logic choose(
@@ -5543,14 +5499,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "concatenated always_ff assignment target",
-            r#"
-            module Top(input logic clk, input logic [1:0] d, output logic q1, q0);
-                always_ff @(posedge clk) {q1, q0} <= d;
-            endmodule
-        "#,
-        ),
-        (
             "reduction operator in parameter expression",
             r#"
             module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)
@@ -5571,12 +5519,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "gate primitive instantiation",
             r#"
             module Top(input logic a, b, output logic y); and (y, a, b); endmodule
-        "#,
-        ),
-        (
-            "procedural loop inside always_comb",
-            r#"
-            module Top(input logic a, output logic y); always_comb repeat (1) y = a; endmodule
         "#,
         ),
         (
@@ -5608,7 +5550,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_ff case item expression lowering",
+            "streaming concatenation",
             r#"
             module Top(input logic clk, a, b, output logic q);
                 always_ff @(posedge clk)
@@ -5616,20 +5558,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                         ({<<{b}}): q <= 1'b1;
                         default: q <= 1'b0;
                     endcase
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported statement inside function",
-            r#"
-            module Top(output logic y);
-                function automatic logic f();
-                    logic x;
-                    x = 1'b0;
-                    repeat (1) x = 1'b1;
-                    return x;
-                endfunction
-                assign y = f();
             endmodule
         "#,
         ),
@@ -5643,7 +5571,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "continuous assignment",
+            "index 2 of `values` outside its declared range",
             r#"
             module Top(output logic y);
                 logic [7:0] values [0:1][0:2];
@@ -5658,18 +5586,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "selected or composite assignment inside function",
-            r#"
-            module Top(input logic [1:0] a, output logic [1:0] y);
-                function automatic logic [1:0] set_bit(input logic [1:0] value);
-                    value[0] = 1'b1;
-                    return value;
-                endfunction
-                assign y = set_bit(a);
-            endmodule
-        "#,
-        ),
-        (
             "width-dependent complement in parameter expression",
             r#"
             module Top #(
@@ -5681,7 +5597,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_comb assignment expression",
+            "streaming concatenation",
             r#"
             module Top(input logic [3:0] a, b, output logic [7:0] y);
                 always_comb y = {<<{a}};
@@ -5733,7 +5649,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function return data type",
+            "void function `f` used as a value",
             r#"
             module Top(output logic y);
                 function automatic real f();
@@ -5785,7 +5701,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "function local shadows formal `a`",
+            "duplicate declaration of `a` in one scope",
             r#"
             module Top(input logic a, output logic y);
                 function automatic logic f(input logic a);
@@ -6149,7 +6065,7 @@ fn rejects_unrepresentable_dynamic_selects_instead_of_dropping_them() {
         "#,
     );
     assert!(
-        error.contains("continuous assignment expression"),
+        error.contains("select index `sel ? 1 : 0`"),
         "unexpected error: {error}"
     );
 }
@@ -7057,26 +6973,32 @@ fn declares_implicit_child_output_nets_as_scalar_unsigned_wires() {
 }
 
 #[test]
-fn rejects_four_state_always_ff_event_signals_in_four_state_mode() {
-    for source in [
-        r#"
-        module Top(input logic clk, input bit d, output bit q);
-            always_ff @(posedge clk) q <= d;
+fn simulates_four_state_always_ff_event_signals_in_four_state_mode() {
+    let source = r#"
+        module Top(input logic clk, input logic rst_n, input logic [7:0] d,
+                   output logic [7:0] q);
+            always_ff @(posedge clk or negedge rst_n)
+                if (!rst_n) q <= 8'd0; else q <= d;
         endmodule
-        "#,
-        r#"
-        module Top(input bit clk, input logic rst, input bit d, output bit q);
-            always_ff @(posedge clk or negedge rst)
-                if (!rst) q <= 1'b0; else q <= d;
-        endmodule
-        "#,
-    ] {
-        let error = four_state_cranelift_build_error(source);
-        assert!(
-            error.contains("four-state always_ff event signal"),
-            "unexpected error: {error}"
-        );
-    }
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let rst_n = sim.signal("rst_n");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| {
+        io.set(rst_n, 1u8);
+        io.set(d, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x5au8.into());
+    sim.modify(|io| io.set(rst_n, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
 }
 
 #[test]
@@ -7261,9 +7183,8 @@ fn rejects_multi_bit_always_ff_event_signals() {
 }
 
 #[test]
-fn rejects_shared_resets_associated_with_multiple_clocks() {
-    let error = cranelift_build_error(
-        r#"
+fn shares_an_asynchronous_reset_between_clock_domains() {
+    let source = r#"
         module Top(
             input logic clk_a,
             input logic clk_b,
@@ -7277,31 +7198,51 @@ fn rejects_shared_resets_associated_with_multiple_clocks() {
             always_ff @(posedge clk_b or negedge rst_n)
                 if (!rst_n) q_b <= 1'b0; else q_b <= d;
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("shared reset associated with multiple clocks"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("shared_reset.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let (rst_n, d) = (sim.signal("rst_n"), sim.signal("d"));
+    let (q_a, q_b) = (sim.signal("q_a"), sim.signal("q_b"));
+    sim.modify(|io| {
+        io.set(rst_n, 1u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk_a")).unwrap();
+    assert_eq!(sim.get(q_a), 1u8.into());
+    assert_eq!(sim.get(q_b), 0u8.into());
+    sim.tick(sim.event("clk_b")).unwrap();
+    assert_eq!(sim.get(q_b), 1u8.into());
+    sim.modify(|io| io.set(rst_n, 0u8)).unwrap();
+    sim.tick(sim.event("clk_a")).unwrap();
+    assert_eq!(sim.get(q_a), 0u8.into());
+    assert_eq!(sim.get(q_b), 1u8.into());
+    sim.tick(sim.event("clk_b")).unwrap();
+    assert_eq!(sim.get(q_b), 0u8.into());
 }
 
 #[test]
-fn rejects_function_writes_outside_the_inlined_scope() {
-    let error = cranelift_build_error(
-        r#"
+fn applies_function_writes_outside_the_inlined_scope() {
+    let source = r#"
         module Top(input logic a, output logic y, side);
             function automatic logic f(input logic value);
-                side = value;
+                side = ~value;
                 return value;
             endfunction
             assign y = f(a);
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("function assignment target outside local scope `side`"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_side_effect.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    for value in [0u8, 1, 0] {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), value.into());
+        assert_eq!(sim.get(sim.signal("side")), (value ^ 1).into());
+    }
 }
 
 #[test]
@@ -7463,96 +7404,19 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
 
 sv_backends! {
     fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter N = 2)(
-                    output logic [7:0] p, l, filled,
-                    output logic [15:0] signed_y, sized_y);
-                    typedef logic [3:0] nibble_t;
-                    typedef logic signed [3:0] signed_nibble_t;
-                    parameter nibble_t [1:0] P = 8'hab;
-                    localparam nibble_t [2:1] L = P;
-                    localparam nibble_t [1:0] F = '1;
-                    localparam signed_nibble_t [1:0] S = 8'hab;
-                    parameter nibble_t [N-1:0] R = 16'hcdef;
-                    always_comb begin
-                        p = P;
-                        l = L;
-                        filled = F;
-                        signed_y = S;
-                        sized_y = R;
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("parameter_alias_use_site_dimensions.sv"))], "Top"
-        ).param("P", 0xcd).param("N", 4);
-        for (name, expected) in [("p", 0xcdu16), ("l", 0xcd), ("filled", 0xff), ("signed_y", 0xffab), ("sized_y", 0xcdef)] {
-            assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
-        }
+        @case "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types";
+    }
+
+    fn body_parameters_are_local_with_a_parameter_port_list(sim) {
+        @case "review_regressions::body_parameters_are_local_with_a_parameter_port_list";
     }
 
     fn preserves_four_state_arithmetic_case_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (1'bx + 1'b0) 1'bx: y0 = a; endcase
-                        case (2'b1z - 4'b0001) 4'bxxxx: y1 = a; endcase
-                        case (4'b0000 * 2'b1x) 4'bxxxx: y2 = a; endcase
-                        case (2'b1z / 2'b01) 2'bxx: y3 = a; endcase
-                        case (2'b1x % 2'b01) 2'bxx: y4 = a; endcase
-                        case (-(2'b1z)) 2'bxx: y5 = a; endcase
-                        case ((2'b11 + 2'b01) + 2'b0x) 2'bxx: y6 = a; endcase
-                        case ((2'b1x + 2'b01) & 2'b00) 2'b00: y7 = a; endcase
-                        case (1'bx) (1'bx + 1'b0): y8 = a; endcase
-                        case (2'b01 / 2'b1x) 2'bxx: y9 = a; endcase
-                        case (2'b01 % 2'b1z) 2'bxx: y10 = a; endcase
-                        case (+(2'b1z)) 2'bxx: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_arithmetic_case_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_arithmetic_case_constants";
     }
 
     fn preserves_four_state_shift_and_bit_select_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
-                    always_comb begin
-                        case (2'bx0 >> 1) 2'b0x: y0 = a; endcase
-                        case (4'sbz101 >>> 2) 4'bzzz1: y1 = a; endcase
-                        case (4'b10xz << 1) 4'b0xz0: y2 = a; endcase
-                        case ({2'bx0}[1]) 1'bx: y3 = a; endcase
-                        case (1'bz) ({2'bz0}[1]): y4 = a; endcase
-                        case (4'bxxxx) (4'b0000 << 1'bz): y5 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("shift_and_select_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..6).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_shift_and_bit_select_constants";
     }
 
     fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
@@ -7560,37 +7424,7 @@ sv_backends! {
     }
 
     fn preserves_four_state_reduction_case_constants(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (&1'bx) 1'bx: y0 = a; endcase
-                        case (|1'bz) 1'bx: y1 = a; endcase
-                        case (^2'b1x) 1'bx: y2 = a; endcase
-                        case (&3'b1z0) 1'b0: y3 = a; endcase
-                        case (|3'b0z1) 1'b1: y4 = a; endcase
-                        case (~&2'b1z) 1'bx: y5 = a; endcase
-                        case (~|2'b0x) 1'bx: y6 = a; endcase
-                        case (~^2'b1z) 1'bx: y7 = a; endcase
-                        case (^~2'b1x) 1'bx: y8 = a; endcase
-                        case (1'bx) (&1'bx): y9 = a; endcase
-                        case (^'1) 1'b1: y10 = a; endcase
-                        case (&'z) 1'bx: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_reduction_case_constants.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for &output in &outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_reduction_case_constants";
     }
 
     fn preserves_use_site_dimensions_in_function_alias_types(sim) {
@@ -7598,142 +7432,19 @@ sv_backends! {
     }
 
     fn preserves_four_state_relational_case_selectors(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3);
-                    always_comb begin
-                        case (1'bx < 1'b1) 1'bx: y0 = a; endcase
-                        case (1'bz <= 1'b0) 1'bx: y1 = a; endcase
-                        case (2'b1x > 2'b00) 1'bx: y2 = a; endcase
-                        case (2'b0z >= 2'b10) 1'bx: y3 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_relational_case_selectors.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = ["y0", "y1", "y2", "y3"].map(|name| sim.signal(name));
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_relational_case_selectors";
     }
 
     fn folds_compound_four_state_case_labels(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic s, a, b,
-                    output logic constant_y, concat_y, function_y, dynamic_y);
-                    function automatic logic label(); return 1'bx | 1'b0; endfunction
-                    always_comb begin
-                        case (1'bx) (1'bx | 1'b0): constant_y = a; endcase
-                        case (2'bxz) {1'bx, 1'bz}: concat_y = a; endcase
-                        case (1'bx) label(): function_y = a; endcase
-                        case (s)
-                            (1'b0 & 1'b1): dynamic_y = a;
-                            (1'b1 | 1'b0): dynamic_y = b;
-                            (1'bx | 1'b0): dynamic_y = a ^ b;
-                            (1'bx ? 1'bz : 1'bz): dynamic_y = ~a;
-                        endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("compound_four_state_case_labels.sv"))], "Top"
-        ).four_state(true);
-        let s = sim.signal("s");
-        let a = sim.signal("a");
-        let b = sim.signal("b");
-        let constant_outputs = ["constant_y", "concat_y", "function_y"].map(|name| sim.signal(name));
-        let dynamic_y = sim.signal("dynamic_y");
-        for inputs in 0u8..4 {
-            let a_value = inputs & 1 != 0;
-            let b_value = inputs & 2 != 0;
-            for (value, mask, expected) in [
-                (0u8, 0u8, a_value),
-                (1, 0, b_value),
-                (1, 1, a_value ^ b_value),
-                (0, 1, !a_value),
-            ] {
-                sim.modify(|io| {
-                    io.set(a, a_value);
-                    io.set(b, b_value);
-                    io.set_four_state(s, BigUint::from(value), BigUint::from(mask));
-                }).unwrap();
-                for output in constant_outputs {
-                    assert_eq!(sim.get(output), a_value.into());
-                }
-                assert_eq!(sim.get(dynamic_y), expected.into());
-            }
-        }
+        @case "review_regressions::folds_compound_four_state_case_labels";
     }
 
     fn preserves_four_state_equality_case_selectors(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a,
-                    output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
-                    always_comb begin
-                        case (1'bx == 1'bx) 1'bx: y0 = a; endcase
-                        case (1'bz != 1'b0) 1'bx: y1 = a; endcase
-                        case (2'b0x == 2'b1x) 1'b0: y2 = a; endcase
-                        case (2'b0z != 2'b1x) 1'b1: y3 = a; endcase
-                        case (!(1'bx == 1'b0)) 1'bx: y4 = a; endcase
-                        case ((1'bx != 1'bz) && 1'b1) 1'bx: y5 = a; endcase
-                        case ((1'bx && 1'b1) == 1'bx) 1'bx: y6 = a; endcase
-                        case ((1'bx == 1'bx) ? 1'b0 : 1'b1) 1'bx: y7 = a; endcase
-                        case ((1'bx == 1'bx) ? 1'bz : 1'bz) 1'bz: y8 = a; endcase
-                        case (1'sbx == 2'b1x) 1'b0: y9 = a; endcase
-                        case (1'sbx != 2'sb1x) 1'bx: y10 = a; endcase
-                        case (8'hff == '1) 1'b1: y11 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("four_state_equality_case_selectors.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in &outputs {
-                assert_eq!(sim.get(*output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_four_state_equality_case_selectors";
     }
 
     fn preserves_constant_case_selector_context(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
-                    always_comb begin
-                        case (1'bx && 1'b1) 1'bx: y0 = a; endcase
-                        case (1'b0 || 1'bz) 1'bx: y1 = a; endcase
-                        case (1'b1 ? 1'sb1 : 2'sb00) 2'b11: y2 = a; endcase
-                        case (1'b0 ? 2'sb00 : 1'sb1) 2'b11: y3 = a; endcase
-                        case (1'b1 ? 1'sb1 : 2'b00) 2'b01: y4 = a; endcase
-                        case (1'b1 ? 1'sbx : 2'sb00) 2'bxx: y5 = a; endcase
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(
-            vec![(source, Path::new("constant_case_context.sv"))], "Top"
-        ).four_state(true);
-        let a = sim.signal("a");
-        let outputs = ["y0", "y1", "y2", "y3", "y4", "y5"].map(|name| sim.signal(name));
-        for value in [true, false, true] {
-            sim.modify(|io| io.set(a, value)).unwrap();
-            for output in outputs {
-                assert_eq!(sim.get(output), value.into());
-            }
-        }
+        @case "review_regressions::preserves_constant_case_selector_context";
     }
 
     fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
@@ -7758,6 +7469,22 @@ sv_backends! {
 
     fn lowers_parameter_casts_in_loop_generate(sim) {
         @case "review_regressions::lowers_parameter_casts_in_loop_generate";
+    }
+
+    fn default_pattern_fills_each_element_of_unpacked_subarrays(sim) {
+        @case "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays";
+    }
+
+    fn int_parameters_are_signed_in_comparisons_and_loop_bounds(sim) {
+        @case "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds";
+    }
+
+    fn run_time_for_condition_uses_the_relational_operand_context(sim) {
+        @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
+    }
+
+    fn size_of_a_type_uses_the_dimension_argument(sim) {
+        @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
     }
 }
 
@@ -8279,5 +8006,206 @@ fn function_predicates_prove_complementary_else_if() {
             (input >> 2) & 1
         };
         assert_eq!(sim.get(y), expected.into());
+    }
+}
+
+#[test]
+fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
+    let source = r#"
+        module Top (
+            input logic [2:0] b,
+            input bit [7:0] v,
+            output logic [3:0] y
+        );
+            assign y = v[b +: 4];
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("two_state_select.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    let b = sim.signal("b");
+    let v = sim.signal("v");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(b, 6u8);
+        io.set(v, 0xffu8);
+    })
+    .unwrap();
+    // Bits 6 and 7 exist; bits 8 and 9 of a two-state vector read 0.
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0b0011u8), BigUint::default())
+    );
+}
+
+#[test]
+fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
+    // Each symbolically unrolled iteration deepens the loop's `break` and
+    // `return` conditions. Constant evaluation of those conditions must not
+    // recurse once per level: the diagnostic is reported on a 2 MiB thread,
+    // libtest's default, in a debug build.
+    let source = r#"
+        module Top (
+            input  logic [7:0] a,
+            input  logic       stop,
+            input  logic [1:0] count,
+            output logic [7:0] out
+        );
+            function automatic void notify(input logic [7:0] x);
+                $display("notify=%0d", x);
+            endfunction
+
+            function automatic logic [7:0] pass(
+                input logic [7:0] x,
+                input logic       stop_early,
+                input logic [1:0] count
+            );
+                for (int i = 0; i < count; i++) begin
+                    if (stop_early && i == 1) begin
+                        return x + i;
+                    end
+                    notify(x + i);
+                end
+                notify(x);
+                return x;
+            endfunction
+
+            always_comb begin
+                out = pass(a, stop, count);
+            end
+        endmodule
+    "#;
+    let error = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || cranelift_build_error(source))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        error.contains("loop condition that depends on run-time values"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reports_incompatible_unpacked_arrays_in_each_assignment_like_context() {
+    // An unpacked array needs an equivalent element type and equal element
+    // counts wherever it is assigned (IEEE 1800-2023 7.6, 10.8); the
+    // diagnostic names the context and both array types.
+    let cases = [
+        (
+            r#"
+            module Top(output logic signed [7:0] q);
+                function automatic logic signed [7:0] pick(input logic signed [7:0] x [2]);
+                    return x[0];
+                endfunction
+                logic signed [3:0] narrow [2];
+                always_comb begin
+                    narrow[0] = 4'sh8;
+                    narrow[1] = 4'sh1;
+                    q = pick(narrow);
+                end
+            endmodule
+            "#,
+            "argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not \
+             assignment compatible with `logic signed [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Top(output logic [3:0] q);
+                task automatic fill(output logic [7:0] x [2]);
+                    x[0] = 8'h12;
+                    x[1] = 8'h34;
+                endtask
+                logic [3:0] narrow [2];
+                always_comb begin
+                    fill(narrow);
+                    q = narrow[0];
+                end
+            endmodule
+            "#,
+            "argument 1 of `fill`: an unpacked array of type `logic [3:0] [2]` is not \
+             assignment compatible with `logic [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Top(input logic a, output logic q);
+                function automatic void first(input logic x [2], output logic y);
+                    y = x[0];
+                endfunction
+                bit two [2];
+                always_comb begin
+                    two[0] = a;
+                    two[1] = a;
+                    first(.y(q), .x(two));
+                end
+            endmodule
+            "#,
+            "argument 1 of `first`: an unpacked array of type `bit [2]` is not assignment \
+             compatible with `logic [2]`",
+        ),
+        (
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] q);
+                logic [7:0] grid [2][3];
+                logic [7:0] rows [2][2];
+                always_comb begin
+                    grid = '{default: a};
+                    rows = grid;
+                    q = rows[0][0];
+                end
+            endmodule
+            "#,
+            "assignment: an unpacked array of type `logic [7:0] [2][3]` is not assignment \
+             compatible with `logic [7:0] [2][2]`",
+        ),
+        (
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] q);
+                logic [7:0] row [3];
+                logic [7:0] grid [2][2];
+                assign row[0] = a;
+                assign row[1] = a;
+                assign row[2] = a;
+                assign grid[1] = row;
+                assign grid[0] = '{a, a};
+                assign q = grid[1][0];
+            endmodule
+            "#,
+            "continuous assignment: an unpacked array of type `logic [7:0] [3]` is not \
+             assignment compatible with `logic [7:0] [2]`",
+        ),
+        (
+            r#"
+            module Child(output logic signed [7:0] y [2]);
+                assign y[0] = 8'sd1;
+                assign y[1] = -8'sd1;
+            endmodule
+            module Top(output logic [7:0] q);
+                logic [7:0] wide [2];
+                Child u(.y(wide));
+                assign q = wide[1];
+            endmodule
+            "#,
+            "connection of port `y`: an unpacked array of type `logic [7:0] [2]` is not \
+             assignment compatible with `logic signed [7:0] [2]`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+            .build_cranelift()
+        {
+            Ok(_) => panic!("incompatible unpacked arrays unexpectedly compiled:\n{source}"),
+            Err(error) => error,
+        };
+        match error.kind() {
+            celox::SimulatorErrorKind::SIRParser(celox::ParserError::IllegalContext {
+                detail,
+                ..
+            }) => assert_eq!(detail, expected),
+            _ => panic!("expected an illegal-context error, got {error:?}"),
+        }
     }
 }

@@ -95,353 +95,12 @@ pub(super) fn always_comb_body(
     }
 }
 
-pub(super) fn static_for_loop_iterations(
-    loop_statement: &sv_parser::LoopStatement,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-) -> Option<(String, Vec<i128>)> {
-    let sv_parser::LoopStatement::For(loop_statement) = loop_statement else {
-        return None;
-    };
-    let (_, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
-    let (name, initial_value) =
-        static_for_loop_initial_value(loop_statement, syntax_tree, const_env)?;
-    if for_loop_body_writes_index(loop_statement, &name, syntax_tree) {
-        return None;
-    }
-    let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
-    let steps = step.as_ref()?.nodes.0.contents();
-    let [step] = steps.as_slice() else {
-        return None;
-    };
-
-    let mut values = Vec::new();
-    let mut value = initial_value;
-    for _ in 0..MAX_STATIC_PROCEDURAL_LOOP_EXPANSION {
-        let mut loop_env = const_env.clone();
-        loop_env.insert(name.clone(), value);
-        insert_parameter_type_markers(
-            &mut loop_env,
-            &name,
-            ExprType {
-                width: 32,
-                signed: true,
-            },
-        );
-        let condition_value = eval_ast_const_expr(&condition, &loop_env)?;
-        if condition_value == 0 {
-            return Some((name, values));
-        }
-        values.push(value);
-        let next = next_for_loop_value(step, &name, value, syntax_tree, &loop_env);
-        value = coerce_for_loop_index_value(next?)?;
-    }
-
-    let mut loop_env = const_env.clone();
-    loop_env.insert(name.clone(), value);
-    insert_parameter_type_markers(
-        &mut loop_env,
-        &name,
-        ExprType {
-            width: 32,
-            signed: true,
-        },
-    );
-    (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
-}
-
-fn for_loop_body_writes_index(
-    loop_statement: &sv_parser::LoopStatementFor,
-    name: &str,
-    syntax_tree: &SyntaxTree,
-) -> bool {
-    RefNode::StatementOrNull(&loop_statement.nodes.2)
-        .into_iter()
-        .any(|node| {
-            let lvalue = match node {
-                RefNode::BlockingAssignment(assignment) => match assignment {
-                    sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.0,
-                    sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
-                        &assignment.nodes.0
-                    }
-                    _ => return false,
-                },
-                RefNode::NonblockingAssignment(assignment) => &assignment.nodes.0,
-                _ => return false,
-            };
-            for_loop_variable_lvalue_name(lvalue, syntax_tree).as_deref() == Some(name)
-        })
-}
-
-pub(super) fn static_for_loop_initial_value(
-    loop_statement: &sv_parser::LoopStatementFor,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-) -> Option<(String, i128)> {
-    let initialization = loop_statement.nodes.1.nodes.1.0.as_ref()?;
-    let (name, value) = for_loop_initialization(initialization, syntax_tree)?;
-    let value = eval_ast_const_expr(&value, const_env)?;
-    Some((name, coerce_for_loop_index_value(value)?))
-}
-
-fn coerce_for_loop_index_value(value: i128) -> Option<i128> {
-    const MODULUS: i128 = 1i128 << 32;
-    const SIGN_BIT: i128 = 1i128 << 31;
-    let value = value.rem_euclid(MODULUS);
-    Some(if value >= SIGN_BIT {
-        value - MODULUS
-    } else {
-        value
-    })
-}
-
-fn validate_static_for_loops_in_statement_or_null(
-    statement: &sv_parser::StatementOrNull,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    remaining_expansion: &mut usize,
-) -> Result<(), AnalyzerError> {
-    if let sv_parser::StatementOrNull::Statement(statement) = statement {
-        validate_static_for_loops_in_statement_with_budget(
-            statement,
-            syntax_tree,
-            const_env,
-            remaining_expansion,
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_static_for_loops_in_statement(
-    statement: &sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-) -> Result<(), AnalyzerError> {
-    let mut remaining_expansion = MAX_STATIC_PROCEDURAL_LOOP_EXPANSION;
-    validate_static_for_loops_in_statement_with_budget(
-        statement,
-        syntax_tree,
-        const_env,
-        &mut remaining_expansion,
-    )
-}
-
-fn validate_static_for_loops_in_statement_with_budget(
-    statement: &sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    remaining_expansion: &mut usize,
-) -> Result<(), AnalyzerError> {
-    match &statement.nodes.2 {
-        sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
-            validate_static_for_loops_in_statement_or_null(
-                &timing.nodes.1,
-                syntax_tree,
-                const_env,
-                remaining_expansion,
-            )?;
-        }
-        sv_parser::StatementItem::SeqBlock(block) => {
-            for statement in &block.nodes.3 {
-                validate_static_for_loops_in_statement_or_null(
-                    statement,
-                    syntax_tree,
-                    const_env,
-                    remaining_expansion,
-                )?;
-            }
-        }
-        sv_parser::StatementItem::ConditionalStatement(conditional) => {
-            validate_static_for_loops_in_statement_or_null(
-                &conditional.nodes.3,
-                syntax_tree,
-                const_env,
-                remaining_expansion,
-            )?;
-            for (_, _, _, branch) in &conditional.nodes.4 {
-                validate_static_for_loops_in_statement_or_null(
-                    branch,
-                    syntax_tree,
-                    const_env,
-                    remaining_expansion,
-                )?;
-            }
-            if let Some((_, branch)) = &conditional.nodes.5 {
-                validate_static_for_loops_in_statement_or_null(
-                    branch,
-                    syntax_tree,
-                    const_env,
-                    remaining_expansion,
-                )?;
-            }
-        }
-        sv_parser::StatementItem::CaseStatement(case) => {
-            let sv_parser::CaseStatement::Normal(case) = &**case else {
-                return Ok(());
-            };
-            for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
-                let statement = match item {
-                    sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
-                    sv_parser::CaseItem::Default(item) => &item.nodes.2,
-                };
-                validate_static_for_loops_in_statement_or_null(
-                    statement,
-                    syntax_tree,
-                    const_env,
-                    remaining_expansion,
-                )?;
-            }
-        }
-        sv_parser::StatementItem::LoopStatement(loop_statement) => {
-            let (name, values) = static_for_loop_iterations(loop_statement, syntax_tree, const_env)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("procedural loop inside always_ff".to_string())
-                })?;
-            *remaining_expansion =
-                remaining_expansion
-                    .checked_sub(values.len())
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported(
-                            "procedural loop unroll limit exceeded".to_string(),
-                        )
-                    })?;
-            let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
-                unreachable!();
-            };
-            for value in values {
-                let mut loop_env = const_env.clone();
-                loop_env.insert(name.clone(), value);
-                insert_parameter_type_markers(
-                    &mut loop_env,
-                    &name,
-                    ExprType {
-                        width: 32,
-                        signed: true,
-                    },
-                );
-                validate_static_for_loops_in_statement_or_null(
-                    &loop_statement.nodes.2,
-                    syntax_tree,
-                    &loop_env,
-                    remaining_expansion,
-                )?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn for_loop_initialization(
-    initialization: &sv_parser::ForInitialization,
-    syntax_tree: &SyntaxTree,
-) -> Option<(String, ConstExpr)> {
-    match initialization {
-        sv_parser::ForInitialization::Declaration(declaration) => {
-            let declarations = declaration.nodes.0.contents();
-            let [declaration] = declarations.as_slice() else {
-                return None;
-            };
-            if !for_loop_index_type_is_supported(&declaration.nodes.1) {
-                return None;
-            }
-            let assignments = declaration.nodes.2.contents();
-            let [assignment] = assignments.as_slice() else {
-                return None;
-            };
-            let name = identifier_text(RefNode::VariableIdentifier(&assignment.0), syntax_tree)?;
-            let value = const_expr_from_expr(&assignment.2, syntax_tree)?;
-            Some((name, value))
-        }
-        // An assignment-style initializer targets a variable in the enclosing
-        // procedural scope. Its initialization and loop steps are observable
-        // assignments, so it cannot be treated as a declaration-scoped
-        // compile-time unrolling constant.
-        sv_parser::ForInitialization::ListOfVariableAssignments(_) => None,
-    }
-}
-
-fn for_loop_index_type_is_supported(data_type: &sv_parser::DataType) -> bool {
-    matches!(
-        data_type,
-        sv_parser::DataType::Atom(data_type)
-            if matches!(
-                data_type.nodes.0,
-                sv_parser::IntegerAtomType::Int(_) | sv_parser::IntegerAtomType::Integer(_)
-            ) && !matches!(data_type.nodes.1, Some(sv_parser::Signing::Unsigned(_)))
-    )
-}
-
-fn for_loop_variable_lvalue_name(
-    lvalue: &sv_parser::VariableLvalue,
-    syntax_tree: &SyntaxTree,
-) -> Option<String> {
-    let sv_parser::VariableLvalue::Identifier(identifier) = lvalue else {
-        return None;
-    };
-    identifier_text(
-        RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
-        syntax_tree,
-    )
-}
-
-fn next_for_loop_value(
-    step: &sv_parser::ForStepAssignment,
-    name: &str,
-    value: i128,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-) -> Option<i128> {
-    match step {
-        sv_parser::ForStepAssignment::OperatorAssignment(step) => {
-            if for_loop_variable_lvalue_name(&step.nodes.0, syntax_tree)? != name {
-                return None;
-            }
-            let operator = syntax_tree.get_str(&step.nodes.1.nodes.0)?.trim();
-            let rhs = const_expr_from_expr(&step.nodes.2, syntax_tree)?;
-            if operator == "=" {
-                return eval_ast_const_expr(&rhs, const_env);
-            }
-            let op = match operator {
-                "+=" => BinaryOp::Add,
-                "-=" => BinaryOp::Sub,
-                "*=" => BinaryOp::Mul,
-                "/=" => BinaryOp::Div,
-                "%=" => BinaryOp::Mod,
-                _ => return None,
-            };
-            let lhs = ConstExpr::Literal(format_typed_parameter_literal(value, 32, true));
-            let expression = ConstExpr::Binary {
-                left: Box::new(lhs),
-                op,
-                right: Box::new(rhs),
-            };
-            eval_ast_const_expr(&expression, const_env)
-        }
-        sv_parser::ForStepAssignment::IncOrDecExpression(step) => {
-            let (lvalue, operator) = match &**step {
-                sv_parser::IncOrDecExpression::Prefix(step) => (&step.nodes.2, &step.nodes.0),
-                sv_parser::IncOrDecExpression::Suffix(step) => (&step.nodes.0, &step.nodes.2),
-            };
-            if for_loop_variable_lvalue_name(lvalue, syntax_tree)? != name {
-                return None;
-            }
-            match syntax_tree.get_str(&operator.nodes.0)? {
-                "++" => value.checked_add(1),
-                "--" => value.checked_sub(1),
-                _ => None,
-            }
-        }
-        sv_parser::ForStepAssignment::FunctionSubroutineCall(_) => None,
-    }
-}
-
 pub(super) fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    parameter_dimensions: &VariablePackedDimensions,
+    parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Result<(), AnalyzerError> {
     let mut indexed_dimensions =
@@ -512,13 +171,63 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_) | RefNode::ConstantCast(_)))
         .collect();
+    let subroutine_casts: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_)
+            )
+        })
+        .flat_map(|root| root.into_iter())
+        .filter(|child| matches!(child, RefNode::Cast(_)))
+        .collect();
+    // Declarations inside procedural blocks and subroutines are scoped
+    // locals: their initializers run where they are declared.
+    let procedural_declarations: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::AlwaysConstruct(_)
+                    | RefNode::InitialConstruct(_)
+                    | RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+            )
+        })
+        .flat_map(|root| root.into_iter())
+        .filter(|child| matches!(child, RefNode::VariableDeclAssignmentVariable(_)))
+        .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
             continue;
         }
+        // A parameter initializer with an indexed select is lowered through
+        // the typed path; report why it cannot be.
+        if let RefNode::ParamAssignment(parameter) = &child
+            && let Some((_, expression)) = parameter.nodes.2.as_ref()
+            && expression.into_iter().any(|child| {
+                matches!(
+                    child,
+                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                )
+            })
+        {
+            selects::indexed_parameter_initializer(
+                expression,
+                syntax_tree,
+                &indexed_dimensions,
+                None,
+            )?;
+        }
         match child {
+            // Subroutine bodies may cast to the width of a local parameter;
+            // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)
                 if !typed_indexed_casts.contains(&RefNode::Cast(cast))
+                    && !subroutine_casts.contains(&RefNode::Cast(cast))
                     && !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
@@ -560,48 +269,6 @@ pub(super) fn reject_silently_ignored_constructs(
                     ));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
-                if always_kind(always) == AlwaysKind::Ff
-                    && body
-                        .clone()
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::BlockingAssignment(_)))
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "blocking assignment inside always_ff".to_string(),
-                    ));
-                }
-                if always_kind(always) == AlwaysKind::Ff {
-                    validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)?;
-                }
-                if let Some(comb_body) = always_comb_body(always) {
-                    validate_static_for_loops_in_statement(comb_body, syntax_tree, const_env)
-                        .map_err(|error| match error {
-                            AnalyzerError::Unsupported(construct)
-                                if construct == "procedural loop inside always_ff" =>
-                            {
-                                AnalyzerError::Unsupported(
-                                    "procedural loop inside always_comb".to_string(),
-                                )
-                            }
-                            error => error,
-                        })?;
-                }
-                if always_kind(always) == AlwaysKind::Ff
-                    && body.clone().into_iter().any(|node| {
-                        matches!(
-                            node,
-                            RefNode::CaseStatement(case)
-                                if !matches!(
-                                    case,
-                                    sv_parser::CaseStatement::Normal(_)
-                                )
-                        )
-                    })
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "pattern case inside always_ff".to_string(),
-                    ));
-                }
                 if always_kind(always) == AlwaysKind::Comb
                     && body
                         .clone()
@@ -625,25 +292,6 @@ pub(super) fn reject_silently_ignored_constructs(
                         "iff-qualified always_ff event".to_string(),
                     ));
                 }
-                if always_kind(always) == AlwaysKind::Ff
-                    && body
-                        .clone()
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::VariableLvalueLvalue(_)))
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "concatenated always_ff assignment target".to_string(),
-                    ));
-                }
-                if always_kind(always) != AlwaysKind::Comb
-                    && body
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::DataDeclaration(_)))
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "procedural local data declaration".to_string(),
-                    ));
-                }
             }
             RefNode::NetDeclAssignment(assignment)
                 if assignment.nodes.2.is_some() && !assignment.nodes.1.is_empty() =>
@@ -651,9 +299,6 @@ pub(super) fn reject_silently_ignored_constructs(
                 return Err(AnalyzerError::Unsupported(
                     "net declaration assignment".to_string(),
                 ));
-            }
-            RefNode::InitialConstruct(_) => {
-                return Err(AnalyzerError::Unsupported("initial construct".to_string()));
             }
             RefNode::FinalConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("final construct".to_string()));
@@ -680,38 +325,37 @@ pub(super) fn reject_silently_ignored_constructs(
                     "concurrent assertion".to_string(),
                 ));
             }
-            RefNode::ProceduralAssertionStatement(_) => {
-                return Err(AnalyzerError::Unsupported(
-                    "procedural assertion statement".to_string(),
-                ));
-            }
-            RefNode::VariableDeclAssignmentVariable(assignment) if assignment.nodes.2.is_some() => {
+            RefNode::VariableDeclAssignmentVariable(assignment)
+                if assignment.nodes.2.is_some()
+                    && !procedural_declarations.contains(&RefNode::VariableDeclAssignmentVariable(assignment)) =>
+            {
                 return Err(AnalyzerError::Unsupported(
                     "variable declaration initializer".to_string(),
                 ));
             }
-            RefNode::ParamAssignment(parameter) if parameter.nodes.2.as_ref().is_some_and(|(_, expression)| {
-                expression.into_iter().any(|child| matches!(child,
-                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)))
-                && selects::indexed_parameter_initializer(expression, syntax_tree, &indexed_dimensions, None).is_none()
-            }) => {
-                return Err(AnalyzerError::Unsupported("indexed parameter initializer".to_string()));
+            RefNode::IndexedRange(range) => {
+                indexed_select_base(
+                    RefNode::Expression(&range.nodes.0),
+                    syntax_tree,
+                    &indexed_dimensions,
+                )?;
+                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
             }
-            RefNode::IndexedRange(range) if
-                indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions).is_none()
-                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
-                return Err(AnalyzerError::Unsupported(
-                    "indexed part-select".to_string(),
-                ));
-            }
-            RefNode::ConstantIndexedRange(range) if
-                !lowered_constant_indexed_ranges.contains(&range)
-                || indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions)
-                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
-                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
-                return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
+            RefNode::ConstantIndexedRange(range) => {
+                if !lowered_constant_indexed_ranges.contains(&range) {
+                    return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
+                }
+                let base = indexed_select_base(
+                    RefNode::ConstantExpression(&range.nodes.0),
+                    syntax_tree,
+                    &indexed_dimensions,
+                )?;
+                if eval_ast_const_expr(&base, const_env).is_none() {
+                    return Err(AnalyzerError::Unsupported(
+                        "indexed part-select start that is not constant".to_string(),
+                    ));
+                }
+                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -723,8 +367,21 @@ pub(super) fn reject_silently_ignored_constructs(
                 if matches!(
                     &call.nodes.0.nodes.0,
                     sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some()
+                        && !identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
+                            .is_some_and(|name| const_functions::is_constant_function(&name))
                 ) =>
             {
+                // A function whose body could not be converted is not a
+                // constant function; report why.
+                if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
+                    && let Some(error) = identifier_text(
+                        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                        syntax_tree,
+                    )
+                    .and_then(|name| const_functions::conversion_error(&name))
+                {
+                    return Err(error);
+                }
                 return Err(AnalyzerError::Unsupported(
                     "user constant function call".to_string(),
                 ));
@@ -764,31 +421,6 @@ pub(super) fn reject_silently_ignored_constructs(
                     "ref function argument".to_string(),
                 ));
             }
-            RefNode::FunctionDeclaration(function)
-                if RefNode::FunctionDeclaration(function).into_iter().any(|node| {
-                    matches!(
-                        node,
-                        RefNode::CaseStatement(case)
-                            if !matches!(
-                                case,
-                                sv_parser::CaseStatement::Normal(_)
-                            )
-                    )
-                }) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "pattern case inside function".to_string(),
-                ));
-            }
-            RefNode::FunctionDeclaration(function)
-                if RefNode::FunctionDeclaration(function)
-                    .into_iter()
-                    .any(|node| matches!(node, RefNode::BlockingAssignment(assignment) if blocking_assignment_has_non_plain_lvalue(assignment))) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "selected or composite assignment inside function".to_string(),
-                ));
-            }
             RefNode::GateInstantiation(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "gate primitive instantiation".to_string(),
@@ -814,25 +446,22 @@ pub(super) fn reject_silently_ignored_constructs(
                     "trireg charge storage".to_string(),
                 ));
             }
-            RefNode::PackedDimensionRange(range)
-                if const_expr_from_ref_node_with_env(
-                    RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0),
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )
-                .is_none()
-                    || const_expr_from_ref_node_with_env(
-                        RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.2),
+            RefNode::PackedDimensionRange(range) => {
+                let range = &range.nodes.0.nodes.1;
+                for bound in [&range.nodes.0, &range.nodes.2] {
+                    if const_expr_from_ref_node_with_env(
+                        RefNode::ConstantExpression(bound),
                         syntax_tree,
                         const_env,
                         type_aliases,
-                    )
-                    .is_none() =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "unsupported packed range".to_string(),
-                ));
+                    )?
+                    .is_none()
+                    {
+                        return Err(AnalyzerError::Unsupported(
+                            "unsupported packed range".to_string(),
+                        ));
+                    }
+                }
             }
             RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
                 return Err(AnalyzerError::Unsupported(
@@ -853,7 +482,7 @@ pub(super) fn reject_silently_ignored_constructs(
                                     RefNode::ConstantPrimary(&unary.nodes.2),
                                     syntax_tree,
                                 ),
-                                Some(ConstExpr::Ident(_))
+                                Ok(Some(ConstExpr::Ident(_)))
                             )
                     )
                 }) =>
@@ -895,19 +524,6 @@ pub(super) fn reject_silently_ignored_constructs(
     }
 
     Ok(())
-}
-
-fn blocking_assignment_has_non_plain_lvalue(assignment: &sv_parser::BlockingAssignment) -> bool {
-    let lvalue = match assignment {
-        sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.0,
-        sv_parser::BlockingAssignment::OperatorAssignment(assignment) => &assignment.nodes.0,
-        _ => return true,
-    };
-    let sv_parser::VariableLvalue::Identifier(identifier) = lvalue else {
-        return true;
-    };
-    let select = &identifier.nodes.2;
-    select.nodes.0.is_some() || !select.nodes.1.nodes.0.is_empty() || select.nodes.2.is_some()
 }
 
 fn non_input_function_port(node: RefNode<'_>) -> bool {
@@ -956,12 +572,18 @@ fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) ->
     }
 }
 
-fn positive_indexed_width(
+/// Reject an indexed part-select width that is not a positive constant.
+fn check_indexed_width(
     width: &sv_parser::ConstantExpression,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
-) -> bool {
-    indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)
-        .and_then(|width| eval_ast_const_expr(&width, &dimensions.const_env))
-        .is_some_and(|width| width > 0)
+) -> Result<(), AnalyzerError> {
+    let width = indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)?;
+    if eval_ast_const_expr(&width, &dimensions.const_env).is_some_and(|width| width > 0) {
+        Ok(())
+    } else {
+        Err(AnalyzerError::Unsupported(
+            "indexed part-select width that is not a positive constant".to_string(),
+        ))
+    }
 }

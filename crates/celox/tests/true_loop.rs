@@ -13,7 +13,6 @@ all_backends! {
 fn test_converging_true_loop_with_assign(sim) {
     // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
     @omit_veryl;
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (i: input logic<2>, o: output logic<2>) {
             var v: logic<2>;
@@ -42,7 +41,6 @@ fn test_converging_true_loop_with_assign(sim) {
 fn test_true_loop_oscillation_detected(sim) {
     // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
     @omit_veryl;
-    @ignore_on(sv);
     @setup {
     // v[0] = ~v[1] & a, v[1] = v[0]
     // When a=1: v[0]=~v[1], v[1]=v[0] → oscillates (0,0)→(1,0)→(1,1)→(0,1)→(0,0)→...
@@ -75,7 +73,6 @@ fn test_true_loop_oscillation_detected(sim) {
 fn test_runtime_true_loop_reports_only_failing_scc(sim) {
     // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
     @omit_veryl;
-    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (

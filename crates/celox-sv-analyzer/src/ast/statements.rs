@@ -1,449 +1,6 @@
-//! Procedural assignments, conditional statements, and condition construction.
+//! Assignment helpers: right-hand side coercion, operator assignments, and procedural conditions.
 
 use super::*;
-
-pub(super) fn conditional_assignments_from_statement_or_null(
-    stmt: &sv_parser::StatementOrNull,
-    condition: Option<Expr>,
-    exhaustive_fallback: bool,
-    retain_unreachable_writes: bool,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    packed_dimensions: &PackedDimensions,
-    assignments: &mut Vec<ConditionalAssignment>,
-) -> Result<(), AnalyzerError> {
-    if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
-        conditional_assignments_from_statement(
-            stmt,
-            condition,
-            exhaustive_fallback,
-            retain_unreachable_writes,
-            syntax_tree,
-            const_env,
-            packed_dimensions,
-            assignments,
-        )?;
-    }
-    Ok(())
-}
-
-/// The assignments a call statement `f(a, o);` performs on its `output` and
-/// `inout` arguments: each receives the value its parameter holds when the
-/// function body ends, computed from the arguments' values at the call.
-fn function_call_output_assignments(
-    call: &sv_parser::SubroutineCallStatement,
-    syntax_tree: &SyntaxTree,
-    packed_dimensions: &PackedDimensions,
-) -> Result<Vec<(LValue, Expr)>, AnalyzerError> {
-    let unsupported = || AnalyzerError::Unsupported("function call statement".to_string());
-    let sv_parser::SubroutineCallStatement::SubroutineCall(call) = call else {
-        return Err(unsupported());
-    };
-    let sv_parser::SubroutineCall::TfCall(call) = &call.0 else {
-        return Err(unsupported());
-    };
-    let name = identifier_text(
-        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
-        syntax_tree,
-    )
-    .ok_or_else(unsupported)?;
-    let function = packed_dimensions
-        .functions
-        .get(&name)
-        .filter(|function| !function.outputs.is_empty())
-        .ok_or_else(unsupported)?;
-    let Some(paren) = call.nodes.2.as_ref() else {
-        return Err(unsupported());
-    };
-    let sv_parser::ListOfArguments::Ordered(arguments) = &paren.nodes.1 else {
-        return Err(unsupported());
-    };
-    let arguments = arguments.nodes.0.contents();
-    if arguments.len() != function.params.len() {
-        return Err(unsupported());
-    }
-    let actuals = arguments
-        .into_iter()
-        .map(|argument| {
-            expr_from_expression_with_types(argument.as_ref()?, syntax_tree, packed_dimensions)
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(unsupported)?;
-    let env: HashMap<String, Expr> = function
-        .params
-        .iter()
-        .zip(&actuals)
-        .map(|(param, actual)| (param.name.clone(), actual.clone()))
-        .collect();
-    let mut assignments = Vec::new();
-    for (param, actual) in function.params.iter().zip(&actuals) {
-        if !param.direction.is_written() {
-            continue;
-        }
-        let (_, value) = function
-            .outputs
-            .iter()
-            .find(|(output, _)| *output == param.name)
-            .ok_or_else(unsupported)?;
-        let lhs = match actual {
-            Expr::Ident(name) => LValue::Ident(name.clone()),
-            Expr::Select {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => match &**expr {
-                Expr::Ident(name) => LValue::Select {
-                    name: name.clone(),
-                    msb: msb.clone(),
-                    lsb: lsb.clone(),
-                    signed: *signed,
-                    array_slice_width: None,
-                    array_slice_reversed: false,
-                    is_2state: false,
-                },
-                _ => return Err(unsupported()),
-            },
-            _ => return Err(unsupported()),
-        };
-        assignments.push((lhs, substitute_expr_idents(value.clone(), &env)));
-    }
-    Ok(assignments)
-}
-
-fn push_procedural_assignment(
-    assignments: &mut Vec<ConditionalAssignment>,
-    condition: Option<Expr>,
-    lhs: LValue,
-    rhs: Expr,
-    packed_dimensions: &PackedDimensions,
-) {
-    let rhs = if condition.is_some()
-        || matches!(
-            lhs,
-            LValue::Select {
-                is_2state: true,
-                ..
-            }
-        ) {
-        coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
-    } else {
-        rhs
-    };
-    assignments.push(ConditionalAssignment::new(
-        condition,
-        Assignment::new(lhs, rhs),
-    ));
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum JumpKind {
-    Break,
-    Continue,
-}
-
-thread_local! {
-    /// One entry per `for` loop being unrolled: the `break` / `continue`
-    /// statements met so far, each with the condition under which it executes.
-    static LOOP_JUMPS: std::cell::RefCell<Vec<Vec<(JumpKind, Expr)>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn jump_count() -> usize {
-    LOOP_JUMPS.with(|jumps| jumps.borrow().last().map_or(0, Vec::len))
-}
-
-/// The conditions of the jumps recorded since `start` in the innermost loop.
-fn jump_conditions_since(start: usize) -> Vec<Expr> {
-    LOOP_JUMPS.with(|jumps| {
-        jumps
-            .borrow()
-            .last()
-            .map(|jumps| jumps[start..].iter().map(|(_, c)| c.clone()).collect())
-            .unwrap_or_default()
-    })
-}
-
-/// `condition` and "none of `jumps` was taken".
-fn without_jumps(condition: Option<Expr>, jumps: Vec<Expr>) -> Option<Expr> {
-    let Some(taken) = jumps.into_iter().reduce(|left, right| Expr::Binary {
-        left: Box::new(left),
-        op: BinaryOp::LogicOr,
-        right: Box::new(right),
-    }) else {
-        return condition;
-    };
-    combine_expr_conditions(
-        condition,
-        Expr::Unary {
-            op: UnaryOp::LogicNot,
-            expr: Box::new(taken),
-        },
-    )
-}
-
-pub(super) fn conditional_assignments_from_statement(
-    stmt: &sv_parser::Statement,
-    condition: Option<Expr>,
-    exhaustive_fallback: bool,
-    retain_unreachable_writes: bool,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    packed_dimensions: &PackedDimensions,
-    assignments: &mut Vec<ConditionalAssignment>,
-) -> Result<(), AnalyzerError> {
-    match &stmt.nodes.2 {
-        sv_parser::StatementItem::BlockingAssignment(assignment) => {
-            let lowered = match &assignment.0 {
-                sv_parser::BlockingAssignment::Variable(assignment) => {
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
-                        .and_then(|lhs| {
-                            let rhs = expr_from_expression_for_lvalue(
-                                &assignment.nodes.3,
-                                &lhs,
-                                syntax_tree,
-                                packed_dimensions,
-                            )?;
-                            Some((lhs, rhs))
-                        })
-                }
-                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
-                    let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
-                    let lhs = variable_lvalue_from_node(
-                        &assignment.nodes.0,
-                        syntax_tree,
-                        packed_dimensions,
-                    );
-                    let rhs = lhs.as_ref().and_then(|lhs| {
-                        expr_from_expression_for_lvalue(
-                            &assignment.nodes.2,
-                            lhs,
-                            syntax_tree,
-                            packed_dimensions,
-                        )
-                    });
-                    match (lhs, rhs, op) {
-                        (Some(lhs), Some(rhs), Some("=")) => Some((lhs, rhs)),
-                        (Some(lhs), Some(rhs), Some(op)) => {
-                            assignment_op_expr(&lhs, op, rhs.clone(), packed_dimensions)
-                                .map(|rhs| (lhs, rhs))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            let Some((lhs, rhs)) = lowered else {
-                return Err(AnalyzerError::Unsupported(
-                    "always_comb assignment expression".to_string(),
-                ));
-            };
-            push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
-        }
-        sv_parser::StatementItem::NonblockingAssignment(assignment) => {
-            let lhs =
-                variable_lvalue_from_node(&assignment.0.nodes.0, syntax_tree, packed_dimensions)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
-                    })?;
-            let rhs = expr_from_expression_for_lvalue(
-                &assignment.0.nodes.3,
-                &lhs,
-                syntax_tree,
-                packed_dimensions,
-            )
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
-            })?;
-            push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
-        }
-        sv_parser::StatementItem::JumpStatement(jump) => {
-            let kind = match &**jump {
-                sv_parser::JumpStatement::Break(_) => JumpKind::Break,
-                sv_parser::JumpStatement::Continue(_) => JumpKind::Continue,
-                sv_parser::JumpStatement::Return(_) => {
-                    return Err(AnalyzerError::Unsupported(
-                        "return outside a function".to_string(),
-                    ));
-                }
-            };
-            let taken = condition
-                .clone()
-                .unwrap_or_else(|| Expr::Literal("1'b1".to_string()));
-            LOOP_JUMPS
-                .with(|jumps| {
-                    jumps
-                        .borrow_mut()
-                        .last_mut()
-                        .map(|jumps| jumps.push((kind, taken)))
-                })
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("break or continue outside a loop".to_string())
-                })?;
-        }
-        sv_parser::StatementItem::SubroutineCallStatement(call) => {
-            for (lhs, rhs) in
-                function_call_output_assignments(call, syntax_tree, packed_dimensions)?
-            {
-                push_procedural_assignment(
-                    assignments,
-                    condition.clone(),
-                    lhs,
-                    rhs,
-                    packed_dimensions,
-                );
-            }
-        }
-        sv_parser::StatementItem::SeqBlock(block) => {
-            // After a `break` or `continue` is taken, the rest of the block
-            // does not run.
-            let mut condition = condition;
-            for stmt in &block.nodes.3 {
-                let jumps_before = jump_count();
-                conditional_assignments_from_statement_or_null(
-                    stmt,
-                    condition.clone(),
-                    exhaustive_fallback,
-                    retain_unreachable_writes,
-                    syntax_tree,
-                    const_env,
-                    packed_dimensions,
-                    assignments,
-                )?;
-                condition = without_jumps(condition, jump_conditions_since(jumps_before));
-            }
-        }
-        sv_parser::StatementItem::ConditionalStatement(stmt) => {
-            conditional_assignments_from_conditional_statement(
-                stmt,
-                condition,
-                exhaustive_fallback,
-                retain_unreachable_writes,
-                syntax_tree,
-                const_env,
-                packed_dimensions,
-                assignments,
-            )?;
-        }
-        sv_parser::StatementItem::CaseStatement(stmt) => {
-            conditional_assignments_from_case_statement(
-                stmt,
-                condition,
-                exhaustive_fallback,
-                retain_unreachable_writes,
-                syntax_tree,
-                const_env,
-                packed_dimensions,
-                assignments,
-            )?;
-        }
-        sv_parser::StatementItem::LoopStatement(loop_statement) => {
-            let (name, values) = static_for_loop_iterations(loop_statement, syntax_tree, const_env)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("unsupported procedural for loop".to_string())
-                })?;
-            let body = match &**loop_statement {
-                sv_parser::LoopStatement::For(loop_statement) => &loop_statement.nodes.2,
-                _ => unreachable!(),
-            };
-            let iterations = if values.is_empty() && retain_unreachable_writes {
-                let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
-                    unreachable!();
-                };
-                let (_, initial_value) =
-                    static_for_loop_initial_value(loop_statement, syntax_tree, const_env)
-                        .ok_or_else(|| {
-                            AnalyzerError::Unsupported(
-                                "unsupported procedural for loop".to_string(),
-                            )
-                        })?;
-                vec![(initial_value, false)]
-            } else {
-                values.into_iter().map(|value| (value, true)).collect()
-            };
-            LOOP_JUMPS.with(|jumps| jumps.borrow_mut().push(Vec::new()));
-            // Conditions under which an earlier iteration executed `break`.
-            let mut broken: Vec<Expr> = Vec::new();
-            let result = (|| -> Result<(), AnalyzerError> {
-                for (value, reachable) in iterations {
-                    let mut loop_env = const_env.clone();
-                    loop_env.insert(name.clone(), value);
-                    let mut loop_packed_dimensions = packed_dimensions.clone();
-                    let mut loop_const_env = loop_env.clone();
-                    insert_parameter_type_markers(
-                        &mut loop_const_env,
-                        &name,
-                        ExprType {
-                            width: 32,
-                            signed: true,
-                        },
-                    );
-                    loop_packed_dimensions.const_env = loop_const_env.clone();
-                    let start = assignments.len();
-                    let iteration_condition = if reachable {
-                        without_jumps(condition.clone(), broken.clone())
-                    } else {
-                        combine_expr_conditions(
-                            condition.clone(),
-                            Expr::Literal("1'b0".to_string()),
-                        )
-                    };
-                    let jumps_before = jump_count();
-                    conditional_assignments_from_statement_or_null(
-                        body,
-                        iteration_condition,
-                        exhaustive_fallback && reachable,
-                        retain_unreachable_writes,
-                        syntax_tree,
-                        &loop_const_env,
-                        &loop_packed_dimensions,
-                        assignments,
-                    )?;
-                    for assignment in &mut assignments[start..] {
-                        assignment.condition = assignment.condition.take().map(|condition| {
-                            substitute_expr_constants_with_parameter_literals(
-                                condition,
-                                &loop_env,
-                                &HashMap::default(),
-                            )
-                        });
-                        assignment.assignment = substitute_assignment_constants(
-                            assignment.assignment.clone(),
-                            &loop_env,
-                        );
-                    }
-                    // A `break` ends every later iteration; a `continue` only the
-                    // rest of this one. Fix the loop index in the condition now.
-                    let iteration_jumps = LOOP_JUMPS.with(|jumps| {
-                        jumps
-                            .borrow_mut()
-                            .last_mut()
-                            .map(|jumps| jumps.split_off(jumps_before))
-                            .unwrap_or_default()
-                    });
-                    for (kind, taken) in iteration_jumps {
-                        if kind == JumpKind::Break {
-                            broken.push(substitute_expr_constants_with_parameter_literals(
-                                taken,
-                                &loop_env,
-                                &HashMap::default(),
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            })();
-            LOOP_JUMPS.with(|jumps| jumps.borrow_mut().pop());
-            result?;
-        }
-        _ => {
-            return Err(AnalyzerError::Unsupported(
-                "unsupported statement inside always_ff".to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
 
 pub(super) fn coerce_procedural_assignment_rhs(
     rhs: Expr,
@@ -453,13 +10,9 @@ pub(super) fn coerce_procedural_assignment_rhs(
     let Some(target_type) = lvalue_expr_type(lhs, packed_dimensions) else {
         return rhs;
     };
-    let identifier_signedness = packed_dimensions
-        .iter()
-        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
-        .collect();
     let Some(source_signed) = expr_signedness_with_return_types(
         &rhs,
-        &identifier_signedness,
+        packed_dimensions,
         &HashMap::default(),
         &packed_dimensions.function_return_types,
     ) else {
@@ -538,148 +91,17 @@ pub(super) fn lvalue_expr_type(
     }
 }
 
-fn conditional_assignments_from_conditional_statement(
-    stmt: &sv_parser::ConditionalStatement,
-    parent_condition: Option<Expr>,
-    exhaustive_fallback: bool,
-    retain_unreachable_writes: bool,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    packed_dimensions: &PackedDimensions,
-    assignments: &mut Vec<ConditionalAssignment>,
-) -> Result<(), AnalyzerError> {
-    let chain_start = assignments.len();
-    let if_condition =
-        expr_from_cond_predicate(&stmt.nodes.2.nodes.1, syntax_tree, packed_dimensions)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
-            })?;
-    let mut prior_false = Vec::new();
-    let mut definitely_assigned_branches = Vec::new();
-    let then_condition = combine_expr_conditions(
-        parent_condition.clone(),
-        procedural_truth_condition(if_condition.clone()),
-    );
-    let then_start = assignments.len();
-    conditional_assignments_from_statement_or_null(
-        &stmt.nodes.3,
-        then_condition,
-        false,
-        retain_unreachable_writes,
-        syntax_tree,
-        const_env,
-        packed_dimensions,
-        assignments,
-    )?;
-    mark_condition_context(assignments, then_start, chain_start);
-    definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
-        &stmt.nodes.3,
-        syntax_tree,
-        packed_dimensions,
-    ));
-    prior_false.push(procedural_false_condition(if_condition));
-
-    for (index, (_, _, predicate, branch)) in stmt.nodes.4.iter().enumerate() {
-        let branch_condition =
-            expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
-                })?;
-        let mut terms = prior_false.clone();
-        terms.push(procedural_truth_condition(branch_condition.clone()));
-        let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
-        let branch_start = assignments.len();
-        conditional_assignments_from_statement_or_null(
-            branch,
-            condition,
-            false,
-            retain_unreachable_writes,
-            syntax_tree,
-            const_env,
-            packed_dimensions,
-            assignments,
-        )?;
-        mark_condition_context(assignments, branch_start, chain_start);
-        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
-            branch,
-            syntax_tree,
-            packed_dimensions,
-        ));
-        if index + 1 == stmt.nodes.4.len()
-            && stmt.nodes.5.is_none()
-            && exhaustive_fallback
-            && parent_condition.is_none()
-            && conditional_chain_has_complementary_final_predicate(
-                stmt,
-                syntax_tree,
-                packed_dimensions,
-            )
-        {
-            mark_exhaustive_fallback(
-                &mut assignments[branch_start..],
-                &definitely_assigned_branches,
-                chain_start,
-                packed_dimensions,
-            );
-        }
-        prior_false.push(procedural_false_condition(branch_condition));
-    }
-
-    if let Some((_, branch)) = &stmt.nodes.5 {
-        // Keep the false-path guard while lowering. It can only be removed
-        // for targets that are written in every branch of this chain.
-        let exhaustive = exhaustive_fallback && parent_condition.is_none();
-        let condition = combine_expr_condition_terms(parent_condition, prior_false);
-        let branch_start = assignments.len();
-        conditional_assignments_from_statement_or_null(
-            branch,
-            condition.clone(),
-            false,
-            retain_unreachable_writes,
-            syntax_tree,
-            const_env,
-            packed_dimensions,
-            assignments,
-        )?;
-        mark_condition_context(assignments, branch_start, chain_start);
-        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
-            branch,
-            syntax_tree,
-            packed_dimensions,
-        ));
-        if exhaustive {
-            mark_exhaustive_fallback(
-                &mut assignments[branch_start..],
-                &definitely_assigned_branches,
-                chain_start,
-                packed_dimensions,
-            );
-        }
-    }
-    Ok(())
-}
-
-fn procedural_false_condition(condition: Expr) -> Expr {
-    Expr::Unary {
-        op: UnaryOp::LogicNot,
-        expr: Box::new(Expr::Unary {
-            op: UnaryOp::ToTwoState,
-            expr: Box::new(condition),
-        }),
-    }
-}
-
 pub(super) fn expr_from_cond_predicate(
     predicate: &sv_parser::CondPredicate,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
+) -> Converted<Expr> {
     if cond_predicate_has_conjunction_operator(predicate, syntax_tree) {
-        return None;
+        return Err(unsupported("`&&&` in a condition"));
     }
     let entries = predicate.nodes.0.contents();
     let [sv_parser::ExpressionOrCondPattern::Expression(expr)] = entries.as_slice() else {
-        return None;
+        return Err(unsupported("pattern matching condition"));
     };
     let expression = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
     // Prove this before call expansion, while scoped return metadata can tell
@@ -691,9 +113,9 @@ pub(super) fn expr_from_cond_predicate(
     } = &expression
         && two_state_conditions_are_complements(left, right, packed_dimensions)
     {
-        return Some(Expr::Literal("1'b1".to_string()));
+        return Ok(Expr::Literal("1'b1".to_string()));
     }
-    Some(expression)
+    Ok(expression)
 }
 
 fn cond_predicate_has_conjunction_operator(
@@ -718,35 +140,14 @@ fn cond_predicate_has_conjunction_operator(
     false
 }
 
-fn combine_expr_conditions(parent: Option<Expr>, child: Expr) -> Option<Expr> {
-    combine_expr_condition_terms(parent, vec![child])
-}
-
-pub(super) fn combine_expr_condition_terms(parent: Option<Expr>, terms: Vec<Expr>) -> Option<Expr> {
-    let Some(condition) = terms.into_iter().reduce(|left, right| Expr::Binary {
-        left: Box::new(left),
-        op: BinaryOp::LogicAnd,
-        right: Box::new(right),
-    }) else {
-        return parent;
-    };
-    Some(match parent {
-        Some(parent) => Expr::Binary {
-            left: Box::new(parent),
-            op: BinaryOp::LogicAnd,
-            right: Box::new(condition),
-        },
-        None => condition,
-    })
-}
-
 pub(super) fn assignment_op_expr(
     lhs: &LValue,
     op: &str,
     rhs: Expr,
     packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
-    let op = match op.strip_suffix('=')? {
+) -> Converted<Expr> {
+    let operator = || unsupported(format!("assignment operator `{op}`"));
+    let op = match op.strip_suffix('=').ok_or_else(operator)? {
         "+" => BinaryOp::Add,
         "-" => BinaryOp::Sub,
         "*" => BinaryOp::Mul,
@@ -759,9 +160,9 @@ pub(super) fn assignment_op_expr(
         "&" => BinaryOp::BitAnd,
         "|" => BinaryOp::BitOr,
         "^" => BinaryOp::BitXor,
-        _ => return None,
+        _ => return Err(operator()),
     };
-    Some(guard_zero_divisions(Expr::Binary {
+    Ok(guard_zero_divisions(Expr::Binary {
         left: Box::new(expr_from_lvalue(lhs, packed_dimensions)),
         op,
         right: Box::new(rhs),

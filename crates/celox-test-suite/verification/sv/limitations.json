@@ -88,7 +88,9 @@
         "indexed_select::indexed_constants_work_in_ordinary_selection_indices",
         "indexed_select::indexed_runtime_replications_preserve_attached_selections",
         "indexed_select::indexed_select_multidimensional_packed_reads",
-        "synthesizable::struct_assignment_patterns_follow_the_target_layout"
+        "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+        "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays"
       ]
     }
   },
@@ -106,7 +108,25 @@
     "cases": {
       "icarus": [
         "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
-        "review_regressions::preserves_use_site_dimensions_in_function_alias_types"
+        "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+        "types::packed_parameters_of_signed_named_types_have_signed_elements"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_array_parameters",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "procedural::aggregate_parameters_are_constant_tables"
       ]
     }
   },
@@ -218,6 +238,160 @@
     }
   },
   {
+    "id": "sv_icarus_inside",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::inside_matches_values_ranges_and_wildcards"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_packed_element_size",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 2 for $size of an element of a multidimensional packed struct member (value.m[0] of logic [1:0][3:0]); IEEE 1800-2023 20.7 makes it the element's size, 4. Verilator agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_bounds_and_type_queries"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_type_size_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects a data type as the argument of $size (\"Type names are not valid expressions here\"), which IEEE 1800-2023 20.7 permits. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "review_regressions::size_of_a_type_uses_the_dimension_argument"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_mixed_state_struct_members",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_mixed_state_members"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unary_plus_unknown",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "review_regressions::preserves_four_state_arithmetic_case_constants"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_runtime_packed_subselect",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array (t[k][j], t[k][2:1]: \"Array index expressions must be constant here\"). Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::runtime_indices_select_within_multidimensional_packed_elements"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_packed_inner_index_range",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::out_of_range_inner_indices_stay_in_their_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_subroutine_ports",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "types::passes_unpacked_arguments_of_equivalent_element_types",
+        "types::rejects_unpacked_argument_of_a_wider_element_type"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_array_patterns",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported (\"Procedural assignment of array or array slice\"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "types::rejects_assignment_pattern_item_of_a_narrower_array_type"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_constant_unknown_bits",
     "category": "simulator_two_state",
     "phase": "execute",
@@ -299,6 +473,68 @@
     "cases": {
       "verilator": [
         "generate::rejects_an_escaped_generate_block_named_like_a_port"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_part_select_write_overhang",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 writes the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) into bit 7 instead of discarding it; IEEE 1800-2023 11.5.1 ignores writes to out-of-range bits. Icarus agrees with the expected value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_unpacked_array_extension",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through \"EXTEND unexpected in assignment to unpacked array\" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "types::rejects_assignment_pattern_item_of_a_narrower_array_type",
+        "types::rejects_unpacked_argument_of_a_wider_element_type"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interfaces",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::binds_generic_interface_ports_per_interface",
+        "interfaces::binds_positional_connections_and_parameter_values",
+        "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
+        "interfaces::clocks_interface_processes_from_member_clocks",
+        "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
+        "interfaces::elaborates_net_members_typedefs_and_localparams",
+        "interfaces::infers_directions_of_ports_without_modport",
+        "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
+        "interfaces::reads_undriven_interface_members_as_unknown",
+        "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
+        "interfaces::runs_interface_processes_once_per_array_element"
       ]
     }
   }

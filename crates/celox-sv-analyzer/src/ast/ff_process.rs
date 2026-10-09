@@ -8,6 +8,7 @@ pub(super) fn ff_processes_from_module_node(
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
+    state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in generate::items(
@@ -26,16 +27,14 @@ pub(super) fn ff_processes_from_module_node(
             &literals,
             &dimensions,
             &mut processes,
+            state,
         )?;
         for process in &mut processes[start..] {
             for event in &mut process.events {
                 event.signal = item.name(&event.signal);
             }
-            for assignment in &mut process.assignments {
-                if let Some(condition) = &mut assignment.condition {
-                    item.expr(condition);
-                }
-                item.assignment(&mut assignment.assignment);
+            for stmt in &mut process.body {
+                procedural::qualify_stmt(&item, stmt);
             }
         }
     }
@@ -49,6 +48,7 @@ fn ff_processes_from_module_or_generate_item(
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
+    state: &mut procedural::BodyState<'_>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
         ff_processes_from_module_common_item(
@@ -58,6 +58,7 @@ fn ff_processes_from_module_or_generate_item(
             parameter_literals,
             packed_dimensions,
             processes,
+            state,
         )?;
     }
     Ok(())
@@ -70,6 +71,7 @@ fn ff_processes_from_module_common_item(
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
+    state: &mut procedural::BodyState<'_>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item {
         if let Some(process) = ff_process_from_always_construct(
@@ -78,6 +80,7 @@ fn ff_processes_from_module_common_item(
             const_env,
             parameter_literals,
             packed_dimensions,
+            state,
         )? {
             processes.push(process);
         }
@@ -91,6 +94,7 @@ fn ff_process_from_always_construct(
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
+    state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
     if always_kind(always) != AlwaysKind::Ff {
         return Ok(None);
@@ -100,40 +104,19 @@ fn ff_process_from_always_construct(
             "always_ff event expression".to_string(),
         ));
     };
-    let mut assignments = Vec::new();
-    conditional_assignments_from_statement_or_null(
-        body,
-        None,
-        false,
-        false,
+    let mut local_dimensions = packed_dimensions.clone();
+    local_dimensions.const_env = const_env.clone();
+    let mut builder = procedural::BodyBuilder::new(
         syntax_tree,
-        const_env,
-        packed_dimensions,
-        &mut assignments,
-    )?;
-    let assignments = assignments
-        .into_iter()
-        .map(|assignment| {
-            ConditionalAssignment::new(
-                assignment.condition.map(|condition| {
-                    substitute_expr_constants_with_parameter_literals(
-                        condition,
-                        const_env,
-                        parameter_literals,
-                    )
-                }),
-                substitute_assignment_constants_with_parameter_literals(
-                    assignment.assignment,
-                    const_env,
-                    parameter_literals,
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(
-        (!events.is_empty() && !assignments.is_empty())
-            .then(|| FfProcess::new(events, assignments)),
-    )
+        &local_dimensions,
+        state,
+        system_functions::Body::Always,
+    );
+    let mut body = builder.statement_or_null(body)?;
+    for stmt in &mut body {
+        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+    }
+    Ok((!events.is_empty()).then(|| FfProcess::new(events, body)))
 }
 
 fn ff_event_control_and_body<'a>(
@@ -173,7 +156,7 @@ fn ff_events_from_event_expression(
                 sv_parser::EdgeIdentifier::Negedge(_) => FfEdge::Neg,
                 sv_parser::EdgeIdentifier::Edge(_) => return None,
             };
-            let signal = expr_ident_name(&expr_from_expression(&expr.nodes.1, syntax_tree)?);
+            let signal = expr_ident_name(&expr_from_expression(&expr.nodes.1, syntax_tree).ok()?);
             signal.map(|signal| vec![FfEvent::new(edge, signal)])
         }
         sv_parser::EventExpression::Or(expr) => {

@@ -50,51 +50,14 @@ fn is_complete_element_access(bit_offset: usize, width: usize, element_width: us
 }
 
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            out.push(*lhs);
-            out.push(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src) => {
-            out.push(*src);
-        }
-        SIRInstruction::Load(_, _, offset, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-            out.push(*src);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            out.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
-        SIRInstruction::Slice(_, src, _, _) => {
-            out.push(*src);
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            out.push(*cond);
-            out.push(*then_val);
-            out.push(*else_val);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            out.push(*old);
-            out.push(*new);
-        }
-    }
+    inst.for_each_use(|register| out.push(register));
 }
 
 fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
-    matches!(
-        inst,
-        SIRInstruction::Commit(_, _, _, _, _)
-            | SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. }
-    )
+    // This pass tracks loads and stores precisely but not commits, so a
+    // commit orders every state access here. State accesses are not moved
+    // across host interactions either.
+    inst.is_host_interaction() || matches!(inst, SIRInstruction::Commit(..))
 }
 
 fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, usize, bool)> {
@@ -834,17 +797,8 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                     loads.subtract_write(*offset, write_end);
                 }
             }
-            SIRInstruction::RuntimeEvent { .. }
-            | SIRInstruction::CombCaptureEvent { .. }
-            | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-                available.clear();
-            }
-            SIRInstruction::Imm(..)
-            | SIRInstruction::Binary(..)
-            | SIRInstruction::Unary(..)
-            | SIRInstruction::Concat(..)
-            | SIRInstruction::Slice(..)
-            | SIRInstruction::Mux(..) => {}
+            _ if inst.memory_write().is_none() && !inst.is_host_interaction() => {}
+            _ => available.clear(),
         }
     }
 

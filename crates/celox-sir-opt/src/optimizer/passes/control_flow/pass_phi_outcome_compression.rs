@@ -368,62 +368,11 @@ fn replace_instruction_use(
     old: RegisterId,
     new: RegisterId,
 ) {
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            replace(lhs, old, new);
-            replace(rhs, old, new);
+    instruction.for_each_use_mut(|register| {
+        if *register == old {
+            *register = new;
         }
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            replace(source, old, new);
-        }
-        SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
-            replace_offset_use(offset, old, new);
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            replace_offset_use(offset, old, new);
-            replace(source, old, new);
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => {
-            for argument in arguments {
-                replace(argument, old, new);
-            }
-        }
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            replace(condition, old, new);
-            replace(true_value, old, new);
-            replace(false_value, old, new);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged {
-            old: lhs, new: rhs, ..
-        } => {
-            replace(lhs, old, new);
-            replace(rhs, old, new);
-        }
-    }
-}
-
-fn replace_offset_use(offset: &mut SIROffset, old: RegisterId, new: RegisterId) {
-    match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => replace(register, old, new),
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            replace(index, old, new);
-            if let Some(offset) = dynamic_bit_offset {
-                replace(offset, old, new);
-            }
-        }
-    }
+    });
 }
 
 fn replace_terminator_use(terminator: &mut SIRTerminator, old: RegisterId, new: RegisterId) {

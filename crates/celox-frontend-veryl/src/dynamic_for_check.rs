@@ -918,6 +918,22 @@ fn propagate_comb_unit(
                     SIRInstruction::RuntimeEvent { .. }
                     | SIRInstruction::CombCaptureEvent { .. }
                     | SIRInstruction::CombCaptureEnableIfChanged { .. } => {}
+                    // The result of an external function may depend on any
+                    // bit of any argument.
+                    SIRInstruction::ExternCall {
+                        dst: Some(dst),
+                        args,
+                        ..
+                    } => {
+                        let taint = if args.iter().any(|&arg| register_is_tainted(&registers, arg))
+                        {
+                            whole_register_taint(unit, *dst)
+                        } else {
+                            Vec::new()
+                        };
+                        changed |= extend_register_taint(&mut registers, *dst, taint);
+                    }
+                    SIRInstruction::ExternCall { dst: None, .. } => {}
                 }
             }
 

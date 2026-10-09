@@ -593,7 +593,9 @@ impl TieredBackend {
                             let image = NativeBackend::compile_image_with_cancel(
                                 laid_out, options, cancel,
                             )?;
-                            let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                            let shared = Arc::new(unsafe {
+                                SharedNativeCode::from_image_with_dpi(image, &options.dpi)?
+                            });
                             Ok(CompiledCode::Native(shared))
                         },
                     );
@@ -625,7 +627,9 @@ impl TieredBackend {
                     };
                     // Safety: the image was produced in-process by the Celox
                     // compiler above.
-                    let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                    let shared = Arc::new(unsafe {
+                        SharedNativeCode::from_image_with_dpi(image, &options.dpi)?
+                    });
                     Ok(CompiledCode::Native(shared))
                 })
             }
@@ -686,13 +690,16 @@ impl TieredBackend {
         // and adoption must grow within this allocation so the live image
         // never moves. The slack covers the measured arena sizes with
         // margin; a design that outgrows it declines promotion (recorded via
-        // `promotion_error`) instead of reallocating.
+        // `promotion_error`) instead of reallocating. Lane-partitioned
+        // kernels give every lane its own arena, so the slack scales with
+        // the lane count.
         if !matches!(
             options.tier_promotion,
             crate::simulator::TierPromotion::Never
         ) {
             let len = interp.image_word_len();
-            let slack = len.max(1024) / 8;
+            let lanes = options.optimize_options.parallel_lanes() as usize;
+            let slack = (len.max(1024) / 8).saturating_mul(lanes);
             interp.reserve_image_capacity(len + slack.max(1024));
         }
         let events = interp

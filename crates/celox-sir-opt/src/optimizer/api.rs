@@ -56,12 +56,25 @@ pub fn remove_final_identity_alias_stores(
     );
 }
 
+pub fn redirect_final_alias_accesses(
+    program: &mut OptimizationContext<'_>,
+    aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
+) {
+    pass_identity_store_bypass::redirect_final_alias_accesses(program, aliases);
+}
+
+/// Remove unread combinational stores and the logic only they used.
+///
+/// `shared_storage` maps every address that shares its home with another one
+/// (an identity alias merged by the memory layout) to one representative of
+/// that home.
 pub fn optimize_rooted_comb_memory(
     program: &mut OptimizationContext<'_>,
     externally_live: &crate::HashSet<AbsoluteAddr>,
+    shared_storage: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
 ) {
-    pass_dead_store_elimination::eliminate_dead_stores(program, externally_live);
+    pass_dead_store_elimination::eliminate_dead_stores(program, externally_live, shared_storage);
     let options = PassOptions {
         four_state,
         ..PassOptions::default()

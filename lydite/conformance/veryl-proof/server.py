@@ -4,7 +4,7 @@ import json,pathlib,subprocess,sys,os,hashlib
 from proof_backend import Backend,ROOT
 from four_state import FourStateBackend
 out=pathlib.Path(sys.argv[1]);out.mkdir(parents=True,exist_ok=False)
-backend=None;sticky=None;reads=0;commands=[];compiled_rejection=False;diagnostic=None;design_hash=None
+backend=None;sticky=None;reads=0;commands=[];compiled_rejection=False;frontend_unsupported=False;diagnostic=None;design_hash=None
 
 def send(value):print(json.dumps(value),flush=True)
 for line in sys.stdin:
@@ -19,7 +19,7 @@ for line in sys.stdin:
             if backend and not sticky:backend.proof.feasible()
         except Exception as error:sticky=f'{type(error).__name__}: {error}'
         if backend:backend.close()
-        result={'status':'failed' if sticky else 'passed','error':sticky,'reads':reads,'commands':len(commands),'design_sha256':design_hash,'protocol_sha256':hashlib.sha256(json.dumps(commands,sort_keys=True,separators=(',',':')).encode()).hexdigest(),'compilation_rejected':compiled_rejection,'diagnostic':diagnostic,'negative_control':backend.proof.negative_control if backend else None,'operations':backend.operations if backend else 0}
+        result={'status':'failed' if sticky else 'passed','error':sticky,'reads':reads,'commands':len(commands),'design_sha256':design_hash,'protocol_sha256':hashlib.sha256(json.dumps(commands,sort_keys=True,separators=(',',':')).encode()).hexdigest(),'compilation_rejected':compiled_rejection,'frontend_unsupported':frontend_unsupported,'diagnostic':diagnostic,'negative_control':backend.proof.negative_control if backend else None,'operations':backend.operations if backend else 0}
         (out/'backend-result.json').write_text(json.dumps(result,indent=2)+'\n');send(result);break
     if sticky:send({'error':sticky});continue
     try:
@@ -36,9 +36,13 @@ for line in sys.stdin:
                     rejection=message.startswith(('parse:','frontend diagnostics:')) or message.startswith('lower: IllegalContext')
                     diagnostic={'stage':message.split(':',1)[0],'detail':message}
                 compiled_rejection=rejection
+                # A typed Celox refusal of a construct it does not implement yet is
+                # neither a source rejection nor a backend fault; the suite records
+                # it only through a reviewed celox_unsupported exception.
+                frontend_unsupported=not rejection and message.startswith('lower: Unsupported')
                 (out/'frontend-diagnostic.json').write_text(json.dumps(diagnostic,indent=2)+'\n')
                 sticky=message or 'compiler failed without diagnostics'
-                send({'error':sticky,'compilation_rejected':rejection});continue
+                send({'error':sticky,'compilation_rejected':rejection,'frontend_unsupported':frontend_unsupported});continue
             compiled=json.loads(process.stdout);(out/'scheduled-sir.json').write_text(process.stdout)
             backend=(FourStateBackend if request['design']['four_state'] else Backend)(compiled,request['design']['four_state'],out/'proof')
             send({'status':'ready'})

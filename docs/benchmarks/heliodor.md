@@ -144,13 +144,20 @@ x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backend
 These 9 workloads use Heliodor revision
 `6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
 simulated guest, not the benchmark host OS. Backends execute sequentially on the
-same VM within each group below (26 jobs for the complete suite):
+same VM within each group below (36 jobs for the complete suite):
 
 | Workload | Comparison groups per architecture |
 | --- | --- |
 | 1/2 harts, or x86-64 4 harts | All four backends in one job |
 | AArch64 4 harts | Two jobs: Celox native + Veryl-CC sync; Celox tiered + Veryl-CC tiered |
 | 8 harts, either architecture | Four jobs, one per backend |
+| Every SMP workload (2, 4, 8 harts) | One more job: `celox-parallel` |
+
+`celox-parallel` is the native backend with
+[multi-threaded simulation](../guide/parallel-simulation.md), using one thread per
+host vCPU (`HELIODOR_CELOX_THREADS`, default `nproc`). Its own job keeps the
+comparison groups' time budgets unchanged. The dashboard shows it as
+"multi-threaded" next to single-threaded native execution.
 
 Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
 AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent

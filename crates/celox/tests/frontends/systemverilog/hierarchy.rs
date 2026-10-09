@@ -33,6 +33,14 @@ sv_backends! {
         @case "hierarchy::simulates_systemverilog_hierarchical_always_ff_with_constant_clear";
     }
 
+    fn settles_feedback_through_disjoint_bits_of_child_input(sim) {
+        @case "hierarchy::settles_feedback_through_disjoint_bits_of_child_input";
+    }
+
+    fn settles_feedback_beside_dynamic_child_reader(sim) {
+        @case "hierarchy::settles_feedback_beside_dynamic_child_reader";
+    }
+
     fn simulates_veryl_generated_countones_sv(sim) {
         @setup {
     let sv = include_str!("../../../testdata/verilator/Countones.sv");
@@ -245,4 +253,58 @@ fn builds_veryl_generated_verilator_sv_smoke() {
             .build_native()
             .unwrap_or_else(|err| panic!("failed to build {name}: {err:?}"));
     }
+}
+
+fn assert_combinational_loop(source: &str) {
+    match Simulator::from_sv_sources(vec![(source, Path::new("loop.sv"))], "Top").build_cranelift()
+    {
+        Ok(_) => panic!("a genuine combinational loop must be rejected:\n{source}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                celox::SimulatorErrorKind::SIRParser(
+                    celox::ParserError::Scheduler(celox::SchedulerError::CombinationalLoop { .. })
+                        | celox::ParserError::SchedulerWithLocation {
+                            error: celox::SchedulerError::CombinationalLoop { .. },
+                            ..
+                        }
+                )
+            ),
+            "expected a combinational loop, got: {error:?}"
+        ),
+    }
+}
+
+// Bit-precise scheduling must still reject feedback through the same bit.
+#[test]
+fn rejects_feedback_through_the_same_bit_of_one_variable() {
+    assert_combinational_loop(
+        r#"
+        module Top(input logic inp, output logic out);
+            logic [1:0] v;
+            logic lo;
+            assign lo = v[0];
+            assign v = {inp, lo};
+            assign out = v[0];
+        endmodule
+    "#,
+    );
+}
+
+#[test]
+fn rejects_feedback_through_the_same_bit_of_child_input() {
+    assert_combinational_loop(
+        r#"
+        module Child(input logic [1:0] a, output logic lo);
+            assign lo = a[0];
+        endmodule
+        module Top(input logic inp, output logic out);
+            logic [1:0] v;
+            logic lo;
+            Child c(.a(v), .lo(lo));
+            assign v = {inp, lo};
+            assign out = v[1];
+        endmodule
+    "#,
+    );
 }

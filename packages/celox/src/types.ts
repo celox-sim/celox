@@ -345,6 +345,16 @@ export interface SimulatorOptions {
 	 */
 	deadStorePolicy?: "off" | "preserveTopPorts" | "preserveAllPorts";
 	/**
+	 * Simulation threads, including the calling thread. Default: 1.
+	 *
+	 * With more than one thread, phases with enough independent work get
+	 * lane-partitioned alternatives that run concurrently; each is kept only
+	 * when it measures faster than its sequential version. Results are
+	 * identical to sequential simulation. Use at most the number of physical
+	 * cores.
+	 */
+	threads?: number;
+	/**
 	 * Run tiered: execution starts on the interpreter immediately while the
 	 * host's compiled tier is prepared on a background thread, and the
 	 * simulation adopts it at the next safe point after compilation.

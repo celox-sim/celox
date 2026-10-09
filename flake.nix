@@ -9,7 +9,7 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/dbc715a4b7c0ace63b9769a032d1dd34cd89e5bd";
+      url = "github:oxalica/rust-overlay/f91010a5c1b6125b715eb78a84fb5dd8fb74a2b0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -64,6 +64,7 @@
             python
             pkgs.verilator
             pkgs.iverilog
+            pkgs.z3
             stdenv.cc
             pkgs.mold
             pkgs.gnumake
@@ -72,6 +73,7 @@
             pkgs.openssl
             pkgs.fuse-overlayfs
             pkgs.cargo-insta
+            pkgs.cargo-nextest
             pkgs.git
             pkgs.curl
             pkgs.jq
@@ -125,6 +127,7 @@
           default = (e.pkgs.mkShell.override { stdenv = e.stdenv; }) {
             packages = e.tools;
             CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
+            Z3_BIN = "${e.pkgs.z3}/bin/z3";
             shellHook = ''
               export NPM_CONFIG_PREFIX="''${NPM_CONFIG_PREFIX:-$HOME/.local/share/npm}"
               export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"

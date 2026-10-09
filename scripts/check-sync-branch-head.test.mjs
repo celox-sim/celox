@@ -10,23 +10,17 @@ const guard = fileURLToPath(
   new URL("./check-sync-branch-head.sh", import.meta.url),
 );
 
-test("sync workflow retries after its preserved pull request lands", () => {
+// A daily run also retries after a preserved (hand-resolved) synchronization
+// lands, without re-syncing, and re-running its CI, on every master push.
+test("sync workflow runs daily instead of on every master push", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/sync-develop.yml", import.meta.url),
     "utf8",
   );
-  assert.match(
-    workflow,
-    /pull_request_target:\n\s+types: \[closed\]\n\s+branches: \[develop\]/,
-  );
-  assert.match(
-    workflow,
-    /github\.event\.pull_request\.head\.ref == 'integration\/master-to-develop'/,
-  );
-  assert.match(
-    workflow,
-    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
-  );
+  const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
+  assert.match(triggers, /schedule:\n\s+- cron: "7 22 \* \* \*"/);
+  assert.match(triggers, /workflow_dispatch:/);
+  assert.doesNotMatch(triggers, /^\s+(push|pull_request_target):/m);
 });
 
 test("sync branch guard preserves unresolved branch work", (t) => {

@@ -24,6 +24,7 @@ const sim = Simulation.create(MyModule, { fourState: true });
 
 ::: warning
 `fourState: true` を指定しない場合、すべてのシグナルは 2 値として動作します。X 値の書き込み・読み出しはできません。
+`'x` リテラルや、範囲外・不定のインデックスによる配列の読み出しなど、設計内で生じる X / Z は、4 値から 2 値への変換と同じく 0 として読まれます。
 :::
 
 ## Veryl の型と 4 値

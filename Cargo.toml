@@ -97,9 +97,9 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-napi            = "=3.14.0"
+napi            = "=3.14.1"
 napi-build      = "=2.6.0"
-napi-derive     = "=3.6.10"
+napi-derive     = "=3.6.11"
 num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }
@@ -137,6 +137,12 @@ debug = false
 [profile.dev.package]
 insta.opt-level   = 3
 similar.opt-level = 3
+
+# Tests spend most of their time in the Veryl analyzer, Cranelift, and
+# wasmtime. Unoptimized, these make the suite 5-10x slower; dependencies
+# rarely rebuild, so optimizing them costs little in edit-compile cycles.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release.build-override]
 opt-level = 3

@@ -33,12 +33,10 @@ all_backends! {
     }
 
     fn test_case_in_comb_function_output_argument(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_in_comb_function_output_argument";
     }
 
     fn test_case_break_inside_comb_function_for(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_break_inside_comb_function_for";
     }
 }

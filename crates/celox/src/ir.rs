@@ -526,6 +526,25 @@ impl LaidOutProgram {
         self.runtime
     }
 
+    /// Map every address whose stable home is shared with another address,
+    /// such as a merged identity alias, to one representative of that home.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn shared_storage(&self) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+        let mut addresses = self.layout.offsets.iter().collect::<Vec<_>>();
+        addresses.sort_unstable_by_key(|(address, offset)| (**offset, **address));
+        let mut shared = HashMap::default();
+        for pair in addresses.windows(2) {
+            let [(first, first_offset), (address, offset)] = pair else {
+                unreachable!("windows(2) yields pairs");
+            };
+            if first_offset == offset {
+                let representative = shared.get(*first).copied().unwrap_or(**first);
+                shared.insert(**address, representative);
+            }
+        }
+        shared
+    }
+
     /// Identity of the checkpointable state layout: the path, offset, width
     /// and state kind of every state object. Simulators with the same
     /// fingerprint can exchange checkpoints.
@@ -612,7 +631,14 @@ impl OptimizedSir {
                 .state_aliases_mut()
                 .retain(|alias_addr, _| {
                     !comb_capture_enable_needs_unaliased_old_value(
-                        &program.sir.eval_comb,
+                        program.sir.eval_comb.iter().chain(
+                            program
+                                .sir
+                                .parallel
+                                .iter()
+                                .flat_map(|parallel| parallel.eval_comb.iter())
+                                .map(|unit| &unit.unit),
+                        ),
                         *alias_addr,
                     )
                 });
@@ -644,6 +670,16 @@ impl OptimizedSir {
                     &aliased,
                     four_state,
                 );
+                // Accesses through an alias whose element layout matches its
+                // canonical address now name the canonical address.
+                let redirected = aliased
+                    .iter()
+                    .filter(|(alias, canonical)| {
+                        layout.unpacked_arrays.get(*alias) == layout.unpacked_arrays.get(*canonical)
+                    })
+                    .map(|(&alias, &canonical)| (alias, canonical))
+                    .collect::<crate::HashMap<_, _>>();
+                crate::optimizer::sir::redirect_final_alias_accesses(&mut program, &redirected);
             }
         }
         rebuild_rtl_writes(&mut program);
@@ -695,6 +731,13 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
         .chain(program.sir.eval_comb_apply_ffs.values().flatten())
         .chain(program.sir.eval_only_ffs.values().flatten())
         .chain(program.sir.apply_ffs.values().flatten())
+        .chain(
+            program
+                .sir
+                .parallel
+                .iter()
+                .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
+        )
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -974,71 +1017,109 @@ impl OptimizedSir {
     /// region space.
     pub fn collect_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
         let mut addrs = crate::HashSet::default();
-
-        let scan_units =
-            |units: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-             addrs: &mut crate::HashSet<AbsoluteAddr>| {
-                for eu_list in units.values() {
-                    for eu in eu_list {
-                        for block in eu.blocks.values() {
-                            for inst in &block.instructions {
-                                match inst {
-                                    SIRInstruction::Store(addr, _, _, _, _, _)
-                                        if addr.region == WORKING_REGION =>
-                                    {
-                                        addrs.insert(addr.absolute_addr());
-                                    }
-                                    SIRInstruction::Commit(src, dst, _, _, _) => {
-                                        if src.region == WORKING_REGION {
-                                            addrs.insert(src.absolute_addr());
-                                        }
-                                        if dst.region == WORKING_REGION {
-                                            addrs.insert(dst.absolute_addr());
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-        scan_units(&self.sir.eval_apply_ffs, &mut addrs);
-        scan_units(&self.sir.eval_comb_apply_ffs, &mut addrs);
-        scan_units(&self.sir.eval_only_ffs, &mut addrs);
-        scan_units(&self.sir.apply_ffs, &mut addrs);
-
-        addrs
-    }
-
-    pub fn collect_sparse_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
-        let mut addrs = crate::HashSet::default();
-        for units in self
-            .sir
-            .eval_apply_ffs
-            .values()
-            .chain(self.sir.eval_comb_apply_ffs.values())
-            .chain(self.sir.eval_only_ffs.values())
-        {
-            for eu in units {
-                for block in eu.blocks.values() {
-                    for inst in &block.instructions {
-                        if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
-                            && addr.region == SPARSE_WORKING_REGION
+        for eu in self.ff_units() {
+            for block in eu.blocks.values() {
+                for inst in &block.instructions {
+                    match inst {
+                        SIRInstruction::Store(addr, _, _, _, _, _)
+                            if addr.region == WORKING_REGION =>
                         {
                             addrs.insert(addr.absolute_addr());
                         }
+                        SIRInstruction::Commit(src, dst, _, _, _) => {
+                            if src.region == WORKING_REGION {
+                                addrs.insert(src.absolute_addr());
+                            }
+                            if dst.region == WORKING_REGION {
+                                addrs.insert(dst.absolute_addr());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
         addrs
     }
+
+    /// Every unit that may touch FF staging state: the sequential FF groups
+    /// and every lane-partitioned FF kernel.
+    fn ff_units(&self) -> impl Iterator<Item = &ExecutionUnit<RegionedAbsoluteAddr>> {
+        self.sir
+            .eval_apply_ffs
+            .values()
+            .chain(self.sir.eval_comb_apply_ffs.values())
+            .chain(self.sir.eval_only_ffs.values())
+            .chain(self.sir.apply_ffs.values())
+            .flatten()
+            .chain(self.sir.parallel.iter().flat_map(|parallel| {
+                parallel
+                    .eval_apply_ffs
+                    .values()
+                    .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
+            }))
+    }
+
+    pub fn collect_sparse_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
+        let mut addrs = crate::HashSet::default();
+        let parallel_units = self.sir.parallel.iter().flat_map(|parallel| {
+            parallel
+                .eval_apply_ffs
+                .values()
+                .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
+        });
+        for eu in self
+            .sir
+            .eval_apply_ffs
+            .values()
+            .chain(self.sir.eval_comb_apply_ffs.values())
+            .chain(self.sir.eval_only_ffs.values())
+            .flatten()
+            .chain(parallel_units)
+        {
+            for block in eu.blocks.values() {
+                for inst in &block.instructions {
+                    if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
+                        && addr.region == SPARSE_WORKING_REGION
+                    {
+                        addrs.insert(addr.absolute_addr());
+                    }
+                }
+            }
+        }
+        addrs
+    }
+
+    /// Writer lanes of every state home in the lane-partitioned kernels.
+    pub(crate) fn lane_writers(&self) -> celox_state_layout::LaneWriters<AbsoluteAddr> {
+        let mut writers = celox_state_layout::LaneWriters::default();
+        let Some(parallel) = &self.sir.parallel else {
+            return writers;
+        };
+        for unit in parallel.units() {
+            let bit = 1u64 << unit.lane.min(63);
+            for block in unit.unit.blocks.values() {
+                for instruction in &block.instructions {
+                    let destination = match instruction {
+                        SIRInstruction::Store(address, ..)
+                        | SIRInstruction::Commit(_, address, ..) => address,
+                        _ => continue,
+                    };
+                    let homes = match destination.region {
+                        STABLE_REGION => &mut writers.stable,
+                        SPARSE_WORKING_REGION => &mut writers.sparse,
+                        _ => &mut writers.working,
+                    };
+                    *homes.entry(destination.absolute_addr()).or_default() |= bit;
+                }
+            }
+        }
+        writers
+    }
 }
 
-fn comb_capture_enable_needs_unaliased_old_value(
-    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+fn comb_capture_enable_needs_unaliased_old_value<'a>(
+    units: impl IntoIterator<Item = &'a ExecutionUnit<RegionedAbsoluteAddr>>,
     alias_addr: AbsoluteAddr,
 ) -> bool {
     for eu in units {

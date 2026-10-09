@@ -603,16 +603,7 @@ impl GvnState {
 }
 
 fn is_observable_barrier(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
-    match instruction {
-        SIRInstruction::Store(_, _, _, _, triggers, capture_sites) => {
-            !triggers.is_empty() || !capture_sites.is_empty()
-        }
-        SIRInstruction::Commit(_, _, _, _, triggers) => !triggers.is_empty(),
-        SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => true,
-        _ => false,
-    }
+    instruction.is_observable()
 }
 
 fn resolve_canonical(
@@ -629,6 +620,9 @@ fn resolve_canonical(
 }
 
 fn pure_expression_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<PureExprKey> {
+    if !inst.is_pure() {
+        return None;
+    }
     match inst {
         SIRInstruction::Imm(_, value) => Some(PureExprKey::Imm {
             payload: value.payload.to_u64_digits(),
@@ -650,12 +644,7 @@ fn pure_expression_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Pu
         SIRInstruction::Mux(_, cond, then_value, else_value) => {
             Some(PureExprKey::Mux(*cond, *then_value, *else_value))
         }
-        SIRInstruction::Load(..)
-        | SIRInstruction::Store(..)
-        | SIRInstruction::Commit(..)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+        _ => None,
     }
 }
 
@@ -770,17 +759,13 @@ fn process_gvn_block(
                 continue;
             }
 
-            if matches!(
-                inst,
-                SIRInstruction::Store(..)
-                    | SIRInstruction::Commit(..)
-                    | SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
-            ) {
+            if inst.has_side_effects() {
                 state.bump_memory_epoch();
                 if is_observable_barrier(inst) {
                     state.bump_observable_epoch();
+                }
+                if let Some(dst) = def_reg(inst) {
+                    state.set_canonical(dst, dst);
                 }
                 continue;
             }
@@ -889,70 +874,15 @@ fn apply_aliases_to_terminator(
     }
 }
 
-fn apply_alias_to_offset(offset: &mut SIROffset, aliases: &HashMap<RegisterId, RegisterId>) {
-    match offset {
-        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-        SIROffset::Dynamic(register) => {
-            *register = resolve_canonical(*register, aliases);
-        }
-        SIROffset::Element {
-            index,
-            dynamic_bit_offset,
-            ..
-        } => {
-            *index = resolve_canonical(*index, aliases);
-            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                *dynamic_bit_offset = resolve_canonical(*dynamic_bit_offset, aliases);
-            }
-        }
-    }
-}
-
 fn apply_aliases(
     inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
     aliases: &HashMap<RegisterId, RegisterId>,
 ) {
-    match inst {
-        SIRInstruction::Imm(_, _) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            *lhs = resolve_canonical(*lhs, aliases);
-            *rhs = resolve_canonical(*rhs, aliases);
+    inst.for_each_use_mut(|register| {
+        if let Some(&alias) = aliases.get(register) {
+            *register = alias;
         }
-        SIRInstruction::Unary(_, _, src) => {
-            *src = resolve_canonical(*src, aliases);
-        }
-        SIRInstruction::Load(_, _, offset, _) => apply_alias_to_offset(offset, aliases),
-        SIRInstruction::Store(_, offset, _, src, _, _) => {
-            apply_alias_to_offset(offset, aliases);
-            *src = resolve_canonical(*src, aliases);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            apply_alias_to_offset(offset, aliases);
-        }
-        SIRInstruction::Concat(_, args) => {
-            for arg in args {
-                *arg = resolve_canonical(*arg, aliases);
-            }
-        }
-        SIRInstruction::Slice(_, src, _, _) => {
-            *src = resolve_canonical(*src, aliases);
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            *cond = resolve_canonical(*cond, aliases);
-            *then_val = resolve_canonical(*then_val, aliases);
-            *else_val = resolve_canonical(*else_val, aliases);
-        }
-        SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for arg in args {
-                *arg = resolve_canonical(*arg, aliases);
-            }
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            *old = resolve_canonical(*old, aliases);
-            *new = resolve_canonical(*new, aliases);
-        }
-    }
+    });
 }
 
 #[cfg(test)]

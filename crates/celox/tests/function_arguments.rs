@@ -32,16 +32,13 @@ fn test_ff_inout_copyout_directly_to_register_is_rejected() {
 #[allow(unused_macros)]
 mod test_utils;
 
-// The SV frontend currently rejects output/inout function arguments.
 all_backends! {
 
 fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
-    @ignore_on(sv);
     @case "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal";
 }
 
 fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
-    @ignore_on(sv);
     @case "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments";
 }
 
@@ -51,37 +48,37 @@ fn test_ff_function_local_snapshot_ignores_later_assignment(sim) {
 }
 
 fn test_comb_output_copyout_freezes_aliased_inputs_and_return(sim) {
-    @ignore_on(sv);
     @case "function_arguments::test_comb_output_copyout_freezes_aliased_inputs_and_return";
 }
 
 fn test_comb_statement_output_copyout_obeys_named_argument_order(sim) {
-    @ignore_on(sv);
     @case "function_arguments::test_comb_statement_output_copyout_obeys_named_argument_order";
 }
 
 fn test_comb_nested_output_copyout_stops_at_early_return(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "function_arguments::test_comb_nested_output_copyout_stops_at_early_return";
 }
 
 fn test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "function_arguments::test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements";
 }
 
 fn test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff(sim) {
-    @ignore_on(veryl, sv);
+    @omit_sv;
+    @ignore_on(veryl);
     @case "function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff";
 }
 
 fn test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body(sim) {
-    @ignore_on(sv);
     @case "function_arguments::test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body";
 }
 
 fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
     @omit_veryl;
+    // SV frontend rejects a function call in a select index: "select index `observe(copied)`"
+    // (#88).
     @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (
@@ -126,24 +123,26 @@ fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
 }
 
 fn test_ff_expression_output_copyout_extends_before_splitting_concat(sim) {
-    @ignore_on(veryl, sv);
+    @omit_sv;
+    @ignore_on(veryl);
     @case "function_arguments::test_ff_expression_output_copyout_extends_before_splitting_concat";
 }
 
 fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
     @omit_veryl;
-    @ignore_on(sv);
+    @omit_sv;
     @case "function_arguments::test_ff_statement_output_copyout_freezes_all_inputs";
 }
 
 fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
-    @ignore_on(veryl, sv);
+    @omit_sv;
+    @ignore_on(veryl);
     @case "function_arguments::test_ff_output_copyout_to_dynamic_slice_preserves_other_bits";
 }
 
 fn test_ff_nested_output_copyout_is_visible_before_outer_copyout(sim) {
     @omit_veryl;
-    @ignore_on(sv);
+    @omit_sv;
     @case "function_arguments::test_ff_nested_output_copyout_is_visible_before_outer_copyout";
 }
 
