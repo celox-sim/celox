@@ -787,6 +787,29 @@
     (assert_eq q1 (? (&& bit_in (== row 1)) (<< 1 index) 0) "q1")
     (assert_eq q2 (? (&& bit_in (== row 2)) (<< 1 index) 0) "q2")))
 
+(case runtime_inner_bits_of_unpacked_elements_feed_child_ports
+  ; The same select as an input port connection.
+  (four_state)
+  (source "runtime_inner_bit_port.sv" #"
+                module Child(input logic d, output logic q);
+                    assign q = d;
+                endmodule
+                module Top(input logic [1:0] j, input logic [3:0] i, output logic y);
+                    logic [7:0] a [4];
+                    always_comb begin
+                        a[0] = 8'h01;
+                        a[1] = 8'h02;
+                        a[2] = 8'h04;
+                        a[3] = 8'h08;
+                    end
+                    Child c(.d(a[j][i]), .q(y));
+                endmodule
+            "#)
+  (top Top)
+  (for (row index) (list (1 1) (2 2) (2 1) (1 8) (1 9))
+    (modify (set j row) (set i index))
+    (assert_eq y (? (< index 8) (? (== index row) 1 0) (fourstate 1 1)))))
+
 (case out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element
   ; As above, with several packed dimensions in each element.
   (four_state)

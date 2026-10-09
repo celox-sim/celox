@@ -2608,6 +2608,30 @@ fn lower_glue_parent_expr(
                     source_ids,
                 ));
             }
+            // As in `lower_expr_with_context`: a run-time bit the element
+            // lowering cannot express is read from the flattened array.
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                true,
+            ) {
+                return lower_glue_parent_expr(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
+            }
             let (inner, sources, source_ids) = lower_glue_parent_expr(
                 expr,
                 variables,

@@ -23,6 +23,10 @@ sv_backends! {
         @case "indexed_select::out_of_range_inner_indices_stay_in_their_unpacked_element";
     }
 
+    fn runtime_inner_bits_of_unpacked_elements_feed_child_ports(sim) {
+        @case "indexed_select::runtime_inner_bits_of_unpacked_elements_feed_child_ports";
+    }
+
     fn out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element(sim) {
         @case "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element";
     }
