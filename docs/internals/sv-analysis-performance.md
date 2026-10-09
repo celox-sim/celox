@@ -428,6 +428,12 @@ shared-machine timing variability. Source inspection and operation-count
 regressions establish the eliminated repeated work; no wall-clock threshold is
 part of the tests. All three probes exclude backend compilation and simulation.
 
+Master `586bc7dc7` was subsequently synchronized, including its select-index
+width fix and CI test-selection updates. The probes contain no select indices,
+and the implementation paths they exercise are unchanged by that synchronization;
+the final timing samples above are retained. Regression validation covers the
+combined tree and the expanded 222-case external SystemVerilog catalogue.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
