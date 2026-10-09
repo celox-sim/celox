@@ -156,6 +156,8 @@ assign seen_o = seen;
     }
 
     fn test_instance_output_dynamic_index_function_output_writeback(sim) {
+        // Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
+        // lang/veryl#3476 rejects it after 0.22.0.
         @ignore_on(veryl);
         @case "hierarchy::test_instance_output_dynamic_index_function_output_writeback";
     }
@@ -165,11 +167,15 @@ assign seen_o = seen;
 
 
     fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
+        // Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
+        // lang/veryl#3476 rejects it after 0.22.0.
         @ignore_on(veryl);
         @case "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback";
     }
 
     fn test_instance_output_concat_advances_each_destination(sim) {
+        // veryl-simulator 0.22.0 does not support a concatenation as an instance output
+        // connection (UnsupportedDescription).
         @ignore_on(veryl);
         @case "hierarchy::test_instance_output_concat_advances_each_destination";
     }

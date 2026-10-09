@@ -3626,11 +3626,14 @@ fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
 }
 
 fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
+    // Veryl 0.22.0's simulator evaluates a runtime loop bound wider than 64 bits as 0.
     @ignore_on(veryl);
     @case "flip_flop::test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width";
 }
 
 fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
+    // The Veryl reference reports its own loop diagnostic ("Detected True Loop"), not the
+    // message this test checks.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -3664,6 +3667,8 @@ fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
 }
 
 fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
+    // The Veryl reference reports its own loop diagnostic ("Detected True Loop"), not the
+    // message this test checks.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -3731,6 +3736,8 @@ fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
 }
 
 fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
+    // The Veryl reference reports its own loop diagnostic ("Detected True Loop"), not the
+    // message this test checks.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -3864,6 +3871,8 @@ fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
 }
 
 fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
+    // Veryl does not reject a constant step that is 0 in the 32-bit counter, and its simulator
+    // hangs.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -3917,7 +3926,6 @@ fn test_ff_if_reset_basic(sim) {
 }
 
 fn test_async_reset(sim) {
-    @ignore_on(veryl);
     @case "flip_flop::test_async_reset";
 }
 
@@ -3934,7 +3942,6 @@ fn test_hierarchical_clocks(sim) {
 }
 
 fn test_multiple_async_resets(sim) {
-    @ignore_on(veryl);
     @case "flip_flop::test_multiple_async_resets";
 }
 
