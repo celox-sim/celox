@@ -511,7 +511,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &type_aliases,
-            &parameter_packed_dimensions(&parameters).into(),
+            &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
             &parameter_value_env(&parameters, &const_env),
         ) {
             Ok(()) => {}
@@ -564,7 +564,7 @@ impl Module {
                     syntax_tree,
                     &const_env,
                     &type_aliases,
-                    &parameter_packed_dimensions(&parameters).into(),
+                    &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
                     &parameter_value_env(&parameters, &const_env),
                 )?;
             }
@@ -625,7 +625,10 @@ impl Module {
         packed_dimensions
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
-        packed_dimensions.extend(parameter_packed_dimensions(&parameters));
+        packed_dimensions.extend(parameter_packed_dimensions_with_imported(
+            &parameters,
+            &imported,
+        ));
         // Instance connections may call subroutines, of the module or of the
         // packages it uses, with untyped assignment patterns.
         let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
@@ -1918,6 +1921,17 @@ impl EnumMemberConstants {
             self.types.entry(name.clone()).or_insert(*value);
         }
     }
+}
+
+/// The declared dimensions of `parameters` and of the package parameters a
+/// scope imports, so that selects use their declared ranges.
+fn parameter_packed_dimensions_with_imported(
+    parameters: &[Parameter],
+    imported: &scope::ScopeSymbols,
+) -> VariablePackedDimensions {
+    let mut dimensions = parameter_packed_dimensions(&imported.parameters);
+    dimensions.extend(parameter_packed_dimensions(parameters));
+    dimensions
 }
 
 /// The literal values of `parameters`, and of the package parameters and

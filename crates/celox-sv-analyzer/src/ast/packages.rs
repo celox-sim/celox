@@ -210,8 +210,35 @@ fn analyze_package(
     tree: &SyntaxTree,
     packages: &Packages,
 ) -> Result<Package, AnalyzerError> {
-    let _package = scope::enter_package(name);
-    let imported = imports::imported_symbols(node.clone(), tree, packages)?;
+    let first = {
+        // Inside the package, `p::x` names its own item `x`.
+        let _package = scope::enter_package(name);
+        analyze_package_scope(name, node.clone(), tree, packages, None)?
+    };
+    if !imports::ScopeImports::from_node(node.clone(), tree)
+        .qualified
+        .iter()
+        .any(|(package, _)| package == name)
+    {
+        return Ok(first);
+    }
+    // A self-qualified reference `p::x` is not hidden by a local `x` of a
+    // function (IEEE 1800-2023 26.3). Analyze the package again with its
+    // items from the first analysis under their qualified names.
+    analyze_package_scope(name, node, tree, packages, Some(&first.symbols))
+}
+
+fn analyze_package_scope(
+    name: &str,
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    packages: &Packages,
+    own_items: Option<&ScopeSymbols>,
+) -> Result<Package, AnalyzerError> {
+    let mut imported = imports::imported_symbols(node.clone(), tree, packages)?;
+    if let Some(own_items) = own_items {
+        imported.extend(own_items);
+    }
     let aliases = imported.aliases.clone();
     let imported_locals = imported.local_names();
     // The names the package declares, from its syntax: an escaped name may
@@ -228,19 +255,24 @@ fn analyze_package(
         },
         Arc::new(imported),
     )?;
-    let symbols = module
+    let mut symbols = module
         .symbols
         .expect("a package analysis keeps the package symbols");
-    // The package's own names and locals become qualified; the names its
-    // imports bind are replaced by the items they denote.
+    let qualified = |item: &String| format!("{name}::{item}");
     let mut names: HashMap<String, String> = own
         .iter()
-        .map(|declared| (declared.clone(), format!("{name}::{declared}")))
+        .map(|declared| (declared.clone(), qualified(declared)))
         .collect();
+    let mut own_locals = HashSet::default();
     for local in symbols.local_names() {
         if !imported_locals.contains(&local) {
-            names.insert(local.clone(), format!("{name}::{local}"));
+            names.insert(local.clone(), qualified(&local));
+            own_locals.insert(local);
         }
+    }
+    // The items of the first analysis give way to those of this one.
+    if own_items.is_some() {
+        symbols = symbols.without(&own.iter().chain(&own_locals).map(qualified).collect());
     }
     names.extend(aliases);
     let symbols = symbols.renamed(&names);

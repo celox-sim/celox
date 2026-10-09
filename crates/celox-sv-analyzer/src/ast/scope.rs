@@ -274,6 +274,38 @@ impl ScopeSymbols {
         }
     }
 
+    /// These symbols without those named in `names`.
+    pub fn without(mut self, names: &HashSet<String>) -> ScopeSymbols {
+        let kept = |name: &String| !names.contains(name);
+        self.const_env.retain(|key, _| {
+            !names.contains(split_marker(key).map_or(key.as_str(), |(_, name)| name))
+        });
+        self.parameter_values.retain(|name, _| kept(name));
+        self.parameters.retain(|parameter| kept(&parameter.name));
+        self.type_aliases.retain(|name, _| kept(name));
+        self.enum_constants.numbers.retain(|name, _| kept(name));
+        self.enum_constants.exprs.retain(|name, _| kept(name));
+        self.enum_constants.types.retain(|name, _| kept(name));
+        self.functions.retain(|name, _| kept(name));
+        self.function_return_types.retain(|name, _| kept(name));
+        self.constant_functions
+            .retain(|name| kept(&name.to_string()));
+        self.subroutine_params.retain(|name, _| kept(name));
+        self.subroutine_shapes.retain(|name, _| kept(name));
+        self.subroutines.retain(|subroutine| kept(&subroutine.name));
+        self.locals.retain(|local| kept(&local.name));
+        self.dpi_imports
+            .retain(|import| kept(&import.name().to_string()));
+        self.initial_processes.retain(|process| {
+            !self
+                .signals
+                .iter()
+                .any(|signal| names.contains(&signal.name) && initializes(process, &signal.name))
+        });
+        self.signals.retain(|signal| kept(&signal.name));
+        self
+    }
+
     /// The names of the locals of the scope's subroutines and constant
     /// functions, including their arguments and result variables.
     pub fn local_names(&self) -> HashSet<String> {

@@ -140,6 +140,15 @@ impl ConstantFunctions {
         }
     }
 
+    /// Keep the functions and locals whose names satisfy `keep`.
+    pub(super) fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        Arc::make_mut(&mut self.functions).retain(|name, _| keep(name));
+        Arc::make_mut(&mut self.locals).retain(|name, _| keep(name));
+        Arc::make_mut(&mut self.errors)
+            .by_name
+            .retain(|name, _| keep(name));
+    }
+
     /// Make the function `target` callable as `name` too.
     pub(super) fn alias(&mut self, name: &str, target: &str) {
         if let Some(function) = self.functions.get(target).cloned() {

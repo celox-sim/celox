@@ -229,72 +229,61 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
     names
 }
 
-/// The identifiers a scope uses without a package scope, and declares.
-/// Identifiers qualified by a package scope, the formal names of named
-/// connections, and structure members are left out.
+/// The names a scope looks up without a package scope: the first identifier
+/// of each name reference in an expression, a constant, a data type or a
+/// call. Declarations, formal names of connections, members and identifiers
+/// qualified by a package scope are not looked up.
 pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
-    let mut names = HashSet::default();
-    // In `a.b`, only `a` is looked up in the scope; `b` names a member or a
-    // scope inside `a`. Structure members are not looked up either.
-    let mut inner = HashSet::default();
-    for child in node.clone() {
-        // Structure and union members are declared in their type.
-        if let RefNode::StructUnionMember(_) = child {
-            for member in child.clone() {
-                if let RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) = member
-                    && let Some(locate) = identifier_locate(member)
-                {
-                    inner.insert(locate.offset);
+    let identifiers = |node: RefNode<'_>| {
+        node.into_iter()
+            .filter_map(|node| match node {
+                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
+                    identifier_locate(node)
                 }
-            }
-        }
-        if let RefNode::HierarchicalIdentifier(_) = child {
-            for (index, identifier) in child
-                .into_iter()
-                .filter_map(|node| match node {
-                    RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
-                        identifier_locate(node)
-                    }
-                    _ => None,
-                })
-                .enumerate()
-            {
-                if index > 0 {
-                    inner.insert(identifier.offset);
-                }
-            }
-        }
-    }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
     // A package scope is followed by its package identifier and then by the
-    // identifier it qualifies.
+    // identifier it qualifies; `p::t` as a data type parses as the class type
+    // `p` with the member `t`.
+    let mut qualified = HashSet::default();
     let mut skip = 0;
-    for child in node {
+    for child in node.clone() {
         match child {
             RefNode::PackageScopePackage(_) | RefNode::ClassScope(_) => skip = 2,
-            RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(_)) => skip = 2,
-            RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(_)) => skip = 1,
-            // Port and parameter names of a connection, and structure
-            // members, are not looked up in the scope.
-            RefNode::NamedPortConnection(_)
-            | RefNode::NamedParameterAssignment(_)
-            | RefNode::MemberIdentifier(_)
-            | RefNode::StructurePatternKey(_) => skip = 1,
-            // `p::t` as a data type parses as the class type `p` with the
-            // member `t`.
             RefNode::ClassType(class_type) if !class_type.nodes.2.is_empty() => {
-                skip = 1 + class_type.nodes.2.len();
+                qualified.extend(identifiers(child).iter().map(|locate| locate.offset));
             }
-            RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
-                if skip > 0 {
-                    skip -= 1;
-                } else if identifier_locate(child.clone())
-                    .is_none_or(|locate| !inner.contains(&locate.offset))
-                    && let Some(name) = identifier_text(child, tree)
-                {
-                    names.insert(name);
+            RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) if skip > 0 => {
+                skip -= 1;
+                if let Some(locate) = identifier_locate(child) {
+                    qualified.insert(locate.offset);
                 }
             }
             _ => {}
+        }
+    }
+    let mut names = HashSet::default();
+    for child in node {
+        if !matches!(
+            child,
+            RefNode::HierarchicalIdentifier(_)
+                | RefNode::PsParameterIdentifier(_)
+                | RefNode::PsTypeIdentifier(_)
+                | RefNode::PsOrHierarchicalTfIdentifier(_)
+                | RefNode::PsClassIdentifier(_)
+                | RefNode::DataTypeType(_)
+        ) {
+            continue;
+        }
+        if let Some(first) = identifiers(child).first()
+            && !qualified.contains(&first.offset)
+            && let Some(name) = tree
+                .get_str(first)
+                .map(super::instances::normalize_identifier)
+        {
+            names.insert(name);
         }
     }
     names

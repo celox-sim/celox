@@ -276,6 +276,48 @@ fn package_exports_are_unsupported() {
 }
 
 #[test]
+fn self_qualified_names_are_not_hidden_by_formals() {
+    assert_eq!(
+        output(
+            "package p;
+               localparam int X = 5;
+               function automatic int f(input int X); return p::X * 10 + X; endfunction
+             endpackage
+             module Top(output logic [7:0] y); assign y = 8'(p::f(1)); endmodule"
+        ),
+        51
+    );
+}
+
+#[test]
+fn selects_of_package_parameters_use_their_declared_ranges() {
+    assert_eq!(
+        output(
+            "package p; localparam logic [7:4] V = 4'b0001; endpackage
+             module Top(output logic [7:0] y); assign y = {7'd0, p::V[4]}; endmodule"
+        ),
+        1
+    );
+}
+
+#[test]
+fn declarations_do_not_look_up_wildcard_imports() {
+    assert_eq!(
+        output(
+            "package p; localparam int Top = 1; localparam int g = 1; endpackage
+             package q; localparam int Top = 2; localparam int g = 2; endpackage
+             module Top(output logic [7:0] y);
+               import p::*; import q::*;
+               if (1) begin : g
+                 assign y = 8'd7;
+               end
+             endmodule"
+        ),
+        7
+    );
+}
+
+#[test]
 fn ambiguous_wildcard_references_are_errors() {
     let detail = error(
         "package p; localparam int T = 1; endpackage
