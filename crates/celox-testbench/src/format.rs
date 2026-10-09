@@ -197,14 +197,17 @@ pub fn format_sized_display_arg(
     spec: char,
     field_width: Option<usize>,
 ) -> String {
+    // Table 21-1 gives each uppercase specifier the meaning of its lowercase
+    // one, so `%H` prints lowercase digits like `%h`.
+    let spec = spec.to_ascii_lowercase();
     let text = format_display_arg(arg, Some(spec));
     if arg.is_string {
         return pad(text, ' ', field_width.unwrap_or(0));
     }
     let bits_per_digit = match spec {
-        'b' | 'B' => Some(1),
-        'o' | 'O' => Some(3),
-        'x' | 'X' | 'h' | 'H' => Some(4),
+        'b' => Some(1),
+        'o' => Some(3),
+        'x' | 'h' => Some(4),
         _ => None,
     };
     match bits_per_digit {
@@ -214,7 +217,7 @@ pub fn format_sized_display_arg(
             let width = field_width.unwrap_or_else(|| arg.width.div_ceil(bits_per_digit).max(1));
             pad(minimal.to_string(), '0', width)
         }
-        None if matches!(spec, 'd' | 'D' | 'i' | 'I') => {
+        None if matches!(spec, 'd' | 'i') => {
             let width = field_width.unwrap_or_else(|| decimal_digits(arg));
             pad(text, ' ', width)
         }
@@ -260,6 +263,7 @@ mod tests {
         assert_eq!(sized(0x1234, 32, false, 'h', Some(3)), "1234");
         assert_eq!(sized(0, 8, false, 'b', Some(0)), "0");
         assert_eq!(sized(0x80, 8, true, 'd', None), "-128");
+        assert_eq!(sized(0xab, 8, false, 'H', None), "ab");
     }
 
     #[test]
