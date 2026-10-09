@@ -144,6 +144,10 @@ impl<Addr> SIRBuilder<Addr> {
         ));
         normalized
     }
+    /// Whether a block is open for instructions.
+    pub fn has_open_block(&self) -> bool {
+        self.current_block_id.is_some()
+    }
     /// Get the current block ID
     pub fn current_block(&self) -> BlockId {
         self.current_block_id.expect("No active block")

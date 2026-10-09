@@ -119,12 +119,56 @@ in-memory Rust value. It does not call `fromFrontendArtifact` and does not parse
 Celox artifact JSON. A buildable addon and load test live in
 `examples/my-frontend-napi`.
 
+## Processes and delays
+
+A frontend can add procedural processes, such as `initial` blocks, with
+`ModuleBuilder::process`. A process starts at time zero and runs its statements
+in order:
+
+| Statement | Behavior |
+|---|---|
+| `Assign` | Blocking assignment. Later statements read the new value; other logic sees it once the process suspends. |
+| `If` | Branch on a condition. A condition with unknown bits counts as false. |
+| `While` / `Forever` | Repeat a body while a condition holds, or forever. |
+| `Delay` | Suspend for an amount of time units, at most 64 bits wide. |
+| `Finish` | End the simulation. |
+
+```rust
+// forever #5 clk = ~clk;
+let half_period = module.constant(Constant::two_state(5u8, 8)?);
+let clk_expr = module.read(clk)?;
+let toggled = module.unary(UnaryOp::BitNot, clk_expr, bit)?;
+module.process(vec![Statement::Forever {
+    body: vec![
+        Statement::Delay { amount: half_period },
+        Statement::Assign { target: module.whole(clk)?, value: toggled },
+    ],
+}])?;
+```
+
+Processes run only in a timed `Simulation`. Each one is compiled into a
+resumable kernel that the simulation scheduler resumes when its delay expires.
+Processes that resume at the same time run in declaration order. A process
+sees the state settled at the previous time. The clock and reset edges it
+causes trigger registers at the current time, like a scheduled event. A zero
+delay resumes the process later at the same time, after the other processes
+have run and the registers their edges trigger have settled, so a pulse
+separated by a zero delay is still an edge.
+
+A process may write output and internal signals that no continuous assignment
+or register drives. Several processes may write the same signal. Checkpoints
+capture suspended processes, but state files are not yet supported for a
+simulation with processes. A Veryl native testbench cannot instantiate an
+artifact with processes.
+
 ## Artifact format limits
 
 Format version 1 accepts one flattened module. It supports typed signals,
 constants, combinational expressions and assignments, edge-triggered registers,
-asynchronous reset, synchronous enable, and initial values. A frontend must
-lower hierarchy, memories, latches, custom primitives, and bidirectional signals
+asynchronous reset, synchronous enable, and initial values. Format version 2
+adds processes. The builder writes version 1 for an artifact without processes,
+so consumers that read only version 1 still accept it. A frontend must lower
+hierarchy, memories, latches, custom primitives, and bidirectional signals
 before calling the SDK builder.
 
 Celox validates the artifact again before compilation. Produce it through the

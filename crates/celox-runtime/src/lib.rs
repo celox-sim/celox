@@ -18,7 +18,7 @@ pub use reflection::{
     SignalDirection,
 };
 pub use simulation::{
-    EventInfo, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
+    EventInfo, ProcessRefs, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
 };
 pub use state_file::{
     ScheduleRecord, ScheduledEvent, StateDifference, StateFile, StateFileError, StateObject,

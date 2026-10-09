@@ -202,6 +202,8 @@ export interface NativeSimulationHandle {
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
+	/** Whether a process requested the end of the simulation. */
+	isFinished?(): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;

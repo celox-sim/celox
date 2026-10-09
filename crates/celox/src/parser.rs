@@ -192,6 +192,12 @@ fn verify_program_sir(
                 .flatten()
                 .enumerate()
                 .map(|(unit, eu)| ("apply_ffs", unit, eu)),
+        )
+        .chain(
+            sir.processes
+                .iter()
+                .enumerate()
+                .map(|(unit, eu)| ("processes", unit, eu)),
         );
     for (group, unit, eu) in units {
         verify_memory_offset_contract(program, eu).map_err(|error| ParserError::SirVerify {
@@ -895,6 +901,7 @@ mod fused_hint_tests {
                 eval_only_ffs: Default::default(),
                 apply_ffs: Default::default(),
                 parallel: None,
+                processes: Vec::new(),
             },
             design: Default::default(),
             frontend_lookup: Default::default(),

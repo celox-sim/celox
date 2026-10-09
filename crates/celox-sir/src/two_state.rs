@@ -27,17 +27,21 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
         eval_only_ffs,
         apply_ffs,
         parallel,
+        processes,
     } = program;
-    let units = eval_comb.iter_mut().chain(
-        [
-            eval_apply_ffs,
-            eval_comb_apply_ffs,
-            eval_only_ffs,
-            apply_ffs,
-        ]
-        .into_iter()
-        .flat_map(|units| units.values_mut().flatten()),
-    );
+    let units = eval_comb
+        .iter_mut()
+        .chain(
+            [
+                eval_apply_ffs,
+                eval_comb_apply_ffs,
+                eval_only_ffs,
+                apply_ffs,
+            ]
+            .into_iter()
+            .flat_map(|units| units.values_mut().flatten()),
+        )
+        .chain(processes.iter_mut());
     for unit in units {
         canonicalize_unit(unit);
     }

@@ -68,6 +68,8 @@ pub struct SharedJitCode {
     four_state_inits: Vec<(usize, usize)>,
     /// Lane-partitioned kernels, one function per task.
     lane_kernels: Option<JitLaneKernels>,
+    /// One function per process kernel.
+    process_funcs: Vec<SimFunc>,
     /// The extern functions the code calls.
     extern_functions: crate::dpi::ExternFunctionTable,
 }
@@ -543,6 +545,18 @@ impl JitBackend {
                 .comb_apply_func = comb_apply_func;
         }
 
+        let process_funcs = sir
+            .sir
+            .processes
+            .iter()
+            .map(|unit| {
+                let ptr = engine
+                    .compile_units(std::slice::from_ref(unit), None, None, None)
+                    .map_err(SimulatorError::from)?;
+                Ok(unsafe { std::mem::transmute::<*const u8, SimFunc>(ptr) })
+            })
+            .collect::<Result<Vec<_>, SimulatorError>>()?;
+
         // Insert clock_domains aliases so every event signal resolves
         for (alias, canonical) in &sir.design.events.aliases {
             if let Some(&ev) = event_map.get(canonical) {
@@ -681,6 +695,7 @@ impl JitBackend {
             options,
             four_state_inits,
             lane_kernels,
+            process_funcs,
             extern_functions,
         })
     }
@@ -1153,6 +1168,15 @@ impl JitBackend {
         self.run_sim_func(event.func)
     }
 
+    pub fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        let func = *self
+            .shared
+            .process_funcs
+            .get(index)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        self.run_sim_func(func)
+    }
+
     /// Returns a raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_ptr(&self) -> (*const u8, usize) {
         let size = self.shared.layout.merged_total_size;
@@ -1290,6 +1314,10 @@ impl super::SimBackend for JitBackend {
 
     fn apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
         self.apply_ff_at(event)
+    }
+
+    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        JitBackend::run_process(self, index)
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
