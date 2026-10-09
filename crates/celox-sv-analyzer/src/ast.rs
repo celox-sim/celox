@@ -90,10 +90,10 @@ use dimensions::{
     function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
-    parameter_signed_element_marker, parameter_signed_marker, parameter_types_from_const_env,
-    parameter_width_marker, size_system_function_expr_type, unpacked_dimension_widths,
-    variable_bits_marker, variable_signed_marker, variable_size_function_width,
-    variable_size_marker,
+    parameter_signed_element_marker, parameter_signed_marker, parameter_type_from_const_env,
+    parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
+    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
+    variable_size_function_width, variable_size_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -709,6 +709,10 @@ impl Module {
             &type_aliases,
         )?;
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
+        // Bodies now have the active module's declarations and function types.
+        // Declaration-time queries still use syntax discovery while metadata
+        // is incomplete; generated/procedural scopes overlay this complete base.
+        packed_dimensions.scope_types_complete = true;
         let mut locals = Vec::new();
         let mut local_counter = 0usize;
         let mut body_state = procedural::BodyState {
@@ -1759,6 +1763,9 @@ struct PackedDimensions {
     parameter_values: HashMap<String, Expr>,
     expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
+    /// The current lexical scope has already collected its visible declarations.
+    /// Preliminary parameter/function/range lowering must keep this false.
+    scope_types_complete: bool,
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
@@ -1779,6 +1786,7 @@ impl PackedDimensions {
             parameter_values: HashMap::default(),
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
+            scope_types_complete: false,
             subroutine_param_shapes: Arc::default(),
         }
     }

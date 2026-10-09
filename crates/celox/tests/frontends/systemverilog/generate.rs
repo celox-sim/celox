@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn size_queries_use_generate_local_parameter_types(sim) {
+        @case "generate::size_queries_use_generate_local_parameter_types";
+    }
+
     fn counts_only_known_ones_in_generate_system_functions(sim) {
         @case "generate::counts_only_known_ones_in_generate_system_functions";
     }
