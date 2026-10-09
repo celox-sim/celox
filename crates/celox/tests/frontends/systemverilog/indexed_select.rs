@@ -19,6 +19,14 @@ sv_backends! {
         @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
     }
 
+    fn out_of_range_inner_indices_stay_in_their_unpacked_element(sim) {
+        @case "indexed_select::out_of_range_inner_indices_stay_in_their_unpacked_element";
+    }
+
+    fn out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element(sim) {
+        @case "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element";
+    }
+
     fn runtime_index_reads_single_bit_unpacked_elements(sim) {
         @case "indexed_select::runtime_index_reads_single_bit_unpacked_elements";
     }

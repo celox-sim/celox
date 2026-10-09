@@ -3328,7 +3328,7 @@ fn runtime_select_window(
     }
     let (base, offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
     // A run-time element index can reach every element.
-    if dynamic_array_base_has_stride(
+    if dynamic_array_base_steps_elements(
         base,
         i128::try_from(element_width).ok()?,
         constants,
@@ -4495,28 +4495,27 @@ fn runtime_select_position(
             if !flat_arrays {
                 return None;
             }
-            // Only within a constant element: a position past a run-time
-            // element would reach its neighbour.
-            let element_width = unpacked_element_width(variable)?;
-            let element = if element_width == variable.width {
-                BitAccess::new(0, variable.width.checked_sub(1)?)
-            } else {
-                runtime_select_window(
-                    lsb,
-                    element_width,
-                    variable.width,
-                    constants,
-                    parameter_types,
-                )?
-            };
-            if element_window {
-                window = Some(element);
-                (
-                    i128::try_from(element.msb).ok()?,
-                    i128::try_from(element.lsb).ok()?,
-                )
-            } else {
-                (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
+            // The analyzer moves a select whose inner index is out of range
+            // past the whole array, so a flattened position never reaches a
+            // neighbouring element. Within a constant element, the position
+            // can be measured within it.
+            window = element_window
+                .then(|| {
+                    runtime_select_window(
+                        lsb,
+                        unpacked_element_width(variable)?,
+                        variable.width,
+                        constants,
+                        parameter_types,
+                    )
+                })
+                .flatten();
+            match window {
+                Some(window) => (
+                    i128::try_from(window.msb).ok()?,
+                    i128::try_from(window.lsb).ok()?,
+                ),
+                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
             }
         }
         Some(variable) => {
@@ -4792,46 +4791,67 @@ fn split_dynamic_array_offset<'a>(
     Some((expr, 0))
 }
 
+/// Whether some run-time term of the base steps by whole elements, as a
+/// run-time element index does.
+fn dynamic_array_base_steps_elements(
+    expr: &sv::ir::ConstExpr,
+    element_width: i128,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    let steps =
+        |expr| dynamic_array_base_steps_elements(expr, element_width, constants, parameter_types);
+    let constant =
+        |expr| sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types);
+    match expr {
+        sv::ir::ConstExpr::Binary { left, op, right } => {
+            if *op == sv::ir::BinaryOp::Mul {
+                let (left_value, right_value) = (constant(left), constant(right));
+                if left_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                    && right_value.is_none()
+                    || right_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                        && left_value.is_none()
+                {
+                    return true;
+                }
+            }
+            steps(left) || steps(right)
+        }
+        sv::ir::ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => steps(then_expr) || steps(else_expr),
+        _ => false,
+    }
+}
+
 fn dynamic_array_base_has_stride(
     expr: &sv::ir::ConstExpr,
     element_width: i128,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> bool {
+    // Every value of the base must be a multiple of the element width: a
+    // run-time term without the stride, such as an inner bit index, moves
+    // within an element.
+    if let Some(value) = sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+    {
+        return value % element_width == 0;
+    }
+    let has_stride =
+        |expr| dynamic_array_base_has_stride(expr, element_width, constants, parameter_types);
     match expr {
-        sv::ir::ConstExpr::Binary { left, op, right } => {
-            if *op == sv::ir::BinaryOp::Mul {
-                let left_value =
-                    sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types);
-                let right_value =
-                    sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types);
-                if left_value.is_some_and(|value| value > 0 && value % element_width == 0)
-                    && right_value.is_none()
-                {
-                    return true;
-                }
-                if right_value.is_some_and(|value| value > 0 && value % element_width == 0)
-                    && left_value.is_none()
-                {
-                    return true;
-                }
-            }
-            dynamic_array_base_has_stride(left, element_width, constants, parameter_types)
-                || dynamic_array_base_has_stride(right, element_width, constants, parameter_types)
-        }
+        sv::ir::ConstExpr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Mul => has_stride(left) || has_stride(right),
+            sv::ir::BinaryOp::Add | sv::ir::BinaryOp::Sub => has_stride(left) && has_stride(right),
+            _ => false,
+        },
         sv::ir::ConstExpr::Mux {
             then_expr,
             else_expr,
             ..
-        } => {
-            dynamic_array_base_has_stride(then_expr, element_width, constants, parameter_types)
-                || dynamic_array_base_has_stride(
-                    else_expr,
-                    element_width,
-                    constants,
-                    parameter_types,
-                )
-        }
+        } => has_stride(then_expr) && has_stride(else_expr),
         _ => false,
     }
 }

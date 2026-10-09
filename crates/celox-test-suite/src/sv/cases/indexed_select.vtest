@@ -742,6 +742,72 @@
       (assert_eq b (? (< j 4) (bit value j) (fourstate 1 1)) "b")
       (assert_eq v (? (< j 4) (<< 1 j) 0) "v"))))
 
+(case out_of_range_inner_indices_stay_in_their_unpacked_element
+  ; After a run-time unpacked index, an inner index past its dimension
+  ; flattens to a position in the next element; the select is still out of
+  ; range: a read gives X and a write is ignored (IEEE 1800-2023 7.4.6,
+  ; 11.5.1).
+  (four_state)
+  (source "runtime_unpacked_inner_index_range.sv" #"
+                module Top(input logic clk, input logic [1:0] j, input logic [3:0] i,
+                           output logic b, output logic [7:0] w1,
+                           output logic [7:0] w2, output logic [7:0] q1, output logic [7:0] q2);
+                    logic [7:0] t [4];
+                    logic [7:0] x [4];
+                    logic [7:0] y [4];
+                    always_comb begin
+                        t[0] = 8'h00;
+                        t[1] = 8'h00;
+                        t[2] = 8'hff;
+                        t[3] = 8'hff;
+                    end
+                    assign b = t[j][i];
+                    always_comb begin
+                        for (int e = 0; e < 4; e++) x[e] = 8'h00;
+                        x[j][i] = 1'b1;
+                    end
+                    always_ff @(posedge clk) begin
+                        for (int e = 0; e < 4; e++) y[e] <= 8'h00;
+                        y[j][i] <= 1'b1;
+                    end
+                    assign w1 = x[1];
+                    assign w2 = x[2];
+                    assign q1 = y[1];
+                    assign q2 = y[2];
+                endmodule
+            "#)
+  (top Top)
+  (for (row index) (list (1 0) (1 7) (1 8) (1 9) (1 15) (2 3))
+    (modify (set j row) (set i index))
+    (tick clk)
+    (let bit_in (< index 8))
+    (assert_eq b (? bit_in (? (== row 2) 1 0) (fourstate 1 1)) "b")
+    (assert_eq w1 (? (&& bit_in (== row 1)) (<< 1 index) 0) "w1")
+    (assert_eq w2 (? (&& bit_in (== row 2)) (<< 1 index) 0) "w2")
+    (assert_eq q1 (? (&& bit_in (== row 1)) (<< 1 index) 0) "q1")
+    (assert_eq q2 (? (&& bit_in (== row 2)) (<< 1 index) 0) "q2")))
+
+(case out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element
+  ; As above, with several packed dimensions in each element.
+  (four_state)
+  (source "runtime_unpacked_packed_inner_index_range.sv" #"
+                module Top(input logic [1:0] j, input logic [1:0] k, input logic [3:0] i,
+                           output logic n);
+                    logic [1:0][3:0] u [4];
+                    always_comb begin
+                        u[0] = 8'h00;
+                        u[1] = 8'h00;
+                        u[2] = 8'hff;
+                        u[3] = 8'hff;
+                    end
+                    assign n = u[j][k][i];
+                endmodule
+            "#)
+  (top Top)
+  (for (row inner index) (list (1 1 0) (1 1 3) (1 1 4) (1 0 7) (2 1 2) (2 1 9))
+    (modify (set j row) (set k inner) (set i index))
+    (assert_eq n (? (< index 4) (? (== row 2) 1 0) (fourstate 1 1)) "n")))
+
 (case runtime_index_reads_single_bit_unpacked_elements
   ; A run-time index selects one element of an unpacked array of 1-bit
   ; elements; `[32]` declares `[0:31]` (IEEE 1800-2023 7.4.2, 7.4.6).
