@@ -391,17 +391,23 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Advance time to the next scheduled event and process all events at that time.
     /// Returns the new simulation time, or None if no events are scheduled.
+    ///
+    /// A process waiting for an event or a condition that a host write
+    /// since the previous call satisfied first resumes at the current time.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.state.poll_waiting(&mut self.simulator)?;
         self.state.step(&mut self.simulator)
     }
 
-    /// Advance time and run until `end_time` (inclusive).
+    /// Advance time and run until `end_time` (inclusive). As for
+    /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        self.state.poll_waiting(&mut self.simulator)?;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
             }
-            self.step()?;
+            self.state.step(&mut self.simulator)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -721,5 +727,110 @@ mod process_tests {
     #[test]
     fn long_processes_dispatch_through_two_switch_levels() {
         check_all_backends(false, 300);
+    }
+}
+
+/// Event and level waits of SystemVerilog processes on every backend.
+#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+mod wait_tests {
+    use std::path::Path;
+
+    use super::Simulation;
+    use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+    const SOURCE: &str = r#"
+        module Top(output logic [7:0] edges, output logic [7:0] levels,
+                   output logic [7:0] changes, output logic [7:0] q);
+            logic clk = 1'b0;
+            logic [7:0] d = 8'd0;
+            logic go = 1'b0;
+            always #5 clk = ~clk;
+            always_ff @(posedge clk) q <= d;
+            initial begin
+                edges = 8'd0;
+                forever begin
+                    @(posedge clk);
+                    edges = edges + 8'd1;
+                end
+            end
+            initial begin
+                levels = 8'd0;
+                wait (edges == 8'd3) levels = 8'd1;
+                wait (go);
+                levels = 8'd2;
+            end
+            initial begin
+                changes = 8'd0;
+                forever begin
+                    @(d or go);
+                    changes = changes + 8'd1;
+                end
+            end
+            initial begin
+                #12 d = 8'd1;
+                #10 d = 8'd1;
+                #10 d = 8'd2;
+                @(negedge clk);
+                go = 1'b1;
+                @(posedge clk);
+                $finish;
+            end
+        endmodule
+    "#;
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let edges = sim.signal("edges");
+        let levels = sim.signal("levels");
+        let changes = sim.signal("changes");
+        let q = sim.signal("q");
+        // Rising edges at 5, 15 and 25; `d` changes at 12 and 32.
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.get(edges), 2u8.into());
+        assert_eq!(sim.get(levels), 0u8.into());
+        assert_eq!(sim.get(changes), 1u8.into());
+        assert_eq!(sim.get(q), 1u8.into());
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(edges), 3u8.into());
+        assert_eq!(sim.get(levels), 1u8.into());
+        sim.run_until(u64::MAX - 1).unwrap();
+        assert!(sim.is_finished());
+        // `go` rises at the negedge at 40; the process finishes at 45.
+        assert_eq!(sim.time(), 45);
+        assert_eq!(sim.get(edges), 5u8.into());
+        assert_eq!(sim.get(levels), 2u8.into());
+        assert_eq!(sim.get(changes), 3u8.into());
+        assert_eq!(sim.get(q), 2u8.into());
+    }
+
+    fn builder(four_state: bool) -> SimulatorBuilder<'static, Simulator> {
+        Simulator::from_sv_sources(vec![(SOURCE, Path::new("waits.sv"))], "Top")
+            .four_state(four_state)
+            .emit_triggers()
+    }
+
+    fn check_all_backends(four_state: bool) {
+        check(Simulation::new(
+            builder(four_state).build_interpreter().unwrap(),
+        ));
+        check(Simulation::new(
+            builder(four_state).build_cranelift().unwrap(),
+        ));
+        check(Simulation::new(builder(four_state).build_wasm().unwrap()));
+        check(Simulation::new(builder(four_state).build_tiered().unwrap()));
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        check(Simulation::new(builder(four_state).build_native().unwrap()));
+    }
+
+    #[test]
+    fn waits_run_on_every_backend() {
+        check_all_backends(false);
+    }
+
+    #[test]
+    fn four_state_waits_run_on_every_backend() {
+        check_all_backends(true);
     }
 }

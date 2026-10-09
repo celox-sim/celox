@@ -44,9 +44,10 @@ let mut sim = Simulator::from_sv_sources(
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット |
-| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
+| initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むもの、システムタスクを呼ぶもの、タイミング制御を使うものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
+| タイミング制御 | 整数リテラル・パラメータ・変数・括弧付きの式による `#delay`。`@(posedge x)`、`@(negedge x)`、`@(x)` と、`or` または `,` でつないだリスト。`wait (条件)`。`initial` ブロック、タイミング制御を持つ `always` プロセス（`always #5 clk = ~clk;`、`always @(a or b) ...`、本体にタイミング制御を含むエッジセンシティブな `always`）、およびそれらが呼ぶ task で使えます。遅延はシミュレーションの時間単位で数え、`timescale` は適用しません。エッジで再開したプロセスは、そのエッジのレジスタが更新される前に実行されるため、更新前の値を読みます |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
-| 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
+| 関数 | `input` / `output` / `inout` 引数を持てる `function` と `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開されるため、タイミング制御を持つ task をプロセスから呼べます。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
@@ -64,11 +65,14 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 その構文を追跡する issue の番号が含まれます。専用の issue がない構文は、フロントエンドの
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
-- interface と modport、クラス、タイミング制御を持つ task。
-- 振る舞い記述・検証向けの構文：タイミング制御を持つ `initial` ブロック、プロセスとして
-  実行される `initial` ブロック内のノンブロッキング代入、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
+- interface と modport、クラス、`always_ff` / `always_comb` とそれらが呼ぶサブルーチンの
+  中のタイミング制御。
+- 振る舞い記述・検証向けの構文：タイミングを持って実行されるプロセス内のノンブロッキング代入、
+  `final`、代入内の遅延（`a = #1 b;`、`a <= #1 b;`）と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
+  実数・時間リテラル・`min:typ:max` の遅延、`iff` 付きイベントと名前付きイベント、プロセス内の `@*`、
+  `wait fork`、`wait_order`、イベントトリガ、`fork` / `join`、`disable`、
   並行アサーション、`force` / `release`。
-- `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、`@*` 以外のレベルセンシティブなセンシティビティリスト、
+- `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、タイミング制御のない `always`、
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。

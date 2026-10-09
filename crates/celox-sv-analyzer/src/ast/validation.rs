@@ -38,12 +38,17 @@ pub(super) fn reject_unsupported_multidimensional_packed_bounds(
 pub(super) enum AlwaysKind {
     Comb,
     Ff,
+    /// A process that runs its statement forever, suspending at its
+    /// timing controls.
+    Process,
     Unsupported,
 }
 
 /// `always_comb` and `always @*` are combinational; `always_ff` and an
-/// `always` sensitive to clock edges are sequential. Other sensitivity lists
-/// (incomplete level-sensitive lists, `always_latch`) are not supported.
+/// `always` sensitive only to clock edges are sequential. Any other
+/// `always` with timing controls (a leading delay, a level-sensitive event
+/// list, or timing controls inside an edge-sensitive body) is a process.
+/// `always_latch` and an `always` without timing control are not supported.
 pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => AlwaysKind::Comb,
@@ -53,25 +58,46 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
             let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
                 &always.nodes.1.nodes.2
             else {
-                return AlwaysKind::Unsupported;
+                return if has_timing_control(RefNode::Statement(&always.nodes.1)) {
+                    AlwaysKind::Process
+                } else {
+                    AlwaysKind::Unsupported
+                };
             };
-            let sv_parser::ProceduralTimingControl::EventControl(control) = &timing.nodes.0 else {
-                return AlwaysKind::Unsupported;
-            };
-            match &**control {
-                sv_parser::EventControl::Asterisk(_)
-                | sv_parser::EventControl::ParenAsterisk(_) => AlwaysKind::Comb,
-                sv_parser::EventControl::EventExpression(_)
-                    if RefNode::ProceduralTimingControl(&timing.nodes.0)
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::EdgeIdentifier(_))) =>
-                {
-                    AlwaysKind::Ff
-                }
-                _ => AlwaysKind::Unsupported,
+            match &timing.nodes.0 {
+                sv_parser::ProceduralTimingControl::DelayControl(_) => AlwaysKind::Process,
+                sv_parser::ProceduralTimingControl::CycleDelay(_) => AlwaysKind::Unsupported,
+                sv_parser::ProceduralTimingControl::EventControl(control) => match &**control {
+                    sv_parser::EventControl::Asterisk(_)
+                    | sv_parser::EventControl::ParenAsterisk(_) => AlwaysKind::Comb,
+                    sv_parser::EventControl::EventExpression(_) => {
+                        let edge_sensitive = RefNode::ProceduralTimingControl(&timing.nodes.0)
+                            .into_iter()
+                            .any(|node| matches!(node, RefNode::EdgeIdentifier(_)));
+                        if !edge_sensitive
+                            || has_timing_control(RefNode::StatementOrNull(&timing.nodes.1))
+                        {
+                            AlwaysKind::Process
+                        } else {
+                            AlwaysKind::Ff
+                        }
+                    }
+                    sv_parser::EventControl::EventIdentifier(_)
+                    | sv_parser::EventControl::SequenceIdentifier(_) => AlwaysKind::Unsupported,
+                },
             }
         }
     }
+}
+
+/// Whether a statement contains a delay, an event control or a `wait`.
+fn has_timing_control(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|node| {
+        matches!(
+            node,
+            RefNode::ProceduralTimingControlStatement(_) | RefNode::WaitStatement(_)
+        )
+    })
 }
 
 /// The statement an combinational `always` evaluates, without its event control.

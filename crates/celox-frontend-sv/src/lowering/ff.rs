@@ -11,7 +11,7 @@
 
 use super::procedural::*;
 use super::*;
-use celox_frontend_core::process::ProcessKernelBuilder;
+use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
@@ -1542,7 +1542,101 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Ok(true)
             }
             sv::ir::Stmt::SystemTask { name, args } => self.system_task(name, args),
+            sv::ir::Stmt::Delay(amount) => {
+                self.require_process("delay")?;
+                let signed = self.expr_signed(amount);
+                let amount = self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?;
+                let amount = self.two_state(amount);
+                self.with_kernel(|kernel| kernel.delay(amount))
+                    .map_err(kernel_error)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::WaitEvent(items) => {
+                self.require_process("event control")?;
+                self.wait_event(items)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Wait(condition) => {
+                self.require_process("wait statement")?;
+                let (truth, constant) = self.eval_truth(condition)?;
+                if constant == Some(true) {
+                    return Ok(true);
+                }
+                let wait_block = self.b.new_block();
+                let done = self.b.new_block();
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: truth,
+                    true_block: (done, Vec::new()),
+                    false_block: (wait_block, Vec::new()),
+                });
+                self.b.switch_to_block(wait_block);
+                self.with_kernel(ProcessKernelBuilder::begin_wait)
+                    .map_err(kernel_error)?;
+                let (truth, _) = self.eval_truth(condition)?;
+                self.with_kernel(|kernel| kernel.wake_if(truth));
+                self.jump(done);
+                self.b.switch_to_block(done);
+                Ok(true)
+            }
         }
+    }
+
+    fn require_process(&self, construct: &str) -> Result<(), sv::AnalyzerError> {
+        if self.kernel.is_some() {
+            Ok(())
+        } else {
+            Err(unsupported(format!("{construct} outside a process")))
+        }
+    }
+
+    /// `value` as a two-state register; unknown bits become zero.
+    fn two_state(&mut self, value: RegisterId) -> RegisterId {
+        let RegisterType::Logic { width } = *self.b.register(&value) else {
+            return value;
+        };
+        let two_state = self.b.alloc_bit(width, false);
+        self.b
+            .emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, value));
+        two_state
+    }
+
+    /// `@(items)`: sample every item, suspend, and at the resume point wake
+    /// when an item changed as its edge requires (IEEE 1800-2023 9.4.2).
+    /// The samples are refreshed at every check, so an edge is detected
+    /// against the value last observed.
+    fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut samples = Vec::with_capacity(items.len());
+        for item in items {
+            let value = self.eval(&item.expr, None)?;
+            let (width, four_state) = match *self.b.register(&value) {
+                RegisterType::Logic { width } => (width, true),
+                RegisterType::Bit { width, .. } => (width, false),
+            };
+            let (id, name) = self.m.temp("event", width, false, four_state);
+            self.store(id, SIROffset::Static(0), width, value);
+            samples.push(name);
+        }
+        self.with_kernel(ProcessKernelBuilder::begin_wait)
+            .map_err(kernel_error)?;
+        let occurred = items
+            .iter()
+            .zip(&samples)
+            .map(|(item, sample)| {
+                let sample = sv::ir::Expr::Ident(sample.clone());
+                event_occurred(item.edge, sample, item.expr.clone())
+            })
+            .reduce(|left, right| sv::ir::Expr::Binary {
+                left: Box::new(left),
+                op: sv::ir::BinaryOp::LogicOr,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| unsupported("empty event control"))?;
+        let (woken, _) = self.eval_truth(&occurred)?;
+        for (item, sample) in items.iter().zip(&samples) {
+            self.assign(&sv::ir::LValue::Ident(sample.clone()), &item.expr)?;
+        }
+        self.with_kernel(|kernel| kernel.wake_if(woken));
+        Ok(())
     }
 
     /// A system task statement: a runtime event, and for `$fatal` the end of
@@ -2217,7 +2311,7 @@ impl Ff<'_, '_> {
             });
             if nonblocking {
                 return Err(unsupported(
-                    "nonblocking assignment in an initial block that runs as a process",
+                    "nonblocking assignment in a process that runs with timing",
                 ));
             }
         }
@@ -2230,6 +2324,59 @@ impl Ff<'_, '_> {
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         Ok(unit)
+    }
+}
+
+fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
+    unsupported(error.to_string())
+}
+
+/// Whether the value of `current` differs from `previous` as `edge` requires.
+/// `posedge` and `negedge` look at the least significant bit and count a
+/// transition from or to an unknown value, but not one between `x` and `z`
+/// (IEEE 1800-2023 9.4.2).
+fn event_occurred(
+    edge: sv::ir::EventEdge,
+    previous: sv::ir::Expr,
+    current: sv::ir::Expr,
+) -> sv::ir::Expr {
+    use sv::ir::{BinaryOp, Expr};
+    let binary = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let lsb = |expr: Expr| Expr::Resize {
+        expr: Box::new(expr),
+        width: 1,
+        signed: false,
+    };
+    let literal = |text: &str| Expr::Literal(text.to_string());
+    let is = |expr: Expr, text: &str| binary(expr, BinaryOp::EqCase, literal(text));
+    let is_not = |expr: Expr, text: &str| binary(expr, BinaryOp::NeCase, literal(text));
+    let unknown = |expr: Expr| {
+        binary(
+            is_not(expr.clone(), "1'b0"),
+            BinaryOp::LogicAnd,
+            is_not(expr, "1'b1"),
+        )
+    };
+    // `from` -> anything else, or unknown -> `to`.
+    let edge_to = |previous: Expr, current: Expr, from: &str, to: &str| {
+        binary(
+            binary(
+                is(previous.clone(), from),
+                BinaryOp::LogicAnd,
+                is_not(current.clone(), from),
+            ),
+            BinaryOp::LogicOr,
+            binary(unknown(previous), BinaryOp::LogicAnd, is(current, to)),
+        )
+    };
+    match edge {
+        sv::ir::EventEdge::Any => binary(previous, BinaryOp::NeCase, current),
+        sv::ir::EventEdge::Pos => edge_to(lsb(previous), lsb(current), "1'b0", "1'b1"),
+        sv::ir::EventEdge::Neg => edge_to(lsb(previous), lsb(current), "1'b1", "1'b0"),
     }
 }
 

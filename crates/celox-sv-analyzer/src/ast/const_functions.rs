@@ -593,7 +593,11 @@ impl Frame {
             // Messages have no effect on the value. Unknown and unsupported
             // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
-            Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
+            Stmt::AssignConcat { .. }
+            | Stmt::Call { .. }
+            | Stmt::Delay(_)
+            | Stmt::WaitEvent(_)
+            | Stmt::Wait(_) => return None,
         }
         Some(Flow::Next)
     }

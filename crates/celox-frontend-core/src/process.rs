@@ -6,6 +6,11 @@
 //! suspension stores the next resume point, a [`ProcessStatus`] and its wait
 //! amount into the process's control slots and returns to the runtime.
 //!
+//! A delay resumes after a time. An event or level wait resumes at a check
+//! the kernel runs itself: the runtime resumes the process whenever the
+//! state may have changed, and the kernel continues past the wait or
+//! reports that it is still pending.
+//!
 //! The builder is source-independent: a frontend lowers statements and
 //! expressions into [`ProcessKernelBuilder::builder`] and calls the
 //! suspension methods where the source suspends.
@@ -110,6 +115,42 @@ impl ProcessKernelBuilder {
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);
         Ok(())
+    }
+
+    /// Suspend until a condition the kernel evaluates holds, and continue at
+    /// a new resume point. The caller lowers the condition at that point
+    /// and ends it with [`Self::wake_if`]; the runtime resumes the process
+    /// there whenever the state may have changed. Sampling that an edge
+    /// condition compares against is done by the caller before this call.
+    pub fn begin_wait(&mut self) -> Result<(), ProcessKernelError> {
+        let point = self.resume_blocks.len();
+        if point > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
+        self.end(ProcessStatus::Wait);
+        let resume = self.builder.new_block();
+        self.resume_blocks.push(resume);
+        self.builder.switch_to_block(resume);
+        Ok(())
+    }
+
+    /// At the resume point of a [`Self::begin_wait`]: continue when
+    /// `condition`, a one-bit two-state register, holds, otherwise report
+    /// that the wait is still pending and return. The resume point is left
+    /// unchanged, so the runtime resumes the process at the same check. The
+    /// continuation block is open afterwards.
+    pub fn wake_if(&mut self, condition: RegisterId) {
+        let woken = self.builder.new_block();
+        let pending = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (woken, Vec::new()),
+            false_block: (pending, Vec::new()),
+        });
+        self.builder.switch_to_block(pending);
+        self.end(ProcessStatus::Pending);
+        self.builder.switch_to_block(woken);
     }
 
     /// End the simulation. No block is open afterwards.

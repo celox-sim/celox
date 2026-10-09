@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::procedural::{
-    CaseItemBase, CaseKind, CaseLabel, LoopKind, ParamDirection, SystemTaskArg,
+    CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
+    SystemTaskArg,
 };
 
 /// One lexical scope: the locals it declares and the bindings they shadow.
@@ -499,17 +500,143 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sv_parser::StatementItem::ProceduralAssertionStatement(assertion) => {
                 self.assertion(assertion)
             }
-            sv_parser::StatementItem::ProceduralTimingControlStatement(_)
-            | sv_parser::StatementItem::WaitStatement(_)
-            | sv_parser::StatementItem::EventTrigger(_) => {
-                Err(unsupported("procedural timing control"))
+            sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
+                let mut stmts = vec![self.timing_control(&timing.nodes.0)?];
+                stmts.extend(self.statement_or_null(&timing.nodes.1)?);
+                Ok(stmts)
             }
+            sv_parser::StatementItem::WaitStatement(wait) => match &**wait {
+                sv_parser::WaitStatement::Wait(wait) => {
+                    let condition = self.expr(&wait.nodes.1.nodes.1)?;
+                    let mut stmts = vec![Stmt::Wait(condition)];
+                    stmts.extend(self.statement_or_null(&wait.nodes.2)?);
+                    Ok(stmts)
+                }
+                sv_parser::WaitStatement::Fork(_) | sv_parser::WaitStatement::Order(_) => {
+                    Err(unsupported("wait fork or wait order statement"))
+                }
+            },
+            sv_parser::StatementItem::EventTrigger(_) => Err(unsupported("event trigger")),
             sv_parser::StatementItem::ProceduralContinuousAssignment(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
             sv_parser::StatementItem::DisableStatement(_) => Err(unsupported("disable statement")),
             sv_parser::StatementItem::ParBlock(_) => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),
+        }
+    }
+
+    /// The suspension a procedural timing control stands for: a delay or an
+    /// event control.
+    fn timing_control(
+        &self,
+        control: &sv_parser::ProceduralTimingControl,
+    ) -> Result<Stmt, AnalyzerError> {
+        match control {
+            sv_parser::ProceduralTimingControl::DelayControl(delay) => {
+                self.delay_control(delay).map(Stmt::Delay)
+            }
+            sv_parser::ProceduralTimingControl::EventControl(control) => {
+                self.event_control(control).map(Stmt::WaitEvent)
+            }
+            sv_parser::ProceduralTimingControl::CycleDelay(_) => Err(unsupported("cycle delay")),
+        }
+    }
+
+    /// The amount of a `#` delay control as an expression in time units.
+    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
+        match delay {
+            sv_parser::DelayControl::Delay(delay) => match &delay.nodes.1 {
+                sv_parser::DelayValue::UnsignedNumber(number) => Ok(Expr::Literal(
+                    self.tree
+                        .get_str(&number.nodes.0)
+                        .ok_or_else(|| unsupported("delay value"))?
+                        .replace('_', ""),
+                )),
+                sv_parser::DelayValue::PsIdentifier(identifier) => {
+                    if identifier.nodes.0.is_some() {
+                        return Err(unsupported("package-scoped delay value"));
+                    }
+                    let name = identifier_text(RefNode::Identifier(&identifier.nodes.1), self.tree)
+                        .ok_or_else(|| unsupported("delay value"))?;
+                    let mut expr = Expr::Ident(name);
+                    self.rename_expr(&mut expr);
+                    Ok(expr)
+                }
+                sv_parser::DelayValue::HierarchicalIdentifier(identifier) => {
+                    let name =
+                        identifier_text(RefNode::HierarchicalIdentifier(identifier), self.tree)
+                            .ok_or_else(|| unsupported("delay value"))?;
+                    let mut expr = Expr::Ident(name);
+                    self.rename_expr(&mut expr);
+                    Ok(expr)
+                }
+                sv_parser::DelayValue::RealNumber(_)
+                | sv_parser::DelayValue::TimeLiteral(_)
+                | sv_parser::DelayValue::Step1(_) => Err(unsupported("delay value")),
+            },
+            sv_parser::DelayControl::Mintypmax(delay) => match &delay.nodes.1.nodes.1 {
+                sv_parser::MintypmaxExpression::Expression(expr) => self.expr(expr),
+                sv_parser::MintypmaxExpression::Ternary(_) => Err(unsupported("min:typ:max delay")),
+            },
+        }
+    }
+
+    /// The items of an `@` event control.
+    fn event_control(
+        &self,
+        control: &sv_parser::EventControl,
+    ) -> Result<Vec<EventItemBase<Expr>>, AnalyzerError> {
+        match control {
+            sv_parser::EventControl::EventExpression(control) => {
+                let mut items = Vec::new();
+                self.event_items(&control.nodes.1.nodes.1, &mut items)?;
+                Ok(items)
+            }
+            sv_parser::EventControl::EventIdentifier(_) => Err(unsupported("named event")),
+            sv_parser::EventControl::Asterisk(_) | sv_parser::EventControl::ParenAsterisk(_) => {
+                Err(unsupported("`@*` in a process"))
+            }
+            sv_parser::EventControl::SequenceIdentifier(_) => {
+                Err(unsupported("sequence event control"))
+            }
+        }
+    }
+
+    fn event_items(
+        &self,
+        expr: &sv_parser::EventExpression,
+        items: &mut Vec<EventItemBase<Expr>>,
+    ) -> Result<(), AnalyzerError> {
+        match expr {
+            sv_parser::EventExpression::Expression(expr) => {
+                if expr.nodes.2.is_some() {
+                    return Err(unsupported("iff-qualified event"));
+                }
+                let edge = match &expr.nodes.0 {
+                    None => EventEdge::Any,
+                    Some(sv_parser::EdgeIdentifier::Posedge(_)) => EventEdge::Pos,
+                    Some(sv_parser::EdgeIdentifier::Negedge(_)) => EventEdge::Neg,
+                    Some(sv_parser::EdgeIdentifier::Edge(_)) => {
+                        return Err(unsupported("`edge` event"));
+                    }
+                };
+                let expr = self.expr(&expr.nodes.1)?;
+                items.push(EventItemBase { edge, expr });
+                Ok(())
+            }
+            sv_parser::EventExpression::Or(expr) => {
+                self.event_items(&expr.nodes.0, items)?;
+                self.event_items(&expr.nodes.2, items)
+            }
+            sv_parser::EventExpression::Comma(expr) => {
+                self.event_items(&expr.nodes.0, items)?;
+                self.event_items(&expr.nodes.2, items)
+            }
+            sv_parser::EventExpression::Paren(expr) => {
+                self.event_items(&expr.nodes.0.nodes.1, items)
+            }
+            sv_parser::EventExpression::Sequence(_) => Err(unsupported("sequence event")),
         }
     }
 
@@ -1808,16 +1935,37 @@ pub(super) fn initial_processes_from_module_node(
             }
             continue;
         }
-        let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
-            continue;
+        let mut body = match &module_item.nodes.1 {
+            sv_parser::ModuleCommonItem::InitialConstruct(initial) => {
+                let mut builder = BodyBuilder::new(
+                    tree,
+                    &item_dimensions,
+                    state,
+                    system_functions::Body::Initial,
+                );
+                builder.statement_or_null(&initial.nodes.1)?
+            }
+            // An `always` with timing controls restarts its statement
+            // whenever it ends (IEEE 1800-2023 9.2.2).
+            sv_parser::ModuleCommonItem::AlwaysConstruct(always)
+                if always_kind(always) == AlwaysKind::Process =>
+            {
+                let mut builder = BodyBuilder::new(
+                    tree,
+                    &item_dimensions,
+                    state,
+                    system_functions::Body::Always,
+                );
+                vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body: builder.statement(&always.nodes.1)?,
+                }]
+            }
+            _ => continue,
         };
-        let mut builder = BodyBuilder::new(
-            tree,
-            &item_dimensions,
-            state,
-            system_functions::Body::Initial,
-        );
-        let mut body = builder.statement_or_null(&initial.nodes.1)?;
         for stmt in &mut body {
             substitute_stmt_constants(stmt, &item.env, &literals);
             qualify_stmt(&item, stmt);

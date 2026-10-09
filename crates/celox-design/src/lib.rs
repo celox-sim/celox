@@ -216,6 +216,15 @@ pub enum ProcessStatus {
     Done,
     /// The process requested the end of the simulation.
     Finish,
+    /// The process ran until an event or level wait whose condition the
+    /// kernel evaluates itself. The runtime resumes the process whenever the
+    /// state may have changed; the kernel then either continues or reports
+    /// [`Self::Pending`].
+    Wait,
+    /// The process was resumed at a wait whose condition does not hold yet.
+    /// It ran no statement, so no state other than its own wait bookkeeping
+    /// changed.
+    Pending,
 }
 
 impl ProcessStatus {
@@ -226,6 +235,8 @@ impl ProcessStatus {
             Self::Delay => 1,
             Self::Done => 2,
             Self::Finish => 3,
+            Self::Wait => 4,
+            Self::Pending => 5,
         }
     }
 
@@ -234,6 +245,8 @@ impl ProcessStatus {
             1 => Some(Self::Delay),
             2 => Some(Self::Done),
             3 => Some(Self::Finish),
+            4 => Some(Self::Wait),
+            5 => Some(Self::Pending),
             _ => None,
         }
     }
