@@ -194,62 +194,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 _ => {}
             });
         }
-        // Calls: output arguments and the subroutine bodies, including the
-        // calls in the select positions of assignment targets.
-        let mut calls = Vec::new();
-        for (lvalue, _) in &writes {
-            if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
-                collect_const_calls(msb, &mut calls);
-                collect_const_calls(lsb, &mut calls);
-            }
-        }
         for (lvalue, blocking) in writes {
             self.record_target(&lvalue, blocking);
         }
+        // Calls: output arguments and the subroutine bodies, including the
+        // calls in the select positions of assignment targets.
+        let mut calls = Vec::new();
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                let mut exprs = Vec::new();
-                match stmt {
-                    sv::ir::Stmt::Call { name, args } => {
-                        calls.push((name.clone(), args.clone()));
-                        exprs.extend(args.iter().flatten().cloned());
-                    }
-                    sv::ir::Stmt::Assign { rhs, .. }
-                    | sv::ir::Stmt::AssignConcat { rhs, .. }
-                    | sv::ir::Stmt::Eval(rhs) => exprs.push(rhs.clone()),
-                    sv::ir::Stmt::If { condition, .. } => exprs.push(condition.clone()),
-                    sv::ir::Stmt::Case {
-                        selector, items, ..
-                    } => {
-                        exprs.push(selector.clone());
-                        for item in items {
-                            for label in &item.labels {
-                                match label {
-                                    sv::ir::CaseLabel::Value(value) => exprs.push(value.clone()),
-                                    sv::ir::CaseLabel::Range { low, high } => {
-                                        exprs.push(low.clone());
-                                        exprs.push(high.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    sv::ir::Stmt::Loop { condition, .. } => exprs.extend(condition.clone()),
-                    sv::ir::Stmt::Return(Some(value)) => exprs.push(value.clone()),
-                    sv::ir::Stmt::Local {
-                        init: Some(init), ..
-                    } => exprs.push(init.clone()),
-                    _ => {}
-                }
-                for expr in exprs {
-                    collect_calls(&expr, &mut calls);
-                }
-            });
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
-        for (name, args) in calls {
+        while let Some((name, args)) = calls.pop() {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
+            default_calls(&subroutine, &args, &mut calls);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
@@ -2313,89 +2271,6 @@ pub(super) fn prune_unreachable_blocks<A>(unit: &mut ExecutionUnit<A>) {
         }
     }
     unit.blocks.retain(|id, _| reachable.contains(id));
-}
-
-fn collect_calls(expr: &sv::ir::Expr, calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>) {
-    match expr {
-        sv::ir::Expr::Call { name, args } => {
-            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
-            for arg in args {
-                collect_calls(arg, calls);
-            }
-        }
-        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
-        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
-            collect_calls(expr, calls);
-            collect_const_calls(msb, calls);
-            collect_const_calls(lsb, calls);
-        }
-        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Unary { expr, .. } => {
-            collect_calls(expr, calls)
-        }
-        sv::ir::Expr::Concat(parts) => parts.iter().for_each(|part| collect_calls(part, calls)),
-        sv::ir::Expr::RepeatConcat { count, parts } => {
-            collect_const_calls(count, calls);
-            parts.iter().for_each(|part| collect_calls(part, calls))
-        }
-        sv::ir::Expr::Binary { left, right, .. } => {
-            collect_calls(left, calls);
-            collect_calls(right, calls);
-        }
-        sv::ir::Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_calls(condition, calls);
-            collect_calls(then_expr, calls);
-            collect_calls(else_expr, calls);
-        }
-        sv::ir::Expr::Inside { expr, items } => {
-            collect_calls(expr, calls);
-            for item in items {
-                item.exprs()
-                    .into_iter()
-                    .for_each(|operand| collect_calls(operand, calls));
-            }
-        }
-    }
-}
-
-/// The calls of a constant-expression operand, such as a run-time select
-/// position.
-fn collect_const_calls(
-    expr: &sv::ir::ConstExpr,
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
-) {
-    use sv::ir::ConstExpr;
-    match expr {
-        ConstExpr::Function { name, args, .. } => {
-            calls.push((
-                name.clone(),
-                args.iter().map(expr_from_const_expr).collect(),
-            ));
-            args.iter().for_each(|arg| collect_const_calls(arg, calls));
-        }
-        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
-        ConstExpr::Select { expr, bit } => {
-            collect_const_calls(expr, calls);
-            collect_const_calls(bit, calls);
-        }
-        ConstExpr::Unary { expr, .. } => collect_const_calls(expr, calls),
-        ConstExpr::Binary { left, right, .. } => {
-            collect_const_calls(left, calls);
-            collect_const_calls(right, calls);
-        }
-        ConstExpr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_const_calls(condition, calls);
-            collect_const_calls(then_expr, calls);
-            collect_const_calls(else_expr, calls);
-        }
-    }
 }
 
 fn substitute_overlay_const(
