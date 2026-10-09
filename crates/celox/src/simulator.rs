@@ -761,6 +761,9 @@ mod host {
             }
         }
 
+        /// Drain runtime events, lazily evaluating dirty combinational logic.
+        /// Fatal assertions encountered during evaluation are returned as
+        /// [`RuntimeEvent::AssertFatal`] records so the host can handle them.
         pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
             self.drain_runtime_events_with_context(RuntimeFormatContext::default())
         }
@@ -774,8 +777,7 @@ mod host {
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
             if self.dirty {
-                self.eval_comb_checked().unwrap();
-                self.dirty = false;
+                self.eval_comb_for_runtime_event_drain();
             }
             self.collect_formatted_runtime_events(ctx)
         }
@@ -789,10 +791,25 @@ mod host {
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
             if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
-                self.eval_comb_checked().unwrap();
-                self.dirty = false;
+                self.eval_comb_for_runtime_event_drain();
             }
             self.collect_formatted_runtime_events(ctx)
+        }
+
+        fn eval_comb_for_runtime_event_drain(&mut self) {
+            let start_seq = self.runtime_event_write_seq();
+            let result = self.eval_comb_checked();
+            if result.is_err() {
+                let events = self.peek_backend_runtime_events_from(start_seq);
+                // A fatal assertion is already represented in the records being
+                // drained. Preserve other evaluation failures, including loops.
+                if self.fatal_comb_capture_error(&events).is_some() {
+                    self.dirty = false;
+                    return;
+                }
+            }
+            result.unwrap();
+            self.dirty = false;
         }
 
         fn collect_formatted_runtime_events(
@@ -1296,9 +1313,14 @@ mod host {
         }
 
         /// Try to resolve a port name to an event handle.
+        /// Returns an error if the path is missing, ambiguous, or has no registered event.
         pub fn try_event(&self, port: &str) -> Result<B::Event, crate::ir::AddrLookupError> {
             let addr = self.program.get_addr(&[], &[port])?;
-            Ok(self.backend.resolve_event(&addr))
+            self.backend.resolve_event_opt(&addr).ok_or_else(|| {
+                crate::ir::AddrLookupError::NotAnEvent {
+                    path: port.to_string(),
+                }
+            })
         }
 
         /// Retrieves the current value as a fixed-size type without `BigUint` allocation.

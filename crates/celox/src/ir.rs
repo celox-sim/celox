@@ -376,7 +376,7 @@ impl RuntimeDesign {
     }
 }
 
-/// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
+/// Error returned when a path-based variable or event lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
     #[error("Instance not found: {path}")]
@@ -385,6 +385,8 @@ pub enum AddrLookupError {
     VariableNotFound { path: String },
     #[error("Ambiguous variable path: {path} — multiple variables share this path")]
     AmbiguousPath { path: String },
+    #[error("Signal is not an event: {path}")]
+    NotAnEvent { path: String },
 }
 
 /// Internal consistency failure while consuming the frontend projection into
