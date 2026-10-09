@@ -370,6 +370,52 @@ pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Op
     syntax_tree.get_str(&locate).map(normalize_identifier)
 }
 
+/// The name a reference denotes. A reference through a package scope, such as
+/// `p::x` (IEEE 1800-2023 26.3), names the package item `p::x`; the parser
+/// reads `p::` in an expression as a class scope, which is also a package
+/// scope here since classes are not supported. Otherwise it is the first
+/// identifier, as [`identifier_text`] gives.
+pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+    let mut package = None;
+    // The package scope precedes the identifier it qualifies, and contains
+    // the package identifier itself.
+    let mut skip = 0;
+    for child in node {
+        match child {
+            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) if package.is_none() => {
+                package = Some("$unit".to_string());
+            }
+            RefNode::PackageScopePackage(scope) if package.is_none() => {
+                package = Some(identifier_text(
+                    RefNode::PackageIdentifier(&scope.nodes.0),
+                    syntax_tree,
+                )?);
+                skip = 1;
+            }
+            RefNode::ClassScope(scope) if package.is_none() => {
+                package = Some(identifier_text(
+                    RefNode::ClassIdentifier(&scope.nodes.0.nodes.0.nodes.1),
+                    syntax_tree,
+                )?);
+                skip = 1;
+            }
+            RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                let name = identifier_text(child, syntax_tree)?;
+                return Some(match package {
+                    Some(package) => format!("{package}::{name}"),
+                    None => name,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// An escaped identifier is the same identifier as its text without the
 /// backslash (IEEE 1800-2023 5.6.1): `\a` names `a`. One that cannot be written
 /// without escaping, such as `\a.b`, keeps its backslash.

@@ -558,11 +558,8 @@ fn const_expr_from_primary(
                 return Ok(None);
             }
             let ident = some!(
-                identifier_text(
-                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-                    syntax_tree,
-                )
-                .map(ConstExpr::Ident)
+                reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
+                    .map(ConstExpr::Ident)
             );
             // A single bit-select is kept; other selections need the typed
             // expression path and must not be dropped here.
@@ -900,15 +897,12 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     // never replace a member by the entire parameter value.
                     return Ok(None);
                 }
-                let identifier = some!(unwrap_node!(
-                    RefNode::ConstantPrimaryPsParameter(parameter),
-                    SimpleIdentifier,
-                    EscapedIdentifier
-                ));
                 let base = some!(
-                    identifier_locate(identifier)
-                        .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
-                        .map(ConstExpr::Ident)
+                    reference_name(
+                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                        syntax_tree
+                    )
+                    .map(ConstExpr::Ident)
                 );
                 Ok(Some(
                     const_select_expr(
@@ -964,14 +958,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     if tf_call.nodes.2.is_some() {
                         return None;
                     }
-                    let identifier = unwrap_node!(
-                        RefNode::ConstantFunctionCall(call),
-                        SimpleIdentifier,
-                        EscapedIdentifier
-                    )?;
-                    identifier_locate(identifier)
-                        .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
-                        .map(ConstExpr::Ident)
+                    reference_name(
+                        RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
+                        syntax_tree,
+                    )
+                    .map(ConstExpr::Ident)
                 }))
             }
             sv_parser::ConstantPrimary::ConstantCast(cast) => Ok(constant_cast_const_expr(

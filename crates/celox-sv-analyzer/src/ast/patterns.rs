@@ -44,7 +44,7 @@ pub(super) fn typed_pattern(
     let pattern_type = || unsupported("assignment pattern type");
     let r#type = match pattern.nodes.0.as_ref().ok_or_else(pattern_type)? {
         sv_parser::AssignmentPatternExpressionType::PsTypeIdentifier(identifier) => {
-            let name = identifier_text(RefNode::PsTypeIdentifier(identifier), tree)
+            let name = reference_name(RefNode::PsTypeIdentifier(identifier), tree)
                 .ok_or_else(pattern_type)?;
             dims.type_aliases
                 .get(&name)
@@ -144,10 +144,9 @@ fn unpacked_rank(
                 // A member of a packed structure.
                 return 0;
             }
-            let unpacked =
-                identifier_text(RefNode::HierarchicalIdentifier(&hierarchical.nodes.1), tree)
-                    .and_then(|name| dims.get(&name))
-                    .map_or(0, |shape| shape.unpacked.len());
+            let unpacked = reference_name(RefNode::PrimaryHierarchical(hierarchical), tree)
+                .and_then(|name| dims.get(&name))
+                .map_or(0, |shape| shape.unpacked.len());
             let indices = select.nodes.1.nodes.0.len();
             match &select.nodes.2 {
                 // A slice keeps the dimension it selects from.

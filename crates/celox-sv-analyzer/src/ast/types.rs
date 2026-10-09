@@ -14,7 +14,8 @@ pub(super) fn type_aliases_from_module_node_with_env(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
 ) -> Result<HashMap<String, Type>, AnalyzerError> {
-    let mut aliases = HashMap::default();
+    // The scope's own typedefs hide the package types it imports.
+    let mut aliases = scope::imported().type_aliases.clone();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         if let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list {
             add_type_aliases_from_parameter_port_list(
@@ -430,6 +431,21 @@ pub(super) fn type_alias_from_data_type_or_implicit(
     type_alias_from_data_type(data_type, syntax_tree, type_aliases)
 }
 
+/// The name of a type the parser reads as a class type. `p::t` parses as the
+/// class `p` with member `t` (IEEE 1800-2023 A.2.2.1); without classes, that
+/// is the type `t` of package `p`.
+fn class_type_name(class_type: &sv_parser::ClassType, syntax_tree: &SyntaxTree) -> Option<String> {
+    let base = reference_name(RefNode::PsClassIdentifier(&class_type.nodes.0), syntax_tree)?;
+    match class_type.nodes.2.as_slice() {
+        [] => Some(base),
+        [(_, member, None)] if class_type.nodes.1.is_none() => Some(format!(
+            "{base}::{}",
+            identifier_text(RefNode::ClassIdentifier(member), syntax_tree)?
+        )),
+        _ => None,
+    }
+}
+
 pub(super) fn type_alias_from_data_type(
     data_type: &sv_parser::DataType,
     syntax_tree: &SyntaxTree,
@@ -437,11 +453,9 @@ pub(super) fn type_alias_from_data_type(
 ) -> Option<Type> {
     let name = match data_type {
         sv_parser::DataType::Type(data_type) => {
-            identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?
+            reference_name(RefNode::DataTypeType(data_type), syntax_tree)?
         }
-        sv_parser::DataType::ClassType(data_type) => {
-            identifier_text(RefNode::PsClassIdentifier(&data_type.nodes.0), syntax_tree)?
-        }
+        sv_parser::DataType::ClassType(data_type) => class_type_name(data_type, syntax_tree)?,
         _ => return None,
     };
     type_aliases.get(&name).cloned()

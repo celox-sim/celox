@@ -115,6 +115,97 @@ impl ConstantFunctions {
     }
 }
 
+impl ConstantFunctions {
+    /// Add the functions of `other` that are not known already.
+    pub(super) fn extend_missing(&mut self, other: &ConstantFunctions) {
+        let functions = Arc::make_mut(&mut self.functions);
+        for (name, function) in other.functions.iter() {
+            functions
+                .entry(name.clone())
+                .or_insert_with(|| function.clone());
+        }
+        let locals = Arc::make_mut(&mut self.locals);
+        for (name, r#type) in other.locals.iter() {
+            locals.entry(name.clone()).or_insert_with(|| r#type.clone());
+        }
+        let errors = Arc::make_mut(&mut self.errors);
+        if errors.all.is_none() {
+            errors.all.clone_from(&other.errors.all);
+        }
+        for (name, error) in &other.errors.by_name {
+            errors
+                .by_name
+                .entry(name.clone())
+                .or_insert_with(|| error.clone());
+        }
+    }
+
+    /// Make the function `target` callable as `name` too.
+    pub(super) fn alias(&mut self, name: &str, target: &str) {
+        if let Some(function) = self.functions.get(target).cloned() {
+            Arc::make_mut(&mut self.functions).insert(name.to_string(), function);
+        }
+        if let Some(error) = self.errors.by_name.get(target).cloned() {
+            Arc::make_mut(&mut self.errors)
+                .by_name
+                .insert(name.to_string(), error);
+        }
+    }
+
+    /// These functions with their names, parameter and local names, and
+    /// bodies renamed.
+    pub(super) fn renamed(
+        &self,
+        name: &mut impl FnMut(&str) -> String,
+        stmt: &mut impl FnMut(Stmt) -> Stmt,
+    ) -> Self {
+        let functions = self
+            .functions
+            .iter()
+            .map(|(function_name, function)| {
+                (
+                    name(function_name),
+                    ConstantFunction {
+                        params: function
+                            .params
+                            .iter()
+                            .map(|(param, r#type)| (name(param), r#type.clone()))
+                            .collect(),
+                        return_var: function
+                            .return_var
+                            .as_ref()
+                            .map(|(var, r#type)| (name(var), r#type.clone())),
+                        body: function.body.iter().cloned().map(&mut *stmt).collect(),
+                    },
+                )
+            })
+            .collect();
+        let locals = self
+            .locals
+            .iter()
+            .map(|(local, r#type)| (name(local), r#type.clone()))
+            .collect();
+        Self {
+            functions: Arc::new(functions),
+            locals: Arc::new(locals),
+            errors: Arc::new(FunctionErrors {
+                all: self.errors.all.clone(),
+                by_name: self
+                    .errors
+                    .by_name
+                    .iter()
+                    .map(|(function, error)| (name(function), error.clone()))
+                    .collect(),
+            }),
+        }
+    }
+
+    /// The names of the locals of these functions.
+    pub(super) fn local_names(&self) -> impl Iterator<Item = &String> {
+        self.locals.keys()
+    }
+}
+
 pub(super) fn module_constant_functions(
     node: RefNode<'_>,
     tree: &SyntaxTree,

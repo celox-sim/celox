@@ -1,10 +1,171 @@
 #![cfg(feature = "systemverilog")]
+//! Packages resolved as scopes (IEEE 1800-2023 26).
 
 use celox::{ParserError, Simulator, SimulatorErrorKind};
 
-/// A package variable is one object shared by every module. Inlining would
-/// give the writer and the reader their own copies, so it is rejected until
-/// packages are resolved as scopes (#1146).
+fn output(source: &str) -> u64 {
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("packages.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let y = simulator.signal("y");
+    u64::try_from(simulator.get(y)).unwrap()
+}
+
+fn error(source: &str) -> String {
+    let error =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("packages.sv"))], "Top")
+            .build()
+            .expect_err("the design must be rejected");
+    match error.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { detail, .. }) => detail.clone(),
+        other => panic!("expected an illegal context, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_local_declaration_hides_a_wildcard_import() {
+    assert_eq!(
+        output(
+            "package p; localparam int W = 3; endpackage
+             module Top(output logic [7:0] y); import p::*; localparam int W = 5; assign y = W; endmodule"
+        ),
+        5
+    );
+}
+
+#[test]
+fn packages_may_declare_the_same_name() {
+    assert_eq!(
+        output(
+            "package p; localparam int W = 3; endpackage
+             package q; localparam int W = 5; endpackage
+             module Top(output logic [7:0] y); assign y = p::W + q::W; endmodule"
+        ),
+        8
+    );
+}
+
+#[test]
+fn an_explicit_import_imports_only_its_name() {
+    assert_eq!(
+        output(
+            "package p; localparam int A = 3; localparam int B = 7; endpackage
+             module Top(output logic [7:0] y); import p::A; localparam int B = 1; assign y = A + B; endmodule"
+        ),
+        4
+    );
+}
+
+#[test]
+fn a_qualified_name_does_not_clash_with_a_local_one() {
+    assert_eq!(
+        output(
+            "package p; localparam int W = 3; endpackage
+             module Top(output logic [7:0] y); localparam int W = 5; assign y = p::W + W; endmodule"
+        ),
+        8
+    );
+}
+
+#[test]
+fn package_functions_call_the_package_items() {
+    assert_eq!(
+        output(
+            "package p;
+               function automatic int helper(int x); return x + 1; endfunction
+               function automatic int f(int x); return helper(x); endfunction
+             endpackage
+             module Top(output logic [7:0] y);
+               function automatic int helper(int x); return x + 100; endfunction
+               assign y = 8'(p::f(1) + helper(0));
+             endmodule"
+        ),
+        102
+    );
+}
+
+#[test]
+fn an_unreferenced_name_of_two_wildcard_imports_is_not_ambiguous() {
+    assert_eq!(
+        output(
+            "package p; localparam int T = 1; localparam int A = 2; endpackage
+             package q; localparam int T = 3; localparam int B = 4; endpackage
+             module Top(output logic [7:0] y); import p::*; import q::*; assign y = A + B; endmodule"
+        ),
+        6
+    );
+}
+
+#[test]
+fn packages_provide_types_enums_and_their_dependencies() {
+    assert_eq!(
+        output(
+            "package base; localparam int W = 4; typedef logic [W-1:0] word_t; endpackage
+             package ext;
+               import base::*;
+               typedef enum logic [1:0] { IDLE, RUN, DONE } state_t;
+               localparam word_t ONES = '1;
+               function automatic word_t twice(word_t x); return x << 1; endfunction
+             endpackage
+             module Top import ext::*; (output logic [7:0] y);
+               ext::state_t s;
+               base::word_t w;
+               assign s = DONE;
+               assign w = twice(4'd3);
+               assign y = {2'(s), w[3:0], 2'(ONES)};
+             endmodule"
+        ),
+        (2 << 6) | (6 << 2) | 3
+    );
+}
+
+#[test]
+fn parameter_overrides_take_qualified_enum_members() {
+    assert_eq!(
+        output(
+            "package p; typedef enum logic [1:0] { A, B, C } kind_t; endpackage
+             module Child import p::*; #(parameter kind_t K = A) (output logic [7:0] y);
+               assign y = 8'(K);
+             endmodule
+             module Top(output logic [7:0] y); Child #(.K(p::C)) c (.y(y)); endmodule"
+        ),
+        2
+    );
+}
+
+#[test]
+fn ambiguous_wildcard_references_are_errors() {
+    let detail = error(
+        "package p; localparam int T = 1; endpackage
+         package q; localparam int T = 3; endpackage
+         module Top(output logic [7:0] y); import p::*; import q::*; assign y = T; endmodule",
+    );
+    assert!(detail.contains("`T`"), "{detail}");
+}
+
+#[test]
+fn an_explicit_import_of_a_local_name_is_an_error() {
+    let detail = error(
+        "package p; localparam int W = 3; endpackage
+         module Top(output logic [7:0] y); import p::W; localparam int W = 5; assign y = W; endmodule",
+    );
+    assert!(detail.contains("`W`"), "{detail}");
+}
+
+#[test]
+fn unknown_packages_and_items_are_errors() {
+    let detail = error(
+        "package p; localparam int W = 3; endpackage
+         module Top(output logic [7:0] y); import p::X; assign y = 0; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+    let detail = error("module Top(output logic [7:0] y); import q::*; assign y = 0; endmodule");
+    assert!(detail.contains("unknown package `q`"), "{detail}");
+}
+
+/// A package variable is one object shared by every module. Until it can be
+/// shared, it is rejected (#1146).
 #[test]
 fn rejects_variables_shared_through_a_package() {
     let source = r#"

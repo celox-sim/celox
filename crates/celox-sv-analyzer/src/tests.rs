@@ -2507,7 +2507,7 @@ fn rejects_package_variables_and_nets() {
             "package variable or net `p::w`",
         ),
     ] {
-        let error = source_packages(code, Path::new("state.sv")).unwrap_err();
+        let error = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap_err();
         assert_eq!(error, AnalyzerError::Unsupported(construct.to_string()));
         assert_eq!(error.tracking_issue(), 1146);
     }
@@ -2515,30 +2515,20 @@ fn rejects_package_variables_and_nets() {
     let code = "package p; const int K = 3; localparam int W = 4;\n\
                 function automatic int f(int x); int t; t = x + K; return t; endfunction\n\
                 endpackage";
-    assert_eq!(
-        source_packages(code, Path::new("state.sv")).unwrap().len(),
-        1
-    );
+    let packages = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap();
+    assert_eq!(packages.names().collect::<Vec<_>>(), ["p"]);
 }
 
 #[test]
-fn package_inlining_keeps_source_text_after_a_dpi_import() {
-    // The preprocessor widens the space after `"DPI-C"`, so syntax tree
-    // offsets after it no longer match the source text.
+fn imports_a_dpi_function_declared_in_a_package() {
     let code = "package p; import \"DPI-C\" function int twice(input int x); endpackage\n\
-                module Top(input int a, output int y); import p::*; assign y = a; endmodule\n";
-    let path = Path::new("dpi.sv");
-    let packages = source_packages(code, path)
-        .unwrap()
-        .into_iter()
-        .map(|package| (package.name.clone(), package))
-        .collect::<HashMap<_, _>>();
-    let inlined = inline_module_packages(code, path, "Top", &packages)
-        .unwrap()
-        .unwrap();
-    assert!(
-        inlined.contains("\nimport \"DPI-C\" function int twice(input int x); \nendmodule"),
-        "{inlined}"
+                module Top(input int a, output int y); import p::*; assign y = twice(a); endmodule\n";
+    let ir = analyze_source(code, Path::new("dpi.sv")).unwrap();
+    let imports = ir.modules()[0].dpi_imports();
+    assert_eq!(imports.len(), 1);
+    assert_eq!(
+        (imports[0].name(), imports[0].c_name()),
+        ("p::twice", "twice")
     );
 }
 

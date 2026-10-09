@@ -16,6 +16,18 @@ pub(super) fn module_name_from_node(
         .ok_or_else(|| AnalyzerError::Unsupported("invalid module identifier span".to_string()))
 }
 
+/// The name of a module or package declaration.
+pub(super) fn scope_name_from_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<String, AnalyzerError> {
+    if let RefNode::PackageDeclaration(package) = node {
+        return identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
+            .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()));
+    }
+    module_name_from_node(node, syntax_tree)
+}
+
 pub(super) fn identifier_locate(node: RefNode<'_>) -> Option<Locate> {
     match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
         Some(RefNode::SimpleIdentifier(identifier)) => Some(identifier.nodes.0),
@@ -718,7 +730,7 @@ pub(super) fn type_alias_from_ref_node(
     }
     let name =
         if let Some(RefNode::DataTypeType(data_type)) = unwrap_node!(node.clone(), DataTypeType) {
-            identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?
+            reference_name(RefNode::DataTypeType(data_type), syntax_tree)?
         } else {
             let RefNode::TypeIdentifier(identifier) = unwrap_node!(node, TypeIdentifier)? else {
                 return None;

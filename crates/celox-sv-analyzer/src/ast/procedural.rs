@@ -628,10 +628,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         match call {
             sv_parser::SubroutineCall::TfCall(call) => {
-                let name = identifier_text(
+                let name = reference_name(
                     RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                     self.tree,
                 )
+                .map(scope::bind_call)
                 .ok_or_else(|| unsupported("subroutine call"))?;
                 let args =
                     self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
