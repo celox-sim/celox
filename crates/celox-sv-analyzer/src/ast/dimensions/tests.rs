@@ -34,7 +34,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(module.parameters(), &env);
+    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
     let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
     dimensions
         .function_return_types

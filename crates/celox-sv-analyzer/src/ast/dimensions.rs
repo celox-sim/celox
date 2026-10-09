@@ -309,7 +309,7 @@ fn size_function_expression_type(
         type_aliases,
     )
     .unwrap_or_else(|| PackedDimensions {
-        const_env: const_env.clone(),
+        const_env: const_env.clone().into(),
         type_aliases: type_aliases.clone(),
         ..PackedDimensions::default()
     });

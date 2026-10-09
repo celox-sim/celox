@@ -13,6 +13,9 @@ pub(super) fn instances_from_module_node(
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     for item in active {
+        if item.is_parameter_declaration() {
+            continue;
+        }
         let start = instances.len();
         let dimensions = item.dimensions(packed_dimensions);
         instances_from_module_or_generate_item(

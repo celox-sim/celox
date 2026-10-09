@@ -17,6 +17,9 @@ pub(super) fn ff_processes_from_module_node(
         const_env,
         &packed_dimensions.type_aliases,
     )? {
+        if item.is_parameter_declaration() {
+            continue;
+        }
         let start = processes.len();
         let dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
@@ -105,7 +108,7 @@ fn ff_process_from_always_construct(
         ));
     };
     let mut local_dimensions = packed_dimensions.clone();
-    local_dimensions.const_env = const_env.clone();
+    local_dimensions.const_env = const_env.clone().into();
     let mut builder = procedural::BodyBuilder::new(
         syntax_tree,
         &local_dimensions,
