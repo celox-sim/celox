@@ -1,11 +1,11 @@
 name: Sync Develop
 
 on:
-  push:
-    branches: [master]
-  pull_request_target:
-    types: [closed]
-    branches: [develop]
+  # Sync once a day rather than on every master push. Each update re-runs the
+  # synchronization pull request's CI, and develop only needs master daily.
+  # This runs early enough to merge before the develop full CI at 02:43 UTC.
+  schedule:
+    - cron: "7 22 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -17,11 +17,6 @@ permissions: {}
 jobs:
   sync:
     name: Merge master into develop
-    if: >-
-      github.event_name != 'pull_request_target' ||
-      (github.event.pull_request.merged == true &&
-       github.event.pull_request.head.ref == 'integration/master-to-develop' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
       SYNC_BRANCH: integration/master-to-develop
