@@ -213,6 +213,10 @@ fn analyze_package(
     let _package = scope::enter_package(name);
     let imported = imports::imported_symbols(node.clone(), tree, packages)?;
     let aliases = imported.aliases.clone();
+    let imported_locals = imported.local_names();
+    // The names the package declares, from its syntax: an escaped name may
+    // contain `::` itself.
+    let own = imports::scope_names(node.clone(), tree);
     let module = Module::from_module_node_with_parameter_overrides(
         node,
         tree,
@@ -229,17 +233,12 @@ fn analyze_package(
         .expect("a package analysis keeps the package symbols");
     // The package's own names and locals become qualified; the names its
     // imports bind are replaced by the items they denote.
-    let own: HashSet<String> = symbols
-        .declared_names()
-        .into_iter()
-        .filter(|declared| !aliases.contains_key(declared))
-        .collect();
     let mut names: HashMap<String, String> = own
         .iter()
         .map(|declared| (declared.clone(), format!("{name}::{declared}")))
         .collect();
     for local in symbols.local_names() {
-        if !local.contains("::") {
+        if !imported_locals.contains(&local) {
             names.insert(local.clone(), format!("{name}::{local}"));
         }
     }

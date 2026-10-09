@@ -439,6 +439,11 @@ pub(super) fn reject_silently_ignored_constructs(
             }
             // Package scopes and imports resolve through the imported
             // packages; compilation-unit declarations are not analyzed.
+            RefNode::PackageExportDeclaration(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "package export declaration".to_string(),
+                ));
+            }
             RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
                 return Err(AnalyzerError::Unsupported(
                     "compilation-unit scope reference `$unit::`".to_string(),

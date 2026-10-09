@@ -274,38 +274,6 @@ impl ScopeSymbols {
         }
     }
 
-    /// The names this scope declares itself: the ones not qualified by
-    /// another package. Markers name the symbols they describe.
-    pub fn declared_names(&self) -> HashSet<String> {
-        let mut names = HashSet::default();
-        for key in self.const_env.keys() {
-            let name = split_marker(key).map_or(key.as_str(), |(_, name)| name);
-            names.insert(name.to_string());
-        }
-        names.extend(self.parameter_values.keys().cloned());
-        names.extend(
-            self.parameters
-                .iter()
-                .map(|parameter| parameter.name.clone()),
-        );
-        names.extend(self.type_aliases.keys().cloned());
-        names.extend(self.enum_constants.numbers.keys().cloned());
-        names.extend(self.functions.keys().cloned());
-        names.extend(
-            self.subroutines
-                .iter()
-                .map(|subroutine| subroutine.name.clone()),
-        );
-        names.extend(
-            self.dpi_imports
-                .iter()
-                .map(|import| import.name().to_string()),
-        );
-        names.extend(self.signals.iter().map(|signal| signal.name.clone()));
-        names.retain(|name| !name.contains("::"));
-        names
-    }
-
     /// The names of the locals of the scope's subroutines and constant
     /// functions, including their arguments and result variables.
     pub fn local_names(&self) -> HashSet<String> {
@@ -393,7 +361,9 @@ impl ScopeSymbols {
             subroutine_params: self
                 .subroutine_params
                 .iter()
-                .map(|(name, params)| (key(name), params.iter().map(key).collect()))
+                // The formal names bind named arguments; they are not
+                // references.
+                .map(|(name, params)| (key(name), params.clone()))
                 .collect(),
             subroutine_shapes: self
                 .subroutine_shapes

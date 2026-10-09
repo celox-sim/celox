@@ -233,6 +233,49 @@ fn a_package_names_its_own_items_through_its_scope() {
 }
 
 #[test]
+fn qualified_types_formals_and_escaped_names_resolve() {
+    assert_eq!(
+        output(
+            "package a; typedef logic [3:0] T; localparam int X = 5;
+               task automatic t(input int X, output int r); r = X + 1; endtask
+               localparam int \\c::d = 4;
+             endpackage
+             package b; typedef logic [7:0] T; endpackage
+             module Top(output logic [7:0] y);
+               import a::*; import b::*;
+               a::T v;
+               int r;
+               always_comb a::t(.X(1), .r(r));
+               assign v = 4'(r);
+               assign y = 8'(v) + 8'(a::\\c::d );
+             endmodule"
+        ),
+        2 + 4
+    );
+}
+
+#[test]
+fn package_exports_are_unsupported() {
+    let error = Simulator::from_sv_sources(
+        vec![(
+            "package base; localparam int X = 1; endpackage
+             package ext; import base::*; export base::X; endpackage
+             module Top(output logic [7:0] y); assign y = 0; endmodule",
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("package exports are not supported");
+    match error.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { detail, .. }) => {
+            assert!(detail.contains("package export declaration"), "{detail}")
+        }
+        other => panic!("expected an unsupported construct, got {other:?}"),
+    }
+}
+
+#[test]
 fn ambiguous_wildcard_references_are_errors() {
     let detail = error(
         "package p; localparam int T = 1; endpackage

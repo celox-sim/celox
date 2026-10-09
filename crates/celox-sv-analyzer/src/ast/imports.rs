@@ -279,6 +279,11 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
             | RefNode::NamedParameterAssignment(_)
             | RefNode::MemberIdentifier(_)
             | RefNode::StructurePatternKey(_) => skip = 1,
+            // `p::t` as a data type parses as the class type `p` with the
+            // member `t`.
+            RefNode::ClassType(class_type) if !class_type.nodes.2.is_empty() => {
+                skip = 1 + class_type.nodes.2.len();
+            }
             RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
                 if skip > 0 {
                     skip -= 1;
