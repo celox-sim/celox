@@ -550,7 +550,7 @@ impl<'a> FfParser<'a> {
         let site = RuntimeEventSite {
             kind,
             template,
-            sizing: DisplaySizing::Minimal,
+            sizing: DisplaySizing::Veryl,
             scope: None,
             arg_widths: value_args
                 .iter()
