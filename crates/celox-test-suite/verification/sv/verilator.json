@@ -809,6 +809,28 @@
     },
     {
       "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "indexed_select::out_of_range_inner_indices_stay_in_their_unpacked_element",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
       "detail": "",
       "expectation": "Simulation",
       "name": "indexed_select::runtime_index_reads_single_bit_unpacked_elements",
@@ -892,6 +914,17 @@
       "name": "indexed_select::runtime_indices_select_within_multidimensional_packed_elements",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "indexed_select::runtime_inner_bits_of_unpacked_elements_feed_child_ports",
+      "phase": "compile",
+      "status": "unsupported",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

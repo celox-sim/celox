@@ -1309,7 +1309,8 @@ fn flatten_packed_select(
     }
 
     // A runtime index past its own dimension can still flatten to a position
-    // in another element. Move the whole selection above the vector instead,
+    // in another element. Move the whole selection above the variable
+    // instead, past every unpacked element the selection may be added to,
     // where a read gives X and a write is ignored (IEEE 1800-2023 11.5.1).
     let in_range = indices
         .iter()
@@ -1323,9 +1324,11 @@ fn flatten_packed_select(
         });
     if let Some(in_range) = in_range {
         let total_width = product_expr(
-            &dimensions
+            &variable_dimensions
+                .unpacked
                 .iter()
                 .map(|dimension| dimension.width.clone())
+                .chain(dimensions.iter().map(|dimension| dimension.width.clone()))
                 .collect::<Vec<_>>(),
         );
         offset = ConstExpr::Mux {
