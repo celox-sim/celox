@@ -100,6 +100,14 @@ test("an unchanged retained failure remains visible without failing the daily ga
   assert.deepEqual(check(input, 0), { cases: 2, accepted_failures: [] });
 });
 
+test("a retained baseline without run metadata is accepted", () => {
+  const input = fixture();
+  for (const key of ["counts", "run_counts", "incremental"])
+    delete input.baseline[key];
+  input.baseline.cases.forEach((row) => delete row.reused);
+  assert.deepEqual(check(input), { cases: 2, accepted_failures: ["known"] });
+});
+
 test("new failures, changed diagnostics and changed tools cannot use the baseline", () => {
   for (const mutate of [
     (input) => {

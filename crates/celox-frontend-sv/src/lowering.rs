@@ -524,27 +524,80 @@ fn validate_variable_driver_ranges(
     Ok(())
 }
 
-/// Records the ranges of `signal_name` that the assignments of `body` write.
+/// Records the ranges of `signal_name` that `body` writes: by assignments,
+/// and through the output arguments and bodies of the subroutines it calls,
+/// which write for the calling process (IEEE 1800-2023 9.2.2.2).
 fn body_driver_ranges(
     drivers: &mut Vec<(usize, Option<(i128, i128)>)>,
     body: &[sv::ir::Stmt],
     driver_id: usize,
-    signal_name: &str,
-    range: &dyn Fn(&sv::ir::LValue) -> Option<(i128, i128)>,
+    scan: &DriverScan<'_>,
 ) {
-    for stmt in body {
-        stmt.walk(&mut |stmt| {
-            let lvalues: Vec<&sv::ir::LValue> = match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => vec![lhs],
-                sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().collect(),
-                _ => Vec::new(),
+    let mut visited = HashSet::default();
+    scan.body(drivers, body, driver_id, &mut visited, 0);
+}
+
+/// What `body_driver_ranges` looks for and in which module.
+struct DriverScan<'a> {
+    signal_name: &'a str,
+    subroutines: &'a [sv::ir::Subroutine],
+    /// The bits an assignment target drives, when they are known.
+    range: &'a dyn Fn(&sv::ir::LValue) -> Option<(i128, i128)>,
+}
+
+impl DriverScan<'_> {
+    fn body(
+        &self,
+        drivers: &mut Vec<(usize, Option<(i128, i128)>)>,
+        body: &[sv::ir::Stmt],
+        driver_id: usize,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) {
+        // Deeper calls are rejected when the processes are lowered.
+        if depth > procedural::MAX_CALL_DEPTH {
+            return;
+        }
+        let record = |drivers: &mut Vec<_>, lvalue: &sv::ir::LValue| {
+            if lvalue.name() == self.signal_name {
+                drivers.push((driver_id, (self.range)(lvalue)));
+            }
+        };
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => record(drivers, lhs),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        parts.iter().for_each(|part| record(drivers, part))
+                    }
+                    _ => {}
+                }
+                procedural::stmt_calls(stmt, &mut calls);
+            });
+        }
+        while let Some((name, args)) = calls.pop() {
+            let Some(subroutine) = self
+                .subroutines
+                .iter()
+                .find(|subroutine| subroutine.name == name)
+            else {
+                continue;
             };
-            for lvalue in lvalues {
-                if lvalue.name() == signal_name {
-                    drivers.push((driver_id, range(lvalue)));
+            procedural::default_calls(subroutine, &args, &mut calls);
+            for (param, arg) in subroutine.params.iter().zip(&args) {
+                if param.direction.is_written()
+                    && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
+                {
+                    lvalues.iter().for_each(|lvalue| record(drivers, lvalue));
                 }
             }
-        });
+            // A subroutine body writes a module variable for each caller;
+            // its own formals and locals have module-unique names.
+            if visited.insert(name) {
+                self.body(drivers, &subroutine.body, driver_id, visited, depth + 1);
+            }
+        }
     }
 }
 
@@ -595,28 +648,21 @@ fn local_driver_ranges(
             Some((window.lsb as i128, window.msb as i128))
         })
     };
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &lvalue_range,
+    };
     let mut drivers = Vec::new();
     let mut driver_id = 0;
     for process in module.comb_processes() {
         if condition_is_active(process.condition(), constants, parameter_types) {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                &lvalue_range,
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
         driver_id += 1;
     }
     for process in module.ff_processes() {
-        body_driver_ranges(
-            &mut drivers,
-            process.body(),
-            driver_id,
-            signal_name,
-            &lvalue_range,
-        );
+        body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         driver_id += 1;
     }
     drivers
@@ -629,18 +675,18 @@ fn continuous_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    let range = |lvalue: &sv::ir::LValue| net_lvalue_range(lvalue, constants, parameter_types);
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &range,
+    };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.comb_processes().iter().enumerate() {
         if process.kind() == sv::ir::CombProcessKind::ContinuousAssign
             && condition_is_active(process.condition(), constants, parameter_types)
         {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                &|lvalue| net_lvalue_range(lvalue, constants, parameter_types),
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
     drivers
@@ -654,16 +700,16 @@ fn initial_driver_ranges(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
+    let range = |lvalue: &sv::ir::LValue| net_lvalue_range(lvalue, constants, parameter_types);
+    let scan = DriverScan {
+        signal_name,
+        subroutines: module.subroutines(),
+        range: &range,
+    };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.initial_processes().iter().enumerate() {
         if condition_is_active(process.condition(), constants, parameter_types) {
-            body_driver_ranges(
-                &mut drivers,
-                process.body(),
-                driver_id,
-                signal_name,
-                &|lvalue| net_lvalue_range(lvalue, constants, parameter_types),
-            );
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
     drivers

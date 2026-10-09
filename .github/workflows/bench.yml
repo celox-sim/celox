@@ -1,8 +1,8 @@
 name: Benchmark
 
 on:
-  push:
-    branches: [master]
+  schedule:
+    - cron: "47 1 * * *"
   workflow_dispatch:
 
 permissions:
@@ -12,9 +12,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 concurrency:
-  group: bench
+  group: benchmark-${{ github.ref }}
   cancel-in-progress: false
-  queue: max
 
 jobs:
   # Keep all compared backends on the same VM. Separate jobs with the same
@@ -113,6 +112,7 @@ jobs:
   # ── Convert & publish results ──
   publish:
     needs: bench-comparison
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -136,6 +136,8 @@ jobs:
       - name: Convert TypeScript benchmark output
         run: node scripts/convert-bench.mjs artifacts/bench-ts/ts-output.json ts-converted.json
 
+      # Keep the existing comparisons and alerts, but publish with a retrying
+      # writer rather than pushing this action's local branch.
       - name: Store Rust benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -172,7 +174,12 @@ jobs:
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
           skip-fetch-gh-pages: true
-          auto-push: true
+          auto-push: false
           alert-threshold: "200%"
           comment-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Heliodor matrix jobs also publish while measurements run. Retry a
+      # rejected push against the latest branch tip and retain every history.
+      - name: Publish completed benchmark results
+        run: node scripts/publish-bench.mjs rust-converted.json verilator-converted.json ts-converted.json

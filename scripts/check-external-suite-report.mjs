@@ -50,11 +50,13 @@ function validateReport(report, label) {
     );
     counts[row.status]++;
   }
-  assert.deepEqual(
-    report.counts,
-    counts,
-    `${label}: result counts do not match cases`,
-  );
+  // Retained reports omit counts so that added cases do not conflict.
+  if (report.counts !== undefined)
+    assert.deepEqual(
+      report.counts,
+      counts,
+      `${label}: result counts do not match cases`,
+    );
   return rows;
 }
 

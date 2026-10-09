@@ -47,6 +47,7 @@ mod patterns;
 mod procedural;
 mod scoped_map;
 mod selects;
+mod shared_map;
 mod statements;
 mod types;
 mod validation;
@@ -128,6 +129,7 @@ use selects::{
     add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
     part_select_bounds, product_expr, variable_lvalue_from_node,
 };
+use shared_map::SharedMap;
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_cond_predicate,
     expr_from_lvalue, lvalue_expr_type,
@@ -584,7 +586,7 @@ impl Module {
             packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
         // Four-state parameter values cannot be represented by the numeric
         // environment. Keep their expressions for constant case analysis.
-        packed_dimensions.parameter_values = parameter_value_env(&parameters, &const_env);
+        packed_dimensions.parameter_values = parameter_value_env(&parameters, &const_env).into();
         packed_dimensions
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
@@ -1789,11 +1791,11 @@ struct FunctionReturnMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackedDimensions {
     variables: ScopedMap<VariableDimensions>,
-    const_env: HashMap<String, i128>,
+    const_env: SharedMap<i128>,
     type_aliases: HashMap<String, Type>,
     function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
-    parameter_values: HashMap<String, Expr>,
+    parameter_values: SharedMap<Expr>,
     expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
     /// The current lexical scope has already collected its visible declarations.
@@ -1812,11 +1814,11 @@ impl PackedDimensions {
     ) -> Self {
         Self {
             variables: variables.into(),
-            const_env: const_env.clone(),
+            const_env: const_env.clone().into(),
             type_aliases: type_aliases.clone(),
             function_return_types: HashMap::default(),
             functions: Arc::default(),
-            parameter_values: HashMap::default(),
+            parameter_values: SharedMap::default(),
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             scope_types_complete: false,

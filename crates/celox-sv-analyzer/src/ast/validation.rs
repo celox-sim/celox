@@ -105,7 +105,7 @@ pub(super) fn reject_silently_ignored_constructs(
 ) -> Result<(), AnalyzerError> {
     let mut indexed_dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
-    indexed_dimensions.parameter_values = parameter_values.clone();
+    indexed_dimensions.parameter_values = parameter_values.clone().into();
     let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
     let generated_nodes: Vec<_> = if is_module {
         node.clone()

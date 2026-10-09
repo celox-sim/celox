@@ -22,9 +22,9 @@ jobs:
         run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
   # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
-  # develop ref here as well so the same nightly coverage exercises Veryl HEAD.
+  # develop ref here for the small pinned/HEAD Linux boot compatibility gates.
   queue-heliodor-develop:
-    name: Queue develop Heliodor benchmarks
+    name: Queue develop Linux boot compatibility
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

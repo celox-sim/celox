@@ -297,7 +297,7 @@ cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
 python3 crates/celox-test-suite/scripts/summarize.py
 
 # Reuse unchanged successful cases; new, changed and failed cases run again.
-# The first run (or a report without fingerprints) establishes the baseline.
+# The first run in an output directory establishes the baseline.
 cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
   --incremental --jobs 8 --report crates/celox-test-suite/verification/verilator.json
 cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
@@ -316,7 +316,7 @@ cargo test -p celox-test-suite --all-features --test oracles -- --ignored
 ```
 
 `--incremental` is available on all four Veryl/SystemVerilog runners. Its baseline
-is `--report` when supplied, otherwise `<output>/results.json`. Only unchanged
+is `<output>/results.json` (`target/<suite>-<tool>` by default). Only unchanged
 `passed` and `rejected` results are reused; previous failures are retried, and
 ignored/unsupported cases are classified again. Deleted cases disappear from
 the next report. Reuse does not require old simulator build directories.
@@ -330,12 +330,16 @@ sources, workspace manifests/lockfile, tools, compiler flags, or
 incomplete, the runner verifies the selection afresh. A malformed baseline
 report is an error, not evidence of a pass.
 
-Reports retain the original status and `verified_at_unix` for reused cases, mark
-them with `reused: true`, and count fresh/reused results separately in
-`run_counts`. This distinguishes previous evidence from assertions executed in
-this invocation. `--filter` and `--exclude-stronger-than-sv` still limit the
-report to the selected cases; omit them when refreshing a complete report.
-Use a separate report for a filtered run to preserve an existing full baseline.
+`results.json` retains the original status and `verified_at_unix` for reused
+cases, marks them with `reused: true`, and counts fresh/reused results
+separately in `run_counts`. This distinguishes previous evidence from assertions
+executed in this invocation. The `--report` copy omits these, the fingerprints
+and the status counts, so a retained report changes only where results change
+and branches that add different cases merge without conflicts.
+
+`--filter` and `--exclude-stronger-than-sv` still limit the report to the
+selected cases; omit them when refreshing a complete report. Use a separate
+`--output` and report for a filtered run to preserve an existing full baseline.
 Omit `--incremental` to force a fresh run. Daily CI does so intentionally.
 
 Normal verification excludes the reviewed limitations. The retained Veryl
