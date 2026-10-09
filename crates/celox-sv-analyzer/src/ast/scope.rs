@@ -66,12 +66,6 @@ pub(super) fn imported() -> Arc<ScopeSymbols> {
     IMPORTED.with(|current| current.borrow().clone())
 }
 
-/// The item a call of `name` denotes: the package subroutine an import binds
-/// the name to, or `name` itself.
-pub(super) fn bind_call(name: String) -> String {
-    IMPORTED.with(|current| current.borrow().aliases.get(&name).cloned().unwrap_or(name))
-}
-
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 fn split_marker(key: &str) -> Option<(&str, &str)> {
@@ -154,16 +148,18 @@ impl ScopeSymbols {
                 self.locals.push(local.clone());
             }
         }
+        let mut added = Vec::new();
         for signal in &other.signals {
             if !self.signals.iter().any(|known| known.name == signal.name) {
                 self.signals.push(signal.clone());
-                self.initial_processes.extend(
-                    other
-                        .initial_processes
-                        .iter()
-                        .filter(|process| initializes(process, &signal.name))
-                        .cloned(),
-                );
+                added.push(signal.name.as_str());
+            }
+        }
+        for process in &other.initial_processes {
+            if added.iter().any(|name| initializes(process, name))
+                && !self.initial_processes.contains(process)
+            {
+                self.initial_processes.push(process.clone());
             }
         }
         for import in &other.dpi_imports {
@@ -216,6 +212,34 @@ impl ScopeSymbols {
         self.constant_functions.alias(name, target);
         alias_entry(&mut self.subroutine_params, name, target);
         alias_entry(&mut self.subroutine_shapes, name, target);
+        // A constant signal, such as an array parameter, is copied with its
+        // initializer under the name.
+        if let Some(signal) = self.signals.iter().find(|signal| signal.name == target) {
+            let signal = Signal {
+                name: name.to_string(),
+                ..signal.clone()
+            };
+            let names = HashMap::from_iter([(target.to_string(), name.to_string())]);
+            let rename = Renamer { names: &names };
+            let initializers: Vec<_> = self
+                .initial_processes
+                .iter()
+                .filter(|process| initializes(process, target))
+                .map(|process| InitialProcess {
+                    condition: process.condition.clone(),
+                    body: process
+                        .body
+                        .iter()
+                        .filter(|stmt| stmt_initializes(stmt, target))
+                        .cloned()
+                        .map(|stmt| rename.stmt(stmt))
+                        .collect(),
+                    initializer: process.initializer,
+                })
+                .collect();
+            self.signals.push(signal);
+            self.initial_processes.extend(initializers);
+        }
     }
 
     /// The names this scope declares itself: the ones not qualified by
@@ -403,11 +427,15 @@ impl ScopeSymbols {
 
 /// Whether `process` assigns the signal `name`.
 fn initializes(process: &InitialProcess, name: &str) -> bool {
-    process.body.iter().any(|stmt| match stmt {
+    process.body.iter().any(|stmt| stmt_initializes(stmt, name))
+}
+
+fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
         Stmt::Assign { lhs, .. } => lhs.name() == name,
         Stmt::AssignConcat { parts, .. } => parts.iter().any(|part| part.name() == name),
         _ => false,
-    })
+    }
 }
 
 fn extend_missing<V: Clone>(map: &mut HashMap<String, V>, other: &HashMap<String, V>) {

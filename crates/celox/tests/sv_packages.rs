@@ -4,12 +4,21 @@
 use celox::{ParserError, Simulator, SimulatorErrorKind};
 
 fn output(source: &str) -> u64 {
+    outputs(source, &["y"])[0]
+}
+
+fn outputs(source: &str, names: &[&str]) -> Vec<u64> {
     let mut simulator =
         Simulator::from_sv_sources(vec![(source, std::path::Path::new("packages.sv"))], "Top")
             .build()
             .unwrap_or_else(|error| panic!("{error}"));
-    let y = simulator.signal("y");
-    u64::try_from(simulator.get(y)).unwrap()
+    names
+        .iter()
+        .map(|name| {
+            let signal = simulator.signal(name);
+            u64::try_from(simulator.get(signal)).unwrap()
+        })
+        .collect()
 }
 
 fn error(source: &str) -> String {
@@ -132,6 +141,74 @@ fn parameter_overrides_take_qualified_enum_members() {
         ),
         2
     );
+}
+
+#[test]
+fn imports_bind_array_parameters_and_constant_variables() {
+    assert_eq!(
+        output(
+            "package p;
+               localparam logic [7:0] A [2] = '{8'd3, 8'd5};
+               const int K = 7;
+             endpackage
+             module Top(output logic [7:0] y);
+               import p::*;
+               assign y = A[1] + p::A[0] + 8'(K) + 8'(p::K);
+             endmodule"
+        ),
+        5 + 3 + 7 + 7
+    );
+}
+
+#[test]
+fn names_that_are_not_references_do_not_bind_imports() {
+    // `A` is only a port name and a structure member here; neither looks
+    // up the ambiguous wildcard-imported names.
+    assert_eq!(
+        output(
+            "package p; localparam int A = 1; localparam int W = 4; endpackage
+             package q; localparam int A = 2; endpackage
+             module Child(input logic [7:0] A, output logic [7:0] y); assign y = A; endmodule
+             module Top(output logic [7:0] y);
+               import p::*; import q::*;
+               typedef struct packed { logic [3:0] W; logic [3:0] A; } pair_t;
+               pair_t pair;
+               assign pair = '{W: 4'(W), A: 4'd6};
+               Child c(.A(8'(pair.A) + 8'(pair.W)), .y(y));
+             endmodule"
+        ),
+        10
+    );
+}
+
+#[test]
+fn a_generate_block_function_shadows_an_imported_one_only_inside() {
+    assert_eq!(
+        outputs(
+            "package p; function automatic int f(); return 1; endfunction endpackage
+             module Top(output logic [7:0] y, output logic [7:0] z);
+               import p::*;
+               assign y = 8'(f());
+               if (1) begin : g
+                 function automatic int f(); return 2; endfunction
+                 assign z = 8'(f());
+               end
+             endmodule",
+            &["y", "z"]
+        ),
+        [1, 2]
+    );
+}
+
+#[test]
+fn qualified_references_name_declared_items() {
+    let detail = error(
+        "package p; localparam int W = 3; endpackage
+         module Top(output logic [7:0] y); assign y = p::Missing; endmodule",
+    );
+    assert!(detail.contains("no item `Missing`"), "{detail}");
+    let detail = error("module Top(output logic [7:0] y); assign y = q::W; endmodule");
+    assert!(detail.contains("unknown package `q`"), "{detail}");
 }
 
 #[test]

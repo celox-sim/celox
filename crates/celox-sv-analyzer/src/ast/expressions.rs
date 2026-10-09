@@ -660,7 +660,6 @@ pub(super) fn expr_from_tf_call(
         RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
         syntax_tree,
     )
-    .map(scope::bind_call)
     .ok_or_else(|| unsupported("subroutine name"))?;
     let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
         None => Vec::new(),

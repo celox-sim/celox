@@ -788,7 +788,7 @@ impl Module {
             &parameter_values,
             &mut body_state,
         )?;
-        let comb_processes = comb_processes_from_module_node(
+        let mut comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -805,7 +805,7 @@ impl Module {
             )
         })
         .collect::<Vec<_>>();
-        let ff_processes = ff_processes_from_module_node(
+        let mut ff_processes = ff_processes_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -817,7 +817,6 @@ impl Module {
         for parameter in &array_parameters {
             initial_processes.push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
         }
-        let array_parameter_initializers = initial_processes.clone();
         initial_processes.extend(imported.initial_processes.iter().cloned());
         initial_processes.extend(procedural::initial_processes_from_module_node(
             node.clone(),
@@ -852,6 +851,49 @@ impl Module {
                 signal.name()
             )));
         }
+        // A call of a name an import binds calls the package subroutine or
+        // DPI import. Calls of subroutines declared in a generate block were
+        // already bound to those.
+        let calls: HashMap<String, String> = imported
+            .aliases
+            .iter()
+            .filter(|(_, target)| {
+                imported
+                    .subroutines
+                    .iter()
+                    .any(|subroutine| subroutine.name == **target)
+                    || imported
+                        .dpi_imports
+                        .iter()
+                        .any(|import| import.name() == target.as_str())
+            })
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect();
+        if !calls.is_empty() {
+            let rename = scope::Renamer { names: &calls };
+            let body = |body: Vec<Stmt>| body.into_iter().map(|stmt| rename.stmt(stmt)).collect();
+            for process in &mut comb_processes {
+                process.body = body(std::mem::take(&mut process.body));
+                for assignment in &mut process.assignments {
+                    assignment.rhs = rename.expr(assignment.rhs.clone());
+                }
+            }
+            for process in &mut ff_processes {
+                process.body = body(std::mem::take(&mut process.body));
+            }
+            for process in &mut initial_processes {
+                process.body = body(std::mem::take(&mut process.body));
+            }
+            for subroutine in &mut subroutines {
+                *subroutine = rename.subroutine(subroutine.clone());
+            }
+            for instance in &mut instances {
+                for connection in &mut instance.port_connections {
+                    connection.actual_expr =
+                        connection.actual_expr.take().map(|expr| rename.expr(expr));
+                }
+            }
+        }
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -871,11 +913,10 @@ impl Module {
             subroutines: subroutines.clone(),
             locals: locals.clone(),
             dpi_imports: dpi_imports.clone(),
-            signals: array_parameters
-                .iter()
-                .map(|parameter| parameter.signal.clone())
-                .collect(),
-            initial_processes: array_parameter_initializers,
+            // A package's signals are its array parameters and constant
+            // variables, initialized by its initial processes.
+            signals: signals.clone(),
+            initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
         });
         // The subroutines, locals and DPI imports of the packages the module

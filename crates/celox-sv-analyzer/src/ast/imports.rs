@@ -23,6 +23,8 @@ pub(super) struct ScopeImports {
     pub wildcard: Vec<String>,
     /// Every package named by an import or a package scope.
     pub packages: Vec<String>,
+    /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
+    pub qualified: Vec<(String, String)>,
 }
 
 impl ScopeImports {
@@ -33,8 +35,21 @@ impl ScopeImports {
                 packages.push(name);
             }
         };
+        // The identifier a package scope qualifies follows the scope and its
+        // package identifier.
+        let mut scope: Option<String> = None;
+        let mut skip = 0;
         for child in node {
             match child {
+                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
+                    if skip > 0 {
+                        skip -= 1;
+                    } else if let Some(package) = scope.take()
+                        && let Some(name) = identifier_text(child, tree)
+                    {
+                        imports.qualified.push((package, name));
+                    }
+                }
                 RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
                     let (Some(package), Some(name)) = (
                         identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
@@ -56,19 +71,23 @@ impl ScopeImports {
                         imports.wildcard.push(package);
                     }
                 }
-                RefNode::PackageScopePackage(scope) => {
+                RefNode::PackageScopePackage(package_scope) => {
                     if let Some(package) =
-                        identifier_text(RefNode::PackageIdentifier(&scope.nodes.0), tree)
+                        identifier_text(RefNode::PackageIdentifier(&package_scope.nodes.0), tree)
                     {
-                        note(&mut imports.packages, package);
+                        note(&mut imports.packages, package.clone());
+                        scope = Some(package);
+                        skip = 1;
                     }
                 }
-                RefNode::ClassScope(scope) => {
+                RefNode::ClassScope(class_scope) => {
                     if let Some(package) = identifier_text(
-                        RefNode::ClassIdentifier(&scope.nodes.0.nodes.0.nodes.1),
+                        RefNode::ClassIdentifier(&class_scope.nodes.0.nodes.0.nodes.1),
                         tree,
                     ) {
-                        note(&mut imports.packages, package);
+                        note(&mut imports.packages, package.clone());
+                        scope = Some(package);
+                        skip = 1;
                     }
                 }
                 // `p::t` as a data type parses as a class type.
@@ -76,7 +95,14 @@ impl ScopeImports {
                     if let Some(package) =
                         identifier_text(RefNode::PsClassIdentifier(&class_type.nodes.0), tree)
                     {
-                        note(&mut imports.packages, package);
+                        note(&mut imports.packages, package.clone());
+                        if let [(_, member, None)] = class_type.nodes.2.as_slice()
+                            && class_type.nodes.1.is_none()
+                            && let Some(name) =
+                                identifier_text(RefNode::ClassIdentifier(member), tree)
+                        {
+                            imports.qualified.push((package, name));
+                        }
                     }
                 }
                 _ => {}
@@ -87,8 +113,9 @@ impl ScopeImports {
 }
 
 /// The names declared directly in a module or package scope: its ports and
-/// parameters, the declarations of its items, its instances, and the
-/// functions and tasks it declares anywhere.
+/// parameters, and the declarations and instances of its items. Names
+/// declared in nested scopes, such as structure members, function locals
+/// and generate blocks, are left out.
 pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
     let mut names = HashSet::default();
     let mut add = |node: RefNode<'_>| {
@@ -118,19 +145,6 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
             }
         }
     }
-    for child in node.clone() {
-        let name = match child {
-            RefNode::FunctionBodyDeclaration(_) => unwrap_node!(child, FunctionIdentifier),
-            RefNode::TaskBodyDeclaration(_) => unwrap_node!(child, TaskIdentifier),
-            RefNode::DpiImportExport(_) => {
-                unwrap_node!(child, FunctionIdentifier, TaskIdentifier)
-            }
-            _ => continue,
-        };
-        if let Some(name) = name {
-            add(name);
-        }
-    }
     for item in scope_items(node) {
         if let ScopeItem::Module(module_item) = item
             && let Some(RefNode::HierarchicalInstance(_)) = unwrap_node!(
@@ -147,24 +161,67 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
         let Some(declaration) = item.declaration() else {
             continue;
         };
-        for child in RefNode::PackageOrGenerateItemDeclaration(declaration) {
+        let node = RefNode::PackageOrGenerateItemDeclaration(declaration);
+        match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::FunctionDeclaration(_) => {
+                if let Some(name) = unwrap_node!(node, FunctionIdentifier) {
+                    add(name);
+                }
+                continue;
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::TaskDeclaration(_) => {
+                if let Some(name) = unwrap_node!(node, TaskIdentifier) {
+                    add(name);
+                }
+                continue;
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::DpiImportExport(_) => {
+                if let Some(name) = unwrap_node!(node, FunctionIdentifier, TaskIdentifier) {
+                    add(name);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // Structure and union members are declared in the member name space
+        // of their type.
+        let mut members = HashSet::default();
+        for child in node.clone() {
+            if let RefNode::StructUnionMember(_) = child {
+                for member in child {
+                    if let RefNode::Locate(locate) = member {
+                        members.insert(locate.offset);
+                    }
+                }
+            }
+        }
+        let mut add_declared = |name: Option<RefNode<'_>>| {
+            if let Some(name) = name
+                && identifier_locate(name.clone())
+                    .is_none_or(|locate| !members.contains(&locate.offset))
+            {
+                add(name);
+            }
+        };
+        for child in node {
             match child {
-                // Declarations nested in a function or task belong to it.
-                RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_) => break,
-                RefNode::VariableIdentifier(_) | RefNode::NetIdentifier(_) => add(child),
+                RefNode::VariableDeclAssignment(_) => {
+                    add_declared(unwrap_node!(child, VariableIdentifier))
+                }
+                RefNode::NetDeclAssignment(_) => add_declared(unwrap_node!(child, NetIdentifier)),
                 RefNode::ParamAssignment(assignment) => {
-                    add(RefNode::ParameterIdentifier(&assignment.nodes.0))
+                    add_declared(Some(RefNode::ParameterIdentifier(&assignment.nodes.0)))
                 }
                 RefNode::TypeAssignment(assignment) => {
-                    add(RefNode::TypeIdentifier(&assignment.nodes.0))
+                    add_declared(Some(RefNode::TypeIdentifier(&assignment.nodes.0)))
                 }
                 RefNode::TypeDeclarationDataType(declaration) => {
-                    add(RefNode::TypeIdentifier(&declaration.nodes.2))
+                    add_declared(Some(RefNode::TypeIdentifier(&declaration.nodes.2)))
                 }
                 RefNode::EnumNameDeclaration(member) => {
-                    add(RefNode::EnumIdentifier(&member.nodes.0))
+                    add_declared(Some(RefNode::EnumIdentifier(&member.nodes.0)))
                 }
-                RefNode::GenvarIdentifier(_) => add(child),
+                RefNode::GenvarIdentifier(_) => add_declared(Some(child)),
                 _ => {}
             }
         }
@@ -173,9 +230,41 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
 }
 
 /// The identifiers a scope uses without a package scope, and declares.
-/// Identifiers qualified by a package scope are left out.
+/// Identifiers qualified by a package scope, the formal names of named
+/// connections, and structure members are left out.
 pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
     let mut names = HashSet::default();
+    // In `a.b`, only `a` is looked up in the scope; `b` names a member or a
+    // scope inside `a`. Structure members are not looked up either.
+    let mut inner = HashSet::default();
+    for child in node.clone() {
+        // Structure and union members are declared in their type.
+        if let RefNode::StructUnionMember(_) = child {
+            for member in child.clone() {
+                if let RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) = member
+                    && let Some(locate) = identifier_locate(member)
+                {
+                    inner.insert(locate.offset);
+                }
+            }
+        }
+        if let RefNode::HierarchicalIdentifier(_) = child {
+            for (index, identifier) in child
+                .into_iter()
+                .filter_map(|node| match node {
+                    RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
+                        identifier_locate(node)
+                    }
+                    _ => None,
+                })
+                .enumerate()
+            {
+                if index > 0 {
+                    inner.insert(identifier.offset);
+                }
+            }
+        }
+    }
     // A package scope is followed by its package identifier and then by the
     // identifier it qualifies.
     let mut skip = 0;
@@ -184,10 +273,19 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
             RefNode::PackageScopePackage(_) | RefNode::ClassScope(_) => skip = 2,
             RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(_)) => skip = 2,
             RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(_)) => skip = 1,
+            // Port and parameter names of a connection, and structure
+            // members, are not looked up in the scope.
+            RefNode::NamedPortConnection(_)
+            | RefNode::NamedParameterAssignment(_)
+            | RefNode::MemberIdentifier(_)
+            | RefNode::StructurePatternKey(_) => skip = 1,
             RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
                 if skip > 0 {
                     skip -= 1;
-                } else if let Some(name) = identifier_text(child, tree) {
+                } else if identifier_locate(child.clone())
+                    .is_none_or(|locate| !inner.contains(&locate.offset))
+                    && let Some(name) = identifier_text(child, tree)
+                {
                     names.insert(name);
                 }
             }
@@ -217,6 +315,27 @@ pub(super) fn imported_symbols(
         return Err(AnalyzerError::UnknownPackage {
             name: package.clone(),
         });
+    }
+    // A package may name its own items through its scope.
+    let own = match &node {
+        RefNode::PackageDeclaration(_) => scope_name_from_node(node.clone(), tree).ok(),
+        _ => None,
+    };
+    for (package, name) in &imports.qualified {
+        if own.as_ref() == Some(package) {
+            continue;
+        }
+        let Some(package_symbols) = packages.get(package) else {
+            return Err(AnalyzerError::UnknownPackage {
+                name: package.clone(),
+            });
+        };
+        if !package_symbols.declares(name) {
+            return Err(AnalyzerError::UnknownPackageItem {
+                package: package.clone(),
+                name: name.clone(),
+            });
+        }
     }
     let mut symbols = ScopeSymbols::default();
     let mut used = Vec::new();

@@ -365,9 +365,23 @@ pub(super) fn signals_from_module_node(
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
     for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
-        // Packages declare no instances, signals or processes here.
-        let ScopeItem::Module(node) = item.node else {
-            continue;
+        let node = match item.node {
+            ScopeItem::Module(node) => node,
+            // The variables of a package are its constant variables; the
+            // others are rejected with the package.
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(
+                data,
+            )) => {
+                signals.extend(signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    &item.env,
+                    None,
+                )?);
+                continue;
+            }
+            ScopeItem::Package(_) => continue,
         };
         let start = signals.len();
         signals_from_module_or_generate_item(

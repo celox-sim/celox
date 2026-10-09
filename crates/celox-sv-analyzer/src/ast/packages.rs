@@ -3,9 +3,9 @@
 //! A package is analyzed once, after the packages it depends on, with the
 //! collectors that analyze a module: its declarations form a scope of their
 //! own. Its symbols are exported under their qualified names `p::x`, with the
-//! references among them bound to those names (see [`super::scope`]). A
+//! references among them bound to those names (see the `scope` module). A
 //! module or package that uses packages starts from their symbols, and from
-//! an alias for each name its imports bind (see [`super::imports`]).
+//! an alias for each name its imports bind (see the `imports` module).
 
 use super::scope::ScopeSymbols;
 use super::*;
