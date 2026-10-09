@@ -4500,26 +4500,25 @@ fn runtime_select_position(
             // range past the whole array, so its flattened position never
             // reaches a neighbouring element. Within a constant element, the
             // position can be measured within it.
-            window = element_window
-                .then(|| {
-                    runtime_select_window(
-                        lsb,
-                        unpacked_element_width(variable)?,
-                        variable.width,
-                        constants,
-                        parameter_types,
-                    )
-                })
-                .flatten();
+            // A write stays in its constant element through its own window
+            // (see `dynamic_packed_write`).
+            let element = unpacked_element_width(variable).and_then(|element_width| {
+                runtime_select_window(
+                    lsb,
+                    element_width,
+                    variable.width,
+                    constants,
+                    parameter_types,
+                )
+            });
+            whole_array = element.is_none();
+            window = element.filter(|_| element_window);
             match window {
                 Some(window) => (
                     i128::try_from(window.msb).ok()?,
                     i128::try_from(window.lsb).ok()?,
                 ),
-                None => {
-                    whole_array = true;
-                    (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
-                }
+                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
             }
         }
         Some(variable) => {
