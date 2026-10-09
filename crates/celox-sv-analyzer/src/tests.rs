@@ -2490,6 +2490,38 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
 }
 
 #[test]
+fn rejects_package_variables_and_nets() {
+    // A package variable is one object shared by every module, but inlining
+    // would give each module its own copy.
+    for (code, construct) in [
+        (
+            "package p; logic [7:0] shared; endpackage",
+            "package variable or net `p::shared`",
+        ),
+        (
+            "package p; var int count = 0; endpackage",
+            "package variable or net `p::count`",
+        ),
+        (
+            "package p; wire w; endpackage",
+            "package variable or net `p::w`",
+        ),
+    ] {
+        let error = source_packages(code, Path::new("state.sv")).unwrap_err();
+        assert_eq!(error, AnalyzerError::Unsupported(construct.to_string()));
+        assert_eq!(error.tracking_issue(), 1146);
+    }
+    // Constants, and the variables of package functions, are not shared state.
+    let code = "package p; const int K = 3; localparam int W = 4;\n\
+                function automatic int f(int x); int t; t = x + K; return t; endfunction\n\
+                endpackage";
+    assert_eq!(
+        source_packages(code, Path::new("state.sv")).unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn package_inlining_keeps_source_text_after_a_dpi_import() {
     // The preprocessor widens the space after `"DPI-C"`, so syntax tree
     // offsets after it no longer match the source text.

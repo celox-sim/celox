@@ -208,6 +208,7 @@ pub fn source_packages(
         };
         let name = identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()))?;
+        reject_package_state(&name, &package.nodes.6, syntax_tree)?;
         let (Some((_, header_end)), Some((footer_start, _))) = (
             node_span(RefNode::Symbol(&package.nodes.4), syntax_tree),
             node_span(RefNode::Keyword(&package.nodes.7), syntax_tree),
@@ -234,6 +235,48 @@ pub fn source_packages(
         });
     }
     Ok(packages)
+}
+
+/// Reject the variables and nets of package `name`. A package declares one
+/// object shared by every module, but inlining would give each module its
+/// own copy. Constant variables cannot change, so a copy is equivalent.
+fn reject_package_state(
+    name: &str,
+    items: &[(Vec<sv_parser::AttributeInstance>, sv_parser::PackageItem)],
+    syntax_tree: &SyntaxTree,
+) -> Result<(), AnalyzerError> {
+    use sv_parser::{DataDeclaration, PackageItem, PackageOrGenerateItemDeclaration};
+    for (_, item) in items {
+        let PackageItem::PackageOrGenerateItemDeclaration(declaration) = item else {
+            continue;
+        };
+        let state = match declaration.as_ref() {
+            PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
+                Some(RefNode::NetDeclaration(net))
+            }
+            PackageOrGenerateItemDeclaration::DataDeclaration(data) => match data.as_ref() {
+                DataDeclaration::Variable(variable) if variable.nodes.0.is_none() => {
+                    Some(RefNode::DataDeclarationVariable(variable))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(state) = state else {
+            continue;
+        };
+        let identifier = state.into_iter().find_map(|node| match node {
+            RefNode::VariableIdentifier(_) | RefNode::NetIdentifier(_) => {
+                identifier_text(node, syntax_tree)
+            }
+            _ => None,
+        });
+        return Err(AnalyzerError::Unsupported(format!(
+            "package variable or net `{name}::{}`",
+            identifier.as_deref().unwrap_or("?")
+        )));
+    }
+    Ok(())
 }
 
 /// Add `name` and, before it, the packages it depends on (each once).

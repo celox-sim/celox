@@ -201,7 +201,10 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   simulation.
 - **Packages** are inlined into each module that uses them. Names resolve by
   their plain identifier, so a package item and a module item with the same
-  name are reported as a duplicate declaration.
+  name are reported as a duplicate declaration. Package variables and nets
+  are rejected, since each module would get its own copy instead of sharing
+  one object; `const` variables are accepted. Resolving packages as scopes is
+  tracked in [#1146](https://github.com/celox-sim/celox/issues/1146).
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An
