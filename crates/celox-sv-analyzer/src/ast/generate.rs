@@ -27,7 +27,7 @@ fn scope_component(name: &str) -> String {
 
 #[derive(Clone)]
 pub(super) struct Item<'a> {
-    pub node: &'a sv_parser::ModuleOrGenerateItem,
+    pub node: ScopeItem<'a>,
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
@@ -39,7 +39,9 @@ pub(super) struct Item<'a> {
 impl Item<'_> {
     pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
         match self.node {
-            sv_parser::ModuleOrGenerateItem::ModuleItem(item) => Some(&item.nodes.1),
+            ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(item)) => {
+                Some(&item.nodes.1)
+            }
             _ => None,
         }
     }
@@ -47,22 +49,11 @@ impl Item<'_> {
     /// These declarations have already populated the constant environment;
     /// instance/process/subroutine collectors cannot produce bodies from them.
     pub fn is_parameter_declaration(&self) -> bool {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = self.node else {
-            return false;
-        };
-        let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
-            &item.nodes.1
-        else {
-            return false;
-        };
-        let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-            declaration,
-        ) = &**declaration
-        else {
+        let Some(declaration) = self.node.declaration() else {
             return false;
         };
         matches!(
-            &**declaration,
+            declaration,
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
                 | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)
         )
@@ -351,6 +342,12 @@ pub(super) fn items<'a>(
         ..Scope::default()
     };
     let mut ordinal = 0;
+    if let RefNode::PackageDeclaration(package) = node {
+        for declaration in package_declarations(package) {
+            elaborator.push(ScopeItem::Package(declaration), &scope);
+        }
+        return Ok(elaborator.items);
+    }
     for item in module_non_port_items(node) {
         match item {
             sv_parser::NonPortModuleItem::GenerateRegion(region) => {
@@ -710,8 +707,13 @@ impl<'a> Elaborator<'a, '_> {
                 "function declaration inside loop-generate".to_string(),
             ));
         }
+        self.push(ScopeItem::Module(item), scope);
+        Ok(())
+    }
+
+    fn push(&mut self, node: ScopeItem<'a>, scope: &Scope) {
         self.items.push(Item {
-            node: item,
+            node,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
@@ -719,7 +721,6 @@ impl<'a> Elaborator<'a, '_> {
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
         });
-        Ok(())
     }
 
     fn constants_and_signal_types(
@@ -1141,17 +1142,11 @@ fn module_constant_functions(
     let types = parameter_types_from_const_env(env);
     let mut functions = HashMap::default();
     let mut calls = HashMap::default();
-    for item in module_scope_items(node) {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
+    for item in scope_items(node) {
+        let Some(declaration) = item.declaration() else {
             continue;
         };
-        if !matches!(
-            item.nodes.1,
-            sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_)
-        ) {
-            continue;
-        }
-        for node in RefNode::ModuleCommonItem(&item.nodes.1) {
+        for node in RefNode::PackageOrGenerateItemDeclaration(declaration) {
             let RefNode::FunctionDeclaration(declaration) = node else {
                 continue;
             };
@@ -1322,7 +1317,8 @@ mod tests {
             let assignment = active
                 .iter()
                 .find(|item| {
-                    RefNode::ModuleOrGenerateItem(item.node)
+                    item.node
+                        .node()
                         .into_iter()
                         .any(|node| matches!(node, RefNode::ContinuousAssign(_)))
                 })

@@ -13,11 +13,10 @@ pub(super) fn functions_from_module_node(
         type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
     let active = generate::items(node.clone(), syntax_tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::new(packed_dimensions);
-    for (item, child) in active.iter().flat_map(|item| {
-        RefNode::ModuleOrGenerateItem(item.node)
-            .into_iter()
-            .map(move |child| (item, child))
-    }) {
+    for (item, child) in active
+        .iter()
+        .flat_map(|item| item.node.node().into_iter().map(move |child| (item, child)))
+    {
         if let RefNode::TaskDeclaration(declaration) = child {
             let task_dimensions = views.dimensions(item);
             let const_env = &item.env;

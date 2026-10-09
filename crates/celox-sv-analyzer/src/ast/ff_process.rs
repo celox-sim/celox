@@ -19,6 +19,9 @@ pub(super) fn ff_processes_from_module_node(
     )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
         if !matches!(
             item.common(),
             Some(sv_parser::ModuleCommonItem::AlwaysConstruct(_))
@@ -28,7 +31,7 @@ pub(super) fn ff_processes_from_module_node(
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         ff_processes_from_module_or_generate_item(
-            item.node,
+            node,
             syntax_tree,
             &item.env,
             literals,

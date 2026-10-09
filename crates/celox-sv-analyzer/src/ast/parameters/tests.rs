@@ -179,9 +179,9 @@ fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
         let incremental =
             parameters_from_module_node(node.clone(), &tree, &aliases, &base, &overrides).unwrap();
         let mut rebuilt = Vec::new();
-        for item in module_non_port_items(node.clone()) {
-            let Some(sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter)) =
-                package_or_generate_declaration_from_non_port_item(item)
+        for declaration in scope_declarations(node.clone()) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
+                declaration
             else {
                 continue;
             };
@@ -249,4 +249,48 @@ fn parameter_prefix_is_fresh_for_each_specialization() {
             &crate::ir::Expr::Literal((n + 1).to_string())
         );
     }
+}
+
+#[test]
+fn collects_the_declarations_of_a_package() {
+    let code = "package p;\n\
+                localparam int W = 4;\n\
+                parameter int N = W * 2;\n\
+                typedef logic [W-1:0] word_t;\n\
+                typedef enum logic [1:0] { IDLE, RUN = 2 } state_t;\n\
+                function automatic int twice(int x); return x * 2; endfunction\n\
+                endpackage\n";
+    let tree = crate::syntax::parse_source(code, Path::new("package.sv")).unwrap();
+    let package = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
+        .unwrap();
+    let parameters = parameters_from_module_node(
+        package.clone(),
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap();
+    let env = const_env_from_parameters(&parameters);
+    assert_eq!((env["W"], env["N"]), (4, 8));
+    let aliases = type_aliases_from_module_node_with_env(package.clone(), &tree, &env).unwrap();
+    assert_eq!(aliases["word_t"].packed_ranges().len(), 1);
+    let enums = enum_member_constants_from_module_node(
+        package.clone(),
+        &tree,
+        &env,
+        &aliases,
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert_eq!((enums.numbers["IDLE"], enums.numbers["RUN"]), (0, 2));
+    let items = generate::items(package, &tree, &env, &aliases).unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(
+        items
+            .iter()
+            .all(|item| matches!(item.node, ScopeItem::Package(_)))
+    );
 }

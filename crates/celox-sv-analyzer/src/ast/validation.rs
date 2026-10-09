@@ -503,7 +503,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
         for item in &active {
             let dimensions = views.dimensions(item);
             reject_silently_ignored_constructs_with_dimensions(
-                RefNode::ModuleOrGenerateItem(item.node),
+                item.node.node(),
                 syntax_tree,
                 dimensions,
             )?;

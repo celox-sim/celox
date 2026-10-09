@@ -19,6 +19,9 @@ pub(super) fn comb_processes_from_module_node(
     )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
         let relevant = match item.common() {
             Some(
                 sv_parser::ModuleCommonItem::ContinuousAssign(_)
@@ -38,7 +41,7 @@ pub(super) fn comb_processes_from_module_node(
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         comb_processes_from_module_or_generate_item(
-            item.node,
+            node,
             None,
             syntax_tree,
             &item.env,

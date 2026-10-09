@@ -80,12 +80,11 @@ use constants::{
     unary_expr_from_symbol,
 };
 use declarations::{
-    identifier_locate, module_interface_from_node, module_name_from_node, module_non_port_items,
-    module_parameter_port_list, module_scope_items,
-    package_or_generate_declaration_from_module_item,
-    package_or_generate_declaration_from_non_port_item, parameter_name,
-    parameters_from_module_node, ports_from_module_node, signals_from_data_declaration,
-    signals_from_module_node, signals_from_module_or_generate_item, type_alias_from_ref_node,
+    ScopeItem, identifier_locate, module_interface_from_node, module_name_from_node,
+    module_non_port_items, module_parameter_port_list, package_declarations, parameter_name,
+    parameters_from_module_node, ports_from_module_node, scope_declarations, scope_items,
+    signals_from_data_declaration, signals_from_module_node, signals_from_module_or_generate_item,
+    type_alias_from_ref_node,
 };
 use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,

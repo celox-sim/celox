@@ -202,12 +202,15 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
             .unwrap()
             .into_iter()
             .find(|item| {
-                RefNode::ModuleOrGenerateItem(item.node)
+                item.node
+                    .node()
                     .into_iter()
                     .any(|node| matches!(node, RefNode::SystemTfCall(_)))
             })
             .unwrap();
-        let call = RefNode::ModuleOrGenerateItem(item.node)
+        let call = item
+            .node
+            .node()
             .into_iter()
             .find_map(|node| match node {
                 RefNode::SystemTfCall(call) => Some(call),

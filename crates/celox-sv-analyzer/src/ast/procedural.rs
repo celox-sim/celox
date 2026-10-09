@@ -1501,7 +1501,7 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
-        for child in RefNode::ModuleOrGenerateItem(item.node) {
+        for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
                 RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
@@ -1575,7 +1575,7 @@ pub(super) fn subroutines_from_module_node_with(
         if item.is_parameter_declaration() {
             continue;
         }
-        for child in RefNode::ModuleOrGenerateItem(item.node) {
+        for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
                 RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
@@ -1752,7 +1752,8 @@ pub(super) fn initial_processes_from_module_node(
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(module_item) = item.node else {
+        let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(module_item)) = item.node
+        else {
             continue;
         };
         if item.is_parameter_declaration() {

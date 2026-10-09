@@ -338,8 +338,9 @@ and typed substitution across every constant-expression variant. A 4,096-paramet
 unrelated environment does not increase the number of expression type lookups.
 The existing backend suite checks language behavior; no portable cases are added.
 
-The same optimized profile and three-run median procedure give these complete AST
-construction measurements for a block of independent signals:
+Before merging the later declaration-collection refactor, the same optimized
+profile and three-run median procedure give these complete AST construction
+measurements for a block of independent signals (`bb0b2c124`):
 
 | Signals | AST before (ms) | AST after (ms) | Parse after (ms) |
 | --- | ---: | ---: | ---: |
@@ -353,7 +354,7 @@ construction measurements for a block of independent signals:
 At 1,024 signals, parsing before was 145.591 ms and IR conversion before/after was
 0.468/0.405 ms. AST construction is about 35x faster. Expanding the after input
 from 128 to 4,096 signals (32x) increases AST time about 37x, replacing the earlier
-fourfold cost for each doubling. The full flat declaration path retains sorting
+fourfold cost for each doubling. The probe's flat declaration path retains sorting
 and heap scheduling, so its expected work includes O(N log N); it is not strictly
 O(N). Shared-machine load affects timings, especially the larger inputs.
 
@@ -378,6 +379,25 @@ This is an after-only workload, with no old assignment-mode timing. The final
 sample has a corresponding increase in parser and IR time; the source inspection
 and operation-count regressions establish the eliminated repeated work without
 using wall-clock thresholds. These probes exclude backend compilation and simulation.
+
+The final combined tree also includes master `2d4d82603`, adapting the collectors
+to its shared module/package declaration representation. Both probes were rerun
+on that tree; these later samples show substantial shared-machine variation:
+
+| Signals | Parse (ms) | AST (ms) | IR (ms) | Parse with assignments (ms) | AST with assignments (ms) | IR with assignments (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 26.576 | 66.657 | 0.072 | 82.969 | 77.493 | 0.167 |
+| 256 | 90.290 | 336.197 | 0.132 | 233.984 | 335.563 | 0.317 |
+| 512 | 253.926 | 373.904 | 0.274 | 195.088 | 401.775 | 0.727 |
+| 1,024 | 234.480 | 829.758 | 0.537 | 515.555 | 916.015 | 1.696 |
+| 2,048 | 441.699 | 1,633.141 | 0.994 | 1,551.187 | 2,071.680 | 4.116 |
+| 4,096 | 937.956 | 3,580.860 | 6.140 | 1,651.616 | 3,584.016 | 6.938 |
+
+Across the larger final inputs (512→4,096, an eightfold increase), AST time grows
+about 9.6x without assignments and 8.9x with assignments. The final 1,024-signal
+AST sample is about 16x faster than `a7fbb309e`. Timing ratios describe these
+specific inputs; operation-count regressions and source inspection establish
+which repeated work was removed. No timing threshold is part of the tests.
 
 ## Remaining boundaries
 

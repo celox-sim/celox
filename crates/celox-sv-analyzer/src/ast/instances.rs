@@ -14,13 +14,16 @@ pub(super) fn instances_from_module_node(
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for item in &active {
-        if !matches!(item.node, sv_parser::ModuleOrGenerateItem::Module(_)) {
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
+        if !matches!(node, sv_parser::ModuleOrGenerateItem::Module(_)) {
             continue;
         }
         let start = instances.len();
         let dimensions = views.dimensions(item);
         instances_from_module_or_generate_item(
-            item.node,
+            node,
             None,
             syntax_tree,
             &item.env,
