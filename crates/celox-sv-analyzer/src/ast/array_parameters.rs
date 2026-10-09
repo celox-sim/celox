@@ -91,10 +91,7 @@ pub(super) fn array_parameters_from_module_node<'a>(
             }
         }
     }
-    for item in module_non_port_items(node.clone()) {
-        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
-            continue;
-        };
+    for declaration in scope_declarations(node.clone()) {
         declarations.push(match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
                 RefNode::LocalParameterDeclaration(&declaration.0)

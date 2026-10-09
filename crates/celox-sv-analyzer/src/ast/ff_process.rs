@@ -17,6 +17,10 @@ pub(super) fn ff_processes_from_module_node(
         const_env,
         &packed_dimensions.type_aliases,
     )? {
+        // Packages declare no instances, signals or processes here.
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
         if item.is_parameter_declaration() {
             continue;
         }
@@ -24,7 +28,7 @@ pub(super) fn ff_processes_from_module_node(
         let dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
         ff_processes_from_module_or_generate_item(
-            item.node,
+            node,
             syntax_tree,
             &item.env,
             &literals,

@@ -13,13 +13,17 @@ pub(super) fn instances_from_module_node(
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     for item in active {
+        // Packages declare no instances, signals or processes here.
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
         if item.is_parameter_declaration() {
             continue;
         }
         let start = instances.len();
         let dimensions = item.dimensions(packed_dimensions);
         instances_from_module_or_generate_item(
-            item.node,
+            node,
             None,
             syntax_tree,
             &item.env,
