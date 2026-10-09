@@ -169,6 +169,57 @@ and reverse generate dependencies took 15.630/182.504 ms. After measurements
 are 13.705/186.642 ms and 15.865/179.495 ms, respectively. This change does not
 replace their dependency scheduling or repeated environment construction.
 
+## Parameter environments and scope snapshots
+
+The next follow-up starts from master `064b9541f`. Module parameter collection
+now carries a parameter-only value/type prefix alongside the inherited
+environment. It binds each appended parameter once rather than rebuilding all
+preceding parameters for each declaration and initializer. The prefix keeps
+its existing precedence over inherited values and type markers. It is local to
+one collection pass; later passes rebuild it with the current aliases and
+specialization overrides. Scalar declaration headers avoid constructing range
+environments. Packed ranges and aliases retain the existing range-lowering path.
+
+Modules without a direct enum declaration skip enum-member collection. Modules
+with enums retain the parameter and alias refreshes needed for interleaved enum
+and parameter dependencies. Instance, process, and subroutine collectors also
+skip building body contexts for parameter declarations, which produce no bodies;
+those declarations still undergo constant collection and validation.
+
+Generated item snapshots and packed-dimension contexts share numeric environments
+and parameter-expression tables through `Arc`. A mutable scope detaches a shared
+table on its first write. Other scopes keep their previous values. Parameter
+dimension tables are computed once per completed scope and shared among its
+items; binding generate-local parameters or removing a shadowed loop parameter
+refreshes that table before emitting items.
+
+These optimizations preserve the width/sign rules for value parameters
+(IEEE 1800-2023 6.20.2, **Value parameters**) and local-binding precedence
+(23.9, **Scope rules**). Analyzer regressions compare incremental collection
+with rebuilding across inherited values, overrides, signed aliases, casts,
+unknown literals, and forward references. They check repeated specialization,
+snapshot mutation isolation, and exactly 128 prefix-binding attempts for 128
+simple declarations, without a wall-clock assertion.
+
+The existing `type_queries --parameters` probe checks the final constant value
+or generated signal width. Using the same profile, inputs, machine, and three-run
+median procedure as above, AST construction takes:
+
+| Workload | Count | AST before (ms) | AST after (ms) |
+| --- | ---: | ---: | ---: |
+| declaration-order parameters | 16 | 32.751 | 3.678 |
+| declaration-order parameters | 64 | 306.720 | 17.053 |
+| declaration-order parameters | 256 | 6,760.006 | 125.544 |
+| reverse generate dependencies | 16 | 28.978 | 8.413 |
+| reverse generate dependencies | 64 | 420.373 | 71.882 |
+| reverse generate dependencies | 256 | 7,435.463 | 863.795 |
+
+At 256 entries, these are about 54x and 8.6x improvements in AST construction.
+The after run parses the two inputs in about 26/30 ms, and converts AST to IR in
+about 0.27/0.02 ms. The measurements exclude backend compilation and simulation.
+Shared-machine load varies between runs; these numbers describe these inputs,
+not a universal speedup. Overall AST construction still shows superlinear growth.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -176,12 +227,18 @@ require parsing the rewritten source. Nested module declarations retain the
 syntax-walk fallback; ordinary top-level module lookup avoids unrelated bodies.
 Resolving the parser's source root can still visit its description list.
 
-Constant environments, type-alias tables, and generated parameter metadata are
-still copied in some scope paths. Many dependent parameters, many functions
+Type-alias tables and generated name metadata are still copied in some scope
+paths. Shared numeric/parameter-expression tables copy their contents when a
+shared scope mutates them, and some borrowed-map constructors still copy an
+environment. Many dependent parameters, many functions
 inside generated scopes, and `$bits`/`$size` queries during declaration lowering
 or in numeric cast targets can have different scaling from the flat probes.
 Those preliminary queries still discover enclosing declarations by walking
-syntax. Query contexts also clone some constant/alias/function-type tables.
+syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
+modules with enums still rebuild some environments, generated scopes still
+rebuild parameter prefixes, and dependency scheduling still scans unresolved
+names. Applying parameter dimensions and materializing scoped literals also
+contribute work that grows with the number of visible parameters.
 This change does not establish linear scaling for those workloads. The probes
 provide reproducible baselines for further optimization.
 

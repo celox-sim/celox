@@ -210,6 +210,7 @@ pub(super) fn parameters_from_module_node(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
+    let mut environment = parameters::ParameterEnvironment::new(&parameters, base_const_env);
     let parameter_port_list = module_parameter_port_list(node.clone());
     // IEEE 1800-2023 6.20.1: with a parameter port list, even an empty one,
     // a `parameter` declared in the module body is a localparam.
@@ -225,6 +226,7 @@ pub(super) fn parameters_from_module_node(
             base_const_env,
             type_aliases,
             parameter_overrides,
+            &mut environment,
         )?;
     }
 
@@ -233,7 +235,7 @@ pub(super) fn parameters_from_module_node(
             match declaration {
                 sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
                     localparam,
-                ) => parameters_from_ref_node(
+                ) => parameters::parameters_from_ref_node_with_environment(
                     RefNode::LocalParameterDeclaration(&localparam.0),
                     syntax_tree,
                     &mut parameters,
@@ -241,9 +243,10 @@ pub(super) fn parameters_from_module_node(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
+                    &mut environment,
                 )?,
                 sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                    parameters_from_ref_node(
+                    parameters::parameters_from_ref_node_with_environment(
                         RefNode::ParameterDeclaration(&parameter.0),
                         syntax_tree,
                         &mut parameters,
@@ -251,6 +254,7 @@ pub(super) fn parameters_from_module_node(
                         base_const_env,
                         type_aliases,
                         parameter_overrides,
+                        &mut environment,
                     )?
                 }
                 _ => {}
@@ -268,10 +272,11 @@ fn parameters_from_parameter_port_list(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
+    environment: &mut parameters::ParameterEnvironment,
 ) -> Result<(), AnalyzerError> {
     match list {
         sv_parser::ParameterPortList::Assignment(list) => {
-            parameters_from_ref_node(
+            parameters::parameters_from_ref_node_with_environment(
                 RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0),
                 syntax_tree,
                 parameters,
@@ -279,6 +284,7 @@ fn parameters_from_parameter_port_list(
                 base_const_env,
                 type_aliases,
                 parameter_overrides,
+                environment,
             )?;
             for (_, declaration) in &list.nodes.1.nodes.1.1 {
                 parameters_from_parameter_port_declaration(
@@ -288,6 +294,7 @@ fn parameters_from_parameter_port_list(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
+                    environment,
                 )?;
             }
         }
@@ -300,6 +307,7 @@ fn parameters_from_parameter_port_list(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
+                    environment,
                 )?;
             }
         }
@@ -315,6 +323,7 @@ fn parameters_from_parameter_port_declaration(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
+    environment: &mut parameters::ParameterEnvironment,
 ) -> Result<(), AnalyzerError> {
     let is_local = matches!(
         declaration,
@@ -326,7 +335,7 @@ fn parameters_from_parameter_port_declaration(
     ) {
         return Ok(());
     }
-    parameters_from_ref_node(
+    parameters::parameters_from_ref_node_with_environment(
         RefNode::ParameterPortDeclaration(declaration),
         syntax_tree,
         parameters,
@@ -334,6 +343,7 @@ fn parameters_from_parameter_port_declaration(
         base_const_env,
         type_aliases,
         parameter_overrides,
+        environment,
     )
 }
 

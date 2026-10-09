@@ -1570,6 +1570,9 @@ pub(super) fn subroutines_from_module_node_with(
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
     for item in generate::items(node, tree, const_env, &type_aliases)? {
+        if item.is_parameter_declaration() {
+            continue;
+        }
         let item_dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
         for child in RefNode::ModuleOrGenerateItem(item.node) {
@@ -1749,6 +1752,9 @@ pub(super) fn initial_processes_from_module_node(
         let sv_parser::ModuleOrGenerateItem::ModuleItem(module_item) = item.node else {
             continue;
         };
+        if item.is_parameter_declaration() {
+            continue;
+        }
         let item_dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
         if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
