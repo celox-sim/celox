@@ -19,10 +19,12 @@ function expression(block, property) {
 }
 // Exercise the actual job conditions, including combinations that must avoid
 // starting expensive simulation jobs. These expressions use JS-compatible
-// boolean operators and equality, with no Actions-specific functions.
-function runs(name, event, ref, inputs = {}) {
-  return Boolean(new Function("github", "inputs", `return (${expression(job(heliodor, name), "if")});`)(
+// boolean operators and equality. Supply the cancellation status and input
+// validation result explicitly, including the skipped schedule prerequisite.
+function runs(name, event, ref, inputs = {}, validation = event === "workflow_dispatch" ? "success" : "skipped", cancelled = false) {
+  return Boolean(new Function("github", "inputs", "needs", "cancelled", `return (${expression(job(heliodor, name), "if")});`)(
     { event_name: event, ref: `refs/heads/${ref}` }, inputs,
+    { "validate-dispatch": { result: validation } }, () => cancelled,
   ));
 }
 
@@ -89,4 +91,19 @@ test("publication keeps comparisons and retries without pushing a stale shared h
   assert.match(publish, /node scripts\/publish-bench\.mjs rust-converted\.json verilator-converted\.json ts-converted\.json/);
   assert.doesNotMatch(publish, /auto-push: true/);
   assert.equal([...publish.matchAll(/comment-on-alert: true/g)].length, 3);
+});
+
+
+test("failed manual validation and cancellation cannot start expensive jobs", () => {
+  for (const name of ["heliodor", "heliodor-head", "linux-suite-matrix", "arm64-linux-boot-full"]) {
+    assert.match(job(heliodor, name), /needs: validate-dispatch/);
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      for (const ref of ["master", "develop", "feature"]) {
+        for (const inputs of [{}, { suite_test: "test_soc_linux_boot" }, { arm64_profile: true }]) {
+          assert.equal(runs(name, "workflow_dispatch", ref, inputs, result), false, name);
+        }
+      }
+    }
+    assert.equal(runs(name, "schedule", "master", {}, "skipped", true), false, name);
+  }
 });

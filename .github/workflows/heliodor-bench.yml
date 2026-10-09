@@ -105,8 +105,10 @@ jobs:
   # its smaller fixed gate daily to check the Veryl HEAD lane without duplicating
   # the full suite. Explicit suite selections and profiling remain manual.
   heliodor:
+    needs: validate-dispatch
     name: Pinned Linux boot compatibility
     if: >-
+      !cancelled() && (github.event_name != 'workflow_dispatch' || needs['validate-dispatch'].result == 'success') &&
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' &&
       !inputs.arm64_profile && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
     runs-on: ubuntu-latest
@@ -211,8 +213,11 @@ jobs:
         run: exit 1
 
   arm64-linux-boot-full:
+    needs: validate-dispatch
     name: ARM64 Linux boot profiling
-    if: github.event_name == 'workflow_dispatch' && inputs.arm64_profile
+    if: >-
+      !cancelled() && (github.event_name != 'workflow_dispatch' || needs['validate-dispatch'].result == 'success') &&
+      github.event_name == 'workflow_dispatch' && inputs.arm64_profile
     permissions:
       contents: read
       actions: read
@@ -372,7 +377,9 @@ jobs:
             heliodor-arm64-host.txt
 
   linux-suite-matrix:
+    needs: validate-dispatch
     if: >-
+      !cancelled() && (github.event_name != 'workflow_dispatch' || needs['validate-dispatch'].result == 'success') &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
       !inputs.arm64_profile &&
       (github.ref != 'refs/heads/develop' || inputs.suite_test || inputs.suite_runner || inputs.suite_arch)
@@ -485,8 +492,10 @@ jobs:
             target/heliodor/results/*.log
 
   heliodor-head:
+    needs: validate-dispatch
     name: Heliodor HEAD compatibility
     if: >-
+      !cancelled() && (github.event_name != 'workflow_dispatch' || needs['validate-dispatch'].result == 'success') &&
       (github.event_name == 'schedule' ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')) &&
       !inputs.arm64_profile && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
