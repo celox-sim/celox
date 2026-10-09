@@ -534,6 +534,54 @@
   (assert_eq wrapped_base 10)
   (assert_eq written 0xbf))
 
+(case runtime_index_expressions_wrap_at_their_own_width
+  ; A select index is evaluated in a self-determined context (IEEE 1800-2023
+  ; 11.5.1, Table 11-21): `a + b` of one-bit operands is one bit wide and
+  ; `j + 2'd1` two bits wide, while `j + 1` is at least 32 bits wide (its
+  ; out-of-range value is left out: the simulators read it differently).
+  (source "runtime_index_width.sv" #"
+                module Top(input logic clk, input logic a, input logic b, input logic [1:0] j,
+                           output logic [3:0] written, output logic bit_read,
+                           output logic [1:0] part, output logic [7:0] element,
+                           output logic [3:0] nibble, output logic [7:0] wide,
+                           output logic [3:0] registered);
+                    logic [3:0] source;
+                    logic [7:0] mem [4];
+                    logic [3:0][3:0] packed_;
+                    always_comb begin
+                        source = 4'b0110;
+                        for (int e = 0; e < 4; e++) mem[e] = 8'(e + 1);
+                        packed_ = 16'h4321;
+                    end
+                    always_comb begin
+                        written = 4'd0;
+                        written[a + b] = 1'b1;
+                    end
+                    assign bit_read = source[a + b];
+                    assign part = source[a + b +: 2];
+                    assign element = mem[j + 2'd1];
+                    assign nibble = packed_[j + 2'd1];
+                    assign wide = mem[j + 1];
+                    always_ff @(posedge clk) begin
+                        registered <= 4'd0;
+                        registered[a + b] <= 1'b1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (x y row) (list (0 0 0) (1 0 1) (1 1 3) (0 1 2))
+    (modify (set a x) (set b y) (set j row))
+    (tick clk)
+    (let sum (& (+ x y) 1))
+    (assert_eq written (<< 1 sum))
+    (assert_eq bit_read (& (>> 6 sum) 1))
+    (assert_eq part (& (>> 6 sum) 3))
+    (assert_eq element (+ (& (+ row 1) 3) 1))
+    (assert_eq nibble (+ (& (+ row 1) 3) 1))
+    (if (< row 3)
+      (assert_eq wide (+ row 2)))
+    (assert_eq registered (<< 1 sum))))
+
 (case runtime_indexed_base_may_select_a_parameter_bit
   (source "selected_runtime_base.sv" #"
                 module Top #(parameter logic [3:0] BASE = 4'b1010)(
