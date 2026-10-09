@@ -615,6 +615,7 @@ fn expr_from_system_function_call(
                     &ConstExpr::Function {
                         name: name.to_string(),
                         args: vec![argument],
+                        site: None,
                     },
                     &packed_dimensions.const_env,
                 )
@@ -645,7 +646,7 @@ fn single_expression_argument(call: &sv_parser::SystemTfCall) -> Option<&sv_pars
 }
 
 /// A user function call as an expression operand.
-fn expr_from_tf_call(
+pub(super) fn expr_from_tf_call(
     call: &sv_parser::TfCall,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,

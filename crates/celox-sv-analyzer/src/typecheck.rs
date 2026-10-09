@@ -103,7 +103,7 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
-        ConstExpr::Function { name, args } => eval_const_function(name, args, constants),
+        ConstExpr::Function { name, args, .. } => eval_const_function(name, args, constants),
         ConstExpr::Unary { op, expr: operand } => {
             if let Some(result) = integral_literal_from_const_expr(expr)
                 && let Some(value) = integral_literal_as_i128(&result, result.signed)
@@ -346,8 +346,9 @@ pub fn substitute_typed_constants(
             expr: Box::new(substitute_typed_constants(*expr, constants, types)),
             bit: Box::new(substitute_typed_constants(*bit, constants, types)),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| substitute_typed_constants(arg, constants, types))
@@ -789,7 +790,7 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
-        ConstExpr::Function { name, args } => {
+        ConstExpr::Function { name, args, .. } => {
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
                 "$clog2" | "$countones" => (32, "s"),
