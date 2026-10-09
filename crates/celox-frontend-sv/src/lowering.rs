@@ -4392,23 +4392,28 @@ fn runtime_select_position(
             if !flat_arrays {
                 return None;
             }
-            window = element_window
-                .then(|| {
-                    runtime_select_window(
-                        lsb,
-                        unpacked_element_width(variable)?,
-                        variable.width,
-                        constants,
-                        parameter_types,
-                    )
-                })
-                .flatten();
-            match window {
-                Some(window) => (
-                    i128::try_from(window.msb).ok()?,
-                    i128::try_from(window.lsb).ok()?,
-                ),
-                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
+            // Only within a constant element: a position past a run-time
+            // element would reach its neighbour.
+            let element_width = unpacked_element_width(variable)?;
+            let element = if element_width == variable.width {
+                BitAccess::new(0, variable.width.checked_sub(1)?)
+            } else {
+                runtime_select_window(
+                    lsb,
+                    element_width,
+                    variable.width,
+                    constants,
+                    parameter_types,
+                )?
+            };
+            if element_window {
+                window = Some(element);
+                (
+                    i128::try_from(element.msb).ok()?,
+                    i128::try_from(element.lsb).ok()?,
+                )
+            } else {
+                (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
             }
         }
         Some(variable) => {
