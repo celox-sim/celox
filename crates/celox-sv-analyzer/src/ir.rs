@@ -562,6 +562,10 @@ pub enum ConstExpr {
     Function {
         name: String,
         args: Vec<ConstExpr>,
+        /// Tells a user subroutine call apart from a call written alike: a
+        /// select repeats its index in its bounds and range checks, and the
+        /// copies of one call share its site, so the call runs once.
+        site: Option<usize>,
     },
     Unary {
         op: UnaryOp,
@@ -875,8 +879,9 @@ impl From<ast::ConstExpr> for ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
-            ast::ConstExpr::Function { name, args } => ConstExpr::Function {
+            ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name,
+                site,
                 args: args.into_iter().map(Into::into).collect(),
             },
             ast::ConstExpr::Unary { op, expr } => ConstExpr::Unary {
@@ -910,8 +915,9 @@ impl From<ConstExpr> for ast::ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
-            ConstExpr::Function { name, args } => ast::ConstExpr::Function {
+            ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
                 name,
+                site,
                 args: args.into_iter().map(Into::into).collect(),
             },
             ConstExpr::Unary { op, expr } => ast::ConstExpr::Unary {

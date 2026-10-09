@@ -196,6 +196,9 @@
     ],
     "cases": {
       "icarus": [
+        "procedural::concatenated_targets_fix_their_positions_first",
+        "procedural::select_index_call_skipped_by_logical_and",
+        "procedural::select_index_calls_run_as_written",
         "procedural::select_indices_call_functions",
         "synthesizable::function_output_and_inout_arguments_are_written_back"
       ]
@@ -440,6 +443,23 @@
     "cases": {
       "verilator": [
         "indexed_select::indexed_unsigned_bases_cross_zero"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_short_circuit_calls",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "procedural::select_index_call_skipped_by_logical_and"
       ]
     }
   },

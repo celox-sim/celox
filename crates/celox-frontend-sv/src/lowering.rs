@@ -3268,6 +3268,7 @@ fn dynamic_packed_write(
         constants,
         parameter_types,
         true,
+        false,
     )?;
     let window = unpacked_element_width(variable).and_then(|element_width| {
         runtime_select_window(
@@ -4360,11 +4361,17 @@ struct RuntimePosition {
     vector_width: usize,
     up: sv::ir::Expr,
     down: sv::ir::Expr,
+    /// The bits of the array element the select stays within, when the
+    /// position is measured from its bottom rather than from bit 0.
+    window: Option<BitAccess>,
 }
 
 /// The select width and runtime position of the `lsb` index for a packed
 /// select of `name` whose bounds depend on a runtime value. A variable keeps
-/// its declared range; a parameter is a zero-based vector.
+/// its declared range; a parameter is a zero-based vector. With
+/// `element_window`, a select within one array element is measured within
+/// that element, so a position outside it selects no bits.
+#[allow(clippy::too_many_arguments)]
 fn runtime_select_position(
     name: &str,
     msb: &sv::ir::ConstExpr,
@@ -4374,7 +4381,9 @@ fn runtime_select_position(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     flat_arrays: bool,
+    element_window: bool,
 ) -> Option<RuntimePosition> {
+    let mut window = None;
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
         Some(variable) if !variable.array_dims.is_empty() => {
             // A select the element lowering cannot express, such as a
@@ -4383,7 +4392,24 @@ fn runtime_select_position(
             if !flat_arrays {
                 return None;
             }
-            (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
+            window = element_window
+                .then(|| {
+                    runtime_select_window(
+                        lsb,
+                        unpacked_element_width(variable)?,
+                        variable.width,
+                        constants,
+                        parameter_types,
+                    )
+                })
+                .flatten();
+            match window {
+                Some(window) => (
+                    i128::try_from(window.msb).ok()?,
+                    i128::try_from(window.lsb).ok()?,
+                ),
+                None => (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0),
+            }
         }
         Some(variable) => {
             match variable.packed_ranges.as_slice() {
@@ -4448,6 +4474,7 @@ fn runtime_select_position(
         vector_width: usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
         up: select(hangs_over.clone(), zero(), above),
         down: select(hangs_over, below, zero()),
+        window,
     })
 }
 
@@ -4478,6 +4505,7 @@ fn runtime_select_as_shift(
         constants,
         parameter_types,
         flat_arrays,
+        flat_arrays,
     )?;
     let shift = |value: sv::ir::Expr, op, amount: sv::ir::Expr| sv::ir::Expr::Binary {
         left: Box::new(value),
@@ -4496,7 +4524,17 @@ fn runtime_select_as_shift(
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed: false,
     };
-    let moved = move_down(expr.clone());
+    // Within an array element, only the element's bits can be selected.
+    let vector = match position.window {
+        Some(window) => sv::ir::Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: sv::ir::ConstExpr::Literal(window.msb.to_string()),
+            lsb: sv::ir::ConstExpr::Literal(window.lsb.to_string()),
+            signed: false,
+        },
+        None => expr.clone(),
+    };
+    let moved = move_down(vector);
     // Shifting fills the missing bits with 0, which is what a two-state
     // vector (or a parameter) reads.
     let four_state = name_to_id

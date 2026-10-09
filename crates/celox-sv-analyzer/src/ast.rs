@@ -1307,6 +1307,10 @@ pub enum ConstExpr {
     Function {
         name: String,
         args: Vec<ConstExpr>,
+        /// Tells a user subroutine call apart from a call written alike: a
+        /// select repeats its index in its bounds and range checks, and the
+        /// copies of one call share its site, so the call runs once.
+        site: Option<usize>,
     },
     Unary {
         op: UnaryOp,
@@ -1322,6 +1326,16 @@ pub enum ConstExpr {
         then_expr: Box<ConstExpr>,
         else_expr: Box<ConstExpr>,
     },
+}
+
+impl ConstExpr {
+    /// A call of `name`; a user subroutine call gets a site of its own.
+    fn call(name: String, args: Vec<ConstExpr>) -> Self {
+        static NEXT_SITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let site = (!name.starts_with('$'))
+            .then(|| NEXT_SITE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        ConstExpr::Function { name, args, site }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -30,4 +30,20 @@ sv_backends! {
     fn runtime_bits_of_a_constant_element(sim) {
         @case "procedural::runtime_bits_of_a_constant_element";
     }
+
+    fn select_index_calls_run_as_written(sim) {
+        @case "procedural::select_index_calls_run_as_written";
+    }
+
+    fn select_index_call_skipped_by_logical_and(sim) {
+        @case "procedural::select_index_call_skipped_by_logical_and";
+    }
+
+    fn concatenated_targets_fix_their_positions_first(sim) {
+        @case "procedural::concatenated_targets_fix_their_positions_first";
+    }
+
+    fn runtime_bits_stay_within_their_element(sim) {
+        @case "procedural::runtime_bits_stay_within_their_element";
+    }
 }

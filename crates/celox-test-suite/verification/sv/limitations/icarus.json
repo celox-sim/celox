@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 7,
     "emission_error": 0,
-    "compile_error": 42,
+    "compile_error": 45,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -428,6 +428,30 @@
       "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:5: error: Type names are not valid expressions here.\n<case>/source_0.sv:5: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:5:               : Expression is: <type>\n<case>/source_0.sv:5:               : Expression type: 10PETypename\n<case>/source_0.sv:5: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Unable to elaborate r-value: $size(<type>, 'sd1)\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:7: error: Unable to elaborate r-value: $size(<type>, 'sd2)\n<case>/source_0.sv:8: error: Type names are not valid expressions here.\n<case>/source_0.sv:8: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:8:               : Expression is: <type>\n<case>/source_0.sv:8:               : Expression type: 10PETypename\n<case>/source_0.sv:8: error:",
       "expectation": "Simulation",
       "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:10:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_calls_run_as_written",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_call_skipped_by_logical_and",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Function celox_suite_tb.dut.bump port after is not an input port.\n<case>/source_0.sv:6:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::concatenated_targets_fix_their_positions_first",
       "phase": "compile",
       "status": "compile_error"
     }

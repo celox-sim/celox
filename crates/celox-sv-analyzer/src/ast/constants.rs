@@ -423,8 +423,9 @@ fn substitute_const_expr_constants_impl(
                 preserve_enum_types,
             )),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| {
@@ -696,10 +697,10 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             then_expr: Box::new(expr_to_const(*then_expr)?),
             else_expr: Box::new(expr_to_const(*else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::Function {
+        Expr::Call { name, args } => Some(ConstExpr::call(
             name,
-            args: args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
-        }),
+            args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
+        )),
         Expr::Select { .. }
         | Expr::Concat(_)
         | Expr::RepeatConcat { .. }
@@ -771,13 +772,12 @@ pub(super) fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
             then_expr: Box::new(expr_to_lvalue_const(*then_expr)?),
             else_expr: Box::new(expr_to_lvalue_const(*else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::Function {
+        Expr::Call { name, args } => Some(ConstExpr::call(
             name,
-            args: args
-                .into_iter()
+            args.into_iter()
                 .map(expr_to_lvalue_const)
                 .collect::<Option<_>>()?,
-        }),
+        )),
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => {
             None
         }
@@ -949,7 +949,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     return Ok(Some(ConstExpr::Literal(ty.width.to_string())));
                 }
                 let lowered = const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree)?;
-                if let Some(ConstExpr::Function { name, args }) = &lowered
+                if let Some(ConstExpr::Function { name, args, .. }) = &lowered
                     && name == "$bits"
                     && let [arg] = args.as_slice()
                     && let Some(r#type) =
@@ -1129,10 +1129,7 @@ fn const_expr_from_function_subroutine_call(
         let argument = some!(argument.as_ref());
         lowered.push(parsed!(const_expr_from_expr(argument, syntax_tree)));
     }
-    Ok(Some(ConstExpr::Function {
-        name: name.to_string(),
-        args: lowered,
-    }))
+    Ok(Some(ConstExpr::call(name.to_string(), lowered)))
 }
 
 fn integral_number_literal(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {

@@ -360,6 +360,23 @@ impl<'a> ProcModule<'a> {
         })
     }
 
+    /// The largest subexpressions of `expr` that call a subroutine and also
+    /// occur in `other`, left to right.
+    pub fn shared_calls<'e>(
+        &self,
+        expr: &'e sv::ir::ConstExpr,
+        other: &sv::ir::ConstExpr,
+    ) -> Vec<&'e sv::ir::ConstExpr> {
+        let mut shared = Vec::new();
+        shared_calls(
+            expr,
+            other,
+            &|name| self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name),
+            &mut shared,
+        );
+        shared
+    }
+
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
         expr_calls(expr, &|name| {
             self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
@@ -1423,37 +1440,82 @@ pub(super) fn canonical_for_loop(
     })
 }
 
-/// The identifiers an expression reads.
-pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
-    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-        match expr {
-            sv::ir::ConstExpr::Ident(name) => {
-                names.insert(name.clone());
-            }
-            sv::ir::ConstExpr::Literal(_) => {}
-            sv::ir::ConstExpr::Select { expr, bit } => {
-                const_idents(expr, names);
-                const_idents(bit, names);
-            }
-            sv::ir::ConstExpr::Function { args, .. } => {
-                args.iter().for_each(|arg| const_idents(arg, names))
-            }
-            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
-            sv::ir::ConstExpr::Binary { left, right, .. } => {
-                const_idents(left, names);
-                const_idents(right, names);
-            }
-            sv::ir::ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                const_idents(condition, names);
-                const_idents(then_expr, names);
-                const_idents(else_expr, names);
-            }
+/// The identifiers a constant expression reads.
+pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        sv::ir::ConstExpr::Literal(_) => {}
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_idents(expr, names);
+            const_idents(bit, names);
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().for_each(|arg| const_idents(arg, names))
+        }
+        sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_idents(left, names);
+            const_idents(right, names);
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_idents(condition, names);
+            const_idents(then_expr, names);
+            const_idents(else_expr, names);
         }
     }
+}
+
+/// `expr` with the identifiers in `values` replaced.
+pub(super) fn substitute_const_idents(
+    expr: &sv::ir::ConstExpr,
+    values: &HashMap<String, sv::ir::ConstExpr>,
+) -> sv::ir::ConstExpr {
+    use sv::ir::ConstExpr;
+    let go = |expr: &ConstExpr| Box::new(substitute_const_idents(expr, values));
+    match expr {
+        ConstExpr::Ident(name) => values.get(name).cloned().unwrap_or_else(|| expr.clone()),
+        ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: go(expr),
+            bit: go(bit),
+        },
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_const_idents(arg, values))
+                .collect(),
+            site: *site,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+    }
+}
+
+/// The identifiers an expression reads.
+pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());
@@ -1497,7 +1559,6 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     }
 }
 
-/// Whether an expression calls a user subroutine.
 /// Whether a constant-expression operand, such as a run-time select index,
 /// calls a subroutine.
 pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> bool) -> bool {
@@ -1507,7 +1568,7 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
         ConstExpr::Select { expr, bit } => {
             const_calls(expr, is_callee) || const_calls(bit, is_callee)
         }
-        ConstExpr::Function { name, args } => {
+        ConstExpr::Function { name, args, .. } => {
             is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
         }
         ConstExpr::Unary { expr, .. } => const_calls(expr, is_callee),
@@ -1526,6 +1587,74 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
     }
 }
 
+/// Whether `expr` has `part` as a subexpression.
+fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
+    use sv::ir::ConstExpr;
+    expr == part
+        || match expr {
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+            ConstExpr::Select { expr, bit } => {
+                const_contains(expr, part) || const_contains(bit, part)
+            }
+            ConstExpr::Function { args, .. } => args.iter().any(|arg| const_contains(arg, part)),
+            ConstExpr::Unary { expr, .. } => const_contains(expr, part),
+            ConstExpr::Binary { left, right, .. } => {
+                const_contains(left, part) || const_contains(right, part)
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                const_contains(condition, part)
+                    || const_contains(then_expr, part)
+                    || const_contains(else_expr, part)
+            }
+        }
+}
+
+/// Collect the largest subexpressions of `expr` that call a subroutine and
+/// also occur in `other`, left to right.
+fn shared_calls<'e>(
+    expr: &'e sv::ir::ConstExpr,
+    other: &sv::ir::ConstExpr,
+    is_callee: &dyn Fn(&str) -> bool,
+    shared: &mut Vec<&'e sv::ir::ConstExpr>,
+) {
+    use sv::ir::ConstExpr;
+    if !const_calls(expr, is_callee) {
+        return;
+    }
+    if const_contains(other, expr) {
+        shared.push(expr);
+        return;
+    }
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Select { expr, bit } => {
+            shared_calls(expr, other, is_callee, shared);
+            shared_calls(bit, other, is_callee, shared);
+        }
+        ConstExpr::Function { args, .. } => args
+            .iter()
+            .for_each(|arg| shared_calls(arg, other, is_callee, shared)),
+        ConstExpr::Unary { expr, .. } => shared_calls(expr, other, is_callee, shared),
+        ConstExpr::Binary { left, right, .. } => {
+            shared_calls(left, other, is_callee, shared);
+            shared_calls(right, other, is_callee, shared);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            shared_calls(condition, other, is_callee, shared);
+            shared_calls(then_expr, other, is_callee, shared);
+            shared_calls(else_expr, other, is_callee, shared);
+        }
+    }
+}
+
 /// Whether the select positions of an assignment target call a subroutine.
 pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> bool) -> bool {
     match lvalue {
@@ -1536,6 +1665,7 @@ pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> 
     }
 }
 
+/// Whether an expression calls a user subroutine.
 pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,

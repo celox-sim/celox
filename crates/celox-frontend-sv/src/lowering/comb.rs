@@ -755,13 +755,81 @@ impl<'p, 'a> Comb<'p, 'a> {
         Ok(value)
     }
 
-    /// Execute the user subroutine calls of an expression, left to right, and
-    /// replace each by a hidden variable holding its result. Calls in an
-    /// operand that short-circuit evaluation may skip run only when it is
-    /// evaluated (IEEE 1800-2023 11.4.7, 11.4.11).
+    /// The guard under which the right operand of `&&` or `||` is evaluated:
+    /// it is skipped only when the left one is known false (`&&`) or known
+    /// true (`||`) (IEEE 1800-2023 11.4.7), so an unknown left operand
+    /// evaluates it.
+    fn short_circuit_guard(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        op: sv::ir::BinaryOp,
+        left: &sv::ir::Expr,
+    ) -> Result<Value, sv::AnalyzerError> {
+        let left_value = self.eval(store, frames, left, None)?;
+        let guard = if op == sv::ir::BinaryOp::LogicAnd {
+            slt_not_false(self.arena, left_value.0)?
+        } else {
+            let truth = slt_truth(self.arena, left_value.0)?;
+            slt_not(self.arena, &mut self.consts, truth)?
+        };
+        Ok((guard, left_value.1))
+    }
+
+    /// The guards under which the arms of a conditional operator are
+    /// evaluated; an unknown condition evaluates both (IEEE 1800-2023
+    /// 11.4.11).
+    fn mux_guards(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        condition: &sv::ir::Expr,
+    ) -> Result<(Value, Value), sv::AnalyzerError> {
+        let condition_value = self.eval(store, frames, condition, None)?;
+        let truth = slt_truth(self.arena, condition_value.0)?;
+        let unknown = if self.m.four_state {
+            let known = self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, condition_value.0))?;
+            let is_known =
+                self.alloc(SLTNode::Binary(condition_value.0, BinaryOp::EqCase, known))?;
+            Some(slt_not(self.arena, &mut self.consts, is_known)?)
+        } else {
+            None
+        };
+        let then_guard = match unknown {
+            Some(unknown) => slt_or(self.arena, &mut self.consts, truth, unknown)?,
+            None => truth,
+        };
+        let not_truth = slt_not(self.arena, &mut self.consts, truth)?;
+        let else_guard = match unknown {
+            Some(unknown) => slt_or(self.arena, &mut self.consts, not_truth, unknown)?,
+            None => not_truth,
+        };
+        Ok((
+            (then_guard, condition_value.1.clone()),
+            (else_guard, condition_value.1),
+        ))
+    }
+
+    /// Run `f` on a branch of `store` taken where `guard` holds.
+    fn guarded<T>(
+        &mut self,
+        store: &mut Store,
+        guard: Value,
+        f: impl FnOnce(&mut Self, &mut Store) -> Result<T, sv::AnalyzerError>,
+    ) -> Result<T, sv::AnalyzerError> {
+        let mut taken = store.fork();
+        self.guards.push(guard.clone());
+        let result = f(self, &mut taken);
+        self.guards.pop();
+        let result = result?;
+        *store = self.merge(&guard, &taken, store)?;
+        Ok(result)
+    }
+
     /// Evaluate the subroutine calls of a select position, left to right,
     /// and refer to their results. A flattened select repeats an index in
-    /// its bounds and range checks, so one call is evaluated once.
+    /// its bounds and range checks; the copies of one call share its site,
+    /// so the call is evaluated once.
     fn hoist_const(
         &mut self,
         store: &mut Store,
@@ -773,24 +841,29 @@ impl<'p, 'a> Comb<'p, 'a> {
         if !self.m.const_calls(expr) {
             return Ok(expr.clone());
         }
+        let operand = |expr: &ConstExpr| {
+            expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
+        };
         Ok(match expr {
-            ConstExpr::Function { name, args }
+            ConstExpr::Function { name, args, .. }
                 if self.m.subroutines.contains_key(name)
                     || self.m.dpi_imports.contains_key(name) =>
             {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
-                let args = args
-                    .iter()
-                    .map(|arg| {
-                        expr_from_const_expr(arg)
-                            .ok_or_else(|| unsupported(format!("argument of `{name}` in a select")))
-                    })
-                    .collect::<Result<_, _>>()?;
+                let mut lowered = Vec::with_capacity(args.len());
+                for arg in args {
+                    let arg = self.hoist_const(store, frames, arg, calls)?;
+                    lowered.push(
+                        expr_from_const_expr(&arg).ok_or_else(|| {
+                            unsupported(format!("argument of `{name}` in a select"))
+                        })?,
+                    );
+                }
                 let call = sv::ir::Expr::Call {
                     name: name.clone(),
-                    args,
+                    args: lowered,
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -799,12 +872,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                 calls.push((expr.clone(), result.clone()));
                 result
             }
-            ConstExpr::Function { name, args } => ConstExpr::Function {
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name: name.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.hoist_const(store, frames, arg, calls))
                     .collect::<Result<_, _>>()?,
+                site: *site,
             },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
@@ -814,6 +888,21 @@ impl<'p, 'a> Comb<'p, 'a> {
                 op: *op,
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
             },
+            ConstExpr::Binary { left, op, right }
+                if matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr)
+                    && self.m.const_calls(right) =>
+            {
+                let left = self.hoist_const(store, frames, left, calls)?;
+                let guard = self.short_circuit_guard(store, frames, *op, &operand(&left)?)?;
+                let right = self.guarded(store, guard, |this, store| {
+                    this.hoist_const(store, frames, right, calls)
+                })?;
+                ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: *op,
+                    right: Box::new(right),
+                }
+            }
             ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
                 left: Box::new(self.hoist_const(store, frames, left, calls)?),
                 op: *op,
@@ -823,11 +912,33 @@ impl<'p, 'a> Comb<'p, 'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => ConstExpr::Mux {
-                condition: Box::new(self.hoist_const(store, frames, condition, calls)?),
-                then_expr: Box::new(self.hoist_const(store, frames, then_expr, calls)?),
-                else_expr: Box::new(self.hoist_const(store, frames, else_expr, calls)?),
-            },
+            } => {
+                let condition = self.hoist_const(store, frames, condition, calls)?;
+                let (then_expr, else_expr) =
+                    if self.m.const_calls(then_expr) || self.m.const_calls(else_expr) {
+                        // A part of both arms is a copy the flattening of a
+                        // select made, which runs whichever arm is taken.
+                        for shared in self.m.shared_calls(then_expr, else_expr) {
+                            self.hoist_const(store, frames, shared, calls)?;
+                        }
+                        let (then_guard, else_guard) =
+                            self.mux_guards(store, frames, &operand(&condition)?)?;
+                        let then_expr = self.guarded(store, then_guard, |this, store| {
+                            this.hoist_const(store, frames, then_expr, calls)
+                        })?;
+                        let else_expr = self.guarded(store, else_guard, |this, store| {
+                            this.hoist_const(store, frames, else_expr, calls)
+                        })?;
+                        (then_expr, else_expr)
+                    } else {
+                        ((**then_expr).clone(), (**else_expr).clone())
+                    };
+                ConstExpr::Mux {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                }
+            }
             ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr.clone(),
         })
     }
@@ -852,6 +963,46 @@ impl<'p, 'a> Comb<'p, 'a> {
         Ok(lvalue)
     }
 
+    /// `lvalue` with the variables its select positions read replaced by
+    /// copies of their current values, so a later write to one does not move
+    /// the target.
+    fn freeze_lvalue(
+        &mut self,
+        store: &mut Store,
+        mut lvalue: sv::ir::LValue,
+    ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
+        let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
+            return Ok(lvalue);
+        };
+        let mut names = HashSet::default();
+        const_idents(msb, &mut names);
+        const_idents(lsb, &mut names);
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        let mut copies = HashMap::default();
+        for read in names {
+            let Some(id) = self.m.id(&read) else {
+                continue;
+            };
+            let variable = self.m.var(id);
+            if !variable.array_dims.is_empty() {
+                continue;
+            }
+            let (width, signed, is_4state) = (variable.width, variable.signed, variable.is_4state);
+            let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+            let value = self.read(store, id, full(width))?;
+            self.write(store, temp, full(width), value)?;
+            copies.insert(read, sv::ir::ConstExpr::Ident(temp_name));
+        }
+        *msb = substitute_const_idents(msb, &copies);
+        *lsb = substitute_const_idents(lsb, &copies);
+        Ok(lvalue)
+    }
+
+    /// Execute the user subroutine calls of an expression, left to right, and
+    /// replace each by a hidden variable holding its result. Calls in an
+    /// operand that short-circuit evaluation may skip run only when it is
+    /// evaluated (IEEE 1800-2023 11.4.7, 11.4.11).
     fn hoist(
         &mut self,
         store: &mut Store,
@@ -903,23 +1054,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                     && self.m.calls(right) =>
             {
                 let left = self.hoist(store, frames, left)?;
-                let left_value = self.eval(store, frames, &left, None)?;
-                // The right operand is skipped only when the left one is
-                // known false (`&&`) or known true (`||`) (IEEE 1800-2023
-                // 11.4.7), so an unknown left operand evaluates it.
-                let guard = if *op == sv::ir::BinaryOp::LogicAnd {
-                    slt_not_false(self.arena, left_value.0)?
-                } else {
-                    let truth = slt_truth(self.arena, left_value.0)?;
-                    slt_not(self.arena, &mut self.consts, truth)?
-                };
-                let guard = (guard, left_value.1);
-                let mut taken = store.fork();
-                self.guards.push(guard.clone());
-                let right = self.hoist(&mut taken, frames, right);
-                self.guards.pop();
-                let right = right?;
-                *store = self.merge(&guard, &taken, store)?;
+                let guard = self.short_circuit_guard(store, frames, *op, &left)?;
+                let right =
+                    self.guarded(store, guard, |this, store| this.hoist(store, frames, right))?;
                 Expr::Binary {
                     left: Box::new(left),
                     op: *op,
@@ -932,40 +1069,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                 else_expr,
             } if self.m.calls(then_expr) || self.m.calls(else_expr) => {
                 let condition = self.hoist(store, frames, condition)?;
-                let condition_value = self.eval(store, frames, &condition, None)?;
-                let truth = slt_truth(self.arena, condition_value.0)?;
-                // An unknown condition evaluates both arms.
-                let unknown = if self.m.four_state {
-                    let known =
-                        self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, condition_value.0))?;
-                    let is_known =
-                        self.alloc(SLTNode::Binary(condition_value.0, BinaryOp::EqCase, known))?;
-                    Some(slt_not(self.arena, &mut self.consts, is_known)?)
-                } else {
-                    None
-                };
-                let then_guard = match unknown {
-                    Some(unknown) => slt_or(self.arena, &mut self.consts, truth, unknown)?,
-                    None => truth,
-                };
-                let not_truth = slt_not(self.arena, &mut self.consts, truth)?;
-                let else_guard = match unknown {
-                    Some(unknown) => slt_or(self.arena, &mut self.consts, not_truth, unknown)?,
-                    None => not_truth,
-                };
-                let mut then_store = store.fork();
-                self.guards.push((then_guard, condition_value.1.clone()));
-                let then_expr = self.hoist(&mut then_store, frames, then_expr);
-                self.guards.pop();
-                let then_expr = then_expr?;
-                *store =
-                    self.merge(&(then_guard, condition_value.1.clone()), &then_store, store)?;
-                let mut else_store = store.fork();
-                self.guards.push((else_guard, condition_value.1.clone()));
-                let else_expr = self.hoist(&mut else_store, frames, else_expr);
-                self.guards.pop();
-                let else_expr = else_expr?;
-                *store = self.merge(&(else_guard, condition_value.1), &else_store, store)?;
+                let (then_guard, else_guard) = self.mux_guards(store, frames, &condition)?;
+                let then_expr = self.guarded(store, then_guard, |this, store| {
+                    this.hoist(store, frames, then_expr)
+                })?;
+                let else_expr = self.guarded(store, else_guard, |this, store| {
+                    this.hoist(store, frames, else_expr)
+                })?;
                 Expr::Mux {
                     condition: Box::new(condition),
                     then_expr: Box::new(then_expr),
@@ -1135,8 +1245,8 @@ impl<'p, 'a> Comb<'p, 'a> {
                     return Ok(Target::Dynamic {
                         id,
                         offset: Offset::Packed {
-                            up: write.up,
-                            down: write.down,
+                            up: Box::new(write.up),
+                            down: Box::new(write.down),
                             window: write.window,
                         },
                         width: write.select_width,
@@ -1341,6 +1451,11 @@ impl<'p, 'a> Comb<'p, 'a> {
         let mut widths = Vec::with_capacity(parts.len());
         for part in parts {
             let part = self.hoist_lvalue(store, frames, part)?;
+            let part = if parts.len() > 1 {
+                self.freeze_lvalue(store, part)?
+            } else {
+                part
+            };
             widths.push(self.target_width(store, &part)?);
             targets.push(self.lvalue_target(store, &part)?);
         }
@@ -1372,6 +1487,11 @@ impl<'p, 'a> Comb<'p, 'a> {
         let mut widths = Vec::with_capacity(lvalues.len());
         for part in lvalues {
             let part = self.hoist_lvalue(store, frames, part)?;
+            let part = if lvalues.len() > 1 {
+                self.freeze_lvalue(store, part)?
+            } else {
+                part
+            };
             widths.push(self.target_width(store, &part)?);
             targets.push(self.lvalue_target(store, &part)?);
         }
@@ -3278,8 +3398,8 @@ enum Offset {
     /// A run-time position in a packed vector; see [`RuntimePosition`].
     /// With a window, only those bits are written.
     Packed {
-        up: sv::ir::Expr,
-        down: sv::ir::Expr,
+        up: Box<sv::ir::Expr>,
+        down: Box<sv::ir::Expr>,
         window: Option<BitAccess>,
     },
 }
@@ -3304,8 +3424,9 @@ fn substitute_literals(
                 expr: Box::new(constant(expr, literals)),
                 bit: Box::new(constant(bit, literals)),
             },
-            ConstExpr::Function { name, args } => ConstExpr::Function {
+            ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name: name.clone(),
+                site: *site,
                 args: args.iter().map(|arg| constant(arg, literals)).collect(),
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {

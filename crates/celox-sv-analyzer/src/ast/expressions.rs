@@ -615,6 +615,7 @@ fn expr_from_system_function_call(
                     &ConstExpr::Function {
                         name: name.to_string(),
                         args: vec![argument],
+                        site: None,
                     },
                     &packed_dimensions.const_env,
                 )
