@@ -220,6 +220,93 @@ about 0.27/0.02 ms. The measurements exclude backend compilation and simulation.
 Shared-machine load varies between runs; these numbers describe these inputs,
 not a universal speedup. Overall AST construction still shows superlinear growth.
 
+## Generate dependency scheduling
+
+The next follow-up starts from master `94701163f`, after parameter-environment
+and snapshot reuse. Signal dimensions and generate-local parameters are now
+scheduled by one local dependency graph. Each declaration records its remaining
+prerequisites and reverse edges. Only local names form edges; inherited names
+retain the previous lookup behavior. Completing a binding releases its outgoing
+edges once, rather than rebuilding the unresolved-name set and scanning both
+pending lists after every declaration.
+
+A minimum-index heap preserves the previous priority: ready signals first,
+then ready parameters, with declaration order within each group. Newly ready
+signals take priority over parameters already in the queue. Edges are released
+only after successful binding, so an error in a ready declaration is still
+reported before a cycle in the remaining graph. The readiness work is expected
+O(V + E + V log V) for V declarations and E local dependency edges. Payloads
+stay in indexed optional slots, avoiding repeated vector removal/shifting.
+
+Parameter lowering temporarily appends a declaration's siblings and drains that
+suffix, retaining only the scheduled parameter. This preserves its preceding
+bindings without cloning the inherited parameter vector. The dependency
+extraction, local-name masking, parameter typing, and cycle diagnostics remain
+the same. Generated names and shadowed-name sets now share immutable snapshots;
+mutating a child or a function's formal bindings detaches the corresponding table.
+Empty inherited function/return-type tables skip generated-name rewriting, whose
+result would also be empty.
+
+Analyzer regressions compare all 512 directed three-node graphs with the old
+priority order, including self-edges and cycles. They cover signal precedence,
+external names, a 4,096-node reverse chain with one release per edge, ready-error
+precedence over remaining cycles, grouped declarations shadowing outer values,
+and isolation of generated name snapshots. These are tests of analyzer
+representation, scheduling, and diagnostics; no shared language cases are added.
+
+The `generate_dependencies` probe measures one generate block containing fixed
+width signals, checks every qualified signal name and width, and separates parse,
+AST construction, and IR conversion. Its `--scheduler` mode compiles the production
+scheduler directly and compares it with the former readiness loop on independent
+nodes, reverse chains, and fanout. That mode excludes syntax parsing, declaration
+binding, scoped type expansion, and simulation. Both modes use medians of three
+fresh runs and impose no timing thresholds.
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example generate_dependencies
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example generate_dependencies -- --scheduler 128 512 2048
+```
+
+Measurements use the same optimized profile and three-run median procedure
+above. In the same process, isolated readiness scheduling takes:
+
+| Graph | Vertices | Edges | Legacy (ms) | Graph (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| independent | 128 | 0 | 0.396 | 0.017 |
+| independent | 512 | 0 | 9.321 | 0.021 |
+| independent | 2,048 | 0 | 100.391 | 0.161 |
+| reverse chain | 128 | 127 | 0.532 | 0.009 |
+| reverse chain | 512 | 511 | 8.675 | 0.031 |
+| reverse chain | 2,048 | 2,047 | 153.115 | 0.206 |
+| fanout | 128 | 127 | 0.398 | 0.010 |
+| fanout | 512 | 511 | 6.920 | 0.028 |
+| fanout | 2,048 | 2,047 | 110.467 | 0.155 |
+
+These numbers measure scheduling only, including graph construction. The legacy
+probe retains original-index slots while simulating the former readiness scan;
+it does not include the production payloads' larger vector shifts or their binding
+work. Every produced order is checked against the expected priority.
+
+Fresh AST measurements for one block of independent generated signals:
+
+| Signals | AST before (ms) | AST after (ms) |
+| --- | ---: | ---: |
+| 64 | 105.607 | 68.618 |
+| 256 | 1,294.453 | 739.714 |
+| 1,024 | 18,901.242 | 14,528.035 |
+
+The 1,024-signal inputs parsed in about 162/156 ms before/after. IR conversion
+took about 0.69/0.50 ms. Thus the isolated scheduling gain does not imply linear
+AST construction: repeated scoped type/name expansion still dominates this input.
+The machine was shared and timings varied substantially between separate runs.
+
+For the existing 256-entry reverse-parameter probe, the later before/after AST
+samples were 1,044.361/1,495.835 ms, with parsing 35.771/60.640 ms. The ordinary
+256-parameter samples were 143.745/222.950 ms. These noisier samples do not
+establish an overall parameter-chain speedup; prefix/range rebuilding remains
+outside this scheduler change. The counters and order comparisons establish the
+bounded scheduling work independently of those wall-clock variations.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -227,8 +314,8 @@ require parsing the rewritten source. Nested module declarations retain the
 syntax-walk fallback; ordinary top-level module lookup avoids unrelated bodies.
 Resolving the parser's source root can still visit its description list.
 
-Type-alias tables and generated name metadata are still copied in some scope
-paths. Shared numeric/parameter-expression tables copy their contents when a
+Type-alias tables are still copied in some scope paths. Generated names and
+shadowed-name sets copy on mutation rather than for every item snapshot. Shared numeric/parameter-expression tables copy their contents when a
 shared scope mutates them, and some borrowed-map constructors still copy an
 environment. Many dependent parameters, many functions
 inside generated scopes, and `$bits`/`$size` queries during declaration lowering
@@ -236,8 +323,9 @@ or in numeric cast targets can have different scaling from the flat probes.
 Those preliminary queries still discover enclosing declarations by walking
 syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
 modules with enums still rebuild some environments, generated scopes still
-rebuild parameter prefixes, and dependency scheduling still scans unresolved
-names. Applying parameter dimensions and materializing scoped literals also
+rebuild parameter prefixes. Building scoped dimension views still rebinds
+visible generated names for each item, and those views are created in collectors
+even for some items that produce no output there. Applying parameter dimensions and materializing scoped literals also
 contribute work that grows with the number of visible parameters.
 This change does not establish linear scaling for those workloads. The probes
 provide reproducible baselines for further optimization.
