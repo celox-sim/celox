@@ -979,8 +979,18 @@ pub(super) fn substitute_typed_parameter_literals(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, ExprType>,
 ) -> ConstExpr {
+    substitute_typed_parameter_literals_with_lookup(expr, constants, &|name| {
+        parameter_types.get(name).copied()
+    })
+}
+
+pub(super) fn substitute_typed_parameter_literals_with_lookup(
+    expr: ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &impl Fn(&str) -> Option<ExprType>,
+) -> ConstExpr {
     match expr {
-        ConstExpr::Ident(name) => match (constants.get(&name), parameter_types.get(&name)) {
+        ConstExpr::Ident(name) => match (constants.get(&name), parameter_types(&name)) {
             (Some(value), Some(r#type)) => ConstExpr::Literal(format_typed_parameter_literal(
                 *value,
                 r#type.width,
@@ -990,12 +1000,12 @@ pub(super) fn substitute_typed_parameter_literals(
         },
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
-            expr: Box::new(substitute_typed_parameter_literals(
+            expr: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *expr,
                 constants,
                 parameter_types,
             )),
-            bit: Box::new(substitute_typed_parameter_literals(
+            bit: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *bit,
                 constants,
                 parameter_types,
@@ -1006,25 +1016,27 @@ pub(super) fn substitute_typed_parameter_literals(
             site,
             args: args
                 .into_iter()
-                .map(|arg| substitute_typed_parameter_literals(arg, constants, parameter_types))
+                .map(|arg| {
+                    substitute_typed_parameter_literals_with_lookup(arg, constants, parameter_types)
+                })
                 .collect(),
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
-            expr: Box::new(substitute_typed_parameter_literals(
+            expr: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *expr,
                 constants,
                 parameter_types,
             )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-            left: Box::new(substitute_typed_parameter_literals(
+            left: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *left,
                 constants,
                 parameter_types,
             )),
             op,
-            right: Box::new(substitute_typed_parameter_literals(
+            right: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *right,
                 constants,
                 parameter_types,
@@ -1035,17 +1047,17 @@ pub(super) fn substitute_typed_parameter_literals(
             then_expr,
             else_expr,
         } => ConstExpr::Mux {
-            condition: Box::new(substitute_typed_parameter_literals(
+            condition: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *condition,
                 constants,
                 parameter_types,
             )),
-            then_expr: Box::new(substitute_typed_parameter_literals(
+            then_expr: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *then_expr,
                 constants,
                 parameter_types,
             )),
-            else_expr: Box::new(substitute_typed_parameter_literals(
+            else_expr: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *else_expr,
                 constants,
                 parameter_types,

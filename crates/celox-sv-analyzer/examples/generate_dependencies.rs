@@ -17,6 +17,10 @@ fn main() {
     if scheduler {
         args.remove(0);
     }
+    let assignments = args.first().is_some_and(|arg| arg == "--assignments");
+    if assignments {
+        args.remove(0);
+    }
     let counts: Vec<usize> = args
         .into_iter()
         .map(|arg| {
@@ -39,6 +43,9 @@ fn main() {
         let mut code = String::from("module Top(); if (1) begin : g\n");
         for i in 0..count {
             writeln!(code, "logic [7:0] s{i};").unwrap();
+            if assignments {
+                writeln!(code, "assign s{i} = 8'h5a;").unwrap();
+            }
         }
         code.push_str("end endmodule\n");
         let mut samples = Vec::new();
@@ -52,6 +59,10 @@ fn main() {
             let finished = Instant::now();
             assert_eq!(ir.modules().len(), 1);
             assert_eq!(ir.modules()[0].signals().len(), count);
+            assert_eq!(
+                ir.modules()[0].comb_processes().len(),
+                if assignments { count } else { 0 }
+            );
             let names: HashSet<_> = ir.modules()[0]
                 .signals()
                 .iter()

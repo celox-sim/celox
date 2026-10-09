@@ -2,6 +2,97 @@ use std::{fmt::Write, path::Path};
 
 use super::*;
 
+#[test]
+fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() {
+    use std::cell::Cell;
+
+    let mut env = HashMap::from_iter([("A".into(), -1), ("B".into(), 3)]);
+    insert_parameter_type_markers(
+        &mut env,
+        "A",
+        ExprType {
+            width: 8,
+            signed: true,
+        },
+    );
+    insert_parameter_type_markers(
+        &mut env,
+        "B",
+        ExprType {
+            width: 4,
+            signed: false,
+        },
+    );
+    for index in 0..4096 {
+        insert_parameter_type_markers(
+            &mut env,
+            &format!("unrelated{index}"),
+            ExprType {
+                width: 32,
+                signed: false,
+            },
+        );
+    }
+    let a = || Box::new(ConstExpr::Ident("A".into()));
+    let b = || Box::new(ConstExpr::Ident("B".into()));
+    let cases = [
+        (ConstExpr::Literal("'x".into()), 0),
+        (*a(), 1),
+        (ConstExpr::Ident("unknown".into()), 1),
+        (
+            ConstExpr::Select {
+                expr: a(),
+                bit: b(),
+            },
+            2,
+        ),
+        (
+            ConstExpr::Function {
+                name: "f".into(),
+                args: vec![*a(), *b()],
+                site: Some(17),
+            },
+            2,
+        ),
+        (
+            ConstExpr::Unary {
+                op: UnaryOp::Minus,
+                expr: a(),
+            },
+            1,
+        ),
+        (
+            ConstExpr::Binary {
+                left: a(),
+                op: BinaryOp::Add,
+                right: b(),
+            },
+            2,
+        ),
+        (
+            ConstExpr::Mux {
+                condition: b(),
+                then_expr: a(),
+                else_expr: Box::new(ConstExpr::Literal("'z".into())),
+            },
+            2,
+        ),
+    ];
+    let types = parameter_types_from_const_env(&env);
+    for (expr, expected_lookups) in cases {
+        let lookups = Cell::new(0);
+        let direct = substitute_typed_parameter_literals_with_lookup(expr.clone(), &env, &|name| {
+            lookups.set(lookups.get() + 1);
+            parameter_type_from_const_env(&env, name)
+        });
+        assert_eq!(
+            direct,
+            substitute_typed_parameter_literals(expr, &env, &types)
+        );
+        assert_eq!(lookups.get(), expected_lookups);
+    }
+}
+
 fn module_node(tree: &SyntaxTree) -> RefNode<'_> {
     tree.into_iter()
         .find(|node| {

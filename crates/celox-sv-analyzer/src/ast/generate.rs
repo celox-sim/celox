@@ -7,6 +7,8 @@ use super::*;
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
+mod scope_views;
+pub(super) use scope_views::ScopeViews;
 
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
@@ -35,6 +37,13 @@ pub(super) struct Item<'a> {
 }
 
 impl Item<'_> {
+    pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
+        match self.node {
+            sv_parser::ModuleOrGenerateItem::ModuleItem(item) => Some(&item.nodes.1),
+            _ => None,
+        }
+    }
+
     /// These declarations have already populated the constant environment;
     /// instance/process/subroutine collectors cannot produce bodies from them.
     pub fn is_parameter_declaration(&self) -> bool {
@@ -120,8 +129,8 @@ impl Item<'_> {
             }
             if let Some(value) = dimensions.const_env.get(name) {
                 local.const_env.insert(protected.clone(), *value);
-                if let Some(ty) = parameter_types_from_const_env(&dimensions.const_env).get(name) {
-                    insert_parameter_type_markers(&mut local.const_env, &protected, *ty);
+                if let Some(ty) = parameter_type_from_const_env(&dimensions.const_env, name) {
+                    insert_parameter_type_markers(&mut local.const_env, &protected, ty);
                 }
             }
         }

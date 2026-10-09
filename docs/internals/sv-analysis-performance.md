@@ -307,6 +307,78 @@ establish an overall parameter-chain speedup; prefix/range rebuilding remains
 outside this scheduler change. The counters and order comparisons establish the
 bounded scheduling work independently of those wall-clock variations.
 
+## Removing repeated generate-scope work
+
+The scope follow-up starts from `a7fbb309e`, which contains the dependency scheduler
+and master `a7386fb34`. Three additional sources of quadratic work are removed:
+
+- Collectors cache dimension and parameter-literal views by the identities of all
+  five immutable scope snapshots: numeric environment, literals, names, shadowed
+  names, and parameter dimensions. A collector fixes its inherited inputs for the
+  cache lifetime and retains borrowers of every keyed item, so addresses cannot be
+  recycled and changed child snapshots cannot reuse their parent's view. Nested
+  scopes can interrupt siblings without rebuilding their views. Process, instance,
+  and subroutine collectors request views only for applicable syntax.
+- Validation tracks enter/leave events and generate depth instead of comparing
+  every syntax node with a vector of all generated descendants. Generated items
+  still undergo validation with their own lexical environment. Recursive item
+  validation borrows the cached dimensions instead of copying the entire numeric
+  environment and literal table again.
+- Constant-bound evaluation substitutes typed values by looking up the identifiers
+  actually present in the expression. It no longer rebuilds the full parameter
+  type table, including scanning unrelated variable metadata, for each bound.
+  Protecting a shadowed outer parameter's type also uses a direct lookup.
+
+The cache is local to each collector; it neither crosses analyses nor reuses views
+with different inherited inputs. Scope binding and shadowing follow IEEE 1800-2023
+23.9. Analyzer regressions check a single materialization for 16, 64, and 256
+siblings; interrupted/nested scopes; independent mutation of all five snapshot
+fields; different inherited literals; validation around nested generate bodies;
+and typed substitution across every constant-expression variant. A 4,096-parameter
+unrelated environment does not increase the number of expression type lookups.
+The existing backend suite checks language behavior; no portable cases are added.
+
+The same optimized profile and three-run median procedure give these complete AST
+construction measurements for a block of independent signals:
+
+| Signals | AST before (ms) | AST after (ms) | Parse after (ms) |
+| --- | ---: | ---: | ---: |
+| 128 | 250.620 | 56.110 | 19.905 |
+| 256 | 827.680 | 117.491 | 39.106 |
+| 512 | 3,202.770 | 195.818 | 59.799 |
+| 1,024 | 13,650.542 | 393.066 | 107.448 |
+| 2,048 | — | 1,150.577 | 247.708 |
+| 4,096 | — | 2,063.718 | 734.129 |
+
+At 1,024 signals, parsing before was 145.591 ms and IR conversion before/after was
+0.468/0.405 ms. AST construction is about 35x faster. Expanding the after input
+from 128 to 4,096 signals (32x) increases AST time about 37x, replacing the earlier
+fourfold cost for each doubling. The full flat declaration path retains sorting
+and heap scheduling, so its expected work includes O(N log N); it is not strictly
+O(N). Shared-machine load affects timings, especially the larger inputs.
+
+The `--assignments` mode also emits one constant continuous assignment per signal,
+checks the number of produced processes, and checks every signal name/width:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example generate_dependencies -- 128 256 512 1024 2048 4096
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example generate_dependencies -- --assignments 128 256 512 1024 2048 4096
+```
+
+| Signals and assignments | AST after (ms) | Parse after (ms) | IR after (ms) |
+| --- | ---: | ---: | ---: |
+| 128 | 59.735 | 32.774 | 0.147 |
+| 256 | 134.387 | 64.576 | 0.341 |
+| 512 | 260.489 | 142.033 | 0.653 |
+| 1,024 | 627.613 | 343.221 | 1.458 |
+| 2,048 | 1,372.160 | 701.086 | 2.902 |
+| 4,096 | 4,396.238 | 2,372.087 | 10.156 |
+
+This is an after-only workload, with no old assignment-mode timing. The final
+sample has a corresponding increase in parser and IR time; the source inspection
+and operation-count regressions establish the eliminated repeated work without
+using wall-clock thresholds. These probes exclude backend compilation and simulation.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -322,12 +394,13 @@ inside generated scopes, and `$bits`/`$size` queries during declaration lowering
 or in numeric cast targets can have different scaling from the flat probes.
 Those preliminary queries still discover enclosing declarations by walking
 syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
-modules with enums still rebuild some environments, generated scopes still
-rebuild parameter prefixes. Building scoped dimension views still rebinds
-visible generated names for each item, and those views are created in collectors
-even for some items that produce no output there. Applying parameter dimensions and materializing scoped literals also
-contribute work that grows with the number of visible parameters.
-This change does not establish linear scaling for those workloads. The probes
+modules with enums still rebuild some environments, and generated scopes still
+rebuild parameter prefixes. Dimension/literal views now materialize once per
+immutable scope in each collector. Many distinct scopes with large inherited
+parameter/function tables can therefore differ from a single large block of
+signals. Applying parameter dimensions and materializing scoped literals still
+contribute work proportional to visible bindings in each distinct scope.
+The flat-block probes do not establish linear scaling for those other workloads. The probes
 provide reproducible baselines for further optimization.
 
 ## Validation

@@ -12,18 +12,19 @@ pub(super) fn instances_from_module_node(
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
     let mut instances = Vec::new();
-    for item in active {
-        if item.is_parameter_declaration() {
+    let mut views = generate::ScopeViews::new(packed_dimensions);
+    for item in &active {
+        if !matches!(item.node, sv_parser::ModuleOrGenerateItem::Module(_)) {
             continue;
         }
         let start = instances.len();
-        let dimensions = item.dimensions(packed_dimensions);
+        let dimensions = views.dimensions(item);
         instances_from_module_or_generate_item(
             item.node,
             None,
             syntax_tree,
             &item.env,
-            &dimensions,
+            dimensions,
             interfaces,
             &mut instances,
         )?;

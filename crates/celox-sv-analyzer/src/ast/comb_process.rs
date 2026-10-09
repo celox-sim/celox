@@ -11,25 +11,39 @@ pub(super) fn comb_processes_from_module_node(
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    for item in generate::items(
+    let active = generate::items(
         node,
         syntax_tree,
         const_env,
         &packed_dimensions.type_aliases,
-    )? {
-        if item.is_parameter_declaration() {
+    )?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
+        let relevant = match item.common() {
+            Some(
+                sv_parser::ModuleCommonItem::ContinuousAssign(_)
+                | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
+                | sv_parser::ModuleCommonItem::NetAlias(_),
+            ) => true,
+            Some(sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration)) => {
+                matches!(&**declaration,
+                    sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration)
+                    if matches!(&**declaration, sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_)))
+            }
+            _ => false,
+        };
+        if !relevant {
             continue;
         }
         let start = processes.len();
-        let dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
+        let (dimensions, literals) = views.get(item);
         comb_processes_from_module_or_generate_item(
             item.node,
             None,
             syntax_tree,
             &item.env,
-            &dimensions,
-            &literals,
+            dimensions,
+            literals,
             &mut processes,
             state,
         )?;
@@ -38,7 +52,7 @@ pub(super) fn comb_processes_from_module_node(
                 item.assignment(assignment);
             }
             for stmt in &mut process.body {
-                procedural::qualify_stmt(&item, stmt);
+                procedural::qualify_stmt(item, stmt);
             }
         }
     }

@@ -106,27 +106,47 @@ pub(super) fn reject_silently_ignored_constructs(
     let mut indexed_dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
     indexed_dimensions.parameter_values = parameter_values.clone().into();
+    reject_silently_ignored_constructs_with_dimensions(node, syntax_tree, &indexed_dimensions)
+}
+
+/// Walk each syntax node once, excluding inactive/unelaborated generate bodies.
+/// Generate items are validated separately with their own lexical environment.
+fn validation_nodes(node: RefNode<'_>, is_module: bool) -> impl Iterator<Item = RefNode<'_>> {
+    let mut generate_depth = 0usize;
+    node.into_iter().event().filter_map(move |event| {
+        let (entering, child) = match event {
+            sv_parser::NodeEvent::Enter(child) => (true, child),
+            sv_parser::NodeEvent::Leave(child) => (false, child),
+        };
+        if is_module
+            && matches!(
+                child,
+                RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
+            )
+        {
+            if entering {
+                generate_depth += 1;
+            } else {
+                generate_depth -= 1;
+            }
+            return None;
+        }
+        (entering && generate_depth == 0).then_some(child)
+    })
+}
+
+fn reject_silently_ignored_constructs_with_dimensions(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    indexed_dimensions: &PackedDimensions,
+) -> Result<(), AnalyzerError> {
+    let const_env = &indexed_dimensions.const_env;
+    let type_aliases = &indexed_dimensions.type_aliases;
     let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
-    let generated_nodes: Vec<_> = if is_module {
-        node.clone()
-            .into_iter()
-            .filter(|n| {
-                matches!(
-                    n,
-                    RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
-                )
-            })
-            .flat_map(|n| n.into_iter())
-            .collect()
-    } else {
-        Vec::new()
-    };
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.
-    let lowered_constant_indexed_ranges: Vec<_> = node
-        .clone()
-        .into_iter()
+    let lowered_constant_indexed_ranges: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter_map(|child| match child {
             RefNode::IndexedRange(_)
             | RefNode::Select(_)
@@ -148,9 +168,7 @@ pub(super) fn reject_silently_ignored_constructs(
         .collect();
     // Typed indexed lowering validates casts in bases, widths and supported
     // parameter initializers. Keep the generic cast checks for other contexts.
-    let typed_indexed_casts: Vec<_> = node
-        .clone()
-        .into_iter()
+    let typed_indexed_casts: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter_map(|child| match child {
             RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => Some(child),
             RefNode::ParamAssignment(parameter) => parameter
@@ -171,9 +189,7 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_) | RefNode::ConstantCast(_)))
         .collect();
-    let subroutine_casts: Vec<_> = node
-        .clone()
-        .into_iter()
+    let subroutine_casts: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter(|child| {
             matches!(
                 child,
@@ -183,10 +199,7 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
-    for child in node.clone() {
-        if generated_nodes.iter().any(|n| n == &child) {
-            continue;
-        }
+    for child in validation_nodes(node.clone(), is_module) {
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
@@ -201,7 +214,7 @@ pub(super) fn reject_silently_ignored_constructs(
             selects::indexed_parameter_initializer(
                 expression,
                 syntax_tree,
-                &indexed_dimensions,
+                indexed_dimensions,
                 None,
             )?;
         }
@@ -312,9 +325,9 @@ pub(super) fn reject_silently_ignored_constructs(
                 indexed_select_base(
                     RefNode::Expression(&range.nodes.0),
                     syntax_tree,
-                    &indexed_dimensions,
+                    indexed_dimensions,
                 )?;
-                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
+                check_indexed_width(&range.nodes.2, syntax_tree, indexed_dimensions)?;
             }
             RefNode::ConstantIndexedRange(range) => {
                 if !lowered_constant_indexed_ranges.contains(&range) {
@@ -323,14 +336,14 @@ pub(super) fn reject_silently_ignored_constructs(
                 let base = indexed_select_base(
                     RefNode::ConstantExpression(&range.nodes.0),
                     syntax_tree,
-                    &indexed_dimensions,
+                    indexed_dimensions,
                 )?;
                 if eval_ast_const_expr(&base, const_env).is_none() {
                     return Err(AnalyzerError::Unsupported(
                         "indexed part-select start that is not constant".to_string(),
                     ));
                 }
-                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
+                check_indexed_width(&range.nodes.2, syntax_tree, indexed_dimensions)?;
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -485,15 +498,14 @@ pub(super) fn reject_silently_ignored_constructs(
         }
     }
     if is_module {
-        for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
-            let dimensions = item.dimensions(&indexed_dimensions);
-            reject_silently_ignored_constructs(
+        let active = generate::items(node, syntax_tree, const_env, type_aliases)?;
+        let mut views = generate::ScopeViews::new(indexed_dimensions);
+        for item in &active {
+            let dimensions = views.dimensions(item);
+            reject_silently_ignored_constructs_with_dimensions(
                 RefNode::ModuleOrGenerateItem(item.node),
                 syntax_tree,
-                &dimensions.const_env,
-                type_aliases,
-                &dimensions,
-                &dimensions.parameter_values,
+                dimensions,
             )?;
         }
     }
@@ -560,5 +572,44 @@ fn check_indexed_width(
         Err(AnalyzerError::Unsupported(
             "indexed part-select width that is not a positive constant".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn excludes_nested_generate_bodies_but_keeps_surrounding_declarations() {
+        let tree = crate::syntax::parse_source(
+            "module Top(); logic outside_before; if (1) begin : g logic hidden; if (0) begin : nested logic deep; end end for (genvar i=0; i<2; i++) begin : loop_scope logic looped; end logic outside_after; endmodule",
+            Path::new("validation_scopes.sv"),
+        ).unwrap();
+        let node = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let declarations = |module| {
+            validation_nodes(node.clone(), module)
+                .filter_map(|node| match node {
+                    RefNode::VariableIdentifier(identifier) => {
+                        identifier_text(RefNode::VariableIdentifier(identifier), &tree)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(declarations(true), ["outside_before", "outside_after"]);
+        assert_eq!(
+            declarations(false),
+            [
+                "outside_before",
+                "hidden",
+                "deep",
+                "looped",
+                "outside_after"
+            ]
+        );
     }
 }
