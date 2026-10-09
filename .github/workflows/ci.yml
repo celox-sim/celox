@@ -332,7 +332,7 @@ jobs:
 
       # Any change from the retained results fails, improvements included, so
       # that the expectations follow the frontend.
-      - name: Compare elaboration results with the retained expectations
+      - name: Compare elaboration and simulation results with the retained expectations
         run: >-
           cargo run --locked --release -p celox --features systemverilog
           --example sv_tests -- "$RUNNER_TEMP/sv-tests/tests"
