@@ -628,7 +628,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         match call {
             sv_parser::SubroutineCall::TfCall(call) => {
-                let name = identifier_text(
+                let name = reference_name(
                     RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                     self.tree,
                 )
@@ -1501,7 +1501,7 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
-        for child in RefNode::ModuleOrGenerateItem(item.node) {
+        for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
                 RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
@@ -1575,7 +1575,7 @@ pub(super) fn subroutines_from_module_node_with(
         }
         let item_dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
-        for child in RefNode::ModuleOrGenerateItem(item.node) {
+        for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
                 RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
@@ -1749,21 +1749,13 @@ pub(super) fn initial_processes_from_module_node(
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
     for item in generate::items(node, tree, const_env, &type_aliases)? {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(module_item) = item.node else {
-            continue;
-        };
         if item.is_parameter_declaration() {
             continue;
         }
         let item_dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
-        if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
-            &module_item.nodes.1
-            && let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-                declaration,
-            ) = &**declaration
-            && let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) =
-                &**declaration
+        if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
+            item.node.declaration()
             && let sv_parser::DataDeclaration::Variable(variable) = &**data
         {
             let mut body = Vec::new();
@@ -1807,6 +1799,10 @@ pub(super) fn initial_processes_from_module_node(
             }
             continue;
         }
+        let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(module_item)) = item.node
+        else {
+            continue;
+        };
         let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
             continue;
         };

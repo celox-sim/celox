@@ -38,6 +38,25 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     fn tick(&mut self, event: &str) -> Result<()> {
         self.0.tick(self.0.event(event)).map_err(Into::into)
     }
+
+    fn take_output(&mut self) -> Result<String> {
+        let mut output = String::new();
+        for event in self.0.drain_runtime_events() {
+            match event {
+                celox::RuntimeEvent::Display { message } => {
+                    output.push_str(&message);
+                    output.push('\n');
+                }
+                celox::RuntimeEvent::Write { message } => output.push_str(&message),
+                celox::RuntimeEvent::Missed { count } => {
+                    return Err(format!("{count} runtime events were missed").into());
+                }
+                // Simulators print severity messages in their own words.
+                _ => {}
+            }
+        }
+        Ok(output)
+    }
 }
 
 fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {

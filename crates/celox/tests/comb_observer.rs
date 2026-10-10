@@ -4016,7 +4016,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=1010xxxx".to_string(),
+            message: "a=1010zzzz".to_string(),
         }],
     );
 }
@@ -4114,7 +4114,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=0001xxxx".to_string(),
+            message: "lo=0001zzzz".to_string(),
         }],
     );
 }

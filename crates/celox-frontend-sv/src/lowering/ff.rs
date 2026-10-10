@@ -1633,7 +1633,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         let event_kind = match &kind {
-            SystemTaskKind::Print(kind) => *kind,
+            SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
@@ -1641,6 +1641,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
+            sizing: DisplaySizing::Ieee,
             scope: None,
             arg_widths,
             arg_signed,

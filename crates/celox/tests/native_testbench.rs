@@ -2543,7 +2543,7 @@ fn test_benchmark_native_testbench_fixtures_build() {
 }
 
 #[test]
-fn test_assert_format_args_follow_veryl_single_char_specifiers() {
+fn test_assert_format_args_follow_veryl_field_widths() {
     let code = r#"
         #[test(t)]
         module t {
@@ -2558,7 +2558,7 @@ fn test_assert_format_args_follow_veryl_single_char_specifiers() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=3 hex=f"),
+        Some("cnt=3 hex=0000000f"),
     );
 }
 
@@ -2579,7 +2579,7 @@ fn test_passing_assert_uses_runtime_event_formatting() {
     assert!(detailed.assertions[0].passed);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=3 hex=f"),
+        Some("cnt=3 hex=0000000f"),
     );
 }
 
@@ -2751,7 +2751,7 @@ fn test_assert_dynamic_args_follow_display_style_formatting() {
 }
 
 #[test]
-fn test_assert_format_args_render_char_and_upper_hex() {
+fn test_assert_format_args_render_char_and_hex_alias() {
     let code = r#"
         #[test(t)]
         module t {
@@ -2766,7 +2766,7 @@ fn test_assert_format_args_render_char_and_upper_hex() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("char=A hex=AB"),
+        Some("char=A hex=ab"),
     );
 }
 
@@ -2786,7 +2786,7 @@ fn test_assert_format_args_render_uppercase_aliases_like_lowercase() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("1010 17 12 34 A")
+        Some("1010 017 12 34 A")
     );
 }
 

@@ -342,15 +342,14 @@ pub(super) fn reject_silently_ignored_constructs(
                 if matches!(
                     &call.nodes.0.nodes.0,
                     sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some()
-                        && !identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
+                        && !reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
                             .is_some_and(|name| const_functions::is_constant_function(&name))
                 ) =>
             {
                 // A function whose body could not be converted is not a
                 // constant function; report why.
                 if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
-                    && let Some(error) = identifier_text(
-                        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                    && let Some(error) = reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                         syntax_tree,
                     )
                     .and_then(|name| const_functions::conversion_error(&name))
@@ -438,9 +437,16 @@ pub(super) fn reject_silently_ignored_constructs(
                     }
                 }
             }
-            RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
+            // Package scopes and imports resolve through the imported
+            // packages; compilation-unit declarations are not analyzed.
+            RefNode::PackageExportDeclaration(_) => {
                 return Err(AnalyzerError::Unsupported(
-                    "package-dependent systemverilog module".to_string(),
+                    "package export declaration".to_string(),
+                ));
+            }
+            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
+                return Err(AnalyzerError::Unsupported(
+                    "compilation-unit scope reference `$unit::`".to_string(),
                 ));
             }
             RefNode::ParamAssignment(parameter)
@@ -488,7 +494,7 @@ pub(super) fn reject_silently_ignored_constructs(
         for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
             let dimensions = item.dimensions(&indexed_dimensions);
             reject_silently_ignored_constructs(
-                RefNode::ModuleOrGenerateItem(item.node),
+                item.node.node(),
                 syntax_tree,
                 &dimensions.const_env,
                 type_aliases,

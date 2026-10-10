@@ -171,14 +171,20 @@ pub(in crate::ast) fn member_first_dimension_width(
     usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
 }
 
+/// A member of the structure `node` names. `base`, when given, is the name
+/// of that structure, such as the qualified name of a package parameter.
 pub(in crate::ast) fn variable_member(
     node: RefNode<'_>,
+    base: Option<String>,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let path = variable_path(node, select, syntax_tree)
+    let mut path = variable_path(node, select, syntax_tree)
         .ok_or_else(|| unsupported("member access through an indexed structure"))?;
+    if let Some(base) = base {
+        path[0] = base;
+    }
     let (offset, r#type) = selected_member(&path, dimensions)
         .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
     let mut leaf_select = select.clone();

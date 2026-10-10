@@ -3360,8 +3360,47 @@ fn test_ff_runtime_events_format_verilog_radices(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bin=00101010 hex=2a HEX=2A".to_string(),
+            message: "bin=00101010 hex=2a HEX=2a".to_string(),
         }],
+    );
+}
+
+fn test_ff_runtime_events_follow_veryl_field_widths(sim) {
+    @omit_veryl;
+    // C-style `-` and `0` flags are Veryl's; IEEE 1800-2023 21.2.1.2 gives
+    // them no meaning, so the emitted SystemVerilog has no defined output.
+    @omit_sv;
+    @setup { let code = r#"
+        module Top (clk: input clock, a: input logic<8>, w: input logic<32>) {
+            always_ff (clk) {
+                $display("[%5d][%-5d][%05d][%0h][%2h][%04h]", a, a, a, w, w, a);
+                $display(a, w);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let w = sim.signal("w");
+
+    sim.modify(|io| {
+        io.set(a, 7u8);
+        io.set(w, 9u32);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    // Veryl's simulator: radices at the argument's width, decimals at their
+    // minimum, C-style flags, and no truncation to a narrower field.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "[    7][7    ][00007][9][00000009][0007]".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "07 00000009".to_string(),
+            },
+        ],
     );
 }
 
@@ -3388,11 +3427,17 @@ fn test_ff_runtime_events_preserve_four_state_args(sim) {
     assert_eq!(
         events,
         vec![
+            // Veryl prints a decimal value with unknown bits as x; the SV
+            // frontend follows IEEE 1800-2023 21.2.1.3.
             celox::RuntimeEvent::Display {
-                message: "a=1x10 hex=x dec=x".to_string(),
+                message: match FRONTEND {
+                    test_utils::Frontend::Veryl => "a=1z10 hex=Z dec=x",
+                    test_utils::Frontend::Sv => "a=1z10 hex=Z dec=Z",
+                }
+                .to_string(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "bad=1x10".to_string(),
+                message: "bad=1z10".to_string(),
             },
         ],
     );
@@ -3464,7 +3509,11 @@ fn test_ff_runtime_events_support_wide_four_state_args(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=123456789abcdef0123x dec=x".to_string(),
+            message: match FRONTEND {
+                test_utils::Frontend::Veryl => "a=123456789abcdef0123X dec=x",
+                test_utils::Frontend::Sv => "a=123456789abcdef0123X dec=X",
+            }
+            .to_string(),
         }],
     );
 }

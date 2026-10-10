@@ -18,7 +18,7 @@ not evidence that validation is complete.
 | Rust implementation | Check formatting and lint the affected crates. Run affected unit and regression tests, plus integration tests in consumers of the changed behavior. |
 | One backend | Run its unit tests and the common language suite through that backend; include relevant width, four-state, and parallel variants. Run other backends when shared code or contracts also change. |
 | Shared frontend, IR, optimizer, layout, or runtime | Run affected unit tests and common behavioral regressions through every affected backend. Broaden to the full common suite when the impact spans language groups or cannot be bounded. Include NAPI/JS integration when the public simulator behavior changes. |
-| Shared language cases | Run the added or changed cases through Celox's backend harness and the available external simulator adapters. Retain existing backend exclusions and unchanged expected behavior. A case-only change does not require rebuilding NAPI. |
+| Shared language cases | Run added or changed executable cases through Celox's backend harness and the available external simulator adapters. Script comments, formatting and source-location shifts alone do not require simulation. Retain existing backend exclusions and unchanged expected behavior. A case-only change does not require rebuilding NAPI. |
 | JS or NAPI | Run affected package tests, lint, and type checks; build NAPI and run boundary integration tests when the change uses it. Include WASI/browser or other host targets when the changed behavior affects them. |
 | lydite | Run affected Rust tests and the applicable proof/conformance gates from `lydite/`; include Celox replay when the bridge or shared design contract changes. Solver tests require `Z3_BIN`. |
 | Dependencies, manifests, toolchain, or an uncertain impact | Use the broader workspace and integration checks. Verify relevant feature and target configurations rather than assuming host tests cover them. |
@@ -40,14 +40,18 @@ Use the actual affected case or group as the filter. For SystemVerilog cases,
 use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
 empty selections, compilation failures, and simulator errors are not passes.
 
-For repeated external verification, use `--incremental --report <report.json>`
-to refresh the full selection while running only new/changed cases and prior
-failures. Reuse is decided from `<output>/results.json`, which records reused
-evidence separately; the retained report holds only the results, so branches
-that add different cases do not conflict in it. Keep filters out of a
-full-report refresh; filtered runs still produce partial reports. See the
-[runner documentation](crates/celox-test-suite/README.md#independent-verification).
-Daily CI omits `--incremental` and runs the complete corpus afresh.
+External results are reused locally by default, including between worktrees,
+when the case, verifier and tool fingerprints match. New/changed cases and
+prior failures run again; `--fresh` forces execution. A Celox implementation
+change against an unchanged shared case does not require external revalidation
+unless it also changes the external adapter/emitter or its dependencies.
+Normal validation writes only under `target/`: omit `--report` and do not
+regenerate checked-in JSON or summary tables just because a case was added or
+passed. The daily gate checks the live catalogue and accepts new passing cases
+without a baseline refresh. Retained failure evidence changes only after review
+of a changed failure; proof contracts change when executable coverage changes.
+See the [runner documentation](crates/celox-test-suite/README.md#independent-verification).
+Daily CI uses `--fresh` and runs the complete corpus afresh.
 
 ## Finish validation
 
@@ -72,6 +76,19 @@ Each change is validated where it matters rather than repeatedly:
   are skipped there, which their required checks accept, and run in the merge
   group instead. They rarely fail when the Linux jobs pass. Dispatch `ci.yml` on
   a branch to run them before queueing.
+- Pull requests run only the Rust tests their changes can affect
+  (`scripts/ci-rust-scope.mjs`):
+    - A library change runs its package and every package that depends on it.
+    - A change to one integration test file runs only that test binary.
+    - A backend or frontend crate that only one variant of celox's
+      `all_backends!` tests uses runs only that variant, plus the tests that
+      are not generated per variant. For example, `celox-backend-x86` runs
+      `native` and `native_parallel`, and `celox-frontend-sv` runs `sv` and the
+      `systemverilog` binary.
+    - Manifests, the lockfile, the toolchain, shared test data and CI changes
+      run the whole workspace.
+
+  Merge groups and the daily run always run the whole workspace.
 - The merge group validates the exact tree that lands, so pushes to `master` and
   `develop` do not run CI again. Daily full runs keep those branches' build
   caches current for pull requests.
@@ -103,6 +120,7 @@ uses the finer behavior-based matrix above.
 | Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary workspace tests. |
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
+| Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Weekly, and on pull requests with relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. |

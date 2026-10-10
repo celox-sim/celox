@@ -15,6 +15,14 @@ sv_backends! {
         @case "indexed_select::runtime_indices_select_within_multidimensional_packed_elements";
     }
 
+    fn signed_index_expressions_wrap_at_their_own_width(sim) {
+        @case "indexed_select::signed_index_expressions_wrap_at_their_own_width";
+    }
+
+    fn runtime_index_expressions_wrap_at_their_own_width(sim) {
+        @case "indexed_select::runtime_index_expressions_wrap_at_their_own_width";
+    }
+
     fn out_of_range_inner_indices_stay_in_their_element(sim) {
         @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
     }

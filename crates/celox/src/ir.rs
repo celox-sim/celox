@@ -9,7 +9,7 @@ pub(crate) use celox_design::{
 pub(crate) use celox_design::{BinaryOp, UnaryOp};
 #[cfg(feature = "host-runtime")]
 pub(crate) use celox_design::{
-    InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
+    DisplaySizing, InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
 pub use celox_frontend_core::shared::{
     FrontendLookup, InstancePath, SourceAddr, SourceVarId, VariableInfo, VariableKind,
