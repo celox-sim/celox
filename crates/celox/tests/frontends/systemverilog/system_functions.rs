@@ -1,6 +1,32 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
+    fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
+
+    fn unpacked_dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
+    }
+    fn unpacked_dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_package_array_constants";
+    }
+
+    fn unpacked_dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::unpacked_dimensions_counts_declared_arrays";
+    }
+
+    fn unpacked_dimensions_preserves_selection_and_return_types(sim) {
+        @case "system_functions::unpacked_dimensions_preserves_selection_and_return_types";
+    }
+
+    fn unpacked_dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes";
+    }
+
+    fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
+    }
+
     fn array_query_evaluates_dimension_function_once(sim) {
         @setup {
             let source = r#"
@@ -172,7 +198,13 @@ sv_backends! {
 
 #[test]
 fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
-    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+    for name in [
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$unpacked_dimensions",
+    ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
             let source =
@@ -643,4 +675,54 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
             },
         ]
     );
+}
+
+#[test]
+fn unpacked_dimensions_rejects_undefined_operands() {
+    for source in [
+        "module Top(output int y); assign y = $unpacked_dimensions(missing); endmodule",
+        "module Top(output int y); localparam N = $unpacked_dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($unpacked_dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+        "module Top(input logic a, output logic y); always_comb begin $unpacked_dimensions(missing); y = a; end endmodule",
+    ] {
+        build_error(source);
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_excess_indices() {
+    for operand in ["a[0][3][0]", "a[0][3][0:0]", "a[0][3][0 +: 1]"] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions({operand});"),
+            format!("localparam N = $unpacked_dimensions({operand}); assign y = 0;"),
+            format!("always_comb begin $unpacked_dimensions({operand}); y = 0; end"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); logic [7:0] a [0:1]; {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $unpacked_dimensions(logic)'(1'b1);",
+        "localparam P = $unpacked_dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $unpacked_dimensions(logic); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
+    }
 }

@@ -97,8 +97,9 @@ use dimensions::{
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
     parameter_signed_element_marker, parameter_signed_marker, parameter_type_from_const_env,
     parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
-    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
-    variable_size_function_width, variable_size_marker,
+    unpacked_dimension_widths, variable_bits_marker, variable_dimensions_marker,
+    variable_signed_marker, variable_size_function_width, variable_size_marker,
+    variable_unpacked_dimensions_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -111,7 +112,7 @@ use functions::{
     function_local_packed_dimensions_from_block_items,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
     function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
-    procedural_truth_condition, tf_item_params, tf_params,
+    procedural_truth_condition,
 };
 use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,

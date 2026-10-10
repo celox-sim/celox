@@ -965,15 +965,20 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if name == "$unpacked_dimensions"
+                        && let Some(count) = dimensions::unpacked_dimensions_call_value(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                    {
+                        return Ok(Some(ConstExpr::Literal(count.to_string())));
+                    }
                     if matches!(
                         name,
-                        "$left"
-                            | "$right"
-                            | "$low"
-                            | "$high"
-                            | "$increment"
-                            | "$dimensions"
-                            | "$unpacked_dimensions"
+                        "$left" | "$right" | "$low" | "$high" | "$increment" | "$dimensions"
                     ) {
                         return Ok(dimensions::array_query_call(
                             system_call,

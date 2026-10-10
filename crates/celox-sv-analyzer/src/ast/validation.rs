@@ -142,7 +142,10 @@ fn reject_silently_ignored_constructs_with_dimensions(
 ) -> Result<(), AnalyzerError> {
     let const_env = &indexed_dimensions.const_env;
     let type_aliases = &indexed_dimensions.type_aliases;
-    let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
+    let is_module = matches!(
+        node,
+        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+    );
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.
@@ -219,6 +222,14 @@ fn reject_silently_ignored_constructs_with_dimensions(
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$unpacked_dimensions") =>
+            {
+                dimensions::unpacked_dimensions_call_value(
+                    call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
+                ).ok_or_else(|| unsupported("operand of `$unpacked_dimensions`"))?;
+            }
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)

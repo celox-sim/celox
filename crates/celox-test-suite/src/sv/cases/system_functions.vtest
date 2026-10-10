@@ -608,3 +608,260 @@ a=0a  10
     (tick clk)
     (assert_eq comb c)
     (assert_eq registered r)))
+
+; IEEE 1800-2023 20.7: packed dimensions are excluded; nonarray types
+; (including predefined integers and strings) have zero unpacked dimensions.
+(case unpacked_dimensions_counts_declared_arrays
+  (source "unpacked_dimensions_arrays.sv" #"
+    module Top(output int scalar, packed_vector, packed_matrix, memory,
+               output int matrix, mixed, atom, singleton, nonarray_type);
+        logic s;
+        logic [7:0] v;
+        logic [1:0][3:0] p;
+        logic [7:0] a [3:5];
+        logic [7:0] b [0:1][0:2];
+        logic [1:0][3:0] c [0:1][0:2][0:3];
+        int i;
+        bit one [0:0];
+        assign scalar = $unpacked_dimensions(s);
+        assign packed_vector = $unpacked_dimensions(v);
+        assign packed_matrix = $unpacked_dimensions(p);
+        assign memory = $unpacked_dimensions(a);
+        assign matrix = $unpacked_dimensions(b);
+        assign mixed = $unpacked_dimensions(c);
+        assign atom = $unpacked_dimensions(i);
+        assign singleton = $unpacked_dimensions(one);
+        assign nonarray_type = $unpacked_dimensions(42);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (expand name (scalar packed_vector packed_matrix atom nonarray_type)
+    (assert_eq {name} 0))
+  (assert_eq memory 1)
+  (assert_eq matrix 2)
+  (assert_eq mixed 3)
+  (assert_eq singleton 1))
+
+(case unpacked_dimensions_preserves_selection_and_return_types
+  (source "unpacked_dimensions_expressions.sv" #"
+    module Top(input logic index, clk, input logic [7:0] value,
+               output int whole, element, leaf, packed_element, slice,
+               output int arithmetic, literal_value, returned, member, registered,
+               output logic [63:0] inverted, output logic negative);
+        logic [1:0][3:0] a [0:1][0:2];
+        typedef struct packed { logic [1:0][3:0] pair; logic flag; } record_t;
+        record_t record_value;
+        function automatic logic [1:0][3:0] identity(input logic [7:0] v);
+            $display("operand must not execute");
+            return v;
+        endfunction
+        assign whole = $unpacked_dimensions((a));
+        assign element = $unpacked_dimensions(a[index]);
+        assign leaf = $unpacked_dimensions(a[index][0]);
+        assign packed_element = $unpacked_dimensions(a[index][0][1]);
+        assign slice = $unpacked_dimensions(a[index][0:1]);
+        assign arithmetic = $unpacked_dimensions(value + value);
+        assign literal_value = $unpacked_dimensions(32'd7);
+        assign returned = $unpacked_dimensions(identity(value));
+        assign member = $unpacked_dimensions(record_value.pair);
+        assign inverted = ~$unpacked_dimensions(a);
+        assign negative = ($unpacked_dimensions(a) - 3) < 0;
+        always_ff @(posedge clk) registered <= $unpacked_dimensions(a);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x5a 0xff)
+    (modify (set value value) (set index (& value 1)))
+    (tick clk)
+    (assert_eq whole 2)
+    (assert_eq element 1)
+    (assert_eq leaf 0)
+    (assert_eq packed_element 0)
+    (assert_eq slice 1)
+    (expand name (arithmetic literal_value returned member)
+      (assert_eq {name} 0))
+    (assert_eq inverted (trunc 64 (~ 2)))
+    (assert_eq negative 1)
+    (assert_eq registered 2)
+    (expect_output "")))
+
+(case unpacked_dimensions_resolves_types_and_constant_scopes
+  (source "unpacked_dimensions_types.sv" #"
+    module Child #(parameter type T = logic [7:0])
+                  (output int result, output logic [$unpacked_dimensions(T):0] mask);
+        localparam N = $unpacked_dimensions(T);
+        assign result = N;
+        assign mask = '1;
+    endmodule
+    module Top(output int alias_type, original, overridden, generated,
+               output int formal, local_array, table_count, result_bits,
+               output int string_type, real_type, string_value, real_value,
+               output logic [0:0] original_mask, overridden_mask);
+        typedef logic [7:0] element_t;
+        typedef element_t row_t [0:2];
+        typedef row_t matrix_t [0:1];
+        localparam logic [7:0] TABLE [0:1] = '{8'h12, 8'h34};
+        localparam TABLE_N = $unpacked_dimensions(TABLE);
+        localparam N = $unpacked_dimensions(matrix_t);
+        logic [7:0] x [0:1][0:2];
+        assign alias_type = N;
+        assign table_count = TABLE_N;
+        assign result_bits = $bits($unpacked_dimensions(matrix_t));
+        assign string_type = $unpacked_dimensions(string);
+        assign real_type = $unpacked_dimensions(real);
+        assign string_value = $unpacked_dimensions("hello");
+        assign real_value = $unpacked_dimensions(3.14);
+        Child a(.result(original), .mask(original_mask));
+        Child #(.T(logic [1:0][3:0])) b(.result(overridden), .mask(overridden_mask));
+        if (N == 2) begin : g
+            logic [7:0] x [0:1][0:2][0:3];
+            localparam C = $unpacked_dimensions(x);
+            assign generated = C;
+        end else assign generated = -1;
+        function automatic int query(input logic [7:0] x [0:1]);
+            return $unpacked_dimensions(x);
+        endfunction
+        function automatic int local_query();
+            logic [7:0] x [0:1][0:2][0:3];
+            return $unpacked_dimensions(x);
+        endfunction
+        logic [7:0] arguments [0:1];
+        assign formal = query(arguments);
+        assign local_array = local_query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq alias_type 2)
+  (assert_eq original 0)
+  (assert_eq overridden 0)
+  (assert_eq generated 3)
+  (assert_eq formal 1)
+  (assert_eq local_array 3)
+  (assert_eq table_count 1)
+  (assert_eq result_bits 32)
+  (expand name (string_type real_type string_value real_value)
+    (assert_eq {name} 0))
+  (assert_eq original_mask 1)
+  (assert_eq overridden_mask 1))
+
+(case unpacked_dimensions_is_independent_of_unknown_values
+  (four_state)
+  (source "unpacked_dimensions_four_state.sv" #"
+    module Top(input logic [7:0] value, output int whole, element, parameter_value);
+        logic [7:0] a [0:1];
+        assign a[0] = value;
+        assign a[1] = value;
+        localparam logic [7:0] UNKNOWN = 8'b10xz_11xz;
+        localparam N = $unpacked_dimensions(UNKNOWN);
+        assign whole = $unpacked_dimensions(a);
+        assign element = $unpacked_dimensions(a[0]);
+        assign parameter_value = N;
+    endmodule
+  "#)
+  (top Top)
+  (for (value mask) (list (0 255) (255 255) (0xa5 0x5a))
+    (modify (set value (fourstate value mask)))
+    (assert_eq whole (fourstate 1 0))
+    (assert_eq element (fourstate 0 0))
+    (assert_eq parameter_value (fourstate 0 0))))
+
+; IEEE 1800-2023 20.7: queries use the operand's lexical declaration.
+(case unpacked_dimensions_resolves_procedural_scopes
+  (source "unpacked_scopes.sv" #"
+    module Top(output int task_value, legacy_value, block_value, nested_value, initial_value);
+      logic [7:0] x [0:1][0:2];
+      task automatic query(input logic [7:0] x [0:1], output int result);
+        logic [7:0] local_array [0:1][0:2][0:3];
+        result = $unpacked_dimensions(x) * 10 + $unpacked_dimensions(local_array);
+      endtask
+      task automatic legacy;
+        input logic [7:0] x [0:1];
+        output int result;
+        result = $unpacked_dimensions(x);
+      endtask
+      function automatic int nested();
+        logic [7:0] x [0:1];
+        begin : inner
+          logic [7:0] x [0:1][0:2][0:3];
+          return $unpacked_dimensions(x);
+        end
+      endfunction
+      logic [7:0] argument [0:1];
+      always_comb begin
+        logic [7:0] block_array [0:1][0:2][0:3][0:4];
+        query(argument, task_value);
+        legacy(argument, legacy_value);
+        block_value = $unpacked_dimensions(block_array);
+        nested_value = nested();
+      end
+      initial begin
+        logic [7:0] x [0:1][0:2][0:3][0:4][0:5];
+        initial_value = $unpacked_dimensions(x);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq task_value 13)
+  (assert_eq legacy_value 1)
+  (assert_eq block_value 4)
+  (assert_eq nested_value 3)
+  (assert_eq initial_value 5))
+
+(case unpacked_dimensions_resolves_package_array_constants
+  (source "unpacked_package.sv" #"
+    package data_pkg;
+      localparam logic [7:0] A [0:1] = '{8'h12, 8'h34};
+      localparam int N = $unpacked_dimensions(A);
+      localparam int ELEMENT = $unpacked_dimensions(A[0]);
+    endpackage
+    module Top(output int whole, element);
+      import data_pkg::*;
+      assign whole = N;
+      assign element = ELEMENT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq whole 1)
+  (assert_eq element 0))
+
+(case unpacked_dimensions_resolves_preceding_block_declarations
+  (source "preceding_dimensions.sv" #"
+    module Top(output int first_rank, second_rank, width_value);
+      always_comb begin
+        logic [7:0] a [0:1];
+        logic [$unpacked_dimensions(a):0] b;
+        logic [7:0] c [0:$unpacked_dimensions(a)];
+        first_rank = $unpacked_dimensions(a);
+        second_rank = $unpacked_dimensions(c);
+        width_value = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq first_rank 1)
+  (assert_eq second_rank 1)
+  (assert_eq width_value 2))
+
+
+(case unpacked_dimensions_types_function_pattern_arguments
+  (source "dimension_patterns.sv" #"
+    module Top(output int constant_rank, runtime_rank);
+      function automatic logic [7:0] f(input logic [7:0] a [0:1]);
+        $display("must not execute");
+        return a[0];
+      endfunction
+      localparam N = $unpacked_dimensions(f('{8'h1, 8'h2}));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f('{8'h3, 8'h4}));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (expect_output ""))
