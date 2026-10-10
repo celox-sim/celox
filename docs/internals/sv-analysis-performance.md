@@ -903,7 +903,9 @@ may select additional values rather than hide a required binding.
 
 Owning-crate regressions compare projected values with the full map for X/Z,
 wide/signed values, selects, conditionals, forward references, repeated names,
-self/cyclic references, and numeric overrides with inferred types. Reference scans
+self/cyclic references, and numeric overrides with inferred types. After syncing
+`bd10acc4c`, unbounded values and aliases also match the full map, while unrequested
+`$` values are omitted. Reference scans
 cover packages, escaped identifiers, arrays, and nested/inactive branches. Cold
 item collection stores no unused expressions for incrementing and doubling
 function-call chains at 16/64/256 parameters; source-to-IR checks verify every
