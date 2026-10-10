@@ -483,7 +483,7 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let lowered = lower_module(module, four_state, true, ff_parts)?;
+            let lowered = lower_module(module, four_state, true, ff_parts, true)?;
             // Declaration initializers run before every `initial` block
             // (IEEE 1800-2023 10.5); one that is not folded into an initial
             // value would run among them.
@@ -1280,6 +1280,7 @@ fn specialize_module(
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
+        false,
     )
 }
 
@@ -1288,18 +1289,29 @@ fn lower_module(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    package_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed, ff_parts)
+    lower_module_with_overrides(
+        module,
+        &[],
+        four_state,
+        implicit_nets_allowed,
+        ff_parts,
+        package_state,
+    )
 }
 
 /// `ff_parts` additionally keeps every `always_ff` process as an
 /// independently evaluated part, for lane-partitioned builds.
+/// `package_state` lowers the state module of a package: the module that
+/// holds its variables.
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    package_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
@@ -1418,6 +1430,82 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
+    // The event counters of a package variable are the package's (see
+    // `ff::declare_event_counters`): its state module declares them next to
+    // the variable, and a module denoting the variable denotes the counters
+    // too, bound to the package's alongside it.
+    let mut package_aliases = Vec::new();
+    let counted: Vec<(SourceVarId, String, Option<(String, String)>)> = module
+        .signals()
+        .iter()
+        .filter_map(|signal| {
+            let id = name_to_id[signal.name()];
+            match signal.package_variable() {
+                Some((package, variable)) if !(package_state && package == name) => Some((
+                    id,
+                    signal.name().to_string(),
+                    Some((package.to_string(), variable.to_string())),
+                )),
+                _ if package_state && !signal.is_net() => {
+                    Some((id, signal.name().to_string(), None))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for (id, signal_name, binding) in counted {
+        if binding.is_some() {
+            package_aliases.push(id);
+        }
+        for purpose in procedural::PACKAGE_EVENT_COUNTERS {
+            let counter = next_var_id(&mut next_id);
+            let counter_name = format!("{signal_name}@{purpose}");
+            let width = procedural::EVENT_COUNTER_WIDTH;
+            variables.insert(
+                counter,
+                SvVariable {
+                    path: vec![counter_name.clone()],
+                    width,
+                    signed: false,
+                    is_4state: four_state,
+                    packed_ranges: vec![(width as i128 - 1, 0)],
+                    array_dims: Vec::new(),
+                    domain_kind: DomainKind::Other,
+                    kind: VariableKind::Variable,
+                    type_kind: if four_state {
+                        PortTypeKind::Logic
+                    } else {
+                        PortTypeKind::Bit
+                    },
+                    source: None,
+                    hidden: true,
+                },
+            );
+            name_to_id.insert(counter_name, counter);
+            match &binding {
+                Some((package, variable)) => {
+                    package_variables.push((
+                        counter,
+                        package.clone(),
+                        format!("{variable}@{purpose}"),
+                    ));
+                }
+                // The package's counters start at zero rather than unknown.
+                None => {
+                    let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                    initial_memory_values.push(InitialStateValue {
+                        address: counter,
+                        data: InitialStateData::Packed {
+                            value: BigUint::default(),
+                            mask: BigUint::default(),
+                            written_mask,
+                        },
+                    });
+                }
+            }
+        }
+    }
+
     if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
         return Err(sv::AnalyzerError::Unsupported(
             "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
@@ -1452,6 +1540,7 @@ fn lower_module_with_overrides(
             four_state,
         );
         let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
+        initial_memory_values.append(&mut pm.static_initial_values);
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -1470,6 +1559,7 @@ fn lower_module_with_overrides(
         &mut runtime_event_sites,
         &mut runtime_errors,
         &mut extern_functions,
+        &package_aliases,
     )?;
     initial_memory_values.extend(initial_values);
 
@@ -1902,27 +1992,28 @@ pub(crate) fn attach_instance_glue(
         )?;
         resolved_instances.push((instance, child_id, child, connections));
     }
-    let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
-        &lowered.source,
-        &mut parent_variables,
-        &mut signal_names,
-        &lowered.constants,
-        &lowered.parameter_types,
-        four_state,
-    )
-    .map_err(|error| match error {
-        sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
-            detail,
-            source_location: None,
-        },
-        error => ParserError::unsupported(
-            error.tracking_issue(),
-            LoweringPhase::SimulatorParser,
-            "systemverilog combinational process lowering",
-            error.to_string(),
-            None,
-        ),
-    })?;
+    let (comb_blocks, arena, created, comb_observers, comb_sites, comb_initial_values) =
+        lower_comb_processes(
+            &lowered.source,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+        )
+        .map_err(|error| match error {
+            sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
+                detail,
+                source_location: None,
+            },
+            error => ParserError::unsupported(
+                error.tracking_issue(),
+                LoweringPhase::SimulatorParser,
+                "systemverilog combinational process lowering",
+                error.to_string(),
+                None,
+            ),
+        })?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
@@ -1961,6 +2052,7 @@ pub(crate) fn attach_instance_glue(
             .variables
             .insert(id, parent_variables[&id].to_symbolic_variable());
     }
+    module.initial_memory_values.extend(comb_initial_values);
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -2156,6 +2248,7 @@ fn lower_initial_processes(
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    package_aliases: &[SourceVarId],
 ) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
     if module.initial_processes().is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -2258,7 +2351,7 @@ fn lower_initial_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
-    ff::declare_event_counters(&mut pm, &bodies);
+    ff::declare_event_counters(&mut pm, &bodies, package_aliases)?;
     let processes = runtime
         .into_iter()
         .zip(slots)
@@ -2283,6 +2376,7 @@ fn lower_initial_processes(
             },
         });
     }
+    values.append(&mut pm.static_initial_values);
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
@@ -2303,6 +2397,7 @@ fn lower_comb_processes(
         Vec<SourceVarId>,
         Vec<CombObserver<SourceVarId>>,
         Vec<RuntimeEventSite>,
+        Vec<InitialStateValue<SourceVarId>>,
     ),
     sv::AnalyzerError,
 > {
@@ -2344,7 +2439,14 @@ fn lower_comb_processes(
         sites.append(&mut comb.sites);
     }
     let created = std::mem::take(&mut pm.created);
-    Ok((comb_blocks, arena, created, observers, sites))
+    Ok((
+        comb_blocks,
+        arena,
+        created,
+        observers,
+        sites,
+        std::mem::take(&mut pm.static_initial_values),
+    ))
 }
 
 /// The bit boundaries at which combinational processes write or statically

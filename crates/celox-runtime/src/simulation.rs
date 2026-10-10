@@ -900,16 +900,7 @@ impl<B: SimBackend> SimulationState<B> {
         for (id, is_nonzero) in scheduled {
             track_stable_edges = true;
             let was_nonzero = self.last_clock_values.contains(id);
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
-            if triggered {
+            if self.edge_triggers(id, was_nonzero, is_nonzero) {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
             }
@@ -1005,9 +996,29 @@ impl<B: SimBackend> SimulationState<B> {
                 break;
             }
 
-            for id in &newly_triggered {
+            // A register update may wake a waiting process: it runs before
+            // the registers of the next stage update, as a process does in
+            // the active region that follows an NBA region (IEEE 1800-2023
+            // 4.5). The domains of a cascade commit one at a time, and the
+            // waiting processes run between the commits too, so they see
+            // every value their expressions take. The event signals they
+            // change are edges of the next stage.
+            let polled = !self.waiting.is_empty() && !self.finished;
+            let before: Vec<u8> = if polled {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut any_process_ran = false;
+            for (position, id) in newly_triggered.iter().enumerate() {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
+                }
+                if polled && position + 1 < newly_triggered.len() {
+                    any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
                 }
             }
             for id in &newly_triggered {
@@ -1022,6 +1033,34 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.eval_comb()?;
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
+            }
+
+            if polled {
+                any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
+                if any_process_ran {
+                    let mut driven = BitSet::with_capacity(num_events);
+                    for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
+                        if *id == usize::MAX {
+                            continue;
+                        }
+                        let value: u8 = executor.backend().get_as(*signal);
+                        if value != before && self.edge_triggers(*id, before != 0, value != 0) {
+                            driven.insert(*id);
+                            executor.backend_mut().mark_triggered_bit(*id);
+                        }
+                    }
+                    executor.eval_comb()?;
+                    if track_stable_edges {
+                        if driven.is_empty() {
+                            self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        } else {
+                            executor.backend_mut().clear_triggered_bits();
+                            for id in driven.iter() {
+                                executor.backend_mut().mark_triggered_bit(id);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1051,6 +1090,20 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         Ok(true)
+    }
+
+    /// Whether a change of event signal `id` from `was_nonzero` to
+    /// `is_nonzero` is the edge its domain triggers on.
+    fn edge_triggers(&self, id: usize, was_nonzero: bool, is_nonzero: bool) -> bool {
+        match self.domain_kinds[id] {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                !was_nonzero && is_nonzero
+            }
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                was_nonzero && !is_nonzero
+            }
+            _ => !was_nonzero && is_nonzero,
+        }
     }
 
     pub fn time(&self) -> u64 {

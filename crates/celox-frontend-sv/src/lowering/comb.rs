@@ -1696,12 +1696,22 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.assign_concat(&mut store, frames, parts, rhs)?;
                 Ok(store)
             }
-            sv::ir::Stmt::Local { name, init } => {
+            sv::ir::Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
                 let width = self.m.var(id).width;
+                if *r#static {
+                    if let Some(init) = init {
+                        self.m.static_initial(id, init)?;
+                    }
+                    return Ok(store);
+                }
                 match init {
                     Some(init) => {
                         self.assign(
