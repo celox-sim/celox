@@ -592,7 +592,7 @@ chapter-7/arrays/packed/basic.sv	pass
 chapter-7/arrays/packed/equality.sv	pass
 chapter-7/arrays/packed/onebit.sv	pass
 chapter-7/arrays/packed/operations.sv	pass
-chapter-7/arrays/packed/querying-functions/dimensions.sv	fail
+chapter-7/arrays/packed/querying-functions/dimensions.sv	pass
 chapter-7/arrays/packed/querying-functions/high.sv	fail
 chapter-7/arrays/packed/querying-functions/increment.sv	fail
 chapter-7/arrays/packed/querying-functions/left.sv	fail
