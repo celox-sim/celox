@@ -57,6 +57,10 @@ pub(super) struct Ff<'p, 'a> {
     /// The process's own event counters of the watchers that read one of
     /// its private copies, by watcher index.
     private_watchers: HashMap<usize, EventCounters>,
+    /// Whether a store is recording the events it makes: the stores of that
+    /// bookkeeping (a subroutine an event expression calls may store) are
+    /// not recorded themselves.
+    recording_events: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -98,6 +102,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             kernel: None,
             private: HashMap::default(),
             private_watchers: HashMap::default(),
+            recording_events: false,
         }
     }
 
@@ -951,7 +956,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         width: usize,
         value: RegisterId,
     ) -> Result<(), sv::AnalyzerError> {
-        let watchers = if self.kernel.is_some() {
+        let watchers = if self.kernel.is_some() && !self.recording_events {
             let variable = self.aliases.get(&id).copied().unwrap_or(id);
             self.m
                 .watchers_by_var
@@ -965,10 +970,26 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.store_raw(id, offset, width, value);
             return Ok(());
         }
+        self.recording_events = true;
+        let result = self.store_recorded(&watchers, id, offset, width, value);
+        self.recording_events = false;
+        result
+    }
+
+    /// Store `value` into `id`, a variable the event expressions `watchers`
+    /// read, and record the events the store makes on their counters.
+    fn store_recorded(
+        &mut self,
+        watchers: &[usize],
+        id: SourceVarId,
+        offset: SIROffset,
+        width: usize,
+        value: RegisterId,
+    ) -> Result<(), sv::AnalyzerError> {
         // The expressions before the store, then the store, then the
         // events the store made.
         let mut previous = Vec::with_capacity(watchers.len());
-        for &index in &watchers {
+        for &index in watchers {
             let expr = self.m.event_watchers[index].expr.clone();
             let value = self.eval(&expr, None)?;
             let (width, four_state) = match *self.b.register(&value) {
@@ -2585,7 +2606,8 @@ impl Ff<'_, '_> {
 /// an expression reads then records the events it makes, so an event a
 /// later store of the same kernel run hides (a value written and restored
 /// before the process suspends) still wakes a waiter, as IEEE 1800-2023
-/// 9.4.2 asks. An expression that calls a subroutine is not watched.
+/// 9.4.2 asks. An expression that calls a function reads what the function
+/// reads, directly or through its callees.
 pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]]) {
     let mut exprs: Vec<sv::ir::Expr> = Vec::new();
     let mut visited = HashSet::default();
@@ -2612,11 +2634,9 @@ pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]
         }
     }
     for expr in exprs {
-        if pm.calls(&expr) {
-            continue;
-        }
         let mut names = HashSet::default();
         expr_idents(&expr, &mut names);
+        subroutine_reads(pm, &expr, &mut names);
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
         let dependencies: Vec<SourceVarId> = names
@@ -2641,6 +2661,41 @@ pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]
             state,
         });
     }
+}
+
+/// Add to `names` the variables the subroutines `expr` calls read, directly
+/// or through their callees. The formals and locals of those subroutines
+/// are their own and are left out, as are the arguments of a DPI-C import,
+/// which `expr` reads itself.
+fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSet<String>) {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut visited = HashSet::default();
+    let mut own = HashSet::default();
+    let mut reads = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        own.extend(subroutine.params.iter().map(|param| param.name.clone()));
+        own.extend(subroutine.return_var.clone());
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    own.insert(name.clone());
+                }
+                stmt_reads(stmt, &mut reads);
+                let mut callees = Vec::new();
+                stmt_calls(stmt, &mut callees);
+                pending.extend(callees.into_iter().map(|(name, _)| name));
+            });
+        }
+    }
+    names.extend(reads.into_iter().filter(|name| !own.contains(name)));
 }
 
 /// The subroutines `stmts` call as statements.
