@@ -178,6 +178,11 @@ pub struct Stmt {
     pub pos: Pos,
 }
 
+/// The latest time `run_until` may name, in the design's time unit: the
+/// generated external testbenches scale it to picoseconds in a 64-bit
+/// signed time, and every adapter rejects a later time alike.
+pub const RUN_UNTIL_LIMIT: u64 = i64::MAX as u64 / 1000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StmtKind {
     /// `(set SIGNAL EXPR)`: stage a write; `eval`, a read or a tick settles it.

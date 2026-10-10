@@ -95,8 +95,11 @@ behavioral model and verifies that incorrect results are rejected.
   and clocks. `run_until` advances to the given time in the design's time
   units and fails when the design has finished by then; `run_to_finish` runs
   until a process calls `$finish` and fails when the events run out first. A
-  `write` in a timed case takes effect at the current time. The optional
-  methods' defaults return an unsupported-operation error.
+  `write` in a timed case takes effect at the current time, and `eval_comb`
+  also resumes the processes it woke, as a simulator's settle step does. A
+  time later than `RUN_UNTIL_LIMIT` (`i64::MAX / 1000`) is out of range in
+  every adapter. The optional methods' defaults return an
+  unsupported-operation error.
 - Start each design with fresh storage: zero for two-state signals and X for
   four-state signals. Initial combinational outputs must be readable before an
   input is written. Generic clock/reset types use Veryl's defaults (positive
@@ -250,7 +253,9 @@ checks the design's output with `expect_output`. Design delays count time
 units; the generated testbench for an external simulator sets a time scale of
 1 ns with 1 ps precision and settles in 1 ps steps, so its checks after
 `run_until` observe everything the design did at that time. Only checks may
-follow `run_to_finish`; they run in a `final` block.
+follow `run_to_finish`; they run in a `final` block, which sees the script's
+top-level bindings. A design that does not finish within the generated
+testbench's guard fails `run_to_finish` instead of passing the checks.
 
 For an invalid design, write `(expect reject)` and no statements.
 `TestCase::expectation` lets consumers select these separately. For additional
