@@ -171,7 +171,10 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$acosh", Function),
     unsupported("$atanh", Function),
     // 20.9 Bit vector system functions
-    unsupported("$countbits", Function),
+    SystemTf {
+        max_args: None,
+        ..function("$countbits", 2, 2)
+    },
     function("$countones", 1, 1),
     function("$onehot", 1, 1),
     function("$onehot0", 1, 1),

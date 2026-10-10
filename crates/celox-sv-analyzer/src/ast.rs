@@ -36,6 +36,7 @@ mod expressions;
 mod ff_process;
 mod functions;
 mod generate;
+mod imports;
 mod inlining;
 mod instances;
 pub mod interfaces;
@@ -45,10 +46,12 @@ mod packed_structs;
 mod parameters;
 mod patterns;
 mod procedural;
+mod scope;
 mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+pub(crate) mod type_parameters;
 mod types;
 mod validation;
 
@@ -83,8 +86,8 @@ use declarations::{
     ScopeItem, identifier_locate, module_interface_from_node, module_name_from_node,
     module_non_port_items, module_parameter_port_list, package_declarations, parameter_name,
     parameters_from_module_node, ports_from_module_node, scope_declarations, scope_items,
-    signals_from_data_declaration, signals_from_module_node, signals_from_module_or_generate_item,
-    type_alias_from_ref_node,
+    scope_name_from_node, signals_from_data_declaration, signals_from_module_node,
+    signals_from_module_or_generate_item, type_alias_from_ref_node,
 };
 use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
@@ -114,7 +117,7 @@ use inlining::{
 };
 use instances::{
     collect_connected_nets, expr_ident_name, identifier_text, instances_from_module_node,
-    node_source_text,
+    node_source_text, reference_name,
 };
 use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
@@ -205,10 +208,16 @@ impl Source {
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
+        let packages = packages::Packages::analyze(&[syntax_tree])?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
+                    let imported = imports::imported_symbols(
+                        RefNode::ModuleDeclarationAnsi(module),
+                        syntax_tree,
+                        &packages,
+                    )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         module,
                         syntax_tree,
@@ -218,6 +227,7 @@ impl Source {
                             local: &interfaces,
                             extra: &ModuleInterfaces::default(),
                         },
+                        Arc::new(imported),
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(_) => {
@@ -258,21 +268,25 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let index = module_index::ModuleIndex::new(syntax_tree)?;
+        let packages = packages::Packages::analyze(&[syntax_tree])?;
         Self::from_indexed_syntax_module(
             syntax_tree,
             &index,
             module_name,
             parameter_overrides,
             extra_interfaces,
+            &packages,
         )
     }
 
+    /// `packages` are the packages the module may use, from any source.
     pub(crate) fn from_indexed_syntax_module(
         syntax_tree: &SyntaxTree,
         index: &module_index::ModuleIndex,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         extra_interfaces: &ModuleInterfaces,
+        packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
@@ -283,12 +297,14 @@ impl Source {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
+                    let imported = imports::imported_symbols(node.clone(), syntax_tree, packages)?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
                         module_name,
                         parameter_overrides,
                         &interfaces,
+                        Arc::new(imported),
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(module) => {
@@ -361,6 +377,11 @@ pub struct Module {
     dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.
     constant_functions: const_functions::ConstantFunctions,
+    /// The package parameters the module sees, by qualified name and by the
+    /// names its imports bind.
+    imported_parameters: Vec<Parameter>,
+    /// The symbols of a package, for the scopes that use it.
+    symbols: Option<scope::ScopeSymbols>,
 }
 
 impl Module {
@@ -370,26 +391,36 @@ impl Module {
         const_functions::install(self.constant_functions.clone())
     }
 
+    /// Analyze a module or a package. The scope starts from the `imported`
+    /// symbols of the packages it uses.
     fn from_module_node_with_parameter_overrides<'a>(
         node: impl Into<RefNode<'a>>,
         syntax_tree: &SyntaxTree,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
+        imported: Arc<scope::ScopeSymbols>,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
-        let name = module_name_from_node(node.clone(), syntax_tree)?;
+        let is_package = matches!(node, RefNode::PackageDeclaration(_));
+        let name = scope_name_from_node(node.clone(), syntax_tree)?;
+        let _timed_tasks = validation::install_timed_tasks(node.clone(), syntax_tree);
+        let _imported = scope::install(imported.clone());
+        let with_imported = |mut functions: const_functions::ConstantFunctions| {
+            functions.extend_missing(&imported.constant_functions);
+            functions
+        };
         let mut type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
         // Constant functions see the module constants known so far; they are
         // collected again once the parameters are known.
         let _constant_functions =
-            const_functions::install(const_functions::module_constant_functions(
+            const_functions::install(with_imported(const_functions::module_constant_functions(
                 node.clone(),
                 syntax_tree,
-                &HashMap::default(),
+                &imported.const_env,
                 &type_aliases,
-                &HashMap::default(),
-            ));
+                &imported.parameter_values,
+            )));
         let empty_parameter_overrides = HashMap::default();
         let applicable_parameter_overrides = if name == override_module_name {
             parameter_overrides
@@ -400,7 +431,7 @@ impl Module {
             node.clone(),
             syntax_tree,
             &type_aliases,
-            &HashMap::default(),
+            &imported.const_env,
             applicable_parameter_overrides,
         )?;
         let mut parameter_names = HashSet::default();
@@ -416,10 +447,11 @@ impl Module {
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
-        let mut const_env = const_env_from_parameters(&parameters);
+        let mut const_env = imported.const_env.clone();
+        const_env.extend(const_env_from_parameters(&parameters));
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
-        let enum_constants = enum_member_constants_from_module_node(
+        let mut enum_constants = enum_member_constants_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -433,6 +465,7 @@ impl Module {
                 insert_parameter_type_markers(&mut const_env, name, *r#type);
             }
         }
+        enum_constants.extend_missing(&imported.enum_constants);
         // Alias ranges may themselves contain casts sized by enum members.
         // Rebuild them before assigning declared parameter widths.
         type_aliases =
@@ -465,13 +498,13 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
-        const_functions::replace(const_functions::module_constant_functions(
+        const_functions::replace(with_imported(const_functions::module_constant_functions(
             node.clone(),
             syntax_tree,
             &const_env,
             &type_aliases,
-            &parameter_value_env(&parameters, &const_env),
-        ));
+            &parameter_value_env_with_imported(&parameters, &const_env, &imported),
+        )));
         extend_const_env_with_parameters(&mut const_env, &parameters);
 
         match reject_silently_ignored_constructs(
@@ -479,7 +512,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &type_aliases,
-            &parameter_packed_dimensions(&parameters).into(),
+            &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
             &parameter_value_env(&parameters, &const_env),
         ) {
             Ok(()) => {}
@@ -532,7 +565,7 @@ impl Module {
                     syntax_tree,
                     &const_env,
                     &type_aliases,
-                    &parameter_packed_dimensions(&parameters).into(),
+                    &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
                     &parameter_value_env(&parameters, &const_env),
                 )?;
             }
@@ -565,6 +598,9 @@ impl Module {
                 .iter()
                 .map(|parameter| parameter.signal.clone()),
         );
+        // The array parameters of the packages the module uses are constant
+        // signals of the module, like its own.
+        signals.extend(imported.signals.iter().cloned());
         for r#type in ports
             .iter()
             .map(Port::r#type)
@@ -585,11 +621,34 @@ impl Module {
             packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
         // Four-state parameter values cannot be represented by the numeric
         // environment. Keep their expressions for constant case analysis.
-        packed_dimensions.parameter_values = parameter_value_env(&parameters, &const_env).into();
+        packed_dimensions.parameter_values =
+            parameter_value_env_with_imported(&parameters, &const_env, &imported).into();
         packed_dimensions
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
-        packed_dimensions.extend(parameter_packed_dimensions(&parameters));
+        packed_dimensions.extend(parameter_packed_dimensions_with_imported(
+            &parameters,
+            &imported,
+        ));
+        // Instance connections may call subroutines, of the module or of the
+        // packages it uses, with untyped assignment patterns.
+        let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for (name, params) in &imported.subroutine_params {
+            subroutine_params
+                .entry(name.clone())
+                .or_insert_with(|| params.clone());
+        }
+        for (name, shapes) in &imported.subroutine_shapes {
+            subroutine_shapes
+                .entry(name.clone())
+                .or_insert_with(|| shapes.clone());
+        }
+        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         let mut instances = instances_from_module_node(
             node.clone(),
             syntax_tree,
@@ -634,7 +693,8 @@ impl Module {
             });
         }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
-        let mut parameter_values = parameter_value_env(&parameters, &const_env);
+        let mut parameter_values =
+            parameter_value_env_with_imported(&parameters, &const_env, &imported);
         for (name, value) in &enum_constants.exprs {
             parameter_values
                 .entry(name.clone())
@@ -654,8 +714,19 @@ impl Module {
                 .into_iter()
                 .map(|(name, r#type)| (name, r#type.signed)),
         );
-        let functions =
+        let mut functions =
             functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        for (name, function) in &imported.functions {
+            functions
+                .entry(name.clone())
+                .or_insert_with(|| function.clone());
+        }
+        for (name, metadata) in &imported.function_return_types {
+            packed_dimensions
+                .function_return_types
+                .entry(name.clone())
+                .or_insert(*metadata);
+        }
         packed_dimensions
             .function_return_types
             .extend(functions.iter().map(|(name, function)| {
@@ -669,7 +740,7 @@ impl Module {
                     },
                 )
             }));
-        let dpi_imports = dpi::dpi_imports_from_module_node(
+        let mut dpi_imports = dpi::dpi_imports_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -704,13 +775,6 @@ impl Module {
                 });
             }
         }
-        let (subroutine_params, subroutine_shapes) = procedural::subroutine_argument_names(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
-        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
         // Bodies now have the active module's declarations and function types.
         // Declaration-time queries still use syntax discovery while metadata
         // is incomplete; generated/procedural scopes overlay this complete base.
@@ -722,7 +786,7 @@ impl Module {
             counter: &mut local_counter,
             subroutine_params: &subroutine_params,
         };
-        let subroutines = procedural::subroutines_from_module_node(
+        let mut subroutines = procedural::subroutines_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -730,7 +794,7 @@ impl Module {
             &parameter_values,
             &mut body_state,
         )?;
-        let comb_processes = comb_processes_from_module_node(
+        let mut comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -747,7 +811,7 @@ impl Module {
             )
         })
         .collect::<Vec<_>>();
-        let ff_processes = ff_processes_from_module_node(
+        let mut ff_processes = ff_processes_from_module_node(
             node.clone(),
             syntax_tree,
             &const_env,
@@ -759,6 +823,7 @@ impl Module {
         for parameter in &array_parameters {
             initial_processes.push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
         }
+        initial_processes.extend(imported.initial_processes.iter().cloned());
         initial_processes.extend(procedural::initial_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -792,10 +857,100 @@ impl Module {
                 signal.name()
             )));
         }
+        // A call of a name an import binds calls the package subroutine or
+        // DPI import. Calls of subroutines declared in a generate block were
+        // already bound to those.
+        let calls: HashMap<String, String> = imported
+            .aliases
+            .iter()
+            .filter(|(_, target)| {
+                imported
+                    .subroutines
+                    .iter()
+                    .any(|subroutine| subroutine.name == **target)
+                    || imported
+                        .dpi_imports
+                        .iter()
+                        .any(|import| import.name() == target.as_str())
+            })
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect();
+        if !calls.is_empty() {
+            let rename = scope::Renamer { names: &calls };
+            let body = |body: Vec<Stmt>| body.into_iter().map(|stmt| rename.stmt(stmt)).collect();
+            for process in &mut comb_processes {
+                process.body = body(std::mem::take(&mut process.body));
+                for assignment in &mut process.assignments {
+                    assignment.rhs = rename.expr(assignment.rhs.clone());
+                }
+            }
+            for process in &mut ff_processes {
+                process.body = body(std::mem::take(&mut process.body));
+            }
+            for process in &mut initial_processes {
+                process.body = body(std::mem::take(&mut process.body));
+            }
+            for subroutine in &mut subroutines {
+                *subroutine = rename.subroutine(subroutine.clone());
+            }
+            for instance in &mut instances {
+                for connection in &mut instance.port_connections {
+                    connection.actual_expr =
+                        connection.actual_expr.take().map(|expr| rename.expr(expr));
+                }
+            }
+        }
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
             .collect();
+        // A package keeps its symbols for the scopes that use it.
+        let symbols = is_package.then(|| scope::ScopeSymbols {
+            const_env: const_env.clone(),
+            parameter_values: parameter_values.clone(),
+            parameters: parameters.clone(),
+            type_aliases: type_aliases.clone(),
+            enum_constants: enum_constants.clone(),
+            functions: functions.clone(),
+            function_return_types: packed_dimensions.function_return_types.clone(),
+            constant_functions: const_functions::installed(),
+            subroutine_params: subroutine_params.clone(),
+            subroutine_shapes: subroutine_shapes.clone(),
+            subroutines: subroutines.clone(),
+            locals: locals.clone(),
+            dpi_imports: dpi_imports.clone(),
+            // A package's signals are its array parameters and constant
+            // variables, initialized by its initial processes.
+            signals: signals.clone(),
+            initial_processes: initial_processes.clone(),
+            aliases: imported.aliases.clone(),
+        });
+        // The subroutines, locals and DPI imports of the packages the module
+        // uses are lowered with it.
+        for subroutine in &imported.subroutines {
+            if !subroutines
+                .iter()
+                .any(|known| known.name == subroutine.name)
+            {
+                subroutines.push(subroutine.clone());
+            }
+        }
+        for local in &imported.locals {
+            if !locals.iter().any(|known| known.name == local.name) {
+                locals.push(local.clone());
+            }
+        }
+        for import in &imported.dpi_imports {
+            if !dpi_imports
+                .iter()
+                .any(|known| known.name() == import.name())
+            {
+                dpi_imports.push(import.clone());
+            }
+        }
+        let mut imported_parameters = imported.parameters.clone();
+        imported_parameters
+            .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
 
         Ok(Self {
             name,
@@ -811,6 +966,8 @@ impl Module {
             subroutines,
             dpi_imports,
             constant_functions: const_functions::installed(),
+            imported_parameters,
+            symbols,
         })
     }
 
@@ -824,6 +981,11 @@ impl Module {
 
     pub fn signals(&self) -> &[Signal] {
         &self.signals
+    }
+
+    /// The package parameters the module sees.
+    pub fn imported_parameters(&self) -> &[Parameter] {
+        &self.imported_parameters
     }
 
     pub fn parameters(&self) -> &[Parameter] {
@@ -929,6 +1091,43 @@ impl Parameter {
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
         }
         Some(value)
+    }
+
+    pub(crate) fn resolved_value_with_literals(
+        &self,
+        constants: &HashMap<String, i128>,
+        parameter_types: &HashMap<String, ExprType>,
+        literals: &HashMap<String, Expr>,
+    ) -> Option<i128> {
+        self.resolved_value(constants, parameter_types).or_else(|| {
+            let literal = self.resolved_literal(constants, parameter_types, literals)?;
+            eval_ast_const_expr(&expr_to_const(literal)?, constants)
+        })
+    }
+
+    pub(crate) fn resolved_literal(
+        &self,
+        constants: &HashMap<String, i128>,
+        parameter_types: &HashMap<String, ExprType>,
+        literals: &HashMap<String, Expr>,
+    ) -> Option<Expr> {
+        // A previous elaboration pass may have left this declaration's numeric
+        // value in the environment. Evaluate its initializer, not that value.
+        let mut evaluation_constants = constants.clone();
+        evaluation_constants.remove(self.name());
+        let mut parameter = self.clone();
+        parameter.value = self.value.clone().map(|value| {
+            substitute_typed_parameter_literals(value, &evaluation_constants, parameter_types)
+        });
+        if let Some(ty) = self.resolved_type(parameter_types) {
+            parameter.declared_width = Some(ty.width);
+            parameter.declared_signed = Some(ty.signed);
+        }
+        let value = parameter_value_env(std::slice::from_ref(&parameter), &evaluation_constants)
+            .remove(self.name())?;
+        let value = substitute_expr_idents(value, literals);
+        let value = fold_const_integral_expr_preserving_mask(value, &evaluation_constants);
+        matches!(value, Expr::Literal(_)).then_some(value)
     }
 
     pub(crate) fn resolved_type(
@@ -1735,7 +1934,7 @@ impl InsideItem {
 
 /// Enum member constants collected from module-level `typedef enum`
 /// declarations.
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EnumMemberConstants {
     /// Evaluated values for the module constant environment.
     numbers: HashMap<String, i128>,
@@ -1745,7 +1944,49 @@ struct EnumMemberConstants {
     types: HashMap<String, ExprType>,
 }
 
-#[derive(Clone, Copy)]
+impl EnumMemberConstants {
+    /// Add the members of `other` that are not known already.
+    fn extend_missing(&mut self, other: &EnumMemberConstants) {
+        for (name, value) in &other.numbers {
+            self.numbers.entry(name.clone()).or_insert(*value);
+        }
+        for (name, value) in &other.exprs {
+            self.exprs
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+        for (name, value) in &other.types {
+            self.types.entry(name.clone()).or_insert(*value);
+        }
+    }
+}
+
+/// The declared dimensions of `parameters` and of the package parameters a
+/// scope imports, so that selects use their declared ranges.
+fn parameter_packed_dimensions_with_imported(
+    parameters: &[Parameter],
+    imported: &scope::ScopeSymbols,
+) -> VariablePackedDimensions {
+    let mut dimensions = parameter_packed_dimensions(&imported.parameters);
+    dimensions.extend(parameter_packed_dimensions(parameters));
+    dimensions
+}
+
+/// The literal values of `parameters`, and of the package parameters and
+/// enum members a scope imports.
+fn parameter_value_env_with_imported(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+    imported: &scope::ScopeSymbols,
+) -> HashMap<String, Expr> {
+    let mut values = parameter_value_env(parameters, const_env);
+    for (name, value) in &imported.parameter_values {
+        values.entry(name.clone()).or_insert_with(|| value.clone());
+    }
+    values
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExprType {
     pub(crate) width: usize,
     pub(crate) signed: bool,

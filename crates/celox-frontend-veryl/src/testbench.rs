@@ -105,7 +105,7 @@ fn runtime_event_site_for_assert(
             AssertKind::Continue => RuntimeEventKind::AssertContinue,
         },
         template,
-        sizing: DisplaySizing::Minimal,
+        sizing: DisplaySizing::Veryl,
         scope: None,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args

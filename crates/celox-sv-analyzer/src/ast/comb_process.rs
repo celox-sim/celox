@@ -290,7 +290,7 @@ fn comb_process_from_always_construct(
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
-    let Some(body) = always_comb_body(always) else {
+    let Some(body) = always_comb_body(always, syntax_tree) else {
         return Ok(None);
     };
     let mut builder = procedural::BodyBuilder::new(

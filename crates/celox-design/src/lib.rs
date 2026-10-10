@@ -77,9 +77,11 @@ pub struct EventLocation {
 /// How a runtime event site sizes its formatted arguments.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisplaySizing {
-    /// Each argument takes its minimum width, as Veryl prints it.
+    /// The formatting of Veryl's simulator: radices at the argument's width,
+    /// decimals at their minimum, and C-style field widths that never
+    /// truncate.
     #[default]
-    Minimal,
+    Veryl,
     /// Automatic sizing and field widths of IEEE 1800-2023 21.2.1.2.
     Ieee,
 }
@@ -1057,7 +1059,7 @@ mod tests {
         runtime.runtime_event_sites.push(RuntimeEventSite {
             kind: RuntimeEventKind::AssertFatal,
             template: Some("failed".to_string()),
-            sizing: DisplaySizing::Minimal,
+            sizing: DisplaySizing::Veryl,
             scope: None,
             location: None,
             arg_widths: Vec::new(),

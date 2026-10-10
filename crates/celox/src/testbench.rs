@@ -18,9 +18,9 @@ use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
 pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
-    ExecutableLoopBound, ExecutableStatement, ExecutableTestbench, TestbenchOperator as Op,
-    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget, TestbenchValue as TbValue,
-    format_display_arg,
+    ExecutableLoopBound, ExecutableStatement, ExecutableTestbench, FieldSpec,
+    TestbenchOperator as Op, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
+    TestbenchValue as TbValue, format_veryl_display_arg, pad_veryl_field,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
@@ -121,11 +121,12 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
 fn format_assert_arg<B: SimBackend>(
     sim: &mut Simulator<B>,
     arg: &CompiledAssertArg,
-    spec: Option<char>,
+    spec: char,
+    field: FieldSpec,
 ) -> String {
     let value = eval_expr(sim, &arg.expr);
     let value = value.to_biguint();
-    format_display_arg(
+    format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
             mask: None,
@@ -134,6 +135,7 @@ fn format_assert_arg<B: SimBackend>(
             is_string: arg.is_string,
         },
         spec,
+        field,
     )
 }
 
@@ -146,7 +148,7 @@ fn render_assert_message<B: SimBackend>(
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
-                .map(|arg| format_assert_arg(sim, arg, Some('x')))
+                .map(|arg| format_assert_arg(sim, arg, 'x', FieldSpec::default()))
                 .collect::<Vec<_>>()
                 .join(" "),
         ),
@@ -164,26 +166,30 @@ fn render_assert_message<B: SimBackend>(
                         chars.next();
                         rendered.push('%');
                     }
-                    Some(spec) => {
-                        chars.next();
-                        let spec = if spec.is_ascii_digit() {
-                            while matches!(chars.peek(), Some('0'..='9')) {
-                                chars.next();
-                            }
-                            chars.next().unwrap_or(spec)
-                        } else {
-                            spec
+                    Some(_) => {
+                        let field = FieldSpec::parse(&mut chars, true);
+                        let Some(spec) = chars.next() else {
+                            rendered.push('%');
+                            break;
                         };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
                                 if let Some(arg) = args.get(arg_idx) {
-                                    rendered.push_str(&format_assert_arg(sim, arg, Some(spec)));
+                                    rendered.push_str(&format_assert_arg(sim, arg, spec, field));
                                 }
                                 arg_idx += 1;
                             }
-                            'm' | 'M' => rendered.push_str("<hierarchy>"),
-                            't' | 'T' => rendered.push_str(&current_time.to_string()),
+                            'm' | 'M' => rendered.push_str(&pad_veryl_field(
+                                "<hierarchy>".to_string(),
+                                spec,
+                                field,
+                            )),
+                            't' | 'T' => rendered.push_str(&pad_veryl_field(
+                                current_time.to_string(),
+                                spec,
+                                field,
+                            )),
                             _ => {
                                 rendered.push('%');
                                 rendered.push(spec);

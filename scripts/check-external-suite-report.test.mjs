@@ -108,6 +108,28 @@ test("a retained baseline without run metadata is accepted", () => {
   assert.deepEqual(check(input), { cases: 2, accepted_failures: ["known"] });
 });
 
+test("new passing cases do not require rewriting the retained baseline", () => {
+  for (const status of ["passed", "rejected"]) {
+    const input = fixture();
+    const expectation = status === "rejected" ? "CompilationError" : "Simulation";
+    const row = {
+      ...input.current.cases[1],
+      name: "new::case",
+      expectation,
+      status,
+    };
+    input.current.cases.push(row);
+    input.current.counts = counts(input.current.cases);
+    input.current.run_counts.fresh++;
+    input.catalogue.cases.push({ ...input.catalogue.cases[1], name: row.name, expectation });
+    assert.deepEqual(check(input), { cases: 3, accepted_failures: ["known"] });
+    row.status = "compile_error";
+    row.detail = "new failure";
+    input.current.counts = counts(input.current.cases);
+    assert.throws(() => check(input), /new or changed external verification failures/);
+  }
+});
+
 test("new failures, changed diagnostics and changed tools cannot use the baseline", () => {
   for (const mutate of [
     (input) => {
