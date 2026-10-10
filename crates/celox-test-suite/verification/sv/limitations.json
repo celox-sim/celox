@@ -127,7 +127,8 @@
     ],
     "cases": {
       "icarus": [
-        "procedural::aggregate_parameters_are_constant_tables"
+        "procedural::aggregate_parameters_are_constant_tables",
+        "system_functions::dimensions_resolves_package_array_constants"
       ]
     }
   },
@@ -664,6 +665,74 @@
     "cases": {
       "icarus": [
         "system_functions::immediate_cover_executes_pass_statement"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_subroutine_unpacked_ports",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_resolves_procedural_scopes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_function_return_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_resolves_imported_function_returns"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_one_bit_expression_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_preserves_one_bit_vectors"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_one_bit_expression_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::dimensions_preserves_one_bit_vectors"
       ]
     }
   }

@@ -111,7 +111,7 @@ use functions::{
     function_local_packed_dimensions_from_block_items, function_return_dimensions,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
     function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
-    procedural_truth_condition, tf_item_params, tf_params,
+    procedural_truth_condition,
 };
 use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,

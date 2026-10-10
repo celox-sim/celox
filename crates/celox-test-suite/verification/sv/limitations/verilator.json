@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 4,
+    "mismatch": 5,
     "emission_error": 0,
     "compile_error": 5,
     "runtime_error": 1,
@@ -94,6 +94,17 @@
       "name": "system_functions::dimensions_of_nonarray_handle_types",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_preserves_one_bit_vectors at 889:5: assert_eq literal_rank: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

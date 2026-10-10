@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 8,
+    "mismatch": 10,
     "emission_error": 0,
-    "compile_error": 52,
+    "compile_error": 54,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -518,6 +518,50 @@
       "name": "system_functions::dimensions_resolves_types_and_constant_scopes",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_preserves_one_bit_vectors at 889:5: assert_eq literal_rank: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_resolves_imported_function_returns at 925:3: assert_eq imported_rank: expected 0x2, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_resolves_imported_function_returns",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_resolves_package_array_constants",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:8: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:4: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:23: error: Array argument needs an array index here.\n<case>/source_0.sv:24: error: Array argument needs an array index here.\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_resolves_procedural_scopes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

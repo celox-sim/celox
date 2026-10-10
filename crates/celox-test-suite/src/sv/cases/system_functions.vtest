@@ -799,3 +799,130 @@ a=0a  10
   (top Top)
   (eval)
   (assert_eq result 0))
+
+; IEEE 1800-2023 20.7: queries use the operand's lexical declaration.
+(case dimensions_resolves_procedural_scopes
+  (source "unpacked_scopes.sv" #"
+    module Top(output int task_value, legacy_value, block_value, nested_value, initial_value);
+      logic [7:0] x [0:1][0:2];
+      task automatic query(input logic [7:0] x [0:1], output int result);
+        logic [7:0] local_array [0:1][0:2][0:3];
+        result = $dimensions(x) * 10 + $dimensions(local_array);
+      endtask
+      task automatic legacy;
+        input logic [7:0] x [0:1];
+        output int result;
+        result = $dimensions(x);
+      endtask
+      function automatic int nested();
+        logic [7:0] x [0:1];
+        begin : inner
+          logic [7:0] x [0:1][0:2][0:3];
+          return $dimensions(x);
+        end
+      endfunction
+      logic [7:0] argument [0:1];
+      always_comb begin
+        logic [7:0] block_array [0:1][0:2][0:3][0:4];
+        query(argument, task_value);
+        legacy(argument, legacy_value);
+        block_value = $dimensions(block_array);
+        nested_value = nested();
+      end
+      initial begin
+        logic [7:0] x [0:1][0:2][0:3][0:4][0:5];
+        initial_value = $dimensions(x);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq task_value 24)
+  (assert_eq legacy_value 2)
+  (assert_eq block_value 5)
+  (assert_eq nested_value 4)
+  (assert_eq initial_value 6))
+
+(case dimensions_resolves_package_array_constants
+  (source "unpacked_package.sv" #"
+    package data_pkg;
+      localparam logic [7:0] A [0:1] = '{8'h12, 8'h34};
+      localparam int N = $dimensions(A);
+      localparam int ELEMENT = $dimensions(A[0]);
+    endpackage
+    module Top(output int whole, element);
+      import data_pkg::*;
+      assign whole = N;
+      assign element = ELEMENT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq whole 2)
+  (assert_eq element 1))
+
+(case dimensions_preserves_one_bit_vectors
+  (source "one_bit_dimensions.sv" #"
+    module Top(input logic s, output int literal_rank, concat_rank, repeat_rank, fill_rank,
+               output int parameter_rank, signed_parameter_rank, scalar_rank, declared_vector_rank,
+               output int bit_cast_rank, size_cast_rank);
+      typedef bit scalar_t;
+      localparam P = 1'b0;
+      localparam signed S = 1'b0;
+      localparam logic SCALAR = 1'b0;
+      localparam logic [0:0] VECTOR = 1'b0;
+      assign literal_rank = $dimensions(1'b0);
+      assign concat_rank = $dimensions({s});
+      assign repeat_rank = $dimensions({1{s}});
+      assign fill_rank = $dimensions('0);
+      assign parameter_rank = $dimensions(P);
+      assign signed_parameter_rank = $dimensions(S);
+      assign scalar_rank = $dimensions(SCALAR);
+      assign declared_vector_rank = $dimensions(VECTOR);
+      assign bit_cast_rank = $dimensions(scalar_t'(s));
+      assign size_cast_rank = $dimensions(1'(s));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1)
+    (modify (set s value))
+    (assert_eq literal_rank 1)
+    (assert_eq concat_rank 1)
+    (assert_eq repeat_rank 1)
+    (assert_eq fill_rank 1)
+    (assert_eq parameter_rank 1)
+    (assert_eq signed_parameter_rank 1)
+    (assert_eq scalar_rank 0)
+    (assert_eq declared_vector_rank 1)
+    (assert_eq bit_cast_rank 0)
+    (assert_eq size_cast_rank 1)))
+
+(case dimensions_resolves_imported_function_returns
+  (source "imported_dimensions.sv" #"
+    package shapes;
+      function automatic logic [1:0][3:0] f();
+        $display("must not execute");
+        return 0;
+      endfunction
+    endpackage
+    module Child(output int local_rank);
+      import shapes::*;
+      function automatic logic [7:0] f(); return 0; endfunction
+      localparam N = $dimensions(f());
+      assign local_rank = N;
+    endmodule
+    module Top(output int imported_rank, qualified_rank, local_rank);
+      import shapes::*;
+      localparam N = $dimensions(f());
+      localparam Q = $dimensions(shapes::f());
+      assign imported_rank = N;
+      assign qualified_rank = Q;
+      Child child(local_rank);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq imported_rank 2)
+  (assert_eq qualified_rank 2)
+  (assert_eq local_rank 1)
+  (expect_output ""))

@@ -1,6 +1,19 @@
 use super::*;
 
 sv_backends! {
+    fn dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::dimensions_resolves_procedural_scopes";
+    }
+    fn dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::dimensions_resolves_package_array_constants";
+    }
+    fn dimensions_preserves_one_bit_vectors(sim) {
+        @case "system_functions::dimensions_preserves_one_bit_vectors";
+    }
+    fn dimensions_resolves_imported_function_returns(sim) {
+        @case "system_functions::dimensions_resolves_imported_function_returns";
+    }
+
     fn dimensions_of_nonarray_handle_types(sim) {
         @case "system_functions::dimensions_of_nonarray_handle_types";
     }
@@ -681,5 +694,17 @@ fn dimensions_rejects_undefined_constant_operands() {
         "module Top(output int y); if ($dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
     ] {
         build_error(source);
+    }
+}
+
+#[test]
+fn dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $dimensions(logic)'(1'b1);",
+        "localparam P = $dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $dimensions(logic); assign y = N'(1'b1);",
+        "localparam N = $dimensions(real); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
     }
 }

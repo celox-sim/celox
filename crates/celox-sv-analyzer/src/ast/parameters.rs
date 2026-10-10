@@ -504,7 +504,7 @@ fn bind_parameter(
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
         let rank = if parameter.packed_ranges.is_empty() {
-            usize::from(ty.width > 1)
+            usize::from(!parameter.has_declared_type || ty.width > 1)
         } else {
             parameter.packed_ranges.len()
         };

@@ -2518,6 +2518,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_one_bit_expression_dimensions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "",
       "expectation": "Simulation",
       "name": "system_functions::dimensions_preserves_selected_and_expression_types",
