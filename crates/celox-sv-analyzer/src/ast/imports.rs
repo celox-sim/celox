@@ -544,6 +544,20 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
             RefNode::ParamAssignment(assignment) => {
                 Some(RefNode::ParameterIdentifier(&assignment.nodes.0))
             }
+            // A loop's genvar is declared in each block the loop generates
+            // (IEEE 1800-2023 27.4).
+            RefNode::LoopGenerateConstruct(construct) => {
+                let body = node_range(RefNode::GenerateBlock(&construct.nodes.2));
+                if let Some(index) = blocks.iter().position(|range| *range == body)
+                    && let Some(name) = identifier_text(
+                        RefNode::GenvarIdentifier(&construct.nodes.1.nodes.1.0.nodes.1),
+                        tree,
+                    )
+                {
+                    scopes[index].declared.insert(name);
+                }
+                continue;
+            }
             // `genvar i;`; a loop's own `genvar i` is the loop's.
             RefNode::GenvarDeclaration(declaration) => {
                 if let Some(index) = owner(offset, nested) {
@@ -1227,10 +1241,24 @@ pub(super) fn resolve_imports(
             if outside.as_ref() == Some(&target) {
                 continue;
             }
+            // Types, and the formal names and shapes of subroutines, are
+            // looked up module-wide.
             if symbols.type_aliases.contains_key(&target) {
                 return Err(AnalyzerError::Unsupported(format!(
                     "type `{name}` that a generate block imports as another declaration than \
                      its module"
+                )));
+            }
+            if symbols.subroutine_params.contains_key(&target)
+                || symbols.functions.contains_key(&target)
+                || symbols
+                    .dpi_imports
+                    .iter()
+                    .any(|import| import.name() == target.as_str())
+            {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "subroutine `{name}` that a generate block imports as another declaration \
+                     than its module"
                 )));
             }
             generate_imports
