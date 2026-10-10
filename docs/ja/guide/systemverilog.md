@@ -110,7 +110,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   package の中で解決します。package の変数は、それを使うすべてのモジュール（Veryl からインスタンス化した
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
-  モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、
+  モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、定数でない package 変数の初期化子、
   package の net、`export` 宣言、コンパイル単位（`$unit`）の宣言は未対応です
   （[#1146](https://github.com/celox-sim/celox/issues/1146)）。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と

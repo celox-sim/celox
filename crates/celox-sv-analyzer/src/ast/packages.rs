@@ -302,6 +302,16 @@ fn analyze_package_scope(
             .any(|signal| scope::initializes(process, signal.name()))
     });
     symbols.signals = constants;
+    // A declaration of a user-defined net type gives no signal.
+    if let Some(net) = variables.iter().find(|variable| {
+        !state
+            .iter()
+            .any(|signal| signal.name() == variable.as_str())
+    }) {
+        return Err(AnalyzerError::Unsupported(format!(
+            "package net `{name}::{net}`"
+        )));
+    }
     symbols.state_signals = state
         .into_iter()
         .map(|mut signal| {

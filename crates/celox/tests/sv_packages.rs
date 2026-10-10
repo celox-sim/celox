@@ -551,3 +551,68 @@ fn initial_blocks_write_package_variables_after_their_initializers() {
     let address = simulator.program().get_addr(&[], &["p::shared"]).unwrap();
     assert_eq!(simulator.program().get_path(&address), "p::shared");
 }
+
+#[test]
+fn package_structure_members_are_written_through_the_package_scope() {
+    assert_eq!(
+        output(
+            "package p;
+               typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+               pair_t shared;
+             endpackage
+             module Top(output logic [7:0] y);
+               always_comb begin p::shared.hi = 4'd1; p::shared.lo = 4'd2; end
+               assign y = p::shared;
+             endmodule"
+        ),
+        0x12
+    );
+}
+
+#[test]
+fn rejects_unsupported_package_state() {
+    for (source, expected) in [
+        (
+            "package p; nettype logic nt; nt shared; endpackage
+             module Top(output logic [7:0] y); assign y = 0; endmodule",
+            "package net `p::shared`",
+        ),
+        (
+            "package p; logic [7:0] a = 8'd1; endpackage
+             package q; logic [7:0] b = p::a; endpackage
+             module Top(output logic [7:0] y); assign y = q::b; endmodule",
+            "package variable initializer that is not constant in package `q`",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("state.sv"))], "Top")
+                .build()
+                .expect_err(expected);
+        assert!(format!("{error:?}").contains(expected), "{error:?}");
+    }
+}
+
+#[test]
+fn veryl_instances_of_one_initializer_are_several_drivers() {
+    let sv = "package p; logic [7:0] shared; endpackage
+        module W(input logic [7:0] a); initial p::shared = 8'd1; endmodule";
+    let veryl = r#"
+module Top (
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w1: $sv::W (a);
+    inst w2: $sv::W (a);
+    assign y = a;
+}
+"#;
+    let error = Simulator::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("initial.sv"))])
+        .build()
+        .expect_err("two instances initializing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
+        "{error:?}"
+    );
+}

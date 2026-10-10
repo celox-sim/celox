@@ -210,7 +210,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
   variable are rejected, counting every instance of a module that writes it.
-  A package variable cannot be a clock or reset yet, and package nets,
+  A package variable cannot be a clock or reset yet, and its initializer must
+  be constant. Package nets,
   `export` declarations and compilation-unit (`$unit`) declarations are not
   supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
 - **Interfaces** are expanded into the modules that use them before

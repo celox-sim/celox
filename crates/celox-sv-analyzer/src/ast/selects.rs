@@ -51,7 +51,17 @@ pub(super) fn variable_lvalue_from_node(
             {
                 return packed_structs::variable_member(
                     node,
-                    None,
+                    identifier
+                        .nodes
+                        .0
+                        .is_some()
+                        .then(|| {
+                            reference_name(
+                                RefNode::VariableLvalueIdentifier(identifier),
+                                syntax_tree,
+                            )
+                        })
+                        .flatten(),
                     &identifier.nodes.2,
                     syntax_tree,
                     packed_dimensions,

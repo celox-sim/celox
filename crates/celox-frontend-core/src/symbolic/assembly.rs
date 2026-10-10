@@ -269,10 +269,10 @@ impl PackageBindings {
     }
 }
 
-/// Reject a package variable that two flip-flop processes, or a flip-flop
-/// process and a continuous driver, write. Instances of one module are
-/// separate drivers. Overlapping continuous drivers are rejected by the
-/// scheduler.
+/// Reject a package variable that two flip-flop processes write, that the
+/// initial writes of two instances write, or that a continuous driver and
+/// any other process write. Instances of one module are separate drivers.
+/// Overlapping continuous drivers are rejected by the scheduler.
 fn check_package_variable_drivers(
     bindings: &PackageBindings,
     instance_modules: &HashMap<InstanceId, ModuleId>,
@@ -338,22 +338,71 @@ fn check_package_variable_drivers(
             }
         }
     }
-    for (index, (writer, address, access)) in ff_writes.iter().enumerate() {
-        if ff_writes[index + 1..]
-            .iter()
-            .any(|(other, other_address, other_access)| {
-                other != writer && other_address == address && other_access.overlaps(access)
-            })
-        {
-            return Err(error(address));
+    // Initial writes of module instances: constant ones folded into initial
+    // values, and initial processes. The package's own declaration
+    // initializers are not drivers.
+    let mut initial_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
+    for (&instance, module_id) in instance_modules {
+        let module = &modules[module_id];
+        if module.package_bindings.is_empty() {
+            continue;
+        }
+        for initial in &module.initial_memory_values {
+            let address = bindings.locate(instance, initial.address);
+            if packages.contains(&address) {
+                let access = BitAccess::new(0, width(&address).saturating_sub(1));
+                initial_writes.push(((instance, usize::MAX), address, access));
+            }
+        }
+        for (index, process) in module.processes.iter().enumerate() {
+            for block in process.kernel.blocks.values() {
+                for instruction in &block.instructions {
+                    let (SIRInstruction::Store(address, ..)
+                    | SIRInstruction::Commit(_, address, ..)) = instruction
+                    else {
+                        continue;
+                    };
+                    let address = bindings.locate(instance, address.var_id);
+                    if packages.contains(&address) {
+                        let access = BitAccess::new(0, width(&address).saturating_sub(1));
+                        initial_writes.push(((instance, index), address, access));
+                    }
+                }
+            }
         }
     }
+    let conflict =
+        |writes: &[((InstanceId, usize), AbsoluteAddr, BitAccess)],
+         distinct: &dyn Fn(&(InstanceId, usize), &(InstanceId, usize)) -> bool| {
+            writes
+                .iter()
+                .enumerate()
+                .find_map(|(index, (writer, address, access))| {
+                    writes[index + 1..]
+                        .iter()
+                        .any(|(other, other_address, other_access)| {
+                            distinct(writer, other)
+                                && other_address == address
+                                && other_access.overlaps(access)
+                        })
+                        .then_some(*address)
+                })
+        };
+    // Two flip-flop processes, or initial writes of two instances, race.
+    if let Some(address) = conflict(&ff_writes, &|left, right| left != right) {
+        return Err(error(&address));
+    }
+    if let Some(address) = conflict(&initial_writes, &|left, right| left.0 != right.0) {
+        return Err(error(&address));
+    }
+    // A continuous driver overlaps every other write.
     for path in comb_blocks {
         let celox_slt::LogicPathTarget::Var(target) = &path.target else {
             continue;
         };
         if ff_writes
             .iter()
+            .chain(&initial_writes)
             .any(|(_, address, access)| *address == target.id && access.overlaps(&target.access))
         {
             return Err(error(&target.id));

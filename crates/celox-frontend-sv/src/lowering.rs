@@ -482,11 +482,17 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            Ok((
-                module.name().to_string(),
-                ModuleId(first + index),
-                lower_module(module, four_state, true, ff_parts)?,
-            ))
+            let lowered = lower_module(module, four_state, true, ff_parts)?;
+            // Declaration initializers run before every `initial` block
+            // (IEEE 1800-2023 10.5); one that is not folded into an initial
+            // value would run among them.
+            if !lowered.sim_module.processes.is_empty() {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "package variable initializer that is not constant in package `{}`",
+                    module.name()
+                )));
+            }
+            Ok((module.name().to_string(), ModuleId(first + index), lowered))
         })
         .collect()
 }
