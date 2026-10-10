@@ -376,7 +376,7 @@ impl RuntimeDesign {
     }
 }
 
-/// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
+/// Error returned when a path-based variable or event lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
     #[error("Instance not found: {path}")]
@@ -385,6 +385,8 @@ pub enum AddrLookupError {
     VariableNotFound { path: String },
     #[error("Ambiguous variable path: {path} — multiple variables share this path")]
     AmbiguousPath { path: String },
+    #[error("Signal is not an event: {path}")]
+    NotAnEvent { path: String },
 }
 
 /// Internal consistency failure while consuming the frontend projection into
@@ -465,10 +467,41 @@ pub struct OptimizedSir {
 
 impl OptimizedSir {
     pub(crate) fn new(
-        sir: SirProgram,
+        mut sir: SirProgram,
         runtime: RuntimeProgram,
         layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
     ) -> Self {
+        // Frontend captures carry logical site IDs. Give every backend the
+        // same nonzero fatal status, disjoint from positive loop/error codes.
+        for unit in sir
+            .eval_comb
+            .iter_mut()
+            .chain(sir.eval_apply_ffs.values_mut().flatten())
+            .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
+            .chain(sir.eval_only_ffs.values_mut().flatten())
+            .chain(sir.apply_ffs.values_mut().flatten())
+            .chain(sir.processes.iter_mut())
+            .chain(
+                sir.parallel
+                    .iter_mut()
+                    .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
+            )
+        {
+            for instruction in unit
+                .blocks
+                .values_mut()
+                .flat_map(|block| &mut block.instructions)
+            {
+                if let SIRInstruction::CombCaptureEvent {
+                    site_id,
+                    fatal_error_code: Some(code),
+                    ..
+                } = instruction
+                {
+                    *code = celox_runtime::comb_fatal_code(*site_id);
+                }
+            }
+        }
         Self {
             sir,
             layout_requirements,
