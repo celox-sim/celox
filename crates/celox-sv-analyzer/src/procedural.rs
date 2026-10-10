@@ -62,10 +62,13 @@ pub enum StmtBase<E, L> {
         args: Vec<SystemTaskArg<E>>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
-    /// to `init` or to the default value of its type.
+    /// to `init` or to the default value of its type. A `static` one keeps
+    /// its value between activations instead, and `init` runs once, before
+    /// time zero (IEEE 1800-2023 6.21).
     Local {
         name: String,
         init: Option<E>,
+        r#static: bool,
     },
     /// `#amount`: suspend the process for `amount` time units.
     Delay(E),
@@ -269,7 +272,12 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             },
-            StmtBase::Local { name, init } => StmtBase::Local {
+            StmtBase::Local {
+                name,
+                init,
+                r#static,
+            } => StmtBase::Local {
+                r#static,
                 name,
                 init: init.map(fe),
             },
@@ -383,7 +391,7 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
-            StmtBase::Local { name, init } => {
+            StmtBase::Local { name, init, .. } => {
                 fname(name);
                 if let Some(init) = init {
                     fe(init);

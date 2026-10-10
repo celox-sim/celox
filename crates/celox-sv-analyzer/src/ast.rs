@@ -404,7 +404,6 @@ impl Module {
         let node = node.into();
         let is_package = matches!(node, RefNode::PackageDeclaration(_));
         let name = scope_name_from_node(node.clone(), syntax_tree)?;
-        let _timed_tasks = validation::install_timed_tasks(node.clone(), syntax_tree, &imported);
         let _imported = scope::install(imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
@@ -571,6 +570,16 @@ impl Module {
             }
             Err(error) => return Err(error),
         }
+        // The constants are known: the generate items are elaborated, and
+        // the `always` constructs calling a timed task are classified as
+        // processes from here on.
+        let _timed_tasks = validation::install_timed_tasks(
+            node.clone(),
+            syntax_tree,
+            &imported,
+            &const_env,
+            &type_aliases,
+        )?;
         let ports = ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
