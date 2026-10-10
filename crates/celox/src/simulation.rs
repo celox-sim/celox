@@ -523,7 +523,8 @@ impl<B: SimBackend> Simulation<B> {
     /// Advance time and run until `end_time` (inclusive). As for
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        self.state.poll_waiting(&mut self.simulator)?;
+        self.state
+            .poll_waiting_until(&mut self.simulator, end_time)?;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;

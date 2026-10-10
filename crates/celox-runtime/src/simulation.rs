@@ -328,6 +328,14 @@ fn sample_event_signal<B: SimBackend>(backend: &B, signal: SignalRef) -> (bool, 
     }
 }
 
+/// The error of a process clock whose next edge lies beyond simulation time.
+fn clock_overflow(clock: usize) -> SimulatorErrorCode {
+    SimulatorErrorCode::Runtime {
+        message: format!("process clock {clock} overflows simulation time"),
+        signals: Vec::new(),
+    }
+}
+
 impl<B: SimBackend> SimulationState<B> {
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
@@ -519,7 +527,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.step_round(executor, current_time, events_to_process, ready, true)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
-        Ok(Some(current_time))
+        // Fused ticks may have moved the time on.
+        Ok(Some(self.scheduler.time))
     }
 
     /// Run the further rounds of `current_time`: the rising edges of the
@@ -598,20 +607,34 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        let events = falling
-            .iter()
-            .map(|id| (id, 0))
-            .chain(due.iter().map(|id| (id, 1)))
-            .map(|(id, next_val)| {
-                let clock = &self.tick_clocks[id];
-                SimEvent {
-                    time,
-                    event_ref: clock.event,
-                    signal: clock.signal,
-                    next_val,
-                }
-            })
-            .collect();
+        // A clock that is high when its edge is due (the host or a previous
+        // run left it so) falls first, in a round of its own: the rising
+        // edge that counts is then a real one. The falling edges due now
+        // are applied in the same round.
+        let mut events = Vec::with_capacity(falling.len() + due.len());
+        for id in falling {
+            let clock = &self.tick_clocks[id];
+            events.push(SimEvent {
+                time,
+                event_ref: clock.event,
+                signal: clock.signal,
+                next_val: 0,
+            });
+        }
+        let mut rising = Vec::with_capacity(due.len());
+        for id in due {
+            let clock = &self.tick_clocks[id];
+            let high: u8 = executor.backend().get_as(clock.signal);
+            events.push(SimEvent {
+                time,
+                event_ref: clock.event,
+                signal: clock.signal,
+                next_val: u8::from(high == 0),
+            });
+            if high == 0 {
+                rising.push(*id);
+            }
+        }
         for id in falling {
             self.tick_clocks
                 .get_mut(id)
@@ -619,19 +642,21 @@ impl<B: SimBackend> SimulationState<B> {
                 .falling_edge = None;
         }
         self.step_round(executor, time, events, Vec::new(), true)?;
-        if due.is_empty() {
+        if rising.is_empty() {
             return Ok(());
         }
         self.ticks += 1;
         if let Some(budget) = &mut self.tick_budget {
             *budget -= 1;
         }
-        for id in due {
-            let clock = self.tick_clocks.get_mut(id).expect("a due process clock");
-            clock.next_edge = time + clock.period;
+        for id in rising {
+            let clock = self.tick_clocks.get_mut(&id).expect("a due process clock");
+            clock.next_edge = time
+                .checked_add(clock.period)
+                .ok_or_else(|| clock_overflow(id))?;
             clock.falling_edge = Some(time + clock.period - clock.period / 2);
             let resume_at = clock.next_edge;
-            self.count_edges(*id, 1, resume_at);
+            self.count_edges(id, 1, resume_at);
         }
         Ok(())
     }
@@ -671,6 +696,9 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // The fused kernel runs the waited-on clock's domain alone: a design
+        // whose registers drive another clock or reset needs the scheduler's
+        // rounds, and a clock that is high now needs its normalizing fall.
         if !executor.fused_ticks_allowed()
             || !self.waiting.is_empty()
             || !self.process_wakeups.is_empty()
@@ -681,6 +709,11 @@ impl<B: SimBackend> SimulationState<B> {
                 .any(|clock| clock.falling_edge.is_some())
             || self.clock_waits.values().any(|wait| wait.clock != clock)
             || self.clock_waits.len() + self.done.len() != self.processes.len()
+            || self.event_info.iter().any(|info| info.is_cascaded)
+            || executor
+                .backend()
+                .get_as::<u8>(self.tick_clocks[&clock].signal)
+                != 0
         {
             return Ok(false);
         }
@@ -701,27 +734,34 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let (completed, result) = executor.tick_many(event, count);
-        result?;
-        if completed == 0 || completed > count {
+        if completed > count || (completed == 0 && result.is_ok()) {
             return Err(SimulatorErrorCode::Runtime {
                 message: "the backend made invalid progress on fused clock ticks".into(),
                 signals: Vec::new(),
             });
         }
-        self.ticks += completed;
-        if let Some(budget) = &mut self.tick_budget {
-            *budget -= completed;
+        // The edges the backend completed count, also before an error, so
+        // the schedule agrees with the state it left.
+        if completed != 0 {
+            self.ticks += completed;
+            if let Some(budget) = &mut self.tick_budget {
+                *budget -= completed;
+            }
+            self.scheduler.time = time + (completed - 1) * period;
+            let next_edge = completed
+                .checked_mul(period)
+                .and_then(|span| time.checked_add(span))
+                .ok_or_else(|| clock_overflow(clock))?;
+            self.tick_clocks
+                .get_mut(&clock)
+                .expect("a due process clock")
+                .next_edge = next_edge;
+            self.count_edges(clock, completed, next_edge);
         }
-        let next_edge = time + completed * period;
-        self.tick_clocks
-            .get_mut(&clock)
-            .expect("a due process clock")
-            .next_edge = next_edge;
-        self.count_edges(clock, completed, next_edge);
+        result?;
         // The processes that resume read the state settled after the last
         // edge.
         executor.eval_comb()?;
-        self.scheduler.time = time + (completed - 1) * period;
         Ok(true)
     }
 
@@ -732,13 +772,26 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.poll_waiting_until(executor, u64::MAX)
+    }
+
+    /// [`Self::poll_waiting`], where the fused clock ticks a woken process
+    /// may start stop before `limit`, as in [`Self::step_until`].
+    pub fn poll_waiting_until<E>(
+        &mut self,
+        executor: &mut E,
+        limit: u64,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         if self.finished || self.waiting.is_empty() {
             return Ok(());
         }
         let time = self.scheduler.time;
         if self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
-            self.run_remaining_rounds(executor, time, u64::MAX)?;
-            executor.finish_timed_step(time);
+            self.run_remaining_rounds(executor, time, limit)?;
+            executor.finish_timed_step(self.scheduler.time);
         }
         Ok(())
     }
@@ -1299,14 +1352,7 @@ impl<B: SimBackend> SimulationState<B> {
                 })
             })
             .collect::<Result<_, B::Event>>()?;
-        self.scheduler.time = snapshot.time;
-        self.scheduler.clocks.clone_from(&snapshot.clocks);
-        self.scheduler.event_queue = event_queue;
-        self.periodic_events.clone_from(&snapshot.periodic_events);
-        self.last_clock_values
-            .clone_from(&snapshot.last_clock_values);
-        self.unknown_clock_values
-            .clone_from(&snapshot.unknown_clock_values);
+        // Every translation happens before anything changes.
         let tick_clocks = snapshot
             .tick_clocks
             .iter()
@@ -1320,6 +1366,14 @@ impl<B: SimBackend> SimulationState<B> {
                 ))
             })
             .collect::<Result<_, B::Event>>()?;
+        self.scheduler.time = snapshot.time;
+        self.scheduler.clocks.clone_from(&snapshot.clocks);
+        self.scheduler.event_queue = event_queue;
+        self.periodic_events.clone_from(&snapshot.periodic_events);
+        self.last_clock_values
+            .clone_from(&snapshot.last_clock_values);
+        self.unknown_clock_values
+            .clone_from(&snapshot.unknown_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.waiting.clone_from(&snapshot.waiting);
         self.tick_clocks = tick_clocks;
