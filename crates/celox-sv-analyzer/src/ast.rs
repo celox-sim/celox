@@ -404,7 +404,7 @@ impl Module {
         let node = node.into();
         let is_package = matches!(node, RefNode::PackageDeclaration(_));
         let name = scope_name_from_node(node.clone(), syntax_tree)?;
-        let _timed_tasks = validation::install_timed_tasks(node.clone(), syntax_tree);
+        let _timed_tasks = validation::install_timed_tasks(node.clone(), syntax_tree, &imported);
         let _imported = scope::install(imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);

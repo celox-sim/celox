@@ -51,9 +51,12 @@ pub(super) struct Ff<'p, 'a> {
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
     /// The process's own copies of the formals and locals of the
-    /// subroutines it calls that suspend: original -> copy. Its kernel
-    /// addresses the copy wherever the body names the original.
+    /// `automatic` subroutines it calls that suspend: original -> copy. Its
+    /// kernel addresses the copy wherever the body names the original.
     private: HashMap<SourceVarId, SourceVarId>,
+    /// The process's own event counters of the watchers that read one of
+    /// its private copies, by watcher index.
+    private_watchers: HashMap<usize, EventCounters>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -94,6 +97,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             next_alias: u32::MAX,
             kernel: None,
             private: HashMap::default(),
+            private_watchers: HashMap::default(),
         }
     }
 
@@ -939,7 +943,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     // ---------------------------------------------------------------- stores
 
     /// Store `value` into `id`. In a process kernel, a store to a variable
-    /// some process waits on records the event it makes.
+    /// some event expression reads records the events it makes.
     fn store(
         &mut self,
         id: SourceVarId,
@@ -947,43 +951,87 @@ impl<'p, 'a> Ff<'p, 'a> {
         width: usize,
         value: RegisterId,
     ) -> Result<(), sv::AnalyzerError> {
-        let counters = if self.kernel.is_some() {
+        let watchers = if self.kernel.is_some() {
             let variable = self.aliases.get(&id).copied().unwrap_or(id);
-            self.m.event_counters.get(&variable).cloned()
+            self.m
+                .watchers_by_var
+                .get(&variable)
+                .cloned()
+                .unwrap_or_default()
         } else {
-            None
+            Vec::new()
         };
-        let Some(counters) = counters else {
+        if watchers.is_empty() {
             self.store_raw(id, offset, width, value);
             return Ok(());
-        };
-        self.assign(
-            &sv::ir::LValue::Ident(counters.previous.clone()),
-            &sv::ir::Expr::Ident(counters.name.clone()),
-        )?;
-        self.store_raw(id, offset, width, value);
-        for (edge, counter) in [
-            (sv::ir::EventEdge::Any, &counters.changes),
-            (sv::ir::EventEdge::Pos, &counters.rises),
-            (sv::ir::EventEdge::Neg, &counters.falls),
-        ] {
-            let occurred = event_occurred(
-                edge,
-                sv::ir::Expr::Ident(counters.previous.clone()),
-                sv::ir::Expr::Ident(counters.name.clone()),
-            );
-            let next = sv::ir::Expr::Binary {
-                left: Box::new(sv::ir::Expr::Ident(counter.clone())),
-                op: sv::ir::BinaryOp::Add,
-                right: Box::new(sv::ir::Expr::Resize {
-                    expr: Box::new(occurred),
-                    width: EVENT_COUNTER_WIDTH,
-                    signed: false,
-                }),
+        }
+        // The expressions before the store, then the store, then the
+        // events the store made.
+        let mut previous = Vec::with_capacity(watchers.len());
+        for &index in &watchers {
+            let expr = self.m.event_watchers[index].expr.clone();
+            let value = self.eval(&expr, None)?;
+            let (width, four_state) = match *self.b.register(&value) {
+                RegisterType::Logic { width } => (width, true),
+                RegisterType::Bit { width, .. } => (width, false),
             };
-            self.assign(&sv::ir::LValue::Ident(counter.clone()), &next)?;
+            let (slot, name) = self.watcher_previous(index, width, four_state);
+            self.store_raw(slot, SIROffset::Static(0), width, value);
+            previous.push(name);
+        }
+        self.store_raw(id, offset, width, value);
+        for (&index, previous) in watchers.iter().zip(previous) {
+            let expr = self.m.event_watchers[index].expr.clone();
+            let counters = self.watcher_counters(index);
+            for (edge, counter) in [
+                (sv::ir::EventEdge::Any, &counters.changes),
+                (sv::ir::EventEdge::Pos, &counters.rises),
+                (sv::ir::EventEdge::Neg, &counters.falls),
+            ] {
+                let occurred =
+                    event_occurred(edge, sv::ir::Expr::Ident(previous.clone()), expr.clone());
+                let next = sv::ir::Expr::Binary {
+                    left: Box::new(sv::ir::Expr::Ident(counter.clone())),
+                    op: sv::ir::BinaryOp::Add,
+                    right: Box::new(sv::ir::Expr::Resize {
+                        expr: Box::new(occurred),
+                        width: EVENT_COUNTER_WIDTH,
+                        signed: false,
+                    }),
+                };
+                self.assign(&sv::ir::LValue::Ident(counter.clone()), &next)?;
+            }
         }
         Ok(())
+    }
+
+    /// The counters of watcher `index` this process reads and bumps: its own
+    /// when the expression reads one of its private copies.
+    fn watcher_counters(&self, index: usize) -> EventCounters {
+        self.private_watchers
+            .get(&index)
+            .unwrap_or(&self.m.event_watchers[index].state)
+            .clone()
+    }
+
+    /// The slot holding watcher `index`'s expression value before a store,
+    /// declared at the first store that needs it.
+    fn watcher_previous(
+        &mut self,
+        index: usize,
+        width: usize,
+        four_state: bool,
+    ) -> (SourceVarId, String) {
+        if let Some(previous) = self.watcher_counters(index).previous {
+            return previous;
+        }
+        let previous = self.m.temp("event_previous", width, false, four_state);
+        let state = match self.private_watchers.get_mut(&index) {
+            Some(state) => state,
+            None => &mut self.m.event_watchers[index].state,
+        };
+        state.previous = Some(previous.clone());
+        previous
     }
 
     fn store_raw(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
@@ -1673,10 +1721,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             let (id, name) = self.m.temp("event", width, false, four_state);
             self.store(id, SIROffset::Static(0), width, value)?;
             samples.push(name);
-            if let sv::ir::Expr::Ident(name) = &item.expr
-                && let Some(id) = self.m.id(name)
-                && let Some(counters) = self.m.event_counters.get(&id).cloned()
+            if let Some(index) = self
+                .m
+                .event_watchers
+                .iter()
+                .position(|watcher| watcher.expr == item.expr)
             {
+                let counters = self.watcher_counters(index);
                 let counter = match item.edge {
                     sv::ir::EventEdge::Any => counters.changes,
                     sv::ir::EventEdge::Pos => counters.rises,
@@ -2471,6 +2522,11 @@ impl Ff<'_, '_> {
             let Some(subroutine) = self.m.subroutine(name) else {
                 continue;
             };
+            // A static subroutine shares its formals and locals between
+            // activations, as IEEE 1800-2023 13.3.1 says.
+            if !subroutine.automatic {
+                continue;
+            }
             names.extend(subroutine.params.iter().map(|param| param.name.clone()));
             names.extend(subroutine.return_var.clone());
             for stmt in &subroutine.body {
@@ -2494,6 +2550,18 @@ impl Ff<'_, '_> {
             }
             self.private.insert(id, copy);
         }
+        // A watcher reading a private copy counts this process's events on
+        // its own counters.
+        for index in 0..self.m.event_watchers.len() {
+            if self.m.event_watchers[index]
+                .dependencies
+                .iter()
+                .any(|dependency| self.private.contains_key(dependency))
+            {
+                let counters = self.m.new_event_counters();
+                self.private_watchers.insert(index, counters);
+            }
+        }
     }
 
     /// The subroutines `stmts` call, directly or through other calls.
@@ -2512,20 +2580,14 @@ impl Ff<'_, '_> {
     }
 }
 
-/// Bits of an event counter; the counters wrap, as only equality matters.
-pub const EVENT_COUNTER_WIDTH: usize = 32;
-
-/// Declare the event counters of the variables the processes `bodies`, or
-/// the subroutines they call, wait on by name. A kernel's store to such a
-/// variable then records the event it makes, so an event a later store of
-/// the same kernel run hides (a value written and restored before the
-/// process suspends) still wakes a waiter, as IEEE 1800-2023 9.4.2 asks.
-/// Returns the counters, which start at zero.
-pub fn declare_event_counters(
-    pm: &mut ProcModule<'_>,
-    bodies: &[&[sv::ir::Stmt]],
-) -> Vec<SourceVarId> {
-    let mut names = Vec::new();
+/// Declare the watchers of the event expressions the processes `bodies`, or
+/// the subroutines they call, wait on. A kernel's store to a variable such
+/// an expression reads then records the events it makes, so an event a
+/// later store of the same kernel run hides (a value written and restored
+/// before the process suspends) still wakes a waiter, as IEEE 1800-2023
+/// 9.4.2 asks. An expression that calls a subroutine is not watched.
+pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]]) {
+    let mut exprs: Vec<sv::ir::Expr> = Vec::new();
     let mut visited = HashSet::default();
     let mut pending: Vec<&[sv::ir::Stmt]> = bodies.to_vec();
     while let Some(stmts) = pending.pop() {
@@ -2533,8 +2595,8 @@ pub fn declare_event_counters(
             stmt.walk(&mut |stmt| match stmt {
                 sv::ir::Stmt::WaitEvent(items) => {
                     for item in items {
-                        if let sv::ir::Expr::Ident(name) = &item.expr {
-                            names.push(name.clone());
+                        if !exprs.contains(&item.expr) {
+                            exprs.push(item.expr.clone());
                         }
                     }
                 }
@@ -2549,45 +2611,36 @@ pub fn declare_event_counters(
             });
         }
     }
-    names.sort();
-    names.dedup();
-    let mut counters = Vec::new();
-    for name in names {
-        let Some(id) = pm.id(&name) else {
-            continue;
-        };
-        if pm.event_counters.contains_key(&id) {
+    for expr in exprs {
+        if pm.calls(&expr) {
             continue;
         }
-        let variable = pm.var(id);
-        if !variable.array_dims.is_empty() {
+        let mut names = HashSet::default();
+        expr_idents(&expr, &mut names);
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        let dependencies: Vec<SourceVarId> = names
+            .iter()
+            .filter_map(|name| pm.id(name))
+            .filter(|id| pm.var(*id).array_dims.is_empty())
+            .collect();
+        if dependencies.is_empty() {
             continue;
         }
-        let (width, four_state) = (variable.width, variable.is_4state);
-        let (_, previous) = pm.temp("event_previous", width, false, four_state);
-        // The counters follow the design's state mode, as the expressions
-        // that read them do; their initial value is zero, not unknown.
-        let mut counter = |pm: &mut ProcModule<'_>, purpose: &str| {
-            let four_state = pm.four_state;
-            let (id, name) = pm.temp(purpose, EVENT_COUNTER_WIDTH, false, four_state);
-            counters.push(id);
-            name
-        };
-        let changes = counter(pm, "event_changes");
-        let rises = counter(pm, "event_rises");
-        let falls = counter(pm, "event_falls");
-        pm.event_counters.insert(
-            id,
-            EventCounters {
-                name,
-                previous,
-                changes,
-                rises,
-                falls,
-            },
-        );
+        let index = pm.event_watchers.len();
+        for &dependency in &dependencies {
+            pm.watchers_by_var
+                .entry(dependency)
+                .or_default()
+                .push(index);
+        }
+        let state = pm.new_event_counters();
+        pm.event_watchers.push(EventWatcher {
+            expr,
+            dependencies,
+            state,
+        });
     }
-    counters
 }
 
 /// The subroutines `stmts` call as statements.

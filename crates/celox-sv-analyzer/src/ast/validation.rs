@@ -132,9 +132,29 @@ impl Drop for TimedTasksGuard {
 /// Make the tasks of the module `node` that reach a timing control known to
 /// [`always_kind`] until the guard is dropped: an edge-sensitive `always`
 /// that calls one is a process.
-pub(super) fn install_timed_tasks(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> TimedTasksGuard {
+pub(super) fn install_timed_tasks(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    imported: &scope::ScopeSymbols,
+) -> TimedTasksGuard {
     // (name, has a timing control itself, the subroutines it calls)
     let mut tasks: Vec<(String, bool, Vec<String>)> = Vec::new();
+    // An imported subroutine is known by its body: its qualified name, and
+    // the names the imports bind to it.
+    for subroutine in &imported.subroutines {
+        let mut timed = false;
+        let mut callees = Vec::new();
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| match stmt {
+                crate::procedural::StmtBase::Delay(_)
+                | crate::procedural::StmtBase::WaitEvent(_)
+                | crate::procedural::StmtBase::Wait(_) => timed = true,
+                crate::procedural::StmtBase::Call { name, .. } => callees.push(name.clone()),
+                _ => {}
+            });
+        }
+        tasks.push((subroutine.name.clone(), timed, callees));
+    }
     for child in node {
         let RefNode::TaskDeclaration(declaration) = child else {
             continue;
@@ -176,6 +196,11 @@ pub(super) fn install_timed_tasks(node: RefNode<'_>, syntax_tree: &SyntaxTree) -
         for (name, _, callees) in &tasks {
             if !timed.contains(name) && callees.iter().any(|callee| timed.contains(callee)) {
                 timed.insert(name.clone());
+            }
+        }
+        for (visible, qualified) in &imported.aliases {
+            if timed.contains(qualified) {
+                timed.insert(visible.clone());
             }
         }
         if timed.len() == before {
