@@ -58,7 +58,7 @@ pub(super) const UNIT: &str = "$unit";
 #[derive(Debug, Default)]
 pub(super) struct UnitVisibility {
     /// The source offset of the item that declares each name.
-    declared_at: HashMap<String, usize>,
+    pub declared_at: HashMap<String, usize>,
     /// The subroutines of the unit, which are visible anywhere in it.
     subroutines: HashSet<String>,
     /// The package imports of the unit: their source offsets, packages, and

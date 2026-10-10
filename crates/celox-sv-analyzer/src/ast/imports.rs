@@ -776,6 +776,14 @@ pub(super) fn resolve_imports(
                 continue;
             };
             let target = provided(package_name, name)?;
+            if unit.visibility.declared_at.contains_key(name) {
+                return Err(AnalyzerError::ImportConflict {
+                    name: name.clone(),
+                    detail: format!(
+                        "`import {target};` names an item the compilation unit declares"
+                    ),
+                });
+            }
             if let Some(known) = explicit.get(name)
                 && *known != target
             {

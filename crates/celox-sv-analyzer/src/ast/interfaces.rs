@@ -214,6 +214,14 @@ impl<'a> File<'a> {
             .map(|index| self.text(self.tokens[index]))
     }
 
+    /// Whether the identifier at `start` is qualified by `$unit::`.
+    fn unit_qualified(&self, start: usize) -> bool {
+        let index = self.tokens.partition_point(|&(_, end)| end <= start);
+        index >= 2
+            && self.text(self.tokens[index - 1]) == "::"
+            && self.text(self.tokens[index - 2]) == "$unit"
+    }
+
     /// Whether `span` has a use `.name.` or `.name[` of `name` after one of
     /// the generate block names `blocks`, such as `g.h.x` or `g[0].h.x` for
     /// an instance `h` in a generate block `g`.
@@ -841,11 +849,7 @@ impl<'a> Design<'a> {
                                 let span = file.span(RefNode::Identifier(identifier))?;
                                 // A qualified name does not resolve to the
                                 // compilation unit, unless `$unit::` names it.
-                                let unit_scope = file.code[..span.0]
-                                    .trim_end()
-                                    .strip_suffix("::")
-                                    .is_some_and(|before| before.trim_end().ends_with("$unit"));
-                                if !unit_scope
+                                if !file.unit_qualified(span.0)
                                     && (matches!(file.previous_token(span.0), Some("." | "::"))
                                         || file.next_token(span.1) == Some("::"))
                                 {
