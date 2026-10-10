@@ -199,3 +199,57 @@ fn static_comb_locals_written_on_some_paths_are_latches() {
         1
     );
 }
+
+/// Review cases: initializers, output arguments, loop exits and interfaces.
+#[test]
+fn static_initializers_must_be_constant() {
+    // A static initializer runs once; one that reads a variable or calls a
+    // function with effects cannot.
+    let detail = error(
+        "module Top(input logic [7:0] a, output logic [7:0] y);
+           always_comb begin logic [7:0] t = a; y = t; end
+         endmodule",
+    );
+    assert!(
+        detail.contains("initializer that is not constant"),
+        "{detail}"
+    );
+    // A constant call folds.
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output logic [7:0] y);
+               always_ff @(posedge clk) begin static int c = $countones(3); c++; y <= c; end
+             endmodule",
+            2
+        ),
+        [3, 4]
+    );
+}
+
+#[test]
+fn output_arguments_and_loop_exits_write_static_locals() {
+    assert_eq!(
+        output(
+            "module Top(output logic [7:0] y);
+               task set(output int v, input int a); v = a; endtask
+               function int f(input int a);
+                 int t, u;
+                 set(t, a);
+                 do begin u = t + 1; break; end while (1);
+                 return u;
+               endfunction
+               assign y = f(4);
+             endmodule"
+        ),
+        5
+    );
+}
+
+#[test]
+fn interfaces_keep_their_default_lifetime() {
+    let detail = error(
+        "interface automatic I; logic [7:0] v; endinterface
+         module Top(output logic [7:0] y); I i(); assign i.v = 8'd1; assign y = i.v; endmodule",
+    );
+    assert!(detail.contains("default lifetime"), "{detail}");
+}

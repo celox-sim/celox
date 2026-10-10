@@ -235,8 +235,10 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   reading it, behaves the same either way. Because a static local keeps its
   value, a local of `always_comb` that only some paths write is a latch, and
   is rejected like any other latch. A static local of a function or task
-  that keeps its value between calls is not supported; declare it
-  `automatic`.
+  that keeps its value between calls is not supported, nor is a static local
+  whose initializer is not constant; declare them `automatic`. An interface
+  whose default lifetime (`interface automatic`) differs from that of the
+  module it is used in is rejected.
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.

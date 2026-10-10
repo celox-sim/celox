@@ -30,6 +30,8 @@ pub(super) struct BodyState<'a> {
     pub counter: &'a mut usize,
     /// Positional argument names of each subroutine, for named arguments.
     pub subroutine_params: &'a HashMap<String, Vec<String>>,
+    /// The argument directions of each subroutine.
+    pub subroutine_directions: &'a lifetimes::Directions,
     /// Whether the variables of the scope's subroutines and blocks are
     /// automatic by default (IEEE 1800-2023 6.21).
     pub automatic: bool,
@@ -1520,11 +1522,13 @@ pub(super) fn subroutine_argument_names(
     (
         HashMap<String, Vec<String>>,
         HashMap<String, Vec<VariableDimensions>>,
+        lifetimes::Directions,
     ),
     AnalyzerError,
 > {
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
+    let mut directions = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
@@ -1549,6 +1553,10 @@ pub(super) fn subroutine_argument_names(
                     dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
                 })
                 .collect();
+            let param_directions: Vec<ParamDirection> =
+                params.iter().map(|(_, direction, ..)| *direction).collect();
+            directions.insert(syntax.name.clone(), param_directions.clone());
+            directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
             names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
@@ -1556,7 +1564,7 @@ pub(super) fn subroutine_argument_names(
             shapes.insert(qualified, param_shapes);
         }
     }
-    Ok((names, shapes))
+    Ok((names, shapes, directions))
 }
 
 /// Every function and task of the active generate items, with statement
@@ -1714,7 +1722,11 @@ pub(super) fn subroutines_from_module_node_with(
                         );
                     }
                 }
-                lifetimes::check_subroutine_statics(&subroutine, &statics)?;
+                lifetimes::check_subroutine_statics(
+                    &subroutine,
+                    &statics,
+                    builder.state.subroutine_directions,
+                )?;
                 Ok(subroutine)
             })();
             let subroutine = match (lowered, rejected.as_deref_mut()) {

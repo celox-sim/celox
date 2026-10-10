@@ -12,6 +12,9 @@
 
 use super::*;
 
+/// The argument directions of each subroutine, by the names calls use.
+pub(super) type Directions = HashMap<String, Vec<crate::procedural::ParamDirection>>;
+
 /// How a static local behaves when its declaration reinitializes it.
 #[derive(Debug, PartialEq, Eq)]
 enum Entry {
@@ -24,8 +27,11 @@ enum Entry {
 /// Give the static locals `statics` of the procedural blocks `bodies` a
 /// static lifetime. Returns the locals that keep their value, and their
 /// time-zero initializations.
+/// `directions` gives the argument directions of the subroutines a body
+/// may call.
 pub(super) fn keep_static_locals<'b, T>(
     statics: &HashMap<String, T>,
+    directions: &Directions,
     bodies: impl IntoIterator<Item = &'b mut Vec<Stmt>>,
 ) -> Result<(Vec<String>, Vec<Stmt>), AnalyzerError> {
     let mut kept = Vec::new();
@@ -34,7 +40,7 @@ pub(super) fn keep_static_locals<'b, T>(
         return Ok((kept, initializers));
     }
     for body in bodies {
-        keep_in(body, statics, &mut kept, &mut initializers)?;
+        keep_in(body, statics, directions, &mut kept, &mut initializers)?;
     }
     Ok((kept, initializers))
 }
@@ -42,6 +48,7 @@ pub(super) fn keep_static_locals<'b, T>(
 fn keep_in<T>(
     stmts: &mut Vec<Stmt>,
     statics: &HashMap<String, T>,
+    directions: &Directions,
     kept: &mut Vec<String>,
     initializers: &mut Vec<Stmt>,
 ) -> Result<(), AnalyzerError> {
@@ -49,7 +56,7 @@ fn keep_in<T>(
     while index < stmts.len() {
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
-            && entry(name, init.as_ref(), &stmts[index + 1..])? == Entry::Observed
+            && entry(name, init.as_ref(), &stmts[index + 1..], directions)? == Entry::Observed
         {
             let Stmt::Local { name, init } = stmts.remove(index) else {
                 unreachable!("the statement is a local declaration");
@@ -70,23 +77,23 @@ fn keep_in<T>(
                 else_body,
                 ..
             } => {
-                keep_in(then_body, statics, kept, initializers)?;
-                keep_in(else_body, statics, kept, initializers)?;
+                keep_in(then_body, statics, directions, kept, initializers)?;
+                keep_in(else_body, statics, directions, kept, initializers)?;
             }
             Stmt::Case { items, default, .. } => {
                 for item in items {
-                    keep_in(&mut item.body, statics, kept, initializers)?;
+                    keep_in(&mut item.body, statics, directions, kept, initializers)?;
                 }
                 if let Some(default) = default {
-                    keep_in(default, statics, kept, initializers)?;
+                    keep_in(default, statics, directions, kept, initializers)?;
                 }
             }
             Stmt::Loop {
                 init, step, body, ..
             } => {
-                keep_in(init, statics, kept, initializers)?;
-                keep_in(step, statics, kept, initializers)?;
-                keep_in(body, statics, kept, initializers)?;
+                keep_in(init, statics, directions, kept, initializers)?;
+                keep_in(step, statics, directions, kept, initializers)?;
+                keep_in(body, statics, directions, kept, initializers)?;
             }
             _ => {}
         }
@@ -99,6 +106,7 @@ fn keep_in<T>(
 pub(super) fn check_subroutine_statics(
     subroutine: &Subroutine,
     statics: &HashSet<String>,
+    directions: &Directions,
 ) -> Result<(), AnalyzerError> {
     if statics.is_empty() {
         return Ok(());
@@ -111,14 +119,16 @@ pub(super) fn check_subroutine_statics(
                 && result.is_ok()
             {
                 result =
-                    entry(name, init.as_ref(), &stmts[index + 1..]).and_then(|entry| match entry {
-                        Entry::Unobserved => Ok(()),
-                        Entry::Observed => Err(AnalyzerError::Unsupported(format!(
-                            "static variable `{}` of subroutine `{}` that keeps its value \
+                    entry(name, init.as_ref(), &stmts[index + 1..], directions).and_then(|entry| {
+                        match entry {
+                            Entry::Unobserved => Ok(()),
+                            Entry::Observed => Err(AnalyzerError::Unsupported(format!(
+                                "static variable `{}` of subroutine `{}` that keeps its value \
                              between calls (declare it `automatic`)",
-                            source_name(name),
-                            subroutine.name
-                        ))),
+                                source_name(name),
+                                subroutine.name
+                            ))),
+                        }
                     });
             }
         }
@@ -162,22 +172,30 @@ fn source_name(name: &str) -> &str {
 
 /// Whether the statements after the declaration of the static local `name`
 /// read the value it holds on entry.
-fn entry(name: &str, init: Option<&Expr>, after: &[Stmt]) -> Result<Entry, AnalyzerError> {
-    let flow = Flow { name };
-    let observed = flow.block(after, false).is_err();
-    match init {
-        // Initialized once or on every entry, a local that is never written
-        // holds its initial value; a constant one gives the same value.
-        Some(init) if !observed || (!flow.writes(after) && expr_is_constant(init)) => {
-            Ok(Entry::Unobserved)
-        }
-        Some(init) if !expr_is_constant(init) => Err(AnalyzerError::Unsupported(format!(
-            "static variable `{}` with an initializer that is not constant",
+fn entry(
+    name: &str,
+    init: Option<&Expr>,
+    after: &[Stmt],
+    directions: &Directions,
+) -> Result<Entry, AnalyzerError> {
+    // A static initializer runs once, before simulation starts; one that is
+    // not constant could only run on every entry instead.
+    if init.is_some_and(|init| !expr_is_constant(init)) {
+        return Err(AnalyzerError::Unsupported(format!(
+            "static variable `{}` with an initializer that is not constant (declare it \
+             `automatic`)",
             source_name(name)
-        ))),
-        _ if observed => Ok(Entry::Observed),
-        _ => Ok(Entry::Unobserved),
+        )));
     }
+    let flow = Flow { name, directions };
+    let observed = flow.block(after, false).is_err();
+    Ok(match init {
+        // Initialized once or on every entry, a local that is never written
+        // holds its constant initial value either way.
+        Some(_) if !observed || !flow.writes(after) => Entry::Unobserved,
+        _ if observed => Entry::Observed,
+        _ => Entry::Unobserved,
+    })
 }
 
 /// A statement that may read the value a local holds on entry.
@@ -187,19 +205,63 @@ struct Observed;
 /// on.
 struct Flow<'n> {
     name: &'n str,
+    directions: &'n Directions,
+}
+
+/// Whether the local is written on every path that leaves some statements
+/// in each way, or `None` when no path does.
+#[derive(Default)]
+struct Exits {
+    /// After the statements.
+    next: Option<bool>,
+    /// At a `break`.
+    breaks: Option<bool>,
+    /// At a `continue`.
+    continues: Option<bool>,
+}
+
+impl Exits {
+    fn next(written: bool) -> Self {
+        Self {
+            next: Some(written),
+            ..Self::default()
+        }
+    }
+
+    /// The paths of `self` and of `other`.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            next: merge(self.next, other.next),
+            breaks: merge(self.breaks, other.breaks),
+            continues: merge(self.continues, other.continues),
+        }
+    }
+}
+
+/// Whether the local is written on every path of two sets of paths.
+fn merge(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left && right),
+        (one, None) | (None, one) => one,
+    }
 }
 
 impl Flow<'_> {
-    /// Whether the local is written on every path through `stmts`, from
-    /// `written` on entry; `None` when no path continues after them.
-    fn block(&self, stmts: &[Stmt], mut written: bool) -> Result<Option<bool>, Observed> {
+    /// How the paths through `stmts` leave them, from `written` on entry.
+    fn block(&self, stmts: &[Stmt], written: bool) -> Result<Exits, Observed> {
+        let mut exits = Exits::next(written);
         for stmt in stmts {
-            match self.stmt(stmt, written)? {
-                Some(now) => written = now,
-                None => return Ok(None),
-            }
+            let Some(written) = exits.next else {
+                break;
+            };
+            let after = self.stmt(stmt, written)?;
+            exits = Exits {
+                next: after.next,
+                breaks: merge(exits.breaks, after.breaks),
+                continues: merge(exits.continues, after.continues),
+            };
         }
-        Ok(Some(written))
+        Ok(exits)
     }
 
     fn read(&self, expr: &Expr, written: bool) -> Result<(), Observed> {
@@ -237,7 +299,16 @@ impl Flow<'_> {
         Ok(written || matches!(lhs, LValue::Ident(_)))
     }
 
-    fn stmt(&self, stmt: &Stmt, written: bool) -> Result<Option<bool>, Observed> {
+    /// Whether argument `index` of a call of `name` is an output, which the
+    /// call writes without reading.
+    fn is_output(&self, name: &str, index: usize) -> bool {
+        self.directions
+            .get(name)
+            .and_then(|directions| directions.get(index))
+            .is_some_and(|direction| *direction == crate::procedural::ParamDirection::Output)
+    }
+
+    fn stmt(&self, stmt: &Stmt, written: bool) -> Result<Exits, Observed> {
         match stmt {
             Stmt::Assign {
                 lhs,
@@ -245,7 +316,7 @@ impl Flow<'_> {
                 nonblocking,
             } => {
                 self.read(rhs, written)?;
-                self.write(lhs, *nonblocking, written).map(Some)
+                self.write(lhs, *nonblocking, written).map(Exits::next)
             }
             Stmt::AssignConcat {
                 parts,
@@ -257,7 +328,7 @@ impl Flow<'_> {
                 for part in parts {
                     now = self.write(part, *nonblocking, now)?;
                 }
-                Ok(Some(now))
+                Ok(Exits::next(now))
             }
             Stmt::If {
                 condition,
@@ -265,9 +336,9 @@ impl Flow<'_> {
                 else_body,
             } => {
                 self.read(condition, written)?;
-                let then_written = self.block(then_body, written)?;
-                let else_written = self.block(else_body, written)?;
-                Ok(merge([then_written, else_written]))
+                Ok(self
+                    .block(then_body, written)?
+                    .merge(self.block(else_body, written)?))
             }
             Stmt::Case {
                 selector,
@@ -276,7 +347,10 @@ impl Flow<'_> {
                 ..
             } => {
                 self.read(selector, written)?;
-                let mut paths = Vec::new();
+                let mut exits = match default {
+                    Some(default) => self.block(default, written)?,
+                    None => Exits::next(written),
+                };
                 for item in items {
                     for label in &item.labels {
                         match label {
@@ -289,13 +363,9 @@ impl Flow<'_> {
                             }
                         }
                     }
-                    paths.push(self.block(&item.body, written)?);
+                    exits = exits.merge(self.block(&item.body, written)?);
                 }
-                paths.push(match default {
-                    Some(default) => self.block(default, written)?,
-                    None => Some(written),
-                });
-                Ok(merge(paths))
+                Ok(exits)
             }
             Stmt::Loop {
                 kind,
@@ -304,45 +374,71 @@ impl Flow<'_> {
                 step,
                 body,
             } => {
-                let Some(written) = self.block(init, written)? else {
-                    return Ok(None);
+                let Some(written) = self.block(init, written)?.next else {
+                    return Ok(Exits::default());
                 };
                 if let crate::procedural::LoopKind::Repeat(count) = kind {
                     self.read(count, written)?;
                 }
-                let first = if matches!(kind, crate::procedural::LoopKind::DoWhile) {
-                    let after_body = self.block(body, written)?.unwrap_or(written);
-                    if let Some(condition) = condition {
-                        self.read(condition, after_body)?;
+                let do_while = matches!(kind, crate::procedural::LoopKind::DoWhile);
+                if !do_while && let Some(condition) = condition {
+                    self.read(condition, written)?;
+                }
+                // Later iterations only add writes, so the first one decides
+                // what the loop reads of the entry value.
+                let body = self.block(body, written)?;
+                let stepped = merge(body.next, body.continues);
+                if let Some(stepped) = stepped {
+                    self.block(step, stepped)?;
+                }
+                if do_while {
+                    // The body runs at least once: the loop ends at its
+                    // condition or at a `break`.
+                    if let (Some(condition), Some(stepped)) = (condition, stepped) {
+                        self.read(condition, stepped)?;
                     }
-                    after_body
+                    Ok(Exits {
+                        next: merge(stepped, body.breaks),
+                        ..Exits::default()
+                    })
                 } else {
-                    if let Some(condition) = condition {
-                        self.read(condition, written)?;
-                    }
-                    let after_body = self.block(body, written)?.unwrap_or(written);
-                    self.block(step, after_body)?;
                     // The body may not run at all.
-                    written
-                };
-                Ok(Some(first))
+                    Ok(Exits::next(written))
+                }
             }
-            Stmt::Break | Stmt::Continue => Ok(None),
+            Stmt::Break => Ok(Exits {
+                breaks: Some(written),
+                ..Exits::default()
+            }),
+            Stmt::Continue => Ok(Exits {
+                continues: Some(written),
+                ..Exits::default()
+            }),
             Stmt::Return(value) => {
                 if let Some(value) = value {
                     self.read(value, written)?;
                 }
-                Ok(None)
+                Ok(Exits::default())
             }
-            Stmt::Call { args, .. } => {
-                for arg in args.iter().flatten() {
-                    self.read(arg, written)?;
+            Stmt::Call { name, args } => {
+                let mut outputs = false;
+                for (index, arg) in args.iter().enumerate() {
+                    let Some(arg) = arg else {
+                        continue;
+                    };
+                    if self.is_output(name, index)
+                        && matches!(arg, Expr::Ident(ident) if ident == self.name)
+                    {
+                        outputs = true;
+                    } else {
+                        self.read(arg, written)?;
+                    }
                 }
-                Ok(Some(written))
+                Ok(Exits::next(written || outputs))
             }
             Stmt::Eval(expr) => {
                 self.read(expr, written)?;
-                Ok(Some(written))
+                Ok(Exits::next(written))
             }
             Stmt::SystemTask { args, .. } => {
                 for arg in args {
@@ -350,13 +446,13 @@ impl Flow<'_> {
                         self.read(expr, written)?;
                     }
                 }
-                Ok(Some(written))
+                Ok(Exits::next(written))
             }
             Stmt::Local { init, .. } => {
                 if let Some(init) = init {
                     self.read(init, written)?;
                 }
-                Ok(Some(written))
+                Ok(Exits::next(written))
             }
         }
     }
@@ -379,14 +475,6 @@ impl Flow<'_> {
         }
         writes
     }
-}
-
-/// Whether the local is written after every path that continues.
-fn merge(paths: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
-    paths
-        .into_iter()
-        .flatten()
-        .fold(None, |all, written| Some(all.unwrap_or(true) && written))
 }
 
 fn expr_reads(expr: &Expr, name: &str) -> bool {
@@ -449,7 +537,7 @@ fn const_expr_reads(expr: &ConstExpr, name: &str) -> bool {
 }
 
 /// Whether `expr` has the same value wherever it is evaluated: it reads no
-/// variable and calls nothing.
+/// variable and calls nothing that is not constant.
 fn expr_is_constant(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
@@ -466,7 +554,15 @@ fn expr_is_constant(expr: &Expr) -> bool {
         }
     }
     match expr {
-        Expr::Ident(_) | Expr::Call { .. } => false,
+        Expr::Ident(_) => false,
+        // A call is constant when it folds, as a pure system function or a
+        // constant function of constant arguments does.
+        Expr::Call { args, .. } => {
+            args.iter().all(expr_is_constant)
+                && expr_to_const(expr.clone())
+                    .and_then(|call| eval_ast_const_expr(&call, &HashMap::default()))
+                    .is_some()
+        }
         Expr::Literal(_) => true,
         Expr::Select { expr, msb, lsb, .. } => {
             expr_is_constant(expr) && constant(msb) && constant(lsb)

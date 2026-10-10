@@ -229,7 +229,7 @@ pub(super) fn module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let (subroutine_params, subroutine_shapes) =
+    let (subroutine_params, subroutine_shapes, subroutine_directions) =
         match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
@@ -242,6 +242,7 @@ pub(super) fn module_constant_functions(
         locals: &mut locals,
         counter: &mut counter,
         subroutine_params: &subroutine_params,
+        subroutine_directions: &subroutine_directions,
         automatic: lifetimes::automatic_by_default(&node),
         statics: Vec::new(),
     };

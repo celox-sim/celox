@@ -492,6 +492,9 @@ struct InterfaceDecl {
     /// Whether the header has a parameter port list, which makes a body
     /// `parameter` a localparam.
     has_parameter_port_list: bool,
+    /// Whether the variables of its subroutines and blocks are automatic by
+    /// default: `interface automatic`.
+    automatic: bool,
     /// Whether the declaration uses macros or other compiler directives.
     uses_macros: bool,
     /// Whether the declaration refers to compilation-unit items of its file.
@@ -558,8 +561,9 @@ impl InterfaceDecl {
 
     /// Reject copying the interface into a module that starts at
     /// `module_start` of `file` when the copy would lose its context: macros,
-    /// whose expansion `render` cannot rename, and compilation-unit items,
-    /// which another file or an earlier module does not see.
+    /// whose expansion `render` cannot rename, compilation-unit items, which
+    /// another file or an earlier module does not see, and a default lifetime
+    /// other than the module's, which its copied locals would take instead.
     fn check_context(
         &self,
         file: &File<'_>,
@@ -577,6 +581,23 @@ impl InterfaceDecl {
         {
             return Err(unsupported(format!(
                 "compilation-unit item in interface `{}`, which a module of another source file or before it uses",
+                self.name
+            )));
+        }
+        let module_automatic = file.syntax_tree.into_iter().any(|node| match node {
+            RefNode::ModuleDeclarationAnsi(module) => {
+                file.span(RefNode::ModuleDeclarationAnsi(module))
+                    .is_ok_and(|span| span.0 <= module_start && module_start < span.1)
+                    && matches!(
+                        module.nodes.0.nodes.2,
+                        Some(sv_parser::Lifetime::Automatic(_))
+                    )
+            }
+            _ => false,
+        });
+        if self.automatic != module_automatic {
+            return Err(unsupported(format!(
+                "interface `{}` with a default lifetime other than that of the module it is used in",
                 self.name
             )));
         }
@@ -3394,6 +3415,7 @@ impl InterfaceDecl {
             file: file_index,
             start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
             has_parameter_port_list: header.nodes.5.is_some(),
+            automatic: matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_))),
             uses_unit_items: false,
             uses_macros: has_directive(
                 file.text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?),
