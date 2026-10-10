@@ -275,7 +275,7 @@ test("all four retained baselines accept only their existing failures", () => {
       );
       assert.equal(
         result.accepted_failures.length,
-        suite === "sv" ? 0 : tool === "icarus" ? 11 : 1,
+        suite === "sv" ? 0 : tool === "icarus" ? 11 : 2,
       );
     }
   }

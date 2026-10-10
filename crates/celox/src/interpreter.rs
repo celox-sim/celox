@@ -1060,44 +1060,19 @@ fn alu_binary(
         }
         BinaryOp::Sar => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
-            // The narrow (<= 64-bit) compiled lowering sign-promotes the
-            // source and shifts arithmetically. The multi-word lowering
-            // instead sign-fills whole words above the source's own chunks —
-            // based on the declared width's top bit — and shifts logically,
-            // for the value and the mask alike.
+            // Shift payload and mask as signed numbers of the logical width,
+            // so vacated bits repeat the sign's value and X/Z state.
             if !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
-                let common = lhs_width.max(rhs_width).max(dst_width);
                 let signed_value = to_signed(&lhs.payload, lhs_width);
                 let signed_mask = to_signed(&lhs.mask, lhs_width);
-                // The narrow lowering converges once the count reaches the
-                // operand width; the word-based wide lowering keeps reading
-                // sign-filled words until every output word sits past the
-                // source's own chunks.
-                let bound = if common <= 64 {
-                    lhs_width.max(dst_width).max(1)
-                } else {
-                    lhs_width.div_ceil(64) * 64
-                };
+                let bound = lhs_width.max(dst_width).max(1);
                 match shift_amount(&rhs.payload) {
-                    Some(amount) if amount < bound => {
-                        if common <= 64 {
-                            SIRValue {
-                                payload: wrap_signed(&(signed_value >> amount), dst_width),
-                                mask: wrap_signed(&(signed_mask >> amount), dst_width),
-                            }
-                        } else {
-                            let payload =
-                                (sar_wide_extend(&lhs.payload, lhs_width, common, amount)
-                                    >> amount)
-                                    & width_mask(dst_width);
-                            let mask = (sar_wide_extend(&lhs.mask, lhs_width, common, amount)
-                                >> amount)
-                                & width_mask(dst_width);
-                            SIRValue { payload, mask }
-                        }
-                    }
+                    Some(amount) if amount < bound => SIRValue {
+                        payload: wrap_signed(&(signed_value >> amount), dst_width),
+                        mask: wrap_signed(&(signed_mask >> amount), dst_width),
+                    },
                     _ => {
                         // Overshift or unrepresentable distances converge the
                         // value and the mask toward their own sign fills
@@ -1237,25 +1212,6 @@ fn alu_binary(
 /// Interpret the complete unsigned shift count; unrepresentable counts overshift.
 fn shift_amount(value: &BigUint) -> Option<usize> {
     value.to_usize()
-}
-
-/// Extend a value across the common width the way the compiled multi-word
-/// Sar lowering does: whole 64-bit words above the source's own chunks are
-/// filled with the declared width's top bit, then the caller shifts
-/// logically. Bits inside the source's partial top word are left untouched.
-fn sar_wide_extend(value: &BigUint, lhs_width: usize, common: usize, amount: usize) -> BigUint {
-    let src_words = lhs_width.div_ceil(64);
-    if lhs_width == 0 || !value.bit((lhs_width - 1) as u64) {
-        return value.clone();
-    }
-    // Extend far enough that output words reading past the common width
-    // after the shift still observe sign fill instead of zeroes.
-    let fill_until = common.div_ceil(64) + amount.div_ceil(64) + 1;
-    let mut extended = value.clone();
-    for word in src_words..fill_until {
-        extended |= BigUint::from(u64::MAX) << (word * 64);
-    }
-    extended
 }
 
 /// Two's complement interpretation of `width`-truncated `value`.

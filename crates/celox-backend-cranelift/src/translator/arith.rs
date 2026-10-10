@@ -358,6 +358,18 @@ impl SIRTranslator {
             let l = promote_to_physical(state, l_val, l_width, l_is_signed, common_ty);
             let r = promote_to_physical(state, r_val, r_width, r_is_signed, common_ty);
 
+            // Machine shifts wrap their counts. SAR must saturate at sign fill.
+            let sar_count = if matches!(op, BinaryOp::Sar) {
+                let limit = state
+                    .builder
+                    .ins()
+                    .iconst(common_ty, i64::from(common_ty.bits() - 1));
+                let in_range = state.builder.ins().icmp(IntCC::UnsignedLessThan, r, limit);
+                state.builder.ins().select(in_range, r, limit)
+            } else {
+                r
+            };
+
             let build_icmp = |builder: &mut FunctionBuilder, cc: IntCC| {
                 let b1_res = builder.ins().icmp(cc, l, r);
                 let zero = builder.ins().iconst(common_ty, 0);
@@ -420,7 +432,7 @@ impl SIRTranslator {
                     apply_d_width_mask(state, shifted, common_ty, d_width)
                 }
                 BinaryOp::Sar => {
-                    let raw_shifted = state.builder.ins().sshr(l, r);
+                    let raw_shifted = state.builder.ins().sshr(l, sar_count);
                     apply_d_width_mask_arith(state, raw_shifted, common_ty, d_width)
                 }
                 BinaryOp::Eq => build_icmp(state.builder, IntCC::Equal),
@@ -520,7 +532,7 @@ impl SIRTranslator {
                     BinaryOp::Sar => {
                         let zero = state.builder.ins().iconst(common_ty, 0);
                         let shift_amt_has_x = state.builder.ins().icmp(IntCC::NotEqual, r_m, zero);
-                        let shifted_m = state.builder.ins().sshr(l_m, r);
+                        let shifted_m = state.builder.ins().sshr(l_m, sar_count);
                         let all_ones = state.builder.ins().iconst(common_ty, -1);
                         let m = state
                             .builder

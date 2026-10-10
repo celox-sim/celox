@@ -10484,6 +10484,146 @@
       ]
     },
     {
+      "case": "partial_word_shift::four_state_matrix",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "88fa7826da3b27fe03b5ecf58290208e2bf76706cd52cd0020cdaee8c653cc62"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "0f77564fba5d2308a628e6d2856d82fb40942c4b0cc3004ef564906624f14112",
+          "protocol_sha256": "605a6a33aa1148c6329e578d6dd0a1dbf40e3eb401e6920873e46b3b92579c3c",
+          "reads": 1440,
+          "commands": 3818,
+          "operations": 1152,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::four_state_wide_counts",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "bb1380a384ddcd34d6e47ab50ba96dba095ee60e396d6fd6286a1176245db09b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "b8af37a4de7a13809024c077408f9b6a0a6e98d2208ca3d4647d58749ef03b56",
+          "protocol_sha256": "d0608ea806ae9d70fe6ff5fd677f690c59394c3523038e38232b9eaf28c12e46",
+          "reads": 136,
+          "commands": 398,
+          "operations": 128,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::sar_padding_does_not_escape",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "9bfac44f1ea660e3356bab542be07515a1761590e72e0ad7352658e2529406d9"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "df6e18d6396fd24ee73cc4b30b44509e631a4e5678baddb71756c63704ce8a7c",
+          "protocol_sha256": "854c3619cf0b9494ea5d358edf46fb636f32919c2086faeb459cf93ae3f6ba90",
+          "reads": 48,
+          "commands": 154,
+          "operations": 48,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::sign_x_65",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "8b5613ac16a1c34e97e20d38522ad49fe5c5007de88f49b08171c949c3c8869b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "9d56de14b1adb47c148845bc13a421434f24f0c653bfb3af3cddc32c7aaf6109",
+          "protocol_sha256": "e80f73b21829a28adeae1628ea829303d27eb2a4b30ac0287c427de9c03e05aa",
+          "reads": 1,
+          "commands": 6,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::sign_z_65",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "d5275c1527ea0d5464339b3bef61454e537634c7ee5dd67a1b9359638f54bb4a"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "9d56de14b1adb47c148845bc13a421434f24f0c653bfb3af3cddc32c7aaf6109",
+          "protocol_sha256": "d24137e697c9116b0fc361cc6f6c9bb0553ebbd1bc1eae282c3aa50332e1f40e",
+          "reads": 1,
+          "commands": 6,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::two_state_matrix",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "2d827af25ac86c1d230eb1dc31bc71da2141b5ceda3ab78f8b8bc86a065ac237"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "2012d2c3745c6e8dee848a1592862ef732e6e48f52afda383a6638c144ab2da4",
+          "protocol_sha256": "3c217004d6faefbc390fc19009efb8d40bcdb2cda74e6017a45cfdaeab24d62b",
+          "reads": 360,
+          "commands": 956,
+          "operations": 288,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "partial_word_shift::two_state_runtime_matrix",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/partial_word_shift.vtest",
+        "script_sha256": "88dd22f584d7245711e940a4630e1e109453ef4558ff96fb6d462203d4c7737a"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "2370cb03cd24311337b2e43dd374563a9747bd50294c89c83a0456cff71b1c48",
+          "protocol_sha256": "4d9a0a20a9fa18f47b9b3e52e4f39c11524d64b1c8181f45ff38e8163b4e9fde",
+          "reads": 288,
+          "commands": 884,
+          "operations": 288,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "proto_package::test_proto_package_builtin_comparison",
       "expectation": "Simulation",
       "category": "Hierarchy",
