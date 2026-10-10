@@ -31,8 +31,11 @@ pub(super) struct ScopeSymbols {
     pub subroutines: Vec<Subroutine>,
     pub locals: Vec<LocalVariable>,
     pub dpi_imports: Vec<crate::ir::DpiImport>,
-    /// Array parameters, which are constant signals, and their initializers.
+    /// Array parameters and constant variables, which are constant signals
+    /// copied into each scope, and their initializers.
     pub signals: Vec<Signal>,
+    /// Package variables: each scope's signal denotes the package's object.
+    pub state_signals: Vec<Signal>,
     pub initial_processes: Vec<InitialProcess>,
     /// The names imports make visible, and the qualified names they denote.
     pub aliases: HashMap<String, String>,
@@ -180,6 +183,15 @@ impl ScopeSymbols {
                 self.locals.push(local.clone());
             }
         }
+        for signal in &other.state_signals {
+            if !self
+                .state_signals
+                .iter()
+                .any(|known| known.name == signal.name)
+            {
+                self.state_signals.push(signal.clone());
+            }
+        }
         let mut added = Vec::new();
         for signal in &other.signals {
             if !self.signals.iter().any(|known| known.name == signal.name) {
@@ -244,6 +256,18 @@ impl ScopeSymbols {
         self.constant_functions.alias(name, target);
         alias_entry(&mut self.subroutine_params, name, target);
         alias_entry(&mut self.subroutine_shapes, name, target);
+        // A package variable is denoted by a signal of that name too.
+        if let Some(signal) = self
+            .state_signals
+            .iter()
+            .find(|signal| signal.name == target)
+            .cloned()
+        {
+            self.state_signals.push(Signal {
+                name: name.to_string(),
+                ..signal
+            });
+        }
         // A constant signal, such as an array parameter, is copied with its
         // initializer under the name.
         if let Some(signal) = self.signals.iter().find(|signal| signal.name == target) {
@@ -303,6 +327,7 @@ impl ScopeSymbols {
                 .any(|signal| names.contains(&signal.name) && initializes(process, &signal.name))
         });
         self.signals.retain(|signal| kept(&signal.name));
+        self.state_signals.retain(|signal| kept(&signal.name));
         self
     }
 
@@ -434,7 +459,16 @@ impl ScopeSymbols {
                 .map(|signal| Signal {
                     name: rename.name(&signal.name),
                     r#type: rename.r#type(signal.r#type.clone()),
-                    is_net: signal.is_net,
+                    ..signal.clone()
+                })
+                .collect(),
+            state_signals: self
+                .state_signals
+                .iter()
+                .map(|signal| Signal {
+                    name: rename.name(&signal.name),
+                    r#type: rename.r#type(signal.r#type.clone()),
+                    ..signal.clone()
                 })
                 .collect(),
             initial_processes: self
@@ -460,7 +494,7 @@ impl ScopeSymbols {
 }
 
 /// Whether `process` assigns the signal `name`.
-fn initializes(process: &InitialProcess, name: &str) -> bool {
+pub(super) fn initializes(process: &InitialProcess, name: &str) -> bool {
     process.body.iter().any(|stmt| stmt_initializes(stmt, name))
 }
 

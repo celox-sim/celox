@@ -1569,6 +1569,7 @@ fn compile_binary_narrow(
             &r,
             d_width,
             l_width.max(r_width),
+            l_width,
             locals,
             instrs,
         );
@@ -1660,7 +1661,7 @@ fn compile_binary_narrow(
             instrs.truncate(len - 2);
             // Sign-extend lhs to 64-bit based on its logical width
             emit_sign_extend(instrs, l.value_idx, l_width);
-            instrs.push(Instruction::LocalGet(r.value_idx));
+            emit_sar_count(instrs, r.value_idx);
             instrs.push(Instruction::I64ShrS);
         }
         BinaryOp::Eq => {
@@ -1768,6 +1769,7 @@ fn compile_binary_narrow(
             &r,
             d_width,
             l_width.max(r_width),
+            l_width,
             locals,
             instrs,
         );
@@ -2464,6 +2466,7 @@ fn compile_binary_mask_narrow(
     rhs: &RegLocal,
     d_width: usize,
     operand_width: usize,
+    lhs_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2618,8 +2621,13 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalGet(rhs_has_x));
             instrs.push(Instruction::I64Eqz);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-            instrs.push(Instruction::LocalGet(lhs_mask));
-            instrs.push(Instruction::LocalGet(rhs.value_idx));
+            if matches!(op, BinaryOp::Sar) {
+                emit_sign_extend(instrs, lhs_mask, lhs_width);
+                emit_sar_count(instrs, rhs.value_idx);
+            } else {
+                instrs.push(Instruction::LocalGet(lhs_mask));
+                instrs.push(Instruction::LocalGet(rhs.value_idx));
+            }
             match op {
                 BinaryOp::Shl => instrs.push(Instruction::I64Shl),
                 BinaryOp::Shr => instrs.push(Instruction::I64ShrU),
@@ -3382,6 +3390,12 @@ fn emit_wide_sar(
     instrs.push(Instruction::LocalSet(sign_fill));
     instrs.push(Instruction::End);
 
+    // A partial top word must repeat its logical sign into physical padding
+    // before it contributes either the main word or the cross-word carry.
+    let extended_msb = locals.alloc(1);
+    emit_sign_extend(instrs, l.value_idx + msb_chunk, (msb_bit + 1) as usize);
+    instrs.push(Instruction::LocalSet(extended_msb));
+
     for i in 0..d_chunks {
         instrs.push(Instruction::LocalGet(sign_fill));
         instrs.push(Instruction::LocalSet(cur_word));
@@ -3390,6 +3404,13 @@ fn emit_wide_sar(
 
         for j in 0..l.num_chunks {
             let src_idx = j as i64;
+            let source = if j as u32 == msb_chunk {
+                extended_msb
+            } else if j as u32 > msb_chunk {
+                sign_fill
+            } else {
+                l.value_idx + j as u32
+            };
 
             instrs.push(Instruction::I64Const(i as i64));
             instrs.push(Instruction::LocalGet(word_off));
@@ -3397,7 +3418,7 @@ fn emit_wide_sar(
             instrs.push(Instruction::I64Const(src_idx));
             instrs.push(Instruction::I64Eq);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-            instrs.push(Instruction::LocalGet(l.value_idx + j as u32));
+            instrs.push(Instruction::LocalGet(source));
             instrs.push(Instruction::LocalSet(cur_word));
             instrs.push(Instruction::End);
 
@@ -3407,7 +3428,7 @@ fn emit_wide_sar(
             instrs.push(Instruction::I64Const(src_idx));
             instrs.push(Instruction::I64Eq);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-            instrs.push(Instruction::LocalGet(l.value_idx + j as u32));
+            instrs.push(Instruction::LocalGet(source));
             instrs.push(Instruction::LocalSet(next_word));
             instrs.push(Instruction::End);
         }
@@ -5916,6 +5937,16 @@ fn emit_chunk_mask_to_width(
     }
 }
 
+// Saturate SAR's unsigned count; WebAssembly masks an i64 shift to six bits.
+fn emit_sar_count(instrs: &mut Vec<Instruction<'static>>, count: u32) {
+    instrs.push(Instruction::LocalGet(count));
+    instrs.push(Instruction::I64Const(63));
+    instrs.push(Instruction::LocalGet(count));
+    instrs.push(Instruction::I64Const(63));
+    instrs.push(Instruction::I64LtU);
+    instrs.push(Instruction::Select);
+}
+
 fn emit_sign_extend(instrs: &mut Vec<Instruction<'static>>, local_idx: u32, width: usize) {
     instrs.push(Instruction::LocalGet(local_idx));
     if width < 64 {
@@ -6625,7 +6656,10 @@ mod bit_count_tests {
             register_map,
         };
         let two_state_layout = layout(128, false);
-        let expected = (BigUint::from(1u8) << 127usize) | (BigUint::from(1u8) << 63usize);
+        // IEEE 1800-2023 11.4.10: the 65-bit logical sign extends through
+        // bit 127 before shifting. Every output bit from 63 upward is one.
+        let expected =
+            ((BigUint::from(1u8) << 128usize) - 1u8) ^ ((BigUint::from(1u8) << 63usize) - 1u8);
 
         let cranelift = read_bits(&run_cranelift(&unit, &two_state_layout, false), 0, 128);
         let wasm = read_bits(&run_wasm(&unit, &two_state_layout, false), 0, 128);

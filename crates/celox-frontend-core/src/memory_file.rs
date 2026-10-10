@@ -34,6 +34,70 @@ pub struct ParsedMemoryWrites {
     pub words: usize,
 }
 
+/// Writes for an explicit SystemVerilog address range. Offsets are relative
+/// to its lowest address; callers map them to the destination's layout.
+pub struct RangedMemoryWrites {
+    pub writes: ParsedMemoryWrites,
+    pub warning: Option<String>,
+}
+
+/// Load in either direction, interpreting `@` directives as absolute indices
+/// (IEEE 1800-2023 21.4). A data-count mismatch without directives is a warning.
+pub fn parse_memory_range(
+    content: &str,
+    radix: u32,
+    width: usize,
+    start: i128,
+    finish: i128,
+) -> Result<RangedMemoryWrites, MemoryFileError> {
+    let low = start.min(finish);
+    let high = start.max(finish);
+    let step = if start <= finish { 1 } else { -1 };
+    let mut address = Some(start);
+    let mut runs = Vec::new();
+    let mut words = 0usize;
+    let mut directives = false;
+    for token in memory_tokens(content) {
+        if let Some(text) = token.strip_prefix('@') {
+            directives = true;
+            let index = i128::from_str_radix(text, 16).map_err(|error| {
+                MemoryFileError::syntax(format!("invalid address directive {token}: {error}"))
+            })?;
+            if index < low || index > high {
+                return Err(MemoryFileError::destination(format!(
+                    "address {index} is outside requested range [{start}:{finish}]"
+                )));
+            }
+            address = Some(index);
+            continue;
+        }
+        let (value, mask) = parse_memory_word(&token, radix, width)?;
+        words += 1;
+        if let Some(index) = address.filter(|index| *index >= low && *index <= high) {
+            let offset = usize::try_from(index.abs_diff(low))
+                .ok()
+                .and_then(|index| index.checked_mul(width))
+                .ok_or_else(|| MemoryFileError::destination("memory address offset overflows"))?;
+            runs.push(InitialStateWriteRun {
+                bit_offset: offset,
+                bit_width: width,
+                value_bytes: biguint_to_fixed_le_bytes(&value, width),
+                mask_bytes: biguint_to_fixed_le_bytes(&mask, width),
+            });
+            address = index.checked_add(step);
+        }
+    }
+    let expected = start.abs_diff(finish).checked_add(1);
+    let warning = (!directives && expected != Some(words as u128)).then(|| format!(
+        "file contains {words} words for requested range [{start}:{finish}] ({} words); excess words are ignored and missing words leave memory unchanged",
+        expected.map_or_else(|| "too many".to_string(), |count| count.to_string()),
+    ));
+    Ok(RangedMemoryWrites {
+        writes: ParsedMemoryWrites { runs, words },
+        warning,
+    })
+}
+
 /// Parse a memory file of `radix` (2 or 16) into writes of `width`-bit
 /// words to a destination of `depth` words, starting at word `start_addr`.
 pub fn parse_memory_write_runs(
@@ -191,4 +255,53 @@ fn parse_memory_word(
 
 fn invalid_memory_word(token: &str) -> MemoryFileError {
     MemoryFileError::syntax(format!("invalid data token {token}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranged_loads_follow_direction_and_absolute_directives() {
+        for (start, finish, content, expected) in [
+            (3, 1, "a b c", vec![(16, 10), (8, 11), (0, 12)]),
+            (1, 3, "a @2 b c", vec![(0, 10), (8, 11), (16, 12)]),
+            (3, 1, "@2 b c", vec![(8, 11), (0, 12)]),
+            (-2, 0, "a b c", vec![(0, 10), (8, 11), (16, 12)]),
+        ] {
+            let parsed = parse_memory_range(content, 16, 8, start, finish).unwrap();
+            assert!(parsed.warning.is_none());
+            let actual = parsed
+                .writes
+                .runs
+                .iter()
+                .map(|run| (run.bit_offset, run.value_bytes[0]))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn mismatched_counts_warn_and_preserve_only_available_range_words() {
+        for (content, loaded) in [("a", 1), ("a b c d", 2)] {
+            let parsed = parse_memory_range(content, 16, 8, 3, 2).unwrap();
+            assert!(
+                parsed
+                    .warning
+                    .as_deref()
+                    .unwrap()
+                    .contains("requested range [3:2]")
+            );
+            assert_eq!(parsed.writes.runs.len(), loaded);
+        }
+        // Address directives are checked even if no following word exists.
+        for content in ["@4", "@1 a", "a b @4"] {
+            let error = parse_memory_range(content, 16, 8, 3, 2).err().unwrap();
+            assert!(error.at_destination);
+            assert!(error.message.contains("requested range [3:2]"));
+            assert!(!error.message.contains("depth"));
+        }
+        assert!(parse_memory_range("g", 16, 8, 3, 2).is_err());
+        assert!(parse_memory_range("2", 2, 8, 3, 2).is_err());
+    }
 }
