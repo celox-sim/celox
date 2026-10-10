@@ -135,7 +135,7 @@ fn is_source_finish_notice(line: &str, sources: &[String]) -> bool {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            sources.iter().any(|source| *source == name)
+            sources.contains(&name)
         })
 }
 
@@ -902,7 +902,7 @@ impl Generator<'_> {
                     self.width
                 ));
                 self.indent += 1;
-                self.fail(pos, "time %0d is out of range", &[time.clone()]);
+                self.fail(pos, "time %0d is out of range", std::slice::from_ref(&time));
                 self.indent -= 1;
                 self.line("end");
                 let temp = self.temp();
