@@ -314,7 +314,7 @@ jobs:
           rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
           if nix develop --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
-            --bin "$VERIFY_BIN" -- --jobs 2 \
+            --bin "$VERIFY_BIN" -- --fresh --jobs 2 \
             --output "$RUNNER_TEMP/external-suite/logs"; then
             task_verify_status=0
           else
