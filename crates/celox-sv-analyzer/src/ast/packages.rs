@@ -178,6 +178,13 @@ impl Packages {
                     "compilation-unit variables in more than one source file".to_string(),
                 ));
             }
+            // Modules find their unit by the path of their source.
+            if packages.units.contains_key(*path) {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "compilation-unit declarations in two sources named `{}`",
+                    path.display()
+                )));
+            }
             packages
                 .units
                 .insert(path.to_path_buf(), Arc::new(Unit { visibility, scope }));
@@ -548,6 +555,21 @@ fn unit_visibility(
                 visibility.subroutines.insert(name.clone());
             }
             visibility.declared_at.entry(name).or_insert(offset);
+        }
+        // Only an import declaration of the unit itself; one in a subroutine
+        // of the unit is the subroutine's.
+        let sv_parser::PackageItem::PackageOrGenerateItemDeclaration(declaration) = item else {
+            continue;
+        };
+        let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = &**declaration
+        else {
+            continue;
+        };
+        if !matches!(
+            **data,
+            sv_parser::DataDeclaration::PackageImportDeclaration(_)
+        ) {
+            continue;
         }
         for child in node {
             match child {

@@ -181,3 +181,37 @@ fn unused_unsupported_unit_items_are_ignored() {
     .expect_err("the unit cannot be analyzed");
     assert!(error.to_string().contains("union"), "{error}");
 }
+
+/// Review cases: conflicting unit imports, imports of unit subroutines, and
+/// sources that share a path.
+#[test]
+fn unit_imports_conflict_and_stay_in_their_scope() {
+    let detail = error(&[(
+        "package p; localparam int X = 3; endpackage
+         package q; localparam int X = 5; endpackage
+         import p::X; import q::X;
+         module Top(output logic [7:0] y); assign y = X; endmodule",
+        "unit.sv",
+    )]);
+    assert!(detail.contains("`X`"), "{detail}");
+    // An import in a subroutine of the unit is not one of the unit, so `X`
+    // is unknown to the module.
+    assert!(
+        build(&[(
+            "package p; localparam int X = 3; endpackage
+             function automatic int f(); import p::*; return X; endfunction
+             module Top(output logic [7:0] y); assign y = X; endmodule",
+            "unit.sv",
+        )])
+        .is_err()
+    );
+    let error = build(&[
+        ("localparam int W = 1;", "same.sv"),
+        (
+            "localparam int W = 2; module Top(output logic [7:0] y); assign y = W; endmodule",
+            "same.sv",
+        ),
+    ])
+    .expect_err("units of sources with one path are rejected");
+    assert!(error.to_string().contains("two sources named"), "{error}");
+}

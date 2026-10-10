@@ -773,6 +773,30 @@ pub(super) fn resolve_imports(
             .iter()
             .filter(|(offset, ..)| *offset < start)
             .collect();
+        // The declaration the unit's explicit imports of `name` import:
+        // several must import one (IEEE 1800-2023 26.3).
+        let unit_explicit = |name: &String| -> Result<Option<String>, AnalyzerError> {
+            let mut target: Option<String> = None;
+            for (_, package_name, _) in unit_imports
+                .iter()
+                .filter(|(_, _, item)| item.as_ref() == Some(name))
+            {
+                let provided = provided(package_name, name)?;
+                match &target {
+                    Some(known) if *known != provided => {
+                        return Err(AnalyzerError::ImportConflict {
+                            name: name.clone(),
+                            detail: format!(
+                                "explicitly imported as both `{known}` and `{provided}`"
+                            ),
+                        });
+                    }
+                    Some(_) => {}
+                    None => target = Some(provided),
+                }
+            }
+            Ok(target)
+        };
         for name in referenced.keys() {
             if local.contains(name) || bindings.iter().any(|binding| binding.name == *name) {
                 continue;
@@ -780,11 +804,8 @@ pub(super) fn resolve_imports(
             let target = if unit.declares_before(name, start) {
                 uses_unit = true;
                 Some(format!("{}::{name}", packages::UNIT))
-            } else if let Some((_, package_name, _)) = unit_imports
-                .iter()
-                .find(|(_, _, item)| item.as_ref() == Some(name))
-            {
-                Some(provided(package_name, name)?)
+            } else if let Some(target) = unit_explicit(name)? {
+                Some(target)
             } else {
                 let mut found: Option<(String, &String)> = None;
                 for (_, package_name, _) in
