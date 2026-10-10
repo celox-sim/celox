@@ -828,3 +828,23 @@ fn nested_block_declarations_shadow_only_inside_them() {
         30 + 4 + 10
     );
 }
+
+/// A named export does not repair an earlier reference, and a name an
+/// explicit import binds is not imported through a wildcard as well.
+#[test]
+fn exports_follow_lexical_order_and_explicit_imports() {
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package q; localparam int X = 5; endpackage
+         package r; import p::*; import q::*; localparam int Y = X; export p::X; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("`X`"), "{detail}");
+    let detail = error(
+        "package p1; localparam int X = 3; endpackage
+         package p2; import p1::X; export p1::X; endpackage
+         package p3; import p2::X; import p1::*; localparam int Y = X; export p1::*; endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+}

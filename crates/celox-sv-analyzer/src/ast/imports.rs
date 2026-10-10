@@ -27,6 +27,8 @@ pub(super) struct ScopeImports {
     pub qualified: Vec<(String, String)>,
     /// The package exports (IEEE 1800-2023 26.6).
     pub exports: Vec<Export>,
+    /// The source offset of each `export p::x;` item, by `(p, x)`.
+    pub export_offsets: HashMap<(String, String), usize>,
 }
 
 /// A package export declaration item.
@@ -82,6 +84,18 @@ impl ScopeImports {
                         if let Some(export) = export {
                             if let Export::Item(package, _) | Export::Wildcard(package) = &export {
                                 note(&mut imports.packages, package.clone());
+                            }
+                            if let Export::Item(package, name) = &export
+                                && let Some(offset) = RefNode::PackageImportItem(item)
+                                    .into_iter()
+                                    .find_map(|node| match node {
+                                        RefNode::Locate(locate) => Some(locate.offset),
+                                        _ => None,
+                                    })
+                            {
+                                imports
+                                    .export_offsets
+                                    .insert((package.clone(), name.clone()), offset);
                             }
                             imports.exports.push(export);
                         }
@@ -285,8 +299,9 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
 /// of each name reference in an expression, a constant, a data type or a
 /// call. Declarations, formal names of connections, members and identifiers
 /// qualified by a package scope are not looked up, nor are names a nested
-/// subroutine or block declares, within it.
-pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+/// subroutine or block declares, within it. Each name maps to the source
+/// offset of its first reference.
+pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashMap<String, usize> {
     let nested = nested_declarations(node.clone(), tree);
     let identifiers = |node: RefNode<'_>| {
         node.into_iter()
@@ -318,7 +333,7 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
             _ => {}
         }
     }
-    let mut names = HashSet::default();
+    let mut names = HashMap::default();
     for child in node {
         if !matches!(
             child,
@@ -340,7 +355,10 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
                 (*start..*end).contains(&first.offset) && declared.contains(&name)
             })
         {
-            names.insert(name);
+            names
+                .entry(name)
+                .and_modify(|offset: &mut usize| *offset = (*offset).min(first.offset))
+                .or_insert(first.offset);
         }
     }
     names
@@ -601,6 +619,11 @@ pub(super) fn resolve_imports(
         }
         Ok(found)
     };
+    let referenced = if imports.wildcard.is_empty() {
+        HashMap::default()
+    } else {
+        unqualified_names(node, tree)
+    };
     // `export p::x;` refers to `x`: it imports a candidate the scope does
     // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6),
     // before other references bind names through wildcard imports.
@@ -647,24 +670,36 @@ pub(super) fn resolve_imports(
                     binding.through.push(package_name.clone());
                 }
             }
-            None => bind_explicitly(&mut bindings, package_name, name, "export")?,
+            None => {
+                // A reference before the export resolves without it.
+                if let Some(export_offset) = imports
+                    .export_offsets
+                    .get(&(package_name.clone(), name.clone()))
+                    && referenced
+                        .get(name)
+                        .is_some_and(|reference| reference < export_offset)
+                    && let Some((earlier, _)) = candidates(name)?
+                    && earlier != target
+                {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!(
+                            "referenced as `{earlier}` before `export {package_name}::{name};`"
+                        ),
+                    });
+                }
+                bind_explicitly(&mut bindings, package_name, name, "export")?
+            }
         }
     }
     if !imports.wildcard.is_empty() {
-        for name in unqualified_names(node, tree) {
+        for name in referenced.into_keys() {
             if local.contains(&name) {
                 continue;
             }
-            if let Some(binding) = bindings.iter_mut().find(|binding| binding.name == name) {
-                // A wildcard import of the explicitly imported declaration
-                // imports it through that package too.
-                for package_name in &imports.wildcard {
-                    if package(package_name)?.provides(&name).as_ref() == Some(&binding.target)
-                        && !binding.through.contains(package_name)
-                    {
-                        binding.through.push(package_name.clone());
-                    }
-                }
+            // An explicitly imported name is not a wildcard candidate
+            // (IEEE 1800-2023 26.3).
+            if bindings.iter().any(|binding| binding.name == name) {
                 continue;
             }
             if let Some((target, through)) = candidates(&name)? {
