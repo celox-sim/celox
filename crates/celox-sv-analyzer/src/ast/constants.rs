@@ -109,8 +109,8 @@ pub(super) fn bind_generate_parameter_with_types(
         ),
     );
     let resolved_type = parameter.resolved_type(parameter_types);
-    let resolved =
-        parameter.resolved_value_with_literals(const_env, parameter_types, parameter_literals);
+    let (resolved, resolved_literal) =
+        parameter.resolved_value_and_literal(const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -119,13 +119,11 @@ pub(super) fn bind_generate_parameter_with_types(
             value.to_string()
         }))
     } else {
-        parameter
-            .resolved_literal(const_env, parameter_types, parameter_literals)
-            .or_else(|| {
-                parameter_value_env(std::slice::from_ref(&parameter), const_env)
-                    .remove(parameter.name())
-                    .map(|value| substitute_expr_idents(value, parameter_literals))
-            })
+        resolved_literal.or_else(|| {
+            parameter_value_env(std::slice::from_ref(&parameter), const_env)
+                .remove(parameter.name())
+                .map(|value| substitute_expr_idents(value, parameter_literals))
+        })
     };
     if let Some(ty) = resolved_type {
         insert_parameter_type_markers(const_env, parameter.name(), ty);
@@ -978,7 +976,25 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         system_functions::CallSite::Expression,
                     )?;
                     if name == "$isunbounded" {
-                        return parameters::isunbounded_call(system_call, syntax_tree, const_env);
+                        // Imported aliases may not be bound in preliminary
+                        // collection. Retain the query for later resolution,
+                        // including its one-bit type for dependent queries.
+                        return const_expr_from_function_subroutine_call(
+                            &call.nodes.0,
+                            syntax_tree,
+                            const_env,
+                        );
+                    }
+                    if name == "$dimensions"
+                        && let Some(count) = dimensions::dimensions_system_function_call_value(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                    {
+                        return Ok(Some(ConstExpr::Literal(count.to_string())));
                     }
                     if matches!(
                         name,
@@ -987,7 +1003,6 @@ pub(super) fn const_expr_from_ref_node_with_env(
                             | "$low"
                             | "$high"
                             | "$increment"
-                            | "$dimensions"
                             | "$unpacked_dimensions"
                     ) {
                         return Ok(dimensions::array_query_call(

@@ -3863,3 +3863,34 @@ fn rejects_unbounded_values_in_aggregate_parameters() {
         );
     }
 }
+
+#[test]
+fn isunbounded_and_dimensions_preserve_parameter_metadata() {
+    let ir = analyze_source(
+        r#"
+        package P;
+            parameter logic [0:0] U = $;
+            localparam int RANK = $dimensions(U);
+        endpackage
+        module Top(output logic y);
+            import P::*;
+            localparam logic [0:0] ALIAS = U;
+            localparam int RANK = $dimensions(ALIAS);
+            localparam Q = $isunbounded(ALIAS);
+            localparam int QRANK = $dimensions(Q);
+            localparam int IMPORTED_RANK = P::RANK;
+            assign y = Q;
+        endmodule
+        "#,
+        Path::new("isunbounded_dimensions.sv"),
+    )
+    .unwrap();
+    for name in ["RANK", "Q", "QRANK", "IMPORTED_RANK"] {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|p| p.name() == name)
+            .unwrap();
+        assert_eq!(parameter.resolved_value(), Some(1), "{name}");
+    }
+}

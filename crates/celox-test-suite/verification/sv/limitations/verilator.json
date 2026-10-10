@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 3,
+    "mismatch": 6,
     "emission_error": 0,
     "compile_error": 7,
     "runtime_error": 1,
@@ -86,6 +86,36 @@
       "name": "procedural::select_index_call_skipped_by_logical_and",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_of_nonarray_handle_types at 679:3: assert_eq result: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_of_nonarray_handle_types",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_preserves_one_bit_vectors at 889:5: assert_eq literal_rank: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::dimensions_signing_conversions_are_vectors at 986:3: assert_eq signed_scalar: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_signing_conversions_are_vectors",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     },
     {
       "category": "Functions",

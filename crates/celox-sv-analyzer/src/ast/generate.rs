@@ -798,9 +798,11 @@ impl<'a> Elaborator<'a, '_> {
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -901,9 +903,11 @@ impl<'a> Elaborator<'a, '_> {
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -1724,12 +1728,14 @@ mod tests {
         let outer = FunctionReturnMetadata {
             width: Some(8),
             first_packed_dimension_width: Some(2),
+            dimensions: Some(2),
             signed: false,
             is_2state: false,
         };
         let inner = FunctionReturnMetadata {
             width: Some(4),
             first_packed_dimension_width: Some(4),
+            dimensions: Some(1),
             signed: true,
             is_2state: true,
         };

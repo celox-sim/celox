@@ -7,6 +7,44 @@ sv_backends! {
     fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
     fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
     fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
+    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
+    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
+    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
+    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
+
+    fn dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::dimensions_resolves_procedural_scopes";
+    }
+    fn dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::dimensions_resolves_package_array_constants";
+    }
+    fn dimensions_preserves_one_bit_vectors(sim) {
+        @case "system_functions::dimensions_preserves_one_bit_vectors";
+    }
+    fn dimensions_resolves_imported_function_returns(sim) {
+        @case "system_functions::dimensions_resolves_imported_function_returns";
+    }
+
+    fn dimensions_of_nonarray_handle_types(sim) {
+        @case "system_functions::dimensions_of_nonarray_handle_types";
+    }
+
+    fn dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::dimensions_is_independent_of_unknown_values";
+    }
+
+    fn dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::dimensions_counts_declared_arrays";
+    }
+
+    fn dimensions_preserves_selected_and_expression_types(sim) {
+        @case "system_functions::dimensions_preserves_selected_and_expression_types";
+    }
+
+    fn dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
+    }
+
     fn array_query_evaluates_dimension_function_once(sim) {
         @setup {
             let source = r#"
@@ -178,7 +216,13 @@ sv_backends! {
 
 #[test]
 fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
-    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+    for name in [
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$dimensions",
+    ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
             let source =
@@ -393,6 +437,9 @@ fn value_functions_called_as_statements_check_their_operands() {
         endmodule",
         "module Top(input logic a, output logic y);
             always_comb begin $bits(no_such_signal); y = a; end
+        endmodule",
+        "module Top(input logic a, output logic y);
+            always_comb begin $dimensions(no_such_signal); y = a; end
         endmodule",
     ] {
         build_error(source);
@@ -649,4 +696,38 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
             },
         ]
     );
+}
+
+#[test]
+fn dimensions_rejects_undefined_constant_operands() {
+    for source in [
+        "module Top(output int y); localparam N = $dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+    ] {
+        build_error(source);
+    }
+}
+
+#[test]
+fn dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $dimensions(logic)'(1'b1);",
+        "localparam P = $dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $dimensions(logic); assign y = N'(1'b1);",
+        "localparam N = $dimensions(real); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
+    }
 }

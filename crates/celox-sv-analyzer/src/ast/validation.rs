@@ -202,6 +202,8 @@ fn reject_silently_ignored_constructs_with_dimensions(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
+    // Procedure locals, parameters and loop indices are installed by
+    // BodyBuilder. Validate their queries while lowering that scoped body.
     let procedural_queries: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter(|child| {
             matches!(
@@ -256,6 +258,17 @@ fn reject_silently_ignored_constructs_with_dimensions(
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$dimensions")
+                    && !procedural_queries.contains(&call) =>
+            {
+                // Preliminary parameter lowering may defer a type query.
+                // Check even unused declarations once their scope is known.
+                dimensions::dimensions_system_function_call_value(
+                    call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
+                ).ok_or_else(|| unsupported(format!("operand of `$dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
+            }
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)

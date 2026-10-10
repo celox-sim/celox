@@ -45,6 +45,7 @@ pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
 mod scope;
@@ -95,10 +96,11 @@ use dimensions::{
     function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
-    parameter_signed_element_marker, parameter_signed_marker, parameter_type_from_const_env,
-    parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
-    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
-    variable_size_function_width, variable_size_marker,
+    parameter_rank_marker, parameter_signed_element_marker, parameter_signed_marker,
+    parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
+    size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
+    variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
+    variable_size_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -108,10 +110,10 @@ use expressions::{
 use ff_process::ff_processes_from_module_node;
 use functions::{
     function_from_declaration, function_local_packed_dimensions_from_block_item_iter,
-    function_local_packed_dimensions_from_block_items,
+    function_local_packed_dimensions_from_block_items, function_return_dimensions,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
     function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
-    procedural_truth_condition, tf_item_params, tf_params,
+    procedural_truth_condition,
 };
 use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
@@ -749,6 +751,7 @@ impl Module {
                     FunctionReturnMetadata {
                         width: function.return_width,
                         first_packed_dimension_width: function.return_first_packed_dimension_width,
+                        dimensions: function.return_dimensions,
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
                     },
@@ -770,6 +773,7 @@ impl Module {
                         width: Some(r#type.width()),
                         first_packed_dimension_width: (r#type.width() > 1)
                             .then_some(r#type.width()),
+                        dimensions: Some(usize::from(r#type.width() > 1)),
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
                     },
@@ -1108,16 +1112,27 @@ impl Parameter {
         Some(value)
     }
 
-    pub(crate) fn resolved_value_with_literals(
+    /// Resolve once, retaining a nonnumeric literal for the caller to publish.
+    /// Numeric results take precedence, including numbers recovered from a
+    /// literal after two-state conversion or dependency substitution.
+    pub(crate) fn resolved_value_and_literal(
         &self,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
-    ) -> Option<i128> {
-        self.resolved_value(constants, parameter_types).or_else(|| {
-            let literal = self.resolved_literal(constants, parameter_types, literals)?;
-            eval_ast_const_expr(&expr_to_const(literal)?, constants)
-        })
+    ) -> (Option<i128>, Option<Expr>) {
+        if let Some(value) = self.resolved_value(constants, parameter_types) {
+            return (Some(value), None);
+        }
+        let literal = self.resolved_literal(constants, parameter_types, literals);
+        let value = literal
+            .as_ref()
+            .and_then(|literal| eval_ast_const_expr(&expr_to_const(literal.clone())?, constants));
+        if value.is_some() {
+            (value, None)
+        } else {
+            (None, literal)
+        }
     }
 
     pub(crate) fn resolved_literal(
@@ -1126,6 +1141,8 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
+        #[cfg(test)]
+        parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
         if self
             .value()
             .is_some_and(|value| parameters::is_unbounded(value, constants))
@@ -1847,6 +1864,7 @@ struct Function {
     outputs: Vec<(String, Expr)>,
     return_width: Option<usize>,
     return_first_packed_dimension_width: Option<usize>,
+    return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
 }
@@ -2064,6 +2082,7 @@ type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 struct FunctionReturnMetadata {
     width: Option<usize>,
     first_packed_dimension_width: Option<usize>,
+    dimensions: Option<usize>,
     signed: bool,
     is_2state: bool,
 }

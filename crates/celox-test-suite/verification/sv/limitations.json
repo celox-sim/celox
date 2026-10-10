@@ -109,6 +109,7 @@
       "icarus": [
         "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
         "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+        "system_functions::dimensions_is_independent_of_unknown_values",
         "types::packed_parameters_of_signed_named_types_have_signed_elements"
       ]
     }
@@ -127,6 +128,7 @@
     "cases": {
       "icarus": [
         "procedural::aggregate_parameters_are_constant_tables",
+        "system_functions::dimensions_resolves_package_array_constants",
         "system_functions::isunbounded_reports_bounded_array_parameters"
       ]
     }
@@ -343,7 +345,8 @@
     "cases": {
       "icarus": [
         "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element",
-        "indexed_select::runtime_indices_select_within_multidimensional_packed_elements"
+        "indexed_select::runtime_indices_select_within_multidimensional_packed_elements",
+        "system_functions::dimensions_preserves_selected_and_expression_types"
       ]
     }
   },
@@ -581,6 +584,41 @@
     }
   },
   {
+    "id": "sv_icarus_dimensions_type_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects data type arguments to $dimensions: chandle produces a syntax error; parameter and built-in type arguments produce \"Type names are not valid expressions here\", followed by an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_of_nonarray_handle_types",
+        "system_functions::dimensions_resolves_types_and_constant_scopes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_chandle_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 returns 1 for $dimensions(chandle). IEEE 1800-2023 6.14 and 20.7 make a chandle a nonarray pointer type, not an integral bit vector, so the expected result is 0.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::dimensions_of_nonarray_handle_types"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_constant_array_queries",
     "category": "simulator_compile_limitation",
     "phase": "compile",
@@ -628,6 +666,78 @@
     "cases": {
       "icarus": [
         "system_functions::immediate_cover_executes_pass_statement"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_subroutine_unpacked_ports",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_resolves_procedural_scopes",
+        "system_functions::dimensions_types_function_pattern_arguments"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_function_return_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_resolves_imported_function_returns"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_one_bit_expression_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::dimensions_preserves_one_bit_vectors",
+        "system_functions::dimensions_resolves_procedural_parameters_and_indices",
+        "system_functions::dimensions_signing_conversions_are_vectors"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_one_bit_expression_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::dimensions_preserves_one_bit_vectors",
+        "system_functions::dimensions_signing_conversions_are_vectors"
       ]
     }
   },

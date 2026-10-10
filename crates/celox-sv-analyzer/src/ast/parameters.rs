@@ -4,7 +4,7 @@ use super::*;
 
 /// Presence also distinguishes a bounded value parameter from a variable or
 /// enum constant; the payload is 1 for `$` and 0 for a bounded value.
-pub(super) fn unbounded_parameter_marker(name: &str) -> String {
+pub(crate) fn unbounded_parameter_marker(name: &str) -> String {
     format!("__parameter::unbounded::{name}")
 }
 
@@ -174,6 +174,18 @@ impl<'a> ParameterEnvironment<'a> {
             &mut self.literals,
             parameter,
         ) {
+            // A type query does not evaluate its operand. Preserve a known
+            // rank for following declarations even when an imported alias's
+            // value is deferred; do not publish an inherited numeric value.
+            if let Some(ty) = parameter.resolved_type(&self.types) {
+                let rank = if parameter.packed_ranges.is_empty() {
+                    usize::from(!parameter.has_declared_type || ty.width > 1)
+                } else {
+                    parameter.packed_ranges.len()
+                };
+                self.constants
+                    .insert(parameter_rank_marker(parameter.name()), rank as i128);
+            }
             return;
         }
         let name = parameter.name();
@@ -189,6 +201,7 @@ impl<'a> ParameterEnvironment<'a> {
             parameter_width_marker(name),
             parameter_signed_marker(name),
             parameter_dimensions_marker(name),
+            parameter_rank_marker(name),
             parameter_signed_element_marker(name),
         ];
         for index in 0..parameter.packed_ranges.len() {
@@ -613,22 +626,30 @@ fn bind_parameter(
         if let Some(ty) = parameter.resolved_type(types) {
             types.insert(parameter.name().to_string(), ty);
             insert_parameter_type_markers(env, parameter.name(), ty);
+            let rank = if parameter.packed_ranges.is_empty() {
+                usize::from(!parameter.has_declared_type || ty.width > 1)
+            } else {
+                parameter.packed_ranges.len()
+            };
+            env.insert(parameter_rank_marker(parameter.name()), rank as i128);
         }
+        insert_parameter_dimension_markers(env, parameter);
         return true;
     }
-    let value = parameter.resolved_value_with_literals(env, types, literals);
-    let literal = if value.is_none() {
-        let Some(literal) = parameter.resolved_literal(env, types, literals) else {
-            return false;
-        };
-        Some(literal)
-    } else {
-        None
-    };
+    let (value, literal) = parameter.resolved_value_and_literal(env, types, literals);
+    if value.is_none() && literal.is_none() {
+        return false;
+    }
     env.insert(unbounded_parameter_marker(parameter.name()), 0);
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
+        let rank = if parameter.packed_ranges.is_empty() {
+            usize::from(!parameter.has_declared_type || ty.width > 1)
+        } else {
+            parameter.packed_ranges.len()
+        };
+        env.insert(parameter_rank_marker(parameter.name()), rank as i128);
     }
     if let Some(literal) = literal {
         // Shadow a numeric inherited binding with the four-state declaration.
@@ -1311,7 +1332,7 @@ pub(super) fn infer_const_expr_type(
                 width: 32,
                 signed: true,
             }),
-            "$onehot" | "$onehot0" | "$isunknown" => Some(ExprType {
+            "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some(ExprType {
                 width: 1,
                 signed: false,
             }),
@@ -1398,6 +1419,7 @@ thread_local! {
     static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static LITERAL_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static LITERAL_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
