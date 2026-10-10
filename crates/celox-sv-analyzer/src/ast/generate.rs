@@ -793,6 +793,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
@@ -895,6 +896,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
@@ -1173,6 +1175,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     signal.name.clone(),
                     parameter_marker(&signal.name),
+                    parameters::unbounded_parameter_marker(&signal.name),
                     local_parameter_marker(&signal.name),
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),

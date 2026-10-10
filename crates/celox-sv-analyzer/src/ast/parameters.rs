@@ -2,6 +2,68 @@
 
 use super::*;
 
+/// Presence also distinguishes a bounded value parameter from a variable or
+/// enum constant; the payload is 1 for `$` and 0 for a bounded value.
+pub(super) fn unbounded_parameter_marker(name: &str) -> String {
+    format!("__parameter::unbounded::{name}")
+}
+
+pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+    match value {
+        ConstExpr::Literal(value) => value == "$",
+        ConstExpr::Ident(name) => env.get(&unbounded_parameter_marker(name)) == Some(&1),
+        _ => false,
+    }
+}
+
+fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+    match value {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => is_unbounded(value, env),
+        ConstExpr::Select { expr, bit } => {
+            contains_unbounded_operand(expr, env) || contains_unbounded_operand(bit, env)
+        }
+        ConstExpr::Function { name, .. } if name == "$isunbounded" => false,
+        ConstExpr::Function { args, .. } => {
+            args.iter().any(|arg| contains_unbounded_operand(arg, env))
+        }
+        ConstExpr::Unary { expr, .. } => contains_unbounded_operand(expr, env),
+        ConstExpr::Binary { left, right, .. } => {
+            contains_unbounded_operand(left, env) || contains_unbounded_operand(right, env)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            contains_unbounded_operand(condition, env)
+                || contains_unbounded_operand(then_expr, env)
+                || contains_unbounded_operand(else_expr, env)
+        }
+    }
+}
+
+/// Query the parameter binding, without evaluating its value. An unavailable
+/// binding is deferred by preliminary declaration collection; expression
+/// lowering requires a resolved parameter. The result is a one-bit unsigned
+/// value, including when the enclosing expression requests a wider type.
+pub(super) fn isunbounded_call(
+    call: &sv_parser::SystemTfCall,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+) -> Converted<Option<ConstExpr>> {
+    let argument = expressions::single_expression_argument(call)
+        .and_then(|arg| const_expr_from_expr(arg, tree).ok().flatten());
+    let Some(ConstExpr::Ident(name)) = argument else {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: "$isunbounded".into(),
+            detail: "argument must name a value parameter".into(),
+        });
+    };
+    Ok(env
+        .get(&unbounded_parameter_marker(&name))
+        .map(|value| ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))))
+}
+
 pub(super) fn apply_parameter_overrides(
     parameters: &mut [Parameter],
     overrides: &HashMap<String, ConstExpr>,
@@ -122,6 +184,7 @@ impl<'a> ParameterEnvironment<'a> {
         let mut keys = vec![
             name.to_string(),
             parameter_marker(name),
+            unbounded_parameter_marker(name),
             local_parameter_marker(name),
             parameter_width_marker(name),
             parameter_signed_marker(name),
@@ -230,6 +293,10 @@ pub(super) fn parameters_from_ref_node_with_environment(
         function_type_from_ref_node(type_node.clone(), syntax_tree, base_const_env, type_aliases)
             .map(|ty| ty.packed_ranges().to_vec())
             .unwrap_or_default();
+    let simple_bit_vector = parameter_ranges.len() <= 1
+        && declared_alias
+            .as_ref()
+            .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
     let parameter_is_2state = declared_alias
         .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
@@ -237,6 +304,11 @@ pub(super) fn parameters_from_ref_node_with_environment(
         if let RefNode::ParamAssignment(param) = child {
             // An unpacked array parameter is a constant variable, not a value.
             if array_parameters::is_array_parameter(param) {
+                let name =
+                    parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
+                let marker = unbounded_parameter_marker(&name);
+                environment.values.insert(marker.clone(), 0);
+                environment.constants.insert(marker, 0);
                 continue;
             }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -283,6 +355,32 @@ pub(super) fn parameters_from_ref_node_with_environment(
             // only after collection has finished.
             if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
                 value = Some(override_value.clone());
+            }
+            if value
+                .as_ref()
+                .is_some_and(|expression| is_unbounded(expression, const_env))
+                && !simple_bit_vector
+            {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "unbounded parameter `{name}` requires a simple bit vector type"
+                )));
+            }
+            if let Some(expression) = &value
+                && !is_unbounded(expression, const_env)
+                && contains_unbounded_operand(expression, const_env)
+            {
+                let lowered = substitute_expr_idents(
+                    const_expr_to_expr(expression.clone()),
+                    &environment.literals,
+                );
+                if !matches!(
+                    fold_const_integral_expr_preserving_mask(lowered, const_env),
+                    Expr::Literal(_)
+                ) {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "numeric use of unbounded parameter in `{name}`"
+                    )));
+                }
             }
             let mut parameter = Parameter::new(
                 name,
@@ -500,6 +598,24 @@ fn bind_parameter(
 ) -> bool {
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
+    // `$` is an elaboration value, never an integer sentinel. Preserve it
+    // separately so typed parameters, aliases and overrides cannot turn it
+    // into an ordinary number (IEEE 1800-2023 6.20.7, 20.6.3).
+    if parameter
+        .value()
+        .is_some_and(|value| is_unbounded(value, env))
+    {
+        env.remove(parameter.name());
+        env.remove(&parameter_marker(parameter.name()));
+        env.remove(&local_parameter_marker(parameter.name()));
+        env.insert(unbounded_parameter_marker(parameter.name()), 1);
+        literals.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+        if let Some(ty) = parameter.resolved_type(types) {
+            types.insert(parameter.name().to_string(), ty);
+            insert_parameter_type_markers(env, parameter.name(), ty);
+        }
+        return true;
+    }
     let value = parameter.resolved_value_with_literals(env, types, literals);
     let literal = if value.is_none() {
         let Some(literal) = parameter.resolved_literal(env, types, literals) else {
@@ -509,6 +625,7 @@ fn bind_parameter(
     } else {
         None
     };
+    env.insert(unbounded_parameter_marker(parameter.name()), 0);
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
@@ -837,6 +954,13 @@ pub(super) fn parameter_value_env(
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
+        if parameter
+            .value()
+            .is_some_and(|value| is_unbounded(value, const_env))
+        {
+            values.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+            continue;
+        }
         let inferred_type = parameter.value().and_then(|value| {
             infer_parameter_value_type(value, parameter.has_declared_type, &parameter_types)
         });
@@ -1095,6 +1219,15 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
                 parameter_types,
             )),
         },
+        ConstExpr::Function { name, args, site } if name == "$isunbounded" => {
+            if let [ConstExpr::Ident(parameter)] = args.as_slice()
+                && let Some(value) = constants.get(&unbounded_parameter_marker(parameter))
+            {
+                ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))
+            } else {
+                ConstExpr::Function { name, args, site }
+            }
+        }
         ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
             site,

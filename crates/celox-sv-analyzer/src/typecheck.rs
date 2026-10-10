@@ -53,7 +53,7 @@ impl std::fmt::Display for UnpackedArrayType {
     }
 }
 
-/// Width and signedness of the supported bit vector system functions (20.9).
+/// Width and signedness of the supported integral system functions.
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
     if name == "$countbits" {
         return (arity >= 2).then_some((32, true));
@@ -63,7 +63,7 @@ pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usiz
     }
     match name {
         "$countones" | "$clog2" => Some((32, true)),
-        "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
+        "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some((1, false)),
         _ => None,
     }
 }
@@ -889,6 +889,14 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             // Logical operands are self-determined; only the truth result
             // has width one, including an unknown result.
             let left = integral_literal_from_const_expr(left)?;
+            // IEEE 1800-2023 11.3.5: do not evaluate a skipped operand,
+            // which can legally reference an unbounded parameter (6.20.7).
+            let truth = integral_literal_truth(&left);
+            if (*op == BinaryOp::LogicAnd && truth == Some(false))
+                || (*op == BinaryOp::LogicOr && truth == Some(true))
+            {
+                return Some(integral_literal_from_truth(truth));
+            }
             let right = integral_literal_from_const_expr(right)?;
             eval_four_state_binary_literal(&left, *op, &right, false)
         }

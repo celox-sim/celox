@@ -56,7 +56,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -228,6 +228,7 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.
+- **Unbounded parameters.** `$isunbounded(P)` returns a one-bit unsigned result: 1 for a value parameter assigned `$`, otherwise 0. The symbolic value survives parameter aliases and instance overrides (IEEE 1800-2023 6.20.7, 20.6.3).
 - **System functions called as statements**, such as `$countones(f(a));`, are
   checked and evaluated like the same call in an expression, and their value
   is discarded. `$bits` and `$size` do not evaluate their operand.

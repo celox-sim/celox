@@ -9,7 +9,7 @@
     "unexpected_accept": 0,
     "mismatch": 3,
     "emission_error": 0,
-    "compile_error": 5,
+    "compile_error": 7,
     "runtime_error": 1,
     "unsupported": 0,
     "ignored": 0
@@ -86,6 +86,28 @@
       "name": "procedural::select_index_call_skipped_by_logical_and",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:10:22: Unsupported: Unbounded ('$') outside of queue or string operations\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   10 |       Child #(.LIMIT($)) c(.result(explicit_dollar));\n      |                      ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: <case>/source_0.sv:10:16: Can't convert defparam value to constant: Param 'LIMIT' of 'c'\n                                : ... note: In instance 'celox_suite_tb.dut'\n   10 |       Child #(.LIMIT($)) c(.result(explicit_dollar));\n      |                ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error-UNSUPPORTED: <case>/source_0.sv:7:25: Unsupported: Unbounded ('$') outside of queue or string operations\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    7 |       parameter int U = $;\n      |                         ^\n%Error: <case>/source_0.sv:11:16: Can't convert defparam value to constant: Param 'LIMIT' of 'd'\n                                : ... note: In instance 'celox_suite_tb.dut'\n   11 |       Child #(.LIMIT(U)) d(.result(forwarded));\n      |                ^~~~~\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:7:26: ../V3EmitCConstInit.h:110: Unknown node type reached EmitCConstInit: ISUNBOUNDED\n    7 |       localparam QUERY = $isunbounded(ARRAY);\n      |                          ^~~~~~~~~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

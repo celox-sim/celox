@@ -3746,3 +3746,120 @@ fn countbits_alias_parameter_keeps_unknown_bits_in_assignments() {
     assert_eq!(literal.value, num_bigint::BigUint::from(4u8));
     assert_eq!(literal.mask, num_bigint::BigUint::default());
 }
+
+#[test]
+fn isunbounded_elaborates_unbounded_parameters() {
+    let ir = analyze_source(
+        r#"
+        module Top(output logic y);
+            parameter int U = $;
+            localparam Q = $isunbounded(U);
+            if ($isunbounded(U)) begin assign y = Q; end else begin assign y = 0; end
+        endmodule
+    "#,
+        Path::new("isunbounded.sv"),
+    )
+    .unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(1));
+}
+
+#[test]
+fn isunbounded_rejects_non_parameter_operands() {
+    for operand in [
+        "", "P, P", "1", "$", "P + 1", "P[0]", "v", "E", "missing", "f()",
+    ] {
+        for body in [
+            format!("assign y = $isunbounded({operand});"),
+            format!("localparam UNUSED = $isunbounded({operand});"),
+        ] {
+            let source = format!(
+                r#"
+                module Top(input logic v, output logic y);
+                    localparam int P = 3;
+                    typedef enum logic {{E}} t;
+                    function automatic int f(); return 1; endfunction
+                    {body}
+                endmodule
+            "#
+            );
+            let error =
+                analyze_source(&source, Path::new("isunbounded_invalid.sv")).expect_err(&source);
+            assert!(
+                error.to_string().contains("isunbounded"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn isunbounded_rejects_variables_shadowing_parameters() {
+    for body in [
+        "logic P; y = $isunbounded(P);",
+        "for (int P=0; P<1; P++) y = $isunbounded(P);",
+    ] {
+        let source = format!(
+            "module Top(output logic y); parameter int P = $; always_comb begin {body} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("isunbounded_shadow.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("isunbounded")
+                || error.to_string().contains("parameter name collides"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_numeric_use_of_unbounded_parameters() {
+    for initializer in ["$ + 1", "U + 1", "U == 0", "U[0]", "!U"] {
+        let source = format!(
+            "module Top(); parameter int U = $; localparam int BAD = {initializer}; endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("unbounded_numeric.sv")).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn isunbounded_rejects_subroutine_arguments_as_parameters() {
+    for declaration in [
+        "function automatic bit query(input int P); return $isunbounded(P); endfunction assign y = query(1);",
+        "function automatic bit query(); int P; return $isunbounded(P); endfunction assign y = query();",
+        "task automatic query(input int P); y = $isunbounded(P); endtask always_comb query(1);",
+    ] {
+        let source =
+            format!("module Top(output logic y); parameter int P = $; {declaration} endmodule");
+        assert!(
+            analyze_source(&source, Path::new("isunbounded_subroutine.sv")).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn isunbounded_observes_top_level_parameter_overrides() {
+    let ir = analyze_source_with_module_parameter_overrides(
+        "module Top #(parameter int P = $, parameter bit Q = $isunbounded(P)) (output logic y); assign y = Q; endmodule",
+        Path::new("isunbounded_override.sv"), "Top", &HashMap::from_iter([("P".to_string(), 7)]),
+    ).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+}
+
+#[test]
+fn rejects_unbounded_values_in_aggregate_parameters() {
+    for declaration in [
+        "parameter logic [1:0][1:0] P = $;",
+        "typedef logic [1:0][1:0] T; parameter T P = $;",
+        "typedef struct packed {logic [7:0] a;} T; parameter T P = $;",
+        "parameter int U = $; typedef struct packed {logic [7:0] a;} T; localparam T P = U;",
+    ] {
+        let source = format!("module Top(); {declaration} endmodule");
+        assert!(
+            analyze_source(&source, Path::new("unbounded_type.sv")).is_err(),
+            "{source}"
+        );
+    }
+}

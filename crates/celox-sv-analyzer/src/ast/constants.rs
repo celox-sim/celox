@@ -100,6 +100,14 @@ pub(super) fn bind_generate_parameter_with_types(
     parameter_literals: &mut HashMap<String, Expr>,
     parameter_types: &mut HashMap<String, ExprType>,
 ) {
+    const_env.insert(
+        parameters::unbounded_parameter_marker(parameter.name()),
+        i128::from(
+            parameter
+                .value()
+                .is_some_and(|value| parameters::is_unbounded(value, const_env)),
+        ),
+    );
     let resolved_type = parameter.resolved_type(parameter_types);
     let resolved =
         parameter.resolved_value_with_literals(const_env, parameter_types, parameter_literals);
@@ -586,6 +594,7 @@ fn const_expr_from_primary(
     syntax_tree: &SyntaxTree,
 ) -> Converted<Option<ConstExpr>> {
     match primary {
+        sv_parser::Primary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         sv_parser::Primary::PrimaryLiteral(_) => Ok(primary_literal_text(
             RefNode::Primary(primary),
             syntax_tree,
@@ -840,6 +849,7 @@ pub(super) fn const_expr_from_constant_param_with_env(
             }
             sv_parser::ConstantMintypmaxExpression::Ternary(_) => Ok(None),
         },
+        sv_parser::ConstantParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         _ => Ok(None),
     }
 }
@@ -855,7 +865,8 @@ pub(super) fn const_expr_from_param_expression(
             }
             sv_parser::MintypmaxExpression::Ternary(_) => Ok(None),
         },
-        sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => Ok(None),
+        sv_parser::ParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
+        sv_parser::ParamExpression::DataType(_) => Ok(None),
     }
 }
 
@@ -929,6 +940,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
             sv_parser::ConstantExpression::Inside(_) => Ok(None),
         },
         RefNode::ConstantPrimary(primary) => match primary {
+            sv_parser::ConstantPrimary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
             sv_parser::ConstantPrimary::PrimaryLiteral(_) => {
                 Ok(primary_literal_text(node, syntax_tree).map(ConstExpr::Literal))
             }
@@ -965,6 +977,9 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if name == "$isunbounded" {
+                        return parameters::isunbounded_call(system_call, syntax_tree, const_env);
+                    }
                     if matches!(
                         name,
                         "$left"
@@ -1163,6 +1178,16 @@ fn const_expr_from_function_subroutine_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    if name == "$isunbounded" {
+        if let Some(value) = parameters::isunbounded_call(system_call, syntax_tree, const_env)? {
+            return Ok(Some(value));
+        }
+        let argument = expressions::single_expression_argument(system_call).unwrap();
+        return Ok(Some(ConstExpr::call(
+            name.into(),
+            vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
+        )));
+    }
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };

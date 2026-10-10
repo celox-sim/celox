@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
+    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
+    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
+    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
+    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
     fn array_query_evaluates_dimension_function_once(sim) {
         @setup {
             let source = r#"

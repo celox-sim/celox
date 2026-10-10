@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 8,
     "emission_error": 0,
-    "compile_error": 48,
+    "compile_error": 54,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -486,6 +486,72 @@
       "name": "system_functions::display_field_widths_expand_to_the_value",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:22: error: Syntax error defining function.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_preserves_parameter_values_and_result_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8: error: Unable to evaluate parameter Q value: $isunbounded(<P=32'sd-1, wid=32>)\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_reports_bounded_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_resolves_package_and_local_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

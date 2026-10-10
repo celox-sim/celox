@@ -14,6 +14,7 @@ use crate::procedural::{
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
     entries: Vec<ScopeEntry>,
+    parameter_markers: Vec<(String, Option<i128>)>,
 }
 
 struct ScopeEntry {
@@ -21,6 +22,7 @@ struct ScopeEntry {
     unique: String,
     shadowed_dimensions: Option<VariableDimensions>,
     shadowed_constant: Option<i128>,
+    shadowed_parameter_marker: Option<i128>,
     shadowed_signedness: Option<bool>,
 }
 
@@ -103,6 +105,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             dims: dims.clone(),
             scopes: vec![Scope {
                 entries: Vec::new(),
+                parameter_markers: Vec::new(),
             }],
             state,
             type_aliases,
@@ -114,6 +117,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn push_scope(&mut self) {
         self.scopes.push(Scope {
             entries: Vec::new(),
+            parameter_markers: Vec::new(),
         });
     }
 
@@ -121,7 +125,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let Some(scope) = self.scopes.pop() else {
             return;
         };
+        for (marker, previous) in scope.parameter_markers.into_iter().rev() {
+            match previous {
+                Some(value) => {
+                    self.dims.const_env.insert(marker, value);
+                }
+                None => {
+                    self.dims.const_env.remove(&marker);
+                }
+            }
+        }
         for entry in scope.entries.into_iter().rev() {
+            let marker = parameters::unbounded_parameter_marker(&entry.source);
+            if let Some(value) = entry.shadowed_parameter_marker {
+                self.dims.const_env.insert(marker, value);
+            } else {
+                self.dims.const_env.remove(&marker);
+            }
             match entry.shadowed_dimensions {
                 Some(dimensions) => {
                     self.dims.insert(entry.source.clone(), dimensions);
@@ -153,6 +173,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .dims
             .insert(source.to_string(), dimensions_from_type(&r#type));
         let shadowed_constant = self.dims.const_env.remove(source);
+        let shadowed_parameter_marker = self
+            .dims
+            .const_env
+            .remove(&parameters::unbounded_parameter_marker(source));
         let shadowed_signedness = self
             .dims
             .expression_signedness
@@ -174,6 +198,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 unique: unique.clone(),
                 shadowed_dimensions,
                 shadowed_constant,
+                shadowed_parameter_marker,
                 shadowed_signedness,
             });
         unique
@@ -603,6 +628,21 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &HashMap::default(),
         )?;
         for parameter in &parameters {
+            let marker = parameters::unbounded_parameter_marker(parameter.name());
+            let previous = self.dims.const_env.get(&marker).copied();
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .parameter_markers
+                .push((marker, previous));
+            if parameter
+                .value()
+                .is_some_and(|value| parameters::is_unbounded(value, &self.dims.const_env))
+            {
+                self.local_constants
+                    .insert(parameter.name().to_string(), "$".into());
+                continue;
+            }
             let types = parameter_types_from_const_env(&self.dims.const_env);
             let value = parameter
                 .resolved_value(&self.dims.const_env, &types)
