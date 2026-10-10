@@ -581,6 +581,12 @@ fn expr_from_system_function_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    parameters::reject_unbounded_data_query(
+        call,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        packed_dimensions.scope_types_complete,
+    )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
         "$isunbounded" => {

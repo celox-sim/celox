@@ -964,3 +964,33 @@ fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
     assert_eq!(env.get(&unbounded_parameter_marker("P")), Some(&1));
     assert_eq!(literals["P"], Expr::Literal("$".into()));
 }
+
+#[test]
+fn unbounded_generate_binding_clears_inherited_numeric_values() {
+    let parameter = Parameter::new(
+        "P".into(),
+        Some(ConstExpr::Literal("$".into())),
+        Some(32),
+        Some(true),
+        true,
+        true,
+        true,
+    );
+    let mut env = HashMap::from_iter([
+        ("P".into(), 7),
+        (parameter_marker("P"), 7),
+        (local_parameter_marker("P"), 7),
+        (unbounded_parameter_marker("P"), 0),
+    ]);
+    let mut literals = HashMap::default();
+    bind_generate_parameter(parameter, &mut env, &mut literals);
+    assert_eq!(env.get(&unbounded_parameter_marker("P")), Some(&1));
+    for key in [
+        "P".to_string(),
+        parameter_marker("P"),
+        local_parameter_marker("P"),
+    ] {
+        assert!(!env.contains_key(&key), "numeric binding survives: {key}");
+    }
+    assert_eq!(literals.get("P"), Some(&Expr::Literal("$".into())));
+}

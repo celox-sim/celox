@@ -100,13 +100,17 @@ pub(super) fn bind_generate_parameter_with_types(
     parameter_literals: &mut HashMap<String, Expr>,
     parameter_types: &mut HashMap<String, ExprType>,
 ) {
+    let unbounded = parameter
+        .value()
+        .is_some_and(|value| parameters::is_unbounded(value, const_env));
+    if unbounded {
+        const_env.remove(parameter.name());
+        const_env.remove(&parameter_marker(parameter.name()));
+        const_env.remove(&local_parameter_marker(parameter.name()));
+    }
     const_env.insert(
         parameters::unbounded_parameter_marker(parameter.name()),
-        i128::from(
-            parameter
-                .value()
-                .is_some_and(|value| parameters::is_unbounded(value, const_env)),
-        ),
+        i128::from(unbounded),
     );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
@@ -974,6 +978,12 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         name,
                         args.as_deref(),
                         system_functions::CallSite::Expression,
+                    )?;
+                    parameters::reject_unbounded_data_query(
+                        system_call,
+                        syntax_tree,
+                        const_env,
+                        false,
                     )?;
                     if name == "$isunbounded" {
                         // Imported aliases may not be bound in preliminary

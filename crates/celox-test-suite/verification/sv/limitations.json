@@ -110,6 +110,7 @@
         "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
         "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
         "system_functions::dimensions_is_independent_of_unknown_values",
+        "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
         "types::packed_parameters_of_signed_named_types_have_signed_elements"
       ]
     }
@@ -746,7 +747,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+    "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -754,11 +755,15 @@
     ],
     "cases": {
       "icarus": [
+        "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order",
+        "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds",
         "system_functions::isunbounded_handles_overrides_and_forwarding",
         "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits",
         "system_functions::isunbounded_preserves_parameter_values_and_result_type",
         "system_functions::isunbounded_reports_bounded_parameters",
-        "system_functions::isunbounded_resolves_package_and_local_parameters"
+        "system_functions::isunbounded_resolves_package_and_local_parameters",
+        "system_functions::isunbounded_restores_procedural_parameter_bindings",
+        "system_functions::isunbounded_restores_shadowed_function_arguments"
       ]
     }
   },
@@ -793,6 +798,24 @@
     "cases": {
       "verilator": [
         "system_functions::isunbounded_reports_bounded_array_parameters"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_unbounded_scalar_parameter",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::isunbounded_restores_procedural_parameter_bindings",
+        "system_functions::isunbounded_restores_shadowed_function_arguments"
       ]
     }
   }

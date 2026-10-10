@@ -1168,3 +1168,123 @@ a=0a  10
   (top Top)
   (eval)
   (assert_eq result 0))
+
+(case isunbounded_binds_procedural_aliases_in_declaration_order
+  (source "isunbounded_aliases.sv" #"
+    module Top(input logic clk, output logic [2:0] comb, registered, initialized,
+               output logic [2:0] via_function);
+      function automatic logic [2:0] query();
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        return {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      endfunction
+      initial begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        initialized = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_comb begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        comb = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_ff @(posedge clk) begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        registered <= {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      assign via_function = query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (expand name (comb initialized via_function)
+    (assert_eq {name} 7))
+  (tick clk)
+  (assert_eq registered 7))
+
+(case isunbounded_restores_procedural_parameter_bindings
+  (source "isunbounded_restore.sv" #"
+    module Top(output logic [7:0] value, output logic [3:0] flags,
+               output int width, rank, left_bound);
+      parameter logic [7:0] P = 8'h27;
+      always_comb begin
+        flags[3] = $isunbounded(P);
+        begin
+          localparam logic P = $;
+          flags[2] = $isunbounded(P);
+          begin
+            localparam logic [1:0] P = 2'd1;
+            flags[1] = $isunbounded(P);
+          end
+          flags[0] = $isunbounded(P);
+        end
+        value = P;
+        width = $bits(P);
+        rank = $dimensions(P);
+        left_bound = $left(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq value 0x27)
+  (assert_eq flags 5)
+  (assert_eq width 8)
+  (assert_eq rank 1)
+  (assert_eq left_bound 7))
+
+(case isunbounded_restores_procedural_parameter_type_metadata
+  (source "isunbounded_restore_type.sv" #"
+    module Top(output int inner_bits, outer_bits, inner_rank, outer_rank);
+      parameter logic [2:0][1:0] P = 6'h27;
+      always_comb begin
+        begin
+          localparam logic P = 1'b1;
+          inner_bits = $bits(P);
+          inner_rank = $dimensions(P);
+        end
+        outer_bits = $bits(P);
+        outer_rank = $dimensions(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq inner_bits 1)
+  (assert_eq inner_rank 0)
+  (assert_eq outer_bits 6)
+  (assert_eq outer_rank 2))
+
+(case isunbounded_restores_shadowed_function_arguments
+  (source "isunbounded_restore_argument.sv" #"
+    module Top(input logic [7:0] data, output logic [8:0] y);
+      function automatic logic [8:0] query(input logic [7:0] P);
+        bit q;
+        begin
+          localparam logic P = $;
+          q = $isunbounded(P);
+        end
+        return {q, P};
+      endfunction
+      assign y = query(data);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 0x27 0x80 0xff)
+    (modify (set data value))
+    (assert_eq y (+ 0x100 value))))
+
+(case isunbounded_generate_guards_preserve_short_circuit_bounds
+  (source "isunbounded_guarded_bounds.sv" #"
+    module Top(output int and_bits, or_bits);
+      parameter int P = 7;
+      if (1) begin : g
+        localparam int P = $;
+        logic [(!$isunbounded(P) && P == 0):0] a;
+        logic [($isunbounded(P) || P == 0):0] b;
+        assign and_bits = $bits(a);
+        assign or_bits = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq and_bits 1)
+  (assert_eq or_bits 2))

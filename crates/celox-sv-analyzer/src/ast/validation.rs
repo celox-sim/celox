@@ -222,6 +222,11 @@ fn reject_silently_ignored_constructs_with_dimensions(
         .collect();
     for child in validation_nodes(node.clone(), is_module) {
         if let RefNode::SystemTfCall(call) = child.clone()
+            && !procedural_queries.contains(&call)
+        {
+            parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
+        }
+        if let RefNode::SystemTfCall(call) = child.clone()
             && system_tf_call_parts(call, syntax_tree)
                 .is_some_and(|(name, _)| name == "$isunbounded")
         {

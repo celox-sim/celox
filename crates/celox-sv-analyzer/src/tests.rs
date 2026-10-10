@@ -3870,12 +3870,13 @@ fn isunbounded_and_dimensions_preserve_parameter_metadata() {
         r#"
         package P;
             parameter logic [0:0] U = $;
-            localparam int RANK = $dimensions(U);
+            localparam logic [0:0] BOUNDED = 0;
+            localparam int RANK = $dimensions(BOUNDED);
         endpackage
         module Top(output logic y);
             import P::*;
             localparam logic [0:0] ALIAS = U;
-            localparam int RANK = $dimensions(ALIAS);
+            localparam int RANK = $dimensions(P::BOUNDED);
             localparam Q = $isunbounded(ALIAS);
             localparam int QRANK = $dimensions(Q);
             localparam int IMPORTED_RANK = P::RANK;
@@ -3885,6 +3886,12 @@ fn isunbounded_and_dimensions_preserve_parameter_metadata() {
         Path::new("isunbounded_dimensions.sv"),
     )
     .unwrap();
+    let alias = ir.modules()[0]
+        .parameters()
+        .iter()
+        .find(|p| p.name() == "ALIAS")
+        .unwrap();
+    assert_eq!(alias.resolved_width(), Some(1));
     for name in ["RANK", "Q", "QRANK", "IMPORTED_RANK"] {
         let parameter = ir.modules()[0]
             .parameters()
@@ -3892,5 +3899,73 @@ fn isunbounded_and_dimensions_preserve_parameter_metadata() {
             .find(|p| p.name() == name)
             .unwrap();
         assert_eq!(parameter.resolved_value(), Some(1), "{name}");
+    }
+}
+
+#[test]
+fn isunbounded_generate_shadow_does_not_supply_numeric_bounds() {
+    let source = "module Top(); parameter int P = 7; if (1) begin : g localparam int P = $; logic [P:0] s; end endmodule";
+    assert!(analyze_source(source, Path::new("unbounded_generate_shadow.sv")).is_err());
+}
+
+#[test]
+fn rejects_unbounded_parameter_operands_of_other_data_queries() {
+    for name in [
+        "$bits",
+        "$size",
+        "$dimensions",
+        "$unpacked_dimensions",
+        "$left",
+        "$right",
+        "$low",
+        "$high",
+        "$increment",
+    ] {
+        for body in [
+            format!("localparam BAD = {name}(P);"),
+            format!("assign y = {name}(P);"),
+            format!("always_comb begin localparam int U = $; y = {name}(U); end"),
+        ] {
+            let source =
+                format!("module Top(output logic y); parameter int P = $; {body} endmodule");
+            assert!(
+                analyze_source(&source, Path::new("unbounded_query.sv")).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unbounded_data_query_checks_compound_arguments_but_allows_isunbounded() {
+    for operand in ["P + 1", "{P, 1'b0}", "P[0]", "$unsigned(P)", "$"] {
+        let source = format!(
+            "module Top(); parameter int P = $; localparam BAD = $bits({operand}); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("unbounded_compound_query.sv")).is_err(),
+            "{source}"
+        );
+    }
+    let ir = analyze_source(
+        "module Top(); parameter int P = $; localparam W = $bits($isunbounded(P)); endmodule",
+        Path::new("nested_unbounded_query.sv"),
+    )
+    .unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(1));
+}
+
+#[test]
+fn isunbounded_argument_validation_is_not_skipped_by_bits() {
+    for body in [
+        "assign y = $bits($isunbounded(v));",
+        "always_comb y = $bits($isunbounded(v));",
+        "localparam BAD = $bits($isunbounded(v));",
+    ] {
+        let source = format!("module Top(input int v, output int y); {body} endmodule");
+        assert!(
+            analyze_source(&source, Path::new("isunbounded_unevaluated.sv")).is_err(),
+            "{source}"
+        );
     }
 }

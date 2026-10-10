@@ -315,6 +315,52 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_scalar_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_bindings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_scalar_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_shadowed_function_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "system_functions::signed_casts_in_parameters",

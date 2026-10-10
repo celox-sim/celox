@@ -131,6 +131,18 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
         ConstExpr::Binary { left, op, right } => {
+            // Numeric declaration bounds need the same short-circuiting as
+            // four-state generate conditions (11.3.5, 6.20.7).
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
+                && let Some(Some(truth)) = eval_const_truth(left, constants)
+            {
+                if (*op == BinaryOp::LogicAnd && !truth) || (*op == BinaryOp::LogicOr && truth) {
+                    return Some(i128::from(truth));
+                }
+                // Reuse the known left truth; reevaluating it recursively
+                // would double the work at every level of a logical chain.
+                return eval_const_truth(right, constants)?.map(i128::from);
+            }
             if let Some(result) = eval_literal_binary(left, *op, right) {
                 return Some(result);
             }
@@ -1466,6 +1478,20 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn evaluates_nested_logical_parameter_chains() {
+        let constants = HashMap::from_iter([("P".to_string(), 1)]);
+        let mut expr = ConstExpr::Ident("P".into());
+        for _ in 0..64 {
+            expr = ConstExpr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(ConstExpr::Ident("P".into())),
+            };
+        }
+        assert_eq!(eval_const_expr(&expr, &constants), Some(1));
+    }
 
     #[test]
     fn folds_masked_bit_selects_with_invalid_indices() {

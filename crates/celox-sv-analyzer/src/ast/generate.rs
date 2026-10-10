@@ -953,6 +953,30 @@ impl<'a> Elaborator<'a, '_> {
                     Some(&name),
                     &mut signals,
                 )?;
+                // Validate before exporting this type: a symbolic bound must
+                // never reach IR resolution with a same-named outer number.
+                for signal in &signals {
+                    let ty = signal.r#type();
+                    for bound in ty
+                        .packed_ranges()
+                        .iter()
+                        .flat_map(|r| [r.left(), r.right()])
+                        .chain(
+                            ty.unpacked_ranges()
+                                .iter()
+                                .flat_map(|r| [r.left(), r.right()]),
+                        )
+                    {
+                        if parameters::contains_unbounded_operand(bound, &scope.env)
+                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                        {
+                            return Err(AnalyzerError::Unsupported(
+                                "numeric use of unbounded parameter in generate signal range"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
                 extend_const_env_with_variable_types(
                     &mut scope.env,
                     signals

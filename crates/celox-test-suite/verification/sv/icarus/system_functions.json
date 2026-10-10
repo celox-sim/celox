@@ -501,7 +501,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -512,7 +512,53 @@
         "id": "sv_icarus_isunbounded",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
         "upstream": []
       },
       "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
@@ -524,7 +570,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -535,7 +581,7 @@
         "id": "sv_icarus_isunbounded",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
         "upstream": []
       },
       "name": "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits",
@@ -547,7 +593,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -558,7 +604,7 @@
         "id": "sv_icarus_isunbounded",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
         "upstream": []
       },
       "name": "system_functions::isunbounded_preserves_parameter_values_and_result_type",
@@ -593,7 +639,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -604,7 +650,7 @@
         "id": "sv_icarus_isunbounded",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
         "upstream": []
       },
       "name": "system_functions::isunbounded_reports_bounded_parameters",
@@ -616,7 +662,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -627,10 +673,79 @@
         "id": "sv_icarus_isunbounded",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes the declaration, scope and bounded-query cases.",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
         "upstream": []
       },
       "name": "system_functions::isunbounded_resolves_package_and_local_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_bindings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_packed_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_shadowed_function_arguments",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

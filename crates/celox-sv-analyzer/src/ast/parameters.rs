@@ -8,6 +8,41 @@ pub(crate) fn unbounded_parameter_marker(name: &str) -> String {
     format!("__parameter::unbounded::{name}")
 }
 
+/// All constant/type projections of one binding. Include the old and new
+/// packed bounds so scope exit can remove newly introduced dimension keys.
+pub(super) fn binding_keys(
+    name: &str,
+    env: &HashMap<String, i128>,
+    packed_count: usize,
+) -> Vec<String> {
+    let count = env
+        .get(&parameter_dimensions_marker(name))
+        .and_then(|count| usize::try_from(*count).ok())
+        .unwrap_or(0)
+        .max(packed_count);
+    let mut keys = vec![
+        name.to_string(),
+        parameter_marker(name),
+        local_parameter_marker(name),
+        unbounded_parameter_marker(name),
+        parameter_width_marker(name),
+        parameter_signed_marker(name),
+        parameter_rank_marker(name),
+        parameter_dimensions_marker(name),
+        parameter_signed_element_marker(name),
+        enum_marker(name),
+        variable_bits_marker(name),
+        variable_size_marker(name),
+        variable_signed_marker(name),
+        variable_dimensions_marker(name),
+    ];
+    for index in 0..count {
+        keys.push(parameter_dimension_marker(name, index, "left"));
+        keys.push(parameter_dimension_marker(name, index, "right"));
+    }
+    keys
+}
+
 pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
     match value {
         ConstExpr::Literal(value) => value == "$",
@@ -16,7 +51,7 @@ pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bo
     }
 }
 
-fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
     match value {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => is_unbounded(value, env),
         ConstExpr::Select { expr, bit } => {
@@ -40,6 +75,86 @@ fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) ->
                 || contains_unbounded_operand(else_expr, env)
         }
     }
+}
+
+/// 6.20.7 permits a `$` parameter only in the symbolic-value contexts it
+/// lists; `$isunbounded` is the query provided for that value. Other data
+/// queries do not admit a bare unbounded value, even without evaluation.
+pub(super) fn reject_unbounded_data_query(
+    call: &sv_parser::SystemTfCall,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    complete: bool,
+) -> Result<(), AnalyzerError> {
+    let Some((name, _)) = system_tf_call_parts(call, tree) else {
+        return Ok(());
+    };
+    if !matches!(
+        name,
+        "$bits"
+            | "$size"
+            | "$dimensions"
+            | "$unpacked_dimensions"
+            | "$left"
+            | "$right"
+            | "$low"
+            | "$high"
+            | "$increment"
+    ) {
+        return Ok(());
+    }
+    let sv_parser::SystemTfCall::ArgExpression(call) = call else {
+        return Ok(());
+    };
+    if let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first() {
+        let mut query_depth = 0usize;
+        for event in RefNode::Expression(argument).into_iter().event() {
+            let (entering, child) = match event {
+                sv_parser::NodeEvent::Enter(child) => (true, child),
+                sv_parser::NodeEvent::Leave(child) => (false, child),
+            };
+            if let RefNode::SystemTfCall(nested) = &child
+                && system_tf_call_parts(nested, tree)
+                    .is_some_and(|(name, _)| name == "$isunbounded")
+            {
+                if entering {
+                    if complete && isunbounded_call(nested, tree, env)?.is_none() {
+                        return Err(AnalyzerError::InvalidSystemTfCall {
+                            name: "$isunbounded".into(),
+                            detail: "argument must name a value parameter".into(),
+                        });
+                    }
+                    query_depth += 1;
+                } else {
+                    query_depth -= 1;
+                }
+                continue;
+            }
+            if !entering || query_depth != 0 {
+                continue;
+            }
+            let unbounded = match child {
+                RefNode::Primary(sv_parser::Primary::Dollar(_))
+                | RefNode::ConstantPrimary(sv_parser::ConstantPrimary::Dollar(_)) => true,
+                RefNode::Primary(sv_parser::Primary::Hierarchical(primary)) => {
+                    reference_name(RefNode::PrimaryHierarchical(primary), tree)
+                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
+                }
+                RefNode::PsParameterIdentifier(identifier) => {
+                    reference_name(RefNode::PsParameterIdentifier(identifier), tree)
+                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
+                }
+                _ => false,
+            };
+            if unbounded {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "unbounded parameter is not valid in this data query".into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Query the parameter binding, without evaluating its value. An unavailable
@@ -603,7 +718,7 @@ pub(super) fn extend_const_env_with_parameters(
     }
 }
 
-fn bind_parameter(
+pub(super) fn bind_parameter(
     env: &mut HashMap<String, i128>,
     types: &mut HashMap<String, ExprType>,
     literals: &mut HashMap<String, Expr>,

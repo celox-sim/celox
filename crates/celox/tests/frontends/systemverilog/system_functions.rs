@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
+    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
+    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
+    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
+    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
     fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
     fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
     fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }

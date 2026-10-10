@@ -14,15 +14,15 @@ use crate::procedural::{
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
     entries: Vec<ScopeEntry>,
-    parameter_markers: Vec<(String, Option<i128>)>,
 }
 
 struct ScopeEntry {
     source: String,
-    unique: String,
+    unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
-    shadowed_constant: Option<i128>,
-    shadowed_parameter_marker: Option<i128>,
+    shadowed_constants: Vec<(String, Option<i128>)>,
+    shadowed_literal: Option<String>,
+    shadowed_parameter_value: Option<Expr>,
     shadowed_signedness: Option<bool>,
 }
 
@@ -105,7 +105,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             dims: dims.clone(),
             scopes: vec![Scope {
                 entries: Vec::new(),
-                parameter_markers: Vec::new(),
             }],
             state,
             type_aliases,
@@ -117,7 +116,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn push_scope(&mut self) {
         self.scopes.push(Scope {
             entries: Vec::new(),
-            parameter_markers: Vec::new(),
         });
     }
 
@@ -125,22 +123,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let Some(scope) = self.scopes.pop() else {
             return;
         };
-        for (marker, previous) in scope.parameter_markers.into_iter().rev() {
-            match previous {
-                Some(value) => {
-                    self.dims.const_env.insert(marker, value);
-                }
-                None => {
-                    self.dims.const_env.remove(&marker);
+        for entry in scope.entries.into_iter().rev() {
+            for (key, value) in entry.shadowed_constants {
+                if let Some(value) = value {
+                    self.dims.const_env.insert(key, value);
+                } else {
+                    self.dims.const_env.remove(&key);
                 }
             }
-        }
-        for entry in scope.entries.into_iter().rev() {
-            let marker = parameters::unbounded_parameter_marker(&entry.source);
-            if let Some(value) = entry.shadowed_parameter_marker {
-                self.dims.const_env.insert(marker, value);
-            } else {
-                self.dims.const_env.remove(&marker);
+            match entry.shadowed_literal {
+                Some(value) => {
+                    self.local_constants.insert(entry.source.clone(), value);
+                }
+                None => {
+                    self.local_constants.remove(&entry.source);
+                }
+            }
+            match entry.shadowed_parameter_value {
+                Some(value) => {
+                    self.dims
+                        .parameter_values
+                        .insert(entry.source.clone(), value);
+                }
+                None => {
+                    self.dims.parameter_values.remove(&entry.source);
+                }
             }
             match entry.shadowed_dimensions {
                 Some(dimensions) => {
@@ -149,9 +156,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => {
                     self.dims.remove(&entry.source);
                 }
-            }
-            if let Some(value) = entry.shadowed_constant {
-                self.dims.const_env.insert(entry.source.clone(), value);
             }
             let signedness = &mut self.dims.expression_signedness;
             match entry.shadowed_signedness {
@@ -169,16 +173,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
         *self.state.counter += 1;
-        let shadowed_dimensions = self
-            .dims
+        let entry = self.take_binding(source, Some(unique.clone()), r#type.packed_ranges.len());
+        self.dims
             .insert(source.to_string(), dimensions_from_type(&r#type));
-        let shadowed_constant = self.dims.const_env.remove(source);
-        let shadowed_parameter_marker = self
-            .dims
-            .const_env
-            .remove(&parameters::unbounded_parameter_marker(source));
-        let shadowed_signedness = self
-            .dims
+        self.dims
             .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
         self.state.locals.push(LocalVariable {
@@ -193,26 +191,49 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .last_mut()
             .expect("a body always has a scope")
             .entries
-            .push(ScopeEntry {
-                source: source.to_string(),
-                unique: unique.clone(),
-                shadowed_dimensions,
-                shadowed_constant,
-                shadowed_parameter_marker,
-                shadowed_signedness,
-            });
+            .push(entry);
         unique
     }
 
+    /// Detach every view of a declaration before publishing the shadowing
+    /// binding. Save only keys for this name, without copying a growing scope.
+    fn take_binding(
+        &mut self,
+        source: &str,
+        unique: Option<String>,
+        packed_count: usize,
+    ) -> ScopeEntry {
+        let keys = parameters::binding_keys(source, &self.dims.const_env, packed_count);
+        ScopeEntry {
+            source: source.to_string(),
+            unique,
+            shadowed_constants: keys
+                .into_iter()
+                .map(|key| {
+                    let value = self.dims.const_env.remove(&key);
+                    (key, value)
+                })
+                .collect(),
+            shadowed_literal: self.local_constants.remove(source),
+            shadowed_parameter_value: self.dims.parameter_values.remove(source),
+            shadowed_dimensions: self.dims.remove(source),
+            shadowed_signedness: self.dims.expression_signedness.remove(source),
+        }
+    }
+
     fn lookup(&self, source: &str) -> Option<&str> {
-        self.scopes.iter().rev().find_map(|scope| {
-            scope
+        for scope in self.scopes.iter().rev() {
+            if let Some(entry) = scope
                 .entries
                 .iter()
                 .rev()
                 .find(|entry| entry.source == source)
-                .map(|entry| entry.unique.as_str())
-        })
+            {
+                // A parameter in an inner block also hides an outer variable.
+                return entry.unique.as_deref();
+            }
+        }
+        None
     }
 
     fn rename_name(&self, name: &mut String) {
@@ -627,34 +648,50 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &self.type_aliases,
             &HashMap::default(),
         )?;
+        let mut types = parameter_types_from_const_env(&self.dims.const_env);
         for parameter in &parameters {
-            let marker = parameters::unbounded_parameter_marker(parameter.name());
-            let previous = self.dims.const_env.get(&marker).copied();
-            self.scopes
-                .last_mut()
-                .unwrap()
-                .parameter_markers
-                .push((marker, previous));
-            if parameter
-                .value()
-                .is_some_and(|value| parameters::is_unbounded(value, &self.dims.const_env))
-            {
-                self.local_constants
-                    .insert(parameter.name().to_string(), "$".into());
-                continue;
+            let name = parameter.name();
+            let entry = self.take_binding(name, None, parameter.packed_ranges.len());
+            types.remove(name);
+            if !parameters::bind_parameter(
+                &mut self.dims.const_env,
+                &mut types,
+                &mut self.dims.parameter_values,
+                parameter,
+            ) {
+                return Err(unsupported("local parameter whose value is not constant"));
             }
-            let types = parameter_types_from_const_env(&self.dims.const_env);
-            let value = parameter
-                .resolved_value(&self.dims.const_env, &types)
-                .ok_or_else(|| unsupported("local parameter whose value is not constant"))?;
-            let literal = match parameter.resolved_type(&types) {
-                Some(r#type) => format_typed_parameter_literal(value, r#type.width, r#type.signed),
-                None => value.to_string(),
+            let literal = if let Some(value) = self.dims.const_env.get(name).copied() {
+                match types.get(name) {
+                    Some(ty) => format_typed_parameter_literal(value, ty.width, ty.signed),
+                    None => value.to_string(),
+                }
+            } else if let Some(Expr::Literal(value)) = self.dims.parameter_values.get(name) {
+                value.clone()
+            } else {
+                return Err(unsupported("local parameter whose value is not constant"));
             };
             self.local_constants
-                .insert(parameter.name().to_string(), literal);
+                .insert(name.to_string(), literal.clone());
+            self.dims
+                .parameter_values
+                .insert(name.to_string(), Expr::Literal(literal));
+            if let Some(dimensions) =
+                parameter_packed_dimensions(std::slice::from_ref(parameter)).remove(name)
+            {
+                self.dims.insert(name.to_string(), dimensions);
+            }
+            if let Some(ty) = types.get(name) {
+                self.dims
+                    .expression_signedness
+                    .insert(name.to_string(), ty.signed);
+            }
+            self.scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
         }
-        extend_const_env_with_parameters(&mut self.dims.const_env, &parameters);
         Ok(Vec::new())
     }
 
