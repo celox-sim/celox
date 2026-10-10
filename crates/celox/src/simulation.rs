@@ -417,9 +417,13 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the new simulation time, or None if no events are scheduled.
     ///
     /// A process waiting for an event or a condition that a host write
-    /// since the previous call satisfied first resumes at the current time.
+    /// since the previous call satisfied resumes at the current time
+    /// instead: the call then returns the current time without advancing,
+    /// so what the process did is observable at its own time.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
-        self.state.poll_waiting(&mut self.simulator)?;
+        if self.state.poll_waiting(&mut self.simulator)? {
+            return Ok(Some(self.state.time()));
+        }
         self.state.step(&mut self.simulator)
     }
 
@@ -893,5 +897,64 @@ mod wait_tests {
         sim.simulator.set_wide(go, 1u8.into());
         sim.state.settle_at(&mut sim.simulator, 0).unwrap();
         assert_eq!(sim.get(y), 2u8.into());
+    }
+
+    /// `settle_at` runs the processes due at its time, and those due
+    /// before it first, at their own times.
+    #[test]
+    fn settle_at_resumes_the_processes_due_at_its_time() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                initial begin
+                    y = 8'd1;
+                    #5 y = 8'd2;
+                    #2 y = 8'd3;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("due.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let y = sim.signal("y");
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 5).unwrap(), Some(5));
+        assert_eq!(sim.get(y), 2u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 9).unwrap(), Some(9));
+        assert_eq!(sim.get(y), 3u8.into());
+        assert_eq!(sim.time(), 9);
+    }
+
+    /// A process a host write wakes runs in a `step` of its own, at the
+    /// current time; the next scheduled time is stepped to afterwards.
+    #[test]
+    fn a_host_woken_process_runs_in_its_own_step() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                logic go = 1'b0;
+                initial begin
+                    y = 8'd0;
+                    wait (go);
+                    y = 8'd1;
+                    #10 y = 8'd2;
+                end
+                initial begin
+                    #10;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("woken.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let (go, y) = (sim.signal("go"), sim.signal("y"));
+        assert_eq!(sim.step().unwrap(), Some(0));
+        sim.simulator.set_wide(go, 1u8.into());
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.step().unwrap(), Some(10));
+        assert_eq!(sim.get(y), 2u8.into());
+        assert_eq!(sim.step().unwrap(), None);
     }
 }

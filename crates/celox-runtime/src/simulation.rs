@@ -306,20 +306,22 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Resume the processes waiting for an event or a condition at the
     /// current time, for state that was changed from outside the scheduler,
-    /// and settle what they drive. Nothing happens when none wakes.
-    pub fn poll_waiting<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    /// and settle what they drive. Returns whether a process ran; nothing
+    /// happens when none wakes.
+    pub fn poll_waiting<E>(&mut self, executor: &mut E) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
         if self.finished || self.waiting.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let time = self.scheduler.time;
-        if self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
-            self.run_remaining_rounds(executor, time)?;
-            executor.finish_timed_step(time);
+        if !self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
+            return Ok(false);
         }
-        Ok(())
+        self.run_remaining_rounds(executor, time)?;
+        executor.finish_timed_step(time);
+        Ok(true)
     }
 
     /// Remove the processes waiting for `time`, in declaration order.
@@ -412,6 +414,8 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Settle externally driven state against the previous edge baseline even
     /// when no clock/reset signal is explicitly scheduled at this timestamp.
+    /// The events and process wakeups due before `time` are processed first,
+    /// at their own times, and the processes due at `time` run.
     pub fn settle_at<E>(
         &mut self,
         executor: &mut E,
@@ -420,7 +424,14 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.step_round(executor, time, Vec::new(), Vec::new(), true)?;
+        while self.next_event_time().is_some_and(|next| next < time) {
+            self.step(executor)?;
+        }
+        if self.finished {
+            return Ok(None);
+        }
+        let ready = self.take_ready_processes(time);
+        self.step_round(executor, time, Vec::new(), ready, true)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
         self.run_remaining_rounds(executor, time)?;

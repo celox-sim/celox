@@ -1581,37 +1581,40 @@ pub(super) fn canonical_for_loop(
     })
 }
 
-/// The identifiers an expression reads.
-pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
-    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-        match expr {
-            sv::ir::ConstExpr::Ident(name) => {
-                names.insert(name.clone());
-            }
-            sv::ir::ConstExpr::Literal(_) => {}
-            sv::ir::ConstExpr::Select { expr, bit } => {
-                const_idents(expr, names);
-                const_idents(bit, names);
-            }
-            sv::ir::ConstExpr::Function { args, .. } => {
-                args.iter().for_each(|arg| const_idents(arg, names))
-            }
-            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
-            sv::ir::ConstExpr::Binary { left, right, .. } => {
-                const_idents(left, names);
-                const_idents(right, names);
-            }
-            sv::ir::ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                const_idents(condition, names);
-                const_idents(then_expr, names);
-                const_idents(else_expr, names);
-            }
+/// The identifiers a constant-expression operand, such as a run-time select
+/// index, reads.
+pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        sv::ir::ConstExpr::Literal(_) => {}
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_idents(expr, names);
+            const_idents(bit, names);
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().for_each(|arg| const_idents(arg, names))
+        }
+        sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_idents(left, names);
+            const_idents(right, names);
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_idents(condition, names);
+            const_idents(then_expr, names);
+            const_idents(else_expr, names);
         }
     }
+}
+
+/// The identifiers `expr` reads.
+pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());
@@ -2040,6 +2043,77 @@ pub(super) fn stmt_calls(
     }
     for expr in exprs {
         collect_calls(expr, calls);
+    }
+}
+
+/// The identifiers the expressions of `stmt` itself read: its nested
+/// statements are not visited. The variables an assignment writes are not
+/// reads, but the indices of its selects are.
+pub(super) fn stmt_reads(stmt: &sv::ir::Stmt, names: &mut HashSet<String>) {
+    fn lvalue_reads(lvalue: &sv::ir::LValue, names: &mut HashSet<String>) {
+        if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
+            const_idents(msb, names);
+            const_idents(lsb, names);
+        }
+    }
+    let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
+    match stmt {
+        sv::ir::Stmt::Call { args, .. } => exprs.extend(args.iter().flatten()),
+        sv::ir::Stmt::Assign { lhs, rhs, .. } => {
+            lvalue_reads(lhs, names);
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
+            parts.iter().for_each(|part| lvalue_reads(part, names));
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::Eval(rhs) | sv::ir::Stmt::Delay(rhs) | sv::ir::Stmt::Wait(rhs) => {
+            exprs.push(rhs)
+        }
+        sv::ir::Stmt::If { condition, .. } => exprs.push(condition),
+        sv::ir::Stmt::Case {
+            selector, items, ..
+        } => {
+            exprs.push(selector);
+            for item in items {
+                for label in &item.labels {
+                    match label {
+                        sv::ir::CaseLabel::Value(value) => exprs.push(value),
+                        sv::ir::CaseLabel::Range { low, high } => {
+                            exprs.push(low);
+                            exprs.push(high);
+                        }
+                    }
+                }
+            }
+        }
+        sv::ir::Stmt::Loop {
+            kind, condition, ..
+        } => {
+            if let sv::ir::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs.extend(condition);
+        }
+        sv::ir::Stmt::Return(Some(value)) => exprs.push(value),
+        sv::ir::Stmt::Local {
+            init: Some(init), ..
+        } => exprs.push(init),
+        sv::ir::Stmt::SystemTask { args, .. } => {
+            for arg in args {
+                if let sv::ir::SystemTaskArg::Expr(expr) = arg {
+                    exprs.push(expr);
+                }
+            }
+        }
+        sv::ir::Stmt::WaitEvent(items) => exprs.extend(items.iter().map(|item| &item.expr)),
+        sv::ir::Stmt::Return(None)
+        | sv::ir::Stmt::Local { init: None, .. }
+        | sv::ir::Stmt::Break
+        | sv::ir::Stmt::Continue => {}
+    }
+    for expr in exprs {
+        expr_idents(expr, names);
     }
 }
 
