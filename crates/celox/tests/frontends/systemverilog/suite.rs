@@ -52,8 +52,10 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
         Ok(self.0.get_four_state(signal))
     }
 
+    /// Settling also resumes the processes the writes woke, as the external
+    /// simulators' settle step does.
     fn eval_comb(&mut self) -> Result<()> {
-        self.0.eval_comb().map_err(Into::into)
+        self.0.settle().map_err(Into::into)
     }
 
     fn tick(&mut self, _event: &str) -> Result<()> {

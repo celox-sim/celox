@@ -619,7 +619,17 @@ fn run_script(
     match backend.run_testbench() {
         Ok(()) => {
             let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
-            match crate::script::sv::check_output(&String::from_utf8_lossy(&log)) {
+            // The simulators' `$finish` notices name the staged source files.
+            let sources: Vec<String> = std::fs::read_dir(directory)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .filter(|name| name.ends_with(".sv") || name.ends_with(".v"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match crate::script::sv::check_output(&String::from_utf8_lossy(&log), &sources) {
                 Ok(()) => ("passed", "execute", String::new()),
                 Err(detail) => ("mismatch", "execute", detail),
             }

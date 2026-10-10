@@ -837,3 +837,27 @@ fn rejects_nonblocking_assignments_in_tasks_a_process_calls() {
         build_error(source)
     );
 }
+
+/// `Simulation::settle` resumes the processes a host write woke at the
+/// current time, as a simulator's settle step does, without advancing time.
+#[test]
+fn settle_resumes_the_processes_a_host_write_wakes() {
+    let source = r#"
+        module Top(input logic go, output logic [7:0] seen);
+            initial begin
+                seen = 8'd0;
+                wait (go);
+                seen = 8'd1;
+                #0 seen = 8'd2;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (go, seen) = (sim.signal("go"), sim.signal("seen"));
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(seen), 0u8.into());
+    sim.set_wide(go, 1u8.into());
+    sim.settle().unwrap();
+    assert_eq!(sim.get(seen), 2u8.into());
+    assert_eq!(sim.time(), 0);
+}
