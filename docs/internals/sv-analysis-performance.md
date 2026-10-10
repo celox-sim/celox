@@ -814,3 +814,69 @@ cargo test --locked -p celox-test-suite --features verilator,icarus
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-verilator -- --filter generate::size_queries_use_generate_local_parameter_types
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-icarus -- --filter generate::size_queries_use_generate_local_parameter_types
 ```
+
+## Constant-call argument contexts
+
+Lowering each user-function parameter initializer used to construct a
+`PackedDimensions` context by cloning every visible numeric binding and alias.
+Profiling a 512-parameter `next_value(P_previous)` chain with the borrowed-frame
+optimization applied attributed about 20% of samples directly to the numeric
+map clone in this constructor; allocation and copying also contributed.
+A counted diagnostic run at 16/64/256 parameters executed 18N function calls.
+The call count itself is linear; repeating collection passes alone does not
+explain the nonlinear timings. Per-call environment copies and early unresolved
+parameter-expression expansion remain distinct sources of growing costs.
+
+Constant-call lowering now classifies the operands before constructing that
+context. Literals, bare identifiers, unary/binary expressions, parentheses, and
+nested user calls with those operands use an empty context, because their
+expression-lowering branches do not consult declaration metadata. Parameter
+types are still substituted during evaluation. Selections, casts, system calls,
+patterns, conditional expressions, named arguments, and omitted arguments retain
+the complete contextual path. An empty argument list retains its existing meaning.
+
+The owning-crate regression compares the resulting constant expressions against
+the former full-context path with 4,096 unrelated bindings, including signed
+parameters, symbolic cast widths, typedef casts, selected operands, size queries,
+zero divisions, nested calls, and unsupported argument forms. At 16/64/256
+parameters, a source-to-IR arithmetic argument chain verifies every value and
+zero context copies. The large debug probe uses an 8 MiB thread stack for the
+existing recursive parameter substitution, as in the earlier standalone probe.
+
+A manual paired probe alternates old/new order over seven repetitions in one
+optimized process. It converts and checks the same scalar call once per
+unrelated parameter, excluding source parsing and function-body execution:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_lazy_and_copied_scalar_call_contexts -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Full context (ms) | Classified context (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.153 | 0.085 |
+| 128 | 128 | 1.702 | 0.384 |
+| 512 | 512 | 23.827 | 1.473 |
+| 2,048 | 2,048 | 408.296 | 5.962 |
+
+The standalone source probe supports constant-function parameter chains:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+These separate three-sample medians compare master `281f7bd9c` with the classified
+context change, independently of the borrowed-frame optimization:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 5.272 / 5.431 | 19.841 / 22.680 | 0.171 / 0.246 |
+| 128 | 14.900 / 20.624 | 181.059 / 158.147 | 0.575 / 0.645 |
+| 512 | 49.174 / 53.607 | 2,699.106 / 1,720.513 | 5.114 / 5.489 |
+
+Shared-machine timing varies, and the smallest sample became slower. Operand
+classification and its lowering now avoid work proportional to unrelated
+bindings for the accepted forms. Whole AST lowering still scales nonlinearly;
+this change does not eliminate full-context work for other operands, function
+frame copies, preliminary declaration walks, or expanded unresolved expressions.

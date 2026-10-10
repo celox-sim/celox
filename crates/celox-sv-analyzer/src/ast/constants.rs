@@ -993,10 +993,20 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         .and_then(expr_to_const));
                     }
                 }
-                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
+                if let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0
+                    && tf_call.nodes.2.is_some()
                 {
-                    let dimensions =
-                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    // Plain scalar operands do not read declaration metadata
+                    // while lowering. Their types are substituted later during
+                    // parameter evaluation; avoid copying the whole environment
+                    // for every initializer in a growing declaration prefix.
+                    let dimensions = if call_arguments_are_context_free(tf_call) {
+                        PackedDimensions::default()
+                    } else {
+                        #[cfg(test)]
+                        CALL_CONTEXT_COPIES.with(|count| count.set(count.get() + 1));
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases)
+                    };
                     return Ok(expr_from_function_subroutine_call(
                         &call.nodes.0,
                         syntax_tree,
@@ -1098,6 +1108,69 @@ fn const_expr_from_constant_expression_ternary_with_env(
         else_expr: Box::new(parsed!(convert(&expr.nodes.5))),
     }))
 }
+
+/// These operands follow only expression-lowering branches that do not read
+/// `PackedDimensions`. Keep selections, casts, system calls, and patterns on
+/// the contextual path so their ranges, aliases, and parameter types survive.
+fn call_arguments_are_context_free(call: &sv_parser::TfCall) -> bool {
+    let Some(paren) = &call.nodes.2 else {
+        return false;
+    };
+    let sv_parser::ListOfArguments::Ordered(args) = &paren.nodes.1 else {
+        return false;
+    };
+    let args = args.nodes.0.contents();
+    // The parser represents `f()` as one omitted argument.
+    if args.len() == 1 && args[0].is_none() {
+        return true;
+    }
+    args.iter()
+        .all(|arg| arg.as_ref().is_some_and(context_free_expression))
+}
+
+fn context_free_expression(expr: &sv_parser::Expression) -> bool {
+    match expr {
+        sv_parser::Expression::Primary(primary) => context_free_primary(primary),
+        sv_parser::Expression::Unary(unary) => context_free_primary(&unary.nodes.2),
+        sv_parser::Expression::Binary(binary) => {
+            context_free_expression(&binary.nodes.0) && context_free_expression(&binary.nodes.3)
+        }
+        _ => false,
+    }
+}
+
+fn context_free_primary(primary: &sv_parser::Primary) -> bool {
+    match primary {
+        sv_parser::Primary::PrimaryLiteral(_) => true,
+        sv_parser::Primary::Hierarchical(primary) => {
+            let select = &primary.nodes.2;
+            select.nodes.0.is_none()
+                && select.nodes.1.nodes.0.is_empty()
+                && select.nodes.2.is_none()
+                && !packed_structs::has_member_access(
+                    RefNode::HierarchicalIdentifier(&primary.nodes.1),
+                    RefNode::Select(select),
+                )
+        }
+        sv_parser::Primary::MintypmaxExpression(primary) => match &primary.nodes.0.nodes.1 {
+            sv_parser::MintypmaxExpression::Expression(expr) => context_free_expression(expr),
+            sv_parser::MintypmaxExpression::Ternary(_) => false,
+        },
+        sv_parser::Primary::FunctionSubroutineCall(call) => match &call.nodes.0 {
+            sv_parser::SubroutineCall::TfCall(call) => call_arguments_are_context_free(call),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALL_CONTEXT_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;
 
 fn const_select_expr(
     base: ConstExpr,
