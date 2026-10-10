@@ -294,3 +294,123 @@ fn collects_the_declarations_of_a_package() {
             .all(|item| matches!(item.node, ScopeItem::Package(_)))
     );
 }
+
+#[test]
+fn numeric_ranged_headers_do_not_copy_the_environment() {
+    for count in [16, 64, 256] {
+        let mut code = String::from("module Top();\n");
+        for index in 0..count {
+            let value = if index == 0 {
+                "1".into()
+            } else {
+                format!("P{} + 1", index - 1)
+            };
+            writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
+        }
+        code.push_str("endmodule");
+        let tree = crate::syntax::parse_source(&code, Path::new("ranged_prefix.sv")).unwrap();
+        DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
+        let parameters = parameters_from_module_node(
+            module_node(&tree),
+            &tree,
+            &HashMap::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
+        assert_eq!(parameters.len(), count);
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.declared_width() == Some(32))
+        );
+        assert_eq!(
+            const_env_from_parameters(&parameters)[&format!("P{}", count - 1)],
+            count as i128
+        );
+    }
+}
+
+#[test]
+fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values() {
+    let tree = crate::syntax::parse_source(
+        "module Top(); parameter N=4; typedef logic signed [3:0] word_t; parameter word_t [N-1:0] A='1; parameter logic [N-1:0] B=A+1; parameter logic [N-1:0] C=LATER+1; parameter LATER=7; endmodule",
+        Path::new("borrowed_ranges.sv"),
+    ).unwrap();
+    let node = module_node(&tree);
+    let base = HashMap::from_iter([("N".into(), 99), ("LATER".into(), 17)]);
+    let copied_base = base.clone();
+    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &base).unwrap();
+    for n in [3, 8, 2, 3] {
+        let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
+        let mut borrowed = Vec::new();
+        let mut copied = Vec::new();
+        let mut borrowed_env = ParameterEnvironment::new(&borrowed, &base);
+        // The same contents at a different address deliberately select the
+        // former copy-and-mask path, providing an independent width context.
+        let mut copied_env = ParameterEnvironment::new(&copied, &copied_base);
+        DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
+        for declaration in scope_declarations(node.clone()) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
+                declaration
+            else {
+                continue;
+            };
+            parameters_from_ref_node_with_environment(
+                RefNode::ParameterDeclaration(&parameter.0),
+                &tree,
+                &mut borrowed,
+                false,
+                &base,
+                &aliases,
+                &overrides,
+                &mut borrowed_env,
+            )
+            .unwrap();
+        }
+        assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
+        for declaration in scope_declarations(node.clone()) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
+                declaration
+            else {
+                continue;
+            };
+            parameters_from_ref_node_with_environment(
+                RefNode::ParameterDeclaration(&parameter.0),
+                &tree,
+                &mut copied,
+                false,
+                &base,
+                &aliases,
+                &overrides,
+                &mut copied_env,
+            )
+            .unwrap();
+        }
+        assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 6);
+        assert_eq!(borrowed, copied);
+    }
+}
+
+#[test]
+fn four_state_prefix_keeps_the_separate_range_projection() {
+    let tree = crate::syntax::parse_source(
+        "module Top(); localparam logic [3:0] P='x; localparam logic [7:0] Q='1; endmodule",
+        Path::new("four_state_ranges.sv"),
+    )
+    .unwrap();
+    let base = HashMap::from_iter([("P".into(), 99)]);
+    DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
+    let parameters = parameters_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &base,
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 2);
+    assert_eq!(parameters[1].declared_width(), Some(8));
+    assert_eq!(const_env_from_parameters(&parameters)["Q"], 255);
+}

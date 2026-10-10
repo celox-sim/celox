@@ -860,10 +860,16 @@ impl<'a> Elaborator<'a, '_> {
                 }
                 _ => continue,
             };
-            for child in node.clone() {
-                let RefNode::ParamAssignment(assignment) = child else {
-                    continue;
-                };
+            let assignments: Vec<_> = node
+                .clone()
+                .into_iter()
+                .filter_map(|child| match child {
+                    RefNode::ParamAssignment(assignment) => Some(assignment),
+                    _ => None,
+                })
+                .collect();
+            let single = assignments.len() == 1;
+            for assignment in assignments {
                 let name = parameter_name(RefNode::ParamAssignment(assignment), self.tree)?;
                 if !declared.insert(name.clone()) {
                     return Err(AnalyzerError::Unsupported(format!(
@@ -905,7 +911,7 @@ impl<'a> Elaborator<'a, '_> {
                     .retain(|parameter| parameter.name() != name);
                 scope.names.remove(&name);
                 Arc::make_mut(&mut scope.shadowed).insert(name.clone());
-                pending.push((name, node.clone(), dependencies));
+                pending.push((name, node.clone(), dependencies, single));
             }
         }
         // Signal dimensions and localparams can depend on each other. Preserve
@@ -916,7 +922,11 @@ impl<'a> Elaborator<'a, '_> {
             signal_declarations
                 .iter()
                 .map(|(name, _, deps)| (name.as_str(), deps))
-                .chain(pending.iter().map(|(name, _, deps)| (name.as_str(), deps))),
+                .chain(
+                    pending
+                        .iter()
+                        .map(|(name, _, deps, _)| (name.as_str(), deps)),
+                ),
         );
         let mut signal_declarations: Vec<_> = signal_declarations.into_iter().map(Some).collect();
         let mut pending: Vec<_> = pending.into_iter().map(Some).collect();
@@ -944,7 +954,67 @@ impl<'a> Elaborator<'a, '_> {
                         .map(|signal| (signal.name(), signal.r#type())),
                 );
             } else {
-                let (name, node, _) = pending[index - signal_count]
+                if pending[index - signal_count]
+                    .as_ref()
+                    .is_some_and(|(_, _, _, single)| *single)
+                {
+                    // Reuse the declaration-order prefix while parameters remain
+                    // consecutive in the original priority order. Signals can
+                    // publish new type metadata; grouped declarations temporarily
+                    // bind siblings. Either ends this run before rebuilding it.
+                    let base = scope.env.clone();
+                    let mut environment =
+                        parameters::ParameterEnvironment::new(&scope.parameters, &base);
+                    let mut types = parameter_types_from_const_env(&base);
+                    let mut next = index;
+                    loop {
+                        let (name, node, _, _) = pending[next - signal_count]
+                            .take()
+                            .expect("ready parameter is unbound");
+                        let inherited_count = scope.parameters.len();
+                        parameters::parameters_from_ref_node_with_environment(
+                            node,
+                            self.tree,
+                            &mut scope.parameters,
+                            true,
+                            &base,
+                            self.aliases,
+                            &HashMap::default(),
+                            &mut environment,
+                        )?;
+                        let parameter = scope
+                            .parameters
+                            .get(inherited_count)
+                            .filter(|parameter| parameter.name() == name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                AnalyzerError::Unsupported(format!(
+                                    "generate-local parameter `{name}`"
+                                ))
+                            })?;
+                        constants::bind_generate_parameter_with_types(
+                            parameter,
+                            &mut scope.env,
+                            &mut scope.literals,
+                            &mut types,
+                        );
+                        order.complete(next);
+                        let Some(ready) = order.peek_ready().filter(|ready| {
+                            *ready >= signal_count
+                                && pending[*ready - signal_count]
+                                    .as_ref()
+                                    .is_some_and(|(_, _, _, single)| *single)
+                        }) else {
+                            break;
+                        };
+                        next = order
+                            .pop_ready()
+                            .expect("the ready frontier was just inspected");
+                        debug_assert_eq!(next, ready);
+                    }
+                    continue;
+                }
+                let (name, node, _, _) = pending[index - signal_count]
                     .take()
                     .expect("ready parameter is unbound");
                 // The declaration may contain siblings. Temporarily append all
@@ -1258,6 +1328,102 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn consecutive_parameter_runs_bind_each_prefix_once() {
+        for count in [16, 64, 256] {
+            let mut code = String::from("module Top(); if (1) begin : g\n");
+            for index in 0..count {
+                let value = if index + 1 == count {
+                    "1".into()
+                } else {
+                    format!("P{} + 1", index + 1)
+                };
+                use std::fmt::Write;
+                writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
+            }
+            code.push_str("logic [P0-1:0] data; end endmodule");
+            let tree =
+                crate::syntax::parse_source(&code, Path::new("generate_parameter_prefix.sv"))
+                    .unwrap();
+            let node = tree
+                .into_iter()
+                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+                .unwrap();
+            parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
+            let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
+            assert!(
+                bindings <= 3 * count,
+                "{count} parameters rebound {bindings} times"
+            );
+            assert_eq!(active.last().unwrap().env["P0"], count as i128);
+        }
+    }
+
+    #[test]
+    fn signals_interrupt_parameter_runs_before_size_queries_resume() {
+        let source = analyze("module Top(); if (1) begin : g localparam int A=$bits(s0); logic [3:0] s0; localparam int B=A+2; logic [B-1:0] s1; localparam int C=$bits(s1); localparam int D=C+1; logic [D-1:0] s2; end endmodule").unwrap();
+        let ir = crate::analyze::analyze_source(source).unwrap();
+        let signals = ir.modules()[0].signals();
+        assert_eq!(signals.len(), 3);
+        for (signal, width) in signals.iter().zip([4, 6, 7]) {
+            assert_eq!(signal.r#type().resolved_width(), Some(width));
+        }
+    }
+
+    #[test]
+    fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
+        let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
+        insert_parameter_type_markers(
+            &mut base,
+            "pkg::IMPORTED",
+            ExprType {
+                width: 8,
+                signed: true,
+            },
+        );
+        let mut cached_env = base.clone();
+        let mut rebuilt_env = base;
+        let mut cached_literals = HashMap::default();
+        let mut rebuilt_literals = HashMap::default();
+        let mut types = parameter_types_from_const_env(&cached_env);
+        for (name, value, width) in [
+            ("A", ConstExpr::Ident("pkg::IMPORTED".into()), None),
+            ("X", ConstExpr::Literal("8'bx".into()), Some(8)),
+            ("W", ConstExpr::Literal("129'b1".into()), Some(129)),
+            ("Y", ConstExpr::Ident("X".into()), Some(8)),
+            (
+                "Z",
+                ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Ident("A".into())),
+                    op: BinaryOp::Add,
+                    right: Box::new(ConstExpr::Literal("2".into())),
+                },
+                Some(32),
+            ),
+        ] {
+            let parameter = Parameter::new(
+                name.into(),
+                Some(value),
+                width,
+                width.map(|_| false),
+                false,
+                width.is_some(),
+                true,
+            );
+            bind_generate_parameter(parameter.clone(), &mut rebuilt_env, &mut rebuilt_literals);
+            constants::bind_generate_parameter_with_types(
+                parameter,
+                &mut cached_env,
+                &mut cached_literals,
+                &mut types,
+            );
+            assert_eq!(cached_env, rebuilt_env);
+            assert_eq!(cached_literals, rebuilt_literals);
+            assert_eq!(types, parameter_types_from_const_env(&rebuilt_env));
+        }
     }
 
     #[test]

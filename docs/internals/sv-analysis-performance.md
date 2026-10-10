@@ -434,6 +434,75 @@ and the implementation paths they exercise are unchanged by that synchronization
 the final timing samples above are retained. Regression validation covers the
 combined tree and the expanded 222-case external SystemVerilog catalogue.
 
+## Reusing numeric parameter prefixes and range environments
+
+A further follow-up synchronizes master `911903723`, preserving the remote PR's
+package-scope reconciliation. Ordinary numeric parameter headers now borrow their
+width-evaluation environment. The two previous copied maps have identical contents
+when the header has no parameter assignments, the declaration-order prefix has no
+four-state literals, and the inherited map is the same immutable object that
+initialized the prefix. `ParameterEnvironment` retains a borrowed reference to that
+object: the address check cannot match an object whose contents changed or whose
+storage was recycled. Different inherited inputs, four-state prefixes and headers
+containing assignments retain the previous copy, seed and mask behavior.
+
+Generate-local single-parameter declarations reuse the prefix and the complete
+parameter-type table while they remain consecutive in the dependency priority
+order. A newly ready signal takes priority and ends the run before publishing new
+type metadata. A grouped declaration also ends the run before temporarily binding
+siblings. The next run rebuilds from that updated scope. Type-table updates follow
+the same successful bindings as the former whole-environment discovery. Imported
+parameter types remain present in the complete table, independently of the prefix
+used for declaration-order resolution.
+
+Owning-crate regressions check zero width-environment copies for 16/64/256 numeric
+headers, equivalence with the deliberately selected copied path for aliases,
+overrides and inherited values, four-state fallback, linear prefix binding counts
+for 16/64/256 reverse generate dependencies, signal interruptions before size
+queries, and cached/rebuilt type parity for imports and four-state/wide values.
+Grouped declaration and diagnostic-priority regressions remain in place.
+No shared executable cases are added.
+
+The existing phase-separated `type_queries` probe adds `--ranged-parameters`,
+which uses `logic [31:0]` headers. It checks final parameter values and the generated
+signal width, retains three-run medians, and excludes backend compilation and
+simulation:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries -- --ranged-parameters 32 128 512
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries -- --parameters 32 128 512
+```
+
+| Workload | Parameters | AST before (ms) | AST after (ms) |
+| --- | ---: | ---: | ---: |
+| ranged module declarations | 32 | 72.043 | 12.565 |
+| ranged module declarations | 128 | 274.335 | 48.404 |
+| ranged module declarations | 512 | 6,050.021 | 190.586 |
+| ranged reverse generate dependencies | 32 | 169.318 | 13.736 |
+| ranged reverse generate dependencies | 128 | 905.534 | 52.456 |
+| ranged reverse generate dependencies | 512 | 13,741.234 | 215.087 |
+| int module declarations | 32 | 93.254 | 8.580 |
+| int module declarations | 128 | 504.828 | 47.811 |
+| int module declarations | 512 | 2,061.696 | 477.861 |
+| int reverse generate dependencies | 32 | 91.649 | 8.664 |
+| int reverse generate dependencies | 128 | 527.482 | 31.031 |
+| int reverse generate dependencies | 512 | 6,736.087 | 124.536 |
+
+For the ranged inputs, increasing the after input sixteenfold (32→512) increases
+AST time about 15.2x in the module and 15.7x in the generate block. The int reverse
+chain increases about 14.4x. The int module path does not use the borrowed range
+optimization and remains superlinear in these samples; no algorithmic improvement
+is claimed for it. Shared-machine load differed substantially: the 512-parameter
+ranged module parsed in 425.629/78.977 ms before/after, and the ranged generated
+input in 341.272/88.076 ms. These are sample timings, not universal speedup factors.
+The operation-count tests independently establish the removed repeated work.
+
+The after 512-parameter int module and generated inputs parsed in 51.683/56.513 ms,
+with IR conversion 0.638/0.016 ms. Their ranged counterparts converted to IR in
+0.585/0.016 ms. Grouped declarations, many signal/parameter alternations, four-state
+prefixes, and many distinct scopes with large inherited tables still need separate
+scaling measurements. This follow-up does not claim linear behavior for them.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -449,8 +518,10 @@ inside generated scopes, and `$bits`/`$size` queries during declaration lowering
 or in numeric cast targets can have different scaling from the flat probes.
 Those preliminary queries still discover enclosing declarations by walking
 syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
-modules with enums still rebuild some environments, and generated scopes still
-rebuild parameter prefixes. Dimension/literal views now materialize once per
+modules with enums still rebuild some environments. Consecutive single-parameter
+generate runs now reuse their prefixes; grouped declarations and interruptions
+can still rebuild them. Numeric range headers borrow compatible environments,
+while four-state or assignment-containing headers retain their copied contexts. Dimension/literal views now materialize once per
 immutable scope in each collector. Many distinct scopes with large inherited
 parameter/function tables can therefore differ from a single large block of
 signals. Applying parameter dimensions and materializing scoped literals still

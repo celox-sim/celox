@@ -60,6 +60,10 @@ impl DependencyOrder {
         self.ready.pop().map(|Reverse(index)| index)
     }
 
+    pub(super) fn peek_ready(&self) -> Option<usize> {
+        self.ready.peek().map(|Reverse(index)| *index)
+    }
+
     /// Release dependencies only after the declaration's metadata was bound.
     /// A failed binding must retain its original diagnostic before cycle errors.
     pub(super) fn complete(&mut self, index: usize) {

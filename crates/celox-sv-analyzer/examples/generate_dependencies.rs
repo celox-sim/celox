@@ -161,7 +161,8 @@ fn scheduler_scaling(counts: &[usize]) {
                         .map(|(name, deps)| (name.as_str(), deps)),
                 );
                 let mut actual = Vec::with_capacity(count);
-                while let Some(index) = order.pop_ready() {
+                while let Some(index) = order.peek_ready() {
+                    assert_eq!(order.pop_ready(), Some(index));
                     actual.push(index);
                     order.complete(index);
                 }
