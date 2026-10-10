@@ -648,6 +648,16 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 $display("a or b");
                 woken = woken + 8'd1;
             end
+            initial begin
+                @(a ^ 1'b0);
+                $display("a xor");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(negedge (b & 1'b1));
+                $display("b and fell");
+                woken = woken + 8'd1;
+            end
         endmodule
     "#;
     for (four_state, mut sim) in [
@@ -661,15 +671,18 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 (1, "a changed a=0"),
                 (1, "a rose"),
                 (1, "a or b"),
+                (1, "a xor"),
                 (2, "b fell b=1"),
+                (2, "b and fell"),
             ]),
             "four_state={four_state}"
         );
-        assert_eq!(sim.get(woken), 4u8.into(), "four_state={four_state}");
+        assert_eq!(sim.get(woken), 6u8.into(), "four_state={four_state}");
     }
 }
 
-/// Each process has its own activation of a task that suspends.
+/// Each process has its own activation of an `automatic` task that
+/// suspends, declared on the task or as the module's default lifetime.
 #[test]
 fn concurrent_activations_of_a_timed_task_keep_their_arguments() {
     let source = r#"
@@ -694,13 +707,89 @@ fn concurrent_activations_of_a_timed_task_keep_their_arguments() {
             end
         endmodule
     "#;
-    let mut sim = simulation(source);
+    let module_default = source
+        .replace("module Top(", "module automatic Top(")
+        .replace("task automatic put(", "task put(");
+    for source in [source.to_string(), module_default] {
+        let mut sim = simulation(&source);
+        let (o0, o1, sum) = (sim.signal("o0"), sim.signal("o1"), sim.signal("sum"));
+        sim.run_until(5).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(o0), 2u8.into());
+        assert_eq!(sim.get(o1), 4u8.into());
+        assert_eq!(sim.get(sum), 3u8.into());
+    }
+
+    // A static task (the default) shares its formals and locals: both
+    // activations resume with the later caller's values (IEEE 1800-2023
+    // 13.3.1).
+    let static_task = source.replace("task automatic put(", "task put(");
+    let mut sim = simulation(&static_task);
     let (o0, o1, sum) = (sim.signal("o0"), sim.signal("o1"), sim.signal("sum"));
     sim.run_until(5).unwrap();
     assert!(sim.is_finished());
-    assert_eq!(sim.get(o0), 2u8.into());
+    assert_eq!(sim.get(o0), 0u8.into());
     assert_eq!(sim.get(o1), 4u8.into());
-    assert_eq!(sim.get(sum), 3u8.into());
+    assert_eq!(sim.get(sum), 4u8.into());
+}
+
+/// A wait on a formal of an `automatic` task counts the events of this
+/// activation's formal only: another activation's argument does not wake it.
+#[test]
+fn waits_on_private_formals_see_only_their_activation() {
+    let source = r#"
+        module Top(output logic [7:0] woken);
+            task automatic watch(input logic value);
+                @(value);
+                woken = woken + 8'd1;
+            endtask
+            initial begin
+                woken = 8'd0;
+                watch(1'b0);
+            end
+            initial begin
+                #1 watch(1'b1);
+            end
+            initial begin
+                #3 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let woken = sim.signal("woken");
+    sim.run_until(5).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(woken), 0u8.into());
+}
+
+/// A task a package exports is classified like a local one: an
+/// edge-sensitive `always` calling an imported task with timing controls is
+/// a process.
+#[test]
+fn edge_sensitive_always_calling_an_imported_timed_task_runs_as_a_process() {
+    let source = r#"
+        package p;
+            task automatic bump(inout logic [7:0] count);
+                #1 count = count + 8'd1;
+            endtask
+        endpackage
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            import p::*;
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                y = 8'd0;
+                z = 8'd0;
+            end
+            always @(posedge clk) bump(y);
+            always @(posedge clk) p::bump(z);
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (y, z) = (sim.signal("y"), sim.signal("z"));
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+    assert_eq!(sim.get(z), 2u8.into());
 }
 
 /// An edge-sensitive `always` whose body reaches a timing control through a

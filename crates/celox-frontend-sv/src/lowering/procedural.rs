@@ -44,18 +44,32 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
-    /// The event counters of the variables a process waits on, by variable.
-    pub event_counters: HashMap<SourceVarId, EventCounters>,
+    /// The event expressions some process waits on.
+    pub event_watchers: Vec<EventWatcher>,
+    /// The watchers whose expression reads each variable, by index.
+    pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
+    /// Every event counter declared, for its zero initial value.
+    pub event_counter_ids: Vec<SourceVarId>,
 }
 
-/// The hidden state that records the events of a variable some process
-/// waits on: its value before a kernel's store, and how often it changed,
-/// rose and fell. A waiter compares the counters with the ones it sampled,
+/// An event expression some process waits on, and the hidden state that
+/// records its events: a kernel's store to one of `dependencies` snapshots
+/// the expression before the store and counts the change, rise and fall it
+/// made after it. A waiter compares the counters with the ones it sampled,
 /// so an event a later store of the same kernel run hides is still seen.
+pub(super) struct EventWatcher {
+    pub expr: sv::ir::Expr,
+    pub dependencies: Vec<SourceVarId>,
+    /// The state shared by every process; a process with private copies of
+    /// a dependency keeps its own (see `Ff::private_watchers`).
+    pub state: EventCounters,
+}
+
+/// The counters of one watcher: how often its expression changed, rose and
+/// fell, and the value it had before the store being recorded.
 #[derive(Clone)]
 pub(super) struct EventCounters {
-    pub name: String,
-    pub previous: String,
+    pub previous: Option<(SourceVarId, String)>,
     pub changes: String,
     pub rises: String,
     pub falls: String,
@@ -63,6 +77,9 @@ pub(super) struct EventCounters {
 
 /// One word a memory file writes: its bits in the destination, value, and
 /// unknown mask.
+/// Bits of an event counter; the counters wrap, as only equality matters.
+pub const EVENT_COUNTER_WIDTH: usize = 32;
+
 pub(super) struct MemoryWord {
     pub access: BitAccess,
     pub value: BigUint,
@@ -155,7 +172,9 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
-            event_counters: HashMap::default(),
+            event_watchers: Vec::new(),
+            watchers_by_var: HashMap::default(),
+            event_counter_ids: Vec::new(),
         }
     }
 
@@ -312,6 +331,26 @@ impl<'a> ProcModule<'a> {
 
     pub fn id(&self, name: &str) -> Option<SourceVarId> {
         self.name_to_id.get(name).copied()
+    }
+
+    /// Fresh event counters, which start at zero. They follow the design's
+    /// state mode, as the expressions that read them do.
+    pub fn new_event_counters(&mut self) -> EventCounters {
+        let mut counter = |purpose: &str| {
+            let four_state = self.four_state;
+            let (id, name) = self.temp(purpose, EVENT_COUNTER_WIDTH, false, four_state);
+            self.event_counter_ids.push(id);
+            name
+        };
+        let changes = counter("event_changes");
+        let rises = counter("event_rises");
+        let falls = counter("event_falls");
+        EventCounters {
+            previous: None,
+            changes,
+            rises,
+            falls,
+        }
     }
 
     /// A hidden copy of variable `id` with its shape, for the activations
