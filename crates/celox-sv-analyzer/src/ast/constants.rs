@@ -85,10 +85,24 @@ pub(super) fn bind_generate_parameter(
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
-    let parameter_types = parameter_types_from_const_env(const_env);
-    let resolved_type = parameter.resolved_type(&parameter_types);
+    let mut parameter_types = parameter_types_from_const_env(const_env);
+    bind_generate_parameter_with_types(
+        parameter,
+        const_env,
+        parameter_literals,
+        &mut parameter_types,
+    );
+}
+
+pub(super) fn bind_generate_parameter_with_types(
+    parameter: Parameter,
+    const_env: &mut HashMap<String, i128>,
+    parameter_literals: &mut HashMap<String, Expr>,
+    parameter_types: &mut HashMap<String, ExprType>,
+) {
+    let resolved_type = parameter.resolved_type(parameter_types);
     let resolved =
-        parameter.resolved_value_with_literals(const_env, &parameter_types, parameter_literals);
+        parameter.resolved_value_with_literals(const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -98,7 +112,7 @@ pub(super) fn bind_generate_parameter(
         }))
     } else {
         parameter
-            .resolved_literal(const_env, &parameter_types, parameter_literals)
+            .resolved_literal(const_env, parameter_types, parameter_literals)
             .or_else(|| {
                 parameter_value_env(std::slice::from_ref(&parameter), const_env)
                     .remove(parameter.name())
@@ -107,6 +121,7 @@ pub(super) fn bind_generate_parameter(
     };
     if let Some(ty) = resolved_type {
         insert_parameter_type_markers(const_env, parameter.name(), ty);
+        parameter_types.insert(parameter.name().to_string(), ty);
     }
     if let Some(literal) = literal {
         parameter_literals.insert(parameter.name().to_string(), literal);
@@ -117,8 +132,13 @@ pub(super) fn eval_ast_const_expr(
     expr: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> Option<i128> {
-    let parameter_types = parameter_types_from_const_env(const_env);
-    let expr = substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types);
+    // Look up only the identifiers in this expression, rather than scanning
+    // every visible signal/parameter marker for each declaration bound.
+    let expr = parameters::substitute_typed_parameter_literals_with_lookup(
+        expr.clone(),
+        const_env,
+        &|name| parameter_type_from_const_env(const_env, name),
+    );
     typecheck::eval_const_expr(&expr.into(), const_env)
 }
 
@@ -347,26 +367,32 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .collect(),
         },
         Expr::Call { name, args } => {
-            let is_countbits = name == "$countbits";
-            let call = Expr::Call {
-                name,
-                args: args
-                    .into_iter()
-                    .map(|arg| {
-                        substitute_expr_constants_with_parameter_literals(
-                            arg,
-                            const_env,
-                            parameter_literals,
-                        )
-                    })
-                    .collect(),
-            };
-            if is_countbits {
-                // Resolve constant calls before SLT lowering. This retains X/Z
-                // masks and avoids building one comparison per constant bit.
-                fold_const_integral_expr_preserving_mask(call, const_env)
+            let args: Vec<_> = args
+                .into_iter()
+                .map(|arg| {
+                    substitute_expr_constants_with_parameter_literals(
+                        arg,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .collect();
+            if matches!(name.as_str(), "$signed" | "$unsigned")
+                && let [arg] = args.as_slice()
+                && let Some(constant) = expr_to_const(arg.clone())
+                && let Some(ty) =
+                    infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
+            {
+                Expr::Resize {
+                    expr: Box::new(arg.clone()),
+                    width: ty.width,
+                    signed: name == "$signed",
+                }
+            } else if name == "$countbits" {
+                // Resolve constant calls before SLT lowering while retaining X/Z masks.
+                fold_const_integral_expr_preserving_mask(Expr::Call { name, args }, const_env)
             } else {
-                call
+                Expr::Call { name, args }
             }
         }
     }
@@ -939,6 +965,25 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if matches!(
+                        name,
+                        "$left"
+                            | "$right"
+                            | "$low"
+                            | "$high"
+                            | "$increment"
+                            | "$dimensions"
+                            | "$unpacked_dimensions"
+                    ) {
+                        return Ok(dimensions::array_query_call(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                        .and_then(expr_to_const));
+                    }
                 }
                 if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
                 {

@@ -1407,3 +1407,133 @@ fn slice_of_a_loaded_value_survives_a_store_through_an_alias() {
     assert_eq!(state[0], 0xff, "the store through the alias reached memory");
     assert_eq!(state[1] & 0xf, 0b1010, "the slice is of the loaded value");
 }
+
+#[test]
+fn four_state_sar_uses_sign_fill_past_the_logical_source_words() {
+    // Construct SIR directly: the language builder normally narrows wide
+    // counts. The backend also accepts a wider count or result in this ABI.
+    for count_width in [129usize, 257, 32] {
+        for result_width in [65usize, 129] {
+            for constant in [false, true] {
+                for value_sign in [false, true] {
+                    for mask_sign in [false, true] {
+                        let input_abs = AbsoluteAddr {
+                            instance_id: InstanceId(0),
+                            var_id: VarId::default(),
+                        };
+                        let output_abs = AbsoluteAddr {
+                            var_id: VarId::from_raw(1),
+                            ..input_abs
+                        };
+                        let address =
+                            |abs| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, abs);
+                        let lhs = RegisterId(0);
+                        let rhs = RegisterId(1);
+                        let result = RegisterId(2);
+                        let sign = BigUint::from(1u8) << 64usize;
+                        let payload = BigUint::from(5u8)
+                            | if value_sign {
+                                sign.clone()
+                            } else {
+                                BigUint::default()
+                            };
+                        let mask = if mask_sign { sign } else { BigUint::default() };
+                        let unit = ExecutionUnit {
+                            entry_block_id: SirBlockId(0),
+                            blocks: [(
+                                SirBlockId(0),
+                                BasicBlock {
+                                    id: SirBlockId(0),
+                                    params: vec![],
+                                    instructions: vec![
+                                        SIRInstruction::Imm(
+                                            lhs,
+                                            SIRValue::new_four_state(payload, mask),
+                                        ),
+                                        if constant {
+                                            SIRInstruction::Imm(rhs, SIRValue::new(64u8))
+                                        } else {
+                                            SIRInstruction::Load(
+                                                rhs,
+                                                address(input_abs),
+                                                SIROffset::Static(0),
+                                                count_width,
+                                            )
+                                        },
+                                        SIRInstruction::Binary(result, lhs, BinaryOp::Sar, rhs),
+                                        SIRInstruction::Store(
+                                            address(output_abs),
+                                            SIROffset::Static(0),
+                                            result_width,
+                                            result,
+                                            vec![],
+                                            vec![],
+                                        ),
+                                    ],
+                                    terminator: SIRTerminator::Return,
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            register_map: [(lhs, 65), (rhs, count_width), (result, result_width)]
+                                .into_iter()
+                                .map(|(reg, width)| (reg, RegisterType::Logic { width }))
+                                .collect(),
+                        };
+                        unit.verify();
+                        let mut layout = empty_layout();
+                        layout.four_state = true;
+                        for (abs, offset, width) in
+                            [(input_abs, 0, count_width), (output_abs, 128, result_width)]
+                        {
+                            layout.offsets.insert(abs, offset);
+                            layout.widths.insert(abs, width);
+                            layout.is_4states.insert(abs, true);
+                        }
+                        layout.total_size = 256;
+                        layout.working_base_offset = 256;
+                        layout.sparse_base_offset = 256;
+                        layout.merged_total_size = 256;
+                        layout.triggered_bits_offset = 256;
+                        layout.scratch_base_offset = 256;
+                        let mut function = lower_execution_unit(&unit, &layout, true);
+                        function.verify();
+                        mir_legalize::legalize(&mut function);
+                        mir_opt::optimize(&mut function);
+                        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+                        function.verify();
+                        let emitted = emit::emit(
+                            &function,
+                            &allocation.assignment,
+                            allocation.spill_frame_size,
+                        )
+                        .unwrap();
+                        let jit = JitCode::new(&emitted.code).unwrap();
+                        let mut state = vec![0u8; 256];
+                        state[0] = 64;
+                        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                        let bytes = result_width.div_ceil(8);
+                        let full = (BigUint::from(1u8) << result_width) - 1u8;
+                        let actual = (
+                            BigUint::from_bytes_le(&state[128..128 + bytes]) & &full,
+                            BigUint::from_bytes_le(&state[128 + bytes..128 + 2 * bytes]) & &full,
+                        );
+                        let expected = (
+                            if value_sign {
+                                full.clone()
+                            } else {
+                                BigUint::default()
+                            },
+                            if mask_sign { full } else { BigUint::default() },
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "count_width={count_width} result_width={result_width} constant={constant} value_sign={value_sign} mask_sign={mask_sign}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

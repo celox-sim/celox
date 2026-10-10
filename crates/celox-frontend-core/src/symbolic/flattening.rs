@@ -223,6 +223,8 @@ fn fold_projection(
     }
 }
 
+/// `locate` gives the object a variable of an instance denotes: its own, or
+/// the package variable it is bound to.
 pub fn flatten_module(
     module: &SimModule,
     path: &InstancePath,
@@ -230,12 +232,10 @@ pub fn flatten_module(
     global_boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    locate: &dyn Fn(InstanceId, SourceVarId) -> AbsoluteAddr,
 ) -> Result<FlattenedModule, SLTNodeFactsError> {
     let instance_id = instance_ids[path];
-    let cv = &|id: &SourceVarId| AbsoluteAddr {
-        instance_id,
-        var_id: *id,
-    };
+    let cv = &|id: &SourceVarId| locate(instance_id, *id);
 
     let mut comb_cache = HashMap::default();
     let mut comb_blocks: Vec<_> = module
@@ -264,6 +264,7 @@ pub fn flatten_module(
                 gb,
                 instance_id,
                 child_id,
+                locate,
                 &gb.arena,
                 arena,
                 &mut glue_cache,
@@ -962,6 +963,7 @@ fn convert_glue_block(
     gb: &GlueBlock,
     parent_id: InstanceId,
     child_id: InstanceId,
+    locate: &dyn Fn(InstanceId, SourceVarId) -> AbsoluteAddr,
     arena: &SLTNodeArena<GlueAddr>,
     target_arena: &mut SLTNodeArena<AbsoluteAddr>,
     cache: &mut HashMap<NodeId, NodeId>,
@@ -973,14 +975,8 @@ fn convert_glue_block(
         arena: _,
     } = gb;
     let cv = &|addr: &GlueAddr| match addr {
-        GlueAddr::Parent(v) => AbsoluteAddr {
-            instance_id: parent_id,
-            var_id: *v,
-        },
-        GlueAddr::Child(v) => AbsoluteAddr {
-            instance_id: child_id,
-            var_id: *v,
-        },
+        GlueAddr::Parent(v) => locate(parent_id, *v),
+        GlueAddr::Child(v) => locate(child_id, *v),
     };
     let mut res = Vec::new();
 

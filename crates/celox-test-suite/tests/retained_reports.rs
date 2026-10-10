@@ -27,7 +27,7 @@ fn assert_no_run_metadata(report: &serde_json::Value) {
 }
 
 #[test]
-fn retained_reports_cover_the_catalogue_without_losing_failures() {
+fn retained_reports_are_valid_historical_evidence_for_the_live_catalogue() {
     let catalogue: BTreeSet<_> = celox_test_suite::veryl::cases()
         .map(|case| case.name)
         .collect();
@@ -45,10 +45,26 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
             .map(|row| row["name"].as_str().unwrap())
             .collect();
         assert_eq!(names.len(), rows.len(), "duplicate results");
-        assert_eq!(
-            names, catalogue,
-            "refresh both reports after catalogue changes"
+        // Passing new cases need no historical baseline row. The daily gate
+        // separately requires a fresh report of the complete live catalogue
+        // and rejects every new or changed failure without matching evidence.
+        assert!(
+            names.is_subset(&catalogue),
+            "retained evidence names an unknown case"
         );
+        for name in &catalogue {
+            if celox_test_suite::veryl::verification::known_issue(
+                report["tool"].as_str().unwrap(),
+                name,
+            )
+            .is_some()
+            {
+                assert!(
+                    names.contains(name),
+                    "missing reviewed exclusion for {name}"
+                );
+            }
+        }
         for row in rows {
             let case = celox_test_suite::veryl::case(row["name"].as_str().unwrap()).unwrap();
             assert_eq!(row["expectation"], format!("{:?}", case.expectation));
@@ -106,7 +122,7 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
 }
 
 #[test]
-fn systemverilog_reports_cover_the_catalogue_and_explain_every_exclusion() {
+fn systemverilog_retained_reports_explain_every_recorded_exclusion() {
     let catalogue: BTreeSet<_> = celox_test_suite::sv::cases()
         .map(|case| case.name)
         .collect();
@@ -126,10 +142,21 @@ fn systemverilog_reports_cover_the_catalogue_and_explain_every_exclusion() {
             .map(|row| row["name"].as_str().unwrap())
             .collect();
         assert_eq!(names.len(), rows.len(), "duplicate results");
-        assert_eq!(
-            names, catalogue,
-            "refresh both reports after catalogue changes"
+        // Passing new cases need no historical baseline row. The daily gate
+        // separately requires a fresh report of the complete live catalogue
+        // and rejects every new or changed failure without matching evidence.
+        assert!(
+            names.is_subset(&catalogue),
+            "retained evidence names an unknown case"
         );
+        for name in &catalogue {
+            if celox_test_suite::sv::verification::known_issue(tool, name).is_some() {
+                assert!(
+                    names.contains(name),
+                    "missing reviewed exclusion for {name}"
+                );
+            }
+        }
         for row in rows {
             let name = row["name"].as_str().unwrap();
             let case = celox_test_suite::sv::case(name).unwrap();
@@ -165,4 +192,21 @@ fn systemverilog_reports_cover_the_catalogue_and_explain_every_exclusion() {
             }
         }
     }
+}
+
+#[test]
+fn partial_word_sar_discrepancy_remains_an_executed_failure() {
+    let report: serde_json::Value =
+        serde_json::from_str(include_str!("../verification/verilator.json")).unwrap();
+    let name = "partial_word_shift::two_state_matrix";
+    let row = report["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == name)
+        .expect("retain the reviewed SAR failure");
+    assert_eq!(row["status"], "mismatch");
+    assert_eq!(row["phase"], "execute");
+    assert!(row["detail"].as_str().unwrap().contains("assert_eq c63_64"));
+    assert!(celox_test_suite::veryl::verification::known_issue("verilator", name).is_none());
 }

@@ -111,10 +111,12 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   モジュールに同名の項目があっても衝突しません。`import p::x;` で見えるのは `x` だけです。
   `import p::*;` では、スコープ自身の宣言が package の同名の項目を隠し、2 つの wildcard import
   の package が宣言する名前は、参照したときだけエラーになります。package の関数の中の名前は
-  package の中で解決します。package の変数と net は、モジュール間で共有できるようになるまで
-  拒否します（[#1146](https://github.com/celox-sim/celox/issues/1146)）。`const` 変数は受け付けます。
-  package の `export` 宣言とコンパイル単位（`$unit`）の宣言は
-  未対応です。
+  package の中で解決します。package の変数は、それを使うすべてのモジュール（Veryl からインスタンス化した
+  SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
+  `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
+  モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、定数でない package 変数の初期化子、
+  package の net、`export` 宣言、コンパイル単位（`$unit`）の宣言は未対応です
+  （[#1146](https://github.com/celox-sim/celox/issues/1146)）。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の

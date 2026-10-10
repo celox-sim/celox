@@ -578,5 +578,56 @@
         "interfaces::runs_interface_processes_once_per_array_element"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_constant_array_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0 (stable)",
+    "reason": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/system_function_edge_cases.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::array_queries_preserve_bounds_and_dimensions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_runtime_array_queries",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0 (stable)",
+    "reason": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/system_function_edge_cases.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::array_queries_handle_runtime_dimensions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_immediate_cover_actions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0 (stable)",
+    "reason": "Icarus 13.0 discards immediate cover pass statements, including with -gassertions. IEEE 1800-2023 16.3 requires the pass statement to execute when the condition is true. Verilator passes when --coverage-user is enabled by the adapter.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/system_function_edge_cases.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::immediate_cover_executes_pass_statement"
+      ]
+    }
   }
 ]

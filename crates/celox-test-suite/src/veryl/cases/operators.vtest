@@ -300,8 +300,6 @@ assign y = (a as i8) <: (b as i8);
   (assert_eq y 1))
 
 (case test_cast_signed_to_unsigned_affects_comparison
-  ; Veryl 0.20.2's runtime keeps the source signedness for this cast;
-  ; the analyzer and emitted SystemVerilog make the result unsigned.
   (source "test.veryl" #"
 module Top (a: input i8, b: input i8, y: output logic) {
 assign y = (a as u8) <: (b as u8);
