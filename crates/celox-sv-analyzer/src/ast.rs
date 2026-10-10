@@ -41,6 +41,7 @@ mod imports;
 mod inlining;
 mod instances;
 pub mod interfaces;
+mod lifetimes;
 pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
@@ -634,12 +635,13 @@ impl Module {
         ));
         // Instance connections may call subroutines, of the module or of the
         // packages it uses, with untyped assignment patterns.
-        let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
+        let (mut subroutine_params, mut subroutine_shapes, mut subroutine_directions) =
+            procedural::subroutine_argument_names(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+            )?;
         for (name, params) in &imported.subroutine_params {
             subroutine_params
                 .entry(name.clone())
@@ -649,6 +651,26 @@ impl Module {
             subroutine_shapes
                 .entry(name.clone())
                 .or_insert_with(|| shapes.clone());
+        }
+        // The subroutines of the packages the module uses, by their qualified
+        // names and by the names its imports give them.
+        for subroutine in &imported.subroutines {
+            subroutine_directions
+                .entry(subroutine.name.clone())
+                .or_insert_with(|| {
+                    subroutine
+                        .params
+                        .iter()
+                        .map(|param| param.direction)
+                        .collect()
+                });
+        }
+        for (name, target) in &imported.aliases {
+            if let Some(directions) = subroutine_directions.get(target).cloned() {
+                subroutine_directions
+                    .entry(name.clone())
+                    .or_insert(directions);
+            }
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         let mut instances = instances_from_module_node(
@@ -789,6 +811,9 @@ impl Module {
             locals: &mut locals,
             counter: &mut local_counter,
             subroutine_params: &subroutine_params,
+            subroutine_directions: &subroutine_directions,
+            automatic: lifetimes::automatic_by_default(&node),
+            statics: Vec::new(),
         };
         let mut subroutines = procedural::subroutines_from_module_node(
             node.clone(),
@@ -836,6 +861,41 @@ impl Module {
             &parameter_values,
             &mut body_state,
         )?);
+        // Static locals of the processes that keep their value are variables
+        // of the module, initialized once with the declaration initializers.
+        let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
+        let (kept, static_initializers) = lifetimes::keep_static_locals(
+            &statics,
+            &subroutine_directions,
+            comb_processes
+                .iter_mut()
+                .map(|process| &mut process.body)
+                .chain(ff_processes.iter_mut().map(|process| &mut process.body))
+                .chain(
+                    initial_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                ),
+        )?;
+        locals.retain(|local| !kept.contains(&local.name));
+        for name in kept {
+            signals.push(Signal::new(name.clone(), statics[&name].clone()));
+        }
+        if !static_initializers.is_empty() {
+            // Declaration initializers run before the other initial blocks.
+            let first_block = initial_processes
+                .iter()
+                .position(|process| !process.initializer)
+                .unwrap_or(initial_processes.len());
+            initial_processes.insert(
+                first_block,
+                InitialProcess {
+                    condition: None,
+                    body: static_initializers,
+                    initializer: true,
+                },
+            );
+        }
         let procedurally_written = procedural::written_names(
             comb_processes
                 .iter()
