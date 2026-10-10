@@ -1569,12 +1569,12 @@ pub(super) fn subroutines_from_module_node_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1584,6 +1584,7 @@ pub(super) fn subroutines_from_module_node_with(
             let Some(syntax) = syntax else {
                 continue;
             };
+            let (item_dimensions, literals) = views.get(item);
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
@@ -1611,7 +1612,7 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 let mut builder = BodyBuilder::new(
                     tree,
-                    &item_dimensions,
+                    item_dimensions,
                     state,
                     system_functions::Body::Subroutine,
                 );
@@ -1662,8 +1663,8 @@ pub(super) fn subroutines_from_module_node_with(
                     body,
                 };
                 for stmt in &mut subroutine.body {
-                    qualify_stmt(&item, stmt);
-                    substitute_stmt_constants(stmt, &item.env, &literals);
+                    qualify_stmt(item, stmt);
+                    substitute_stmt_constants(stmt, &item.env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {
@@ -1671,7 +1672,7 @@ pub(super) fn subroutines_from_module_node_with(
                         *default = substitute_expr_constants_with_parameter_literals(
                             default.clone(),
                             &item.env,
-                            &literals,
+                            literals,
                         );
                     }
                 }
@@ -1748,16 +1749,20 @@ pub(super) fn initial_processes_from_module_node(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
             item.node.declaration()
             && let sv_parser::DataDeclaration::Variable(variable) = &**data
         {
+            if !variable.nodes.4.nodes.0.contents().into_iter().any(|assignment| matches!(assignment, sv_parser::VariableDeclAssignment::Variable(assignment) if assignment.nodes.2.is_some())) {
+                continue;
+            }
+            let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
             for assignment in variable.nodes.4.nodes.0.contents() {
                 let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
@@ -1768,17 +1773,17 @@ pub(super) fn initial_processes_from_module_node(
                 };
                 let name = identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), tree)
                     .ok_or_else(|| unsupported("variable declaration initializer"))?;
-                if let Some(target) = selected_unpacked_shape(&name, 0, &item_dimensions) {
+                if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     check_unpacked_array_assignment(
                         expr,
                         &target,
                         || format!("initializer of `{name}`"),
                         tree,
-                        &item_dimensions,
+                        item_dimensions,
                     )?;
                 }
                 let lhs = LValue::Ident(name);
-                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, &item_dimensions)?;
+                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, item_dimensions)?;
                 body.push(Stmt::Assign {
                     lhs,
                     rhs,
@@ -1786,8 +1791,8 @@ pub(super) fn initial_processes_from_module_node(
                 });
             }
             for stmt in &mut body {
-                substitute_stmt_constants(stmt, &item.env, &literals);
-                qualify_stmt(&item, stmt);
+                substitute_stmt_constants(stmt, &item.env, literals);
+                qualify_stmt(item, stmt);
                 substitute_stmt_constants(stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
@@ -1806,16 +1811,17 @@ pub(super) fn initial_processes_from_module_node(
         let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
             continue;
         };
+        let (item_dimensions, literals) = views.get(item);
         let mut builder = BodyBuilder::new(
             tree,
-            &item_dimensions,
+            item_dimensions,
             state,
             system_functions::Body::Initial,
         );
         let mut body = builder.statement_or_null(&initial.nodes.1)?;
         for stmt in &mut body {
-            substitute_stmt_constants(stmt, &item.env, &literals);
-            qualify_stmt(&item, stmt);
+            substitute_stmt_constants(stmt, &item.env, literals);
+            qualify_stmt(item, stmt);
             substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {

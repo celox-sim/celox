@@ -5,6 +5,13 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SharedMap<V>(Arc<HashMap<String, V>>);
 
+impl<V> SharedMap<V> {
+    /// Identity of an immutable snapshot, valid while a borrower retains it.
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+}
+
 impl<V> Default for SharedMap<V> {
     fn default() -> Self {
         HashMap::default().into()

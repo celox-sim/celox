@@ -12,20 +12,20 @@ pub(super) fn functions_from_module_node(
     let type_aliases =
         type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
     let active = generate::items(node.clone(), syntax_tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::new(packed_dimensions);
     for (item, child) in active
         .iter()
         .flat_map(|item| item.node.node().into_iter().map(move |child| (item, child)))
     {
         if let RefNode::TaskDeclaration(declaration) = child {
-            let task_dimensions = item.dimensions(packed_dimensions);
+            let task_dimensions = views.dimensions(item);
             let const_env = &item.env;
             let statements = match &declaration.nodes.2 {
                 sv_parser::TaskBodyDeclaration::WithPort(body) => &body.nodes.5,
                 sv_parser::TaskBodyDeclaration::WithoutPort(body) => &body.nodes.4,
             };
             let expression_form = statements.iter().all(|statement| {
-                validate_function_statement_or_null(statement, syntax_tree, &task_dimensions)
-                    .is_ok()
+                validate_function_statement_or_null(statement, syntax_tree, task_dimensions).is_ok()
             });
             let task = expression_form
                 .then(|| {
@@ -34,7 +34,7 @@ pub(super) fn functions_from_module_node(
                         syntax_tree,
                         const_env,
                         &type_aliases,
-                        &task_dimensions,
+                        task_dimensions,
                     )
                 })
                 .flatten()
@@ -63,8 +63,8 @@ pub(super) fn functions_from_module_node(
         };
         let mut literals = item.literals.clone();
         let const_env = &item.env;
-        let function_dimensions = item.dimensions(packed_dimensions);
-        let packed_dimensions = &function_dimensions;
+        let function_dimensions = views.dimensions(item);
+        let packed_dimensions = function_dimensions;
         // The expression form of a body is only used where calls are still
         // inlined (port connections). Statement bodies are lowered from the
         // subroutine IR, so a body without an expression form keeps its

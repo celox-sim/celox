@@ -117,8 +117,13 @@ pub(super) fn eval_ast_const_expr(
     expr: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> Option<i128> {
-    let parameter_types = parameter_types_from_const_env(const_env);
-    let expr = substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types);
+    // Look up only the identifiers in this expression, rather than scanning
+    // every visible signal/parameter marker for each declaration bound.
+    let expr = parameters::substitute_typed_parameter_literals_with_lookup(
+        expr.clone(),
+        const_env,
+        &|name| parameter_type_from_const_env(const_env, name),
+    );
     typecheck::eval_const_expr(&expr.into(), const_env)
 }
 
