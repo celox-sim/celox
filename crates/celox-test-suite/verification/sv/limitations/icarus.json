@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 8,
+    "mismatch": 9,
     "emission_error": 0,
-    "compile_error": 48,
+    "compile_error": 50,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -486,6 +486,30 @@
       "name": "system_functions::display_field_widths_expand_to_the_value",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::unpacked_dimensions_is_independent_of_unknown_values at 645:5: assert_eq element: expected 0x0, got 0x1",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_is_independent_of_unknown_values",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:14: error: Array a[index] needs 2 indices, but got only 1.\n<case>/source_0.sv:14: error: Unable to elaborate r-value: $unpacked_dimensions(a[index])\n<case>/source_0.sv:17: error: Array cannot be indexed by a range.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:15: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

@@ -1,6 +1,19 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::unpacked_dimensions_counts_declared_arrays";
+    }
+    fn unpacked_dimensions_preserves_selection_and_return_types(sim) {
+        @case "system_functions::unpacked_dimensions_preserves_selection_and_return_types";
+    }
+    fn unpacked_dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes";
+    }
+    fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
+    }
+
     fn drain_runtime_events_returns_always_comb_fatal(sim) {
         @setup {
             let source = r#"
@@ -83,7 +96,13 @@ sv_backends! {
 
 #[test]
 fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
-    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+    for name in [
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$unpacked_dimensions",
+    ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
             let source =
@@ -518,4 +537,16 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
             },
         ]
     );
+}
+
+#[test]
+fn unpacked_dimensions_rejects_undefined_operands() {
+    for source in [
+        "module Top(output int y); assign y = $unpacked_dimensions(missing); endmodule",
+        "module Top(output int y); localparam N = $unpacked_dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($unpacked_dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+        "module Top(input logic a, output logic y); always_comb begin $unpacked_dimensions(missing); y = a; end endmodule",
+    ] {
+        build_error(source);
+    }
 }

@@ -2,6 +2,148 @@
 
 use super::*;
 
+/// IEEE 1800-2023 20.7: count unpacked dimensions before expressions are
+/// flattened. Packed arrays and other nonarray operands have count zero.
+pub(super) fn unpacked_dimensions_call_value(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
+) -> Option<usize> {
+    match call {
+        sv_parser::SystemTfCall::ArgDataType(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$unpacked_dimensions"
+                || call.nodes.1.nodes.1.1.is_some()
+            {
+                return None;
+            }
+            let ty = &call.nodes.1.nodes.1.0;
+            if matches!(
+                ty,
+                sv_parser::DataType::String(_)
+                    | sv_parser::DataType::NonIntegerType(_)
+                    | sv_parser::DataType::Chandle(_)
+                    | sv_parser::DataType::Event(_)
+            ) {
+                return Some(0);
+            }
+            function_type_from_ref_node(RefNode::DataType(ty), syntax_tree, const_env, type_aliases)
+                .map(|ty| ty.unpacked_ranges().len())
+        }
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$unpacked_dimensions" {
+                return None;
+            }
+            let arguments = call.nodes.1.nodes.1.0.contents();
+            let [Some(argument)] = arguments.as_slice() else {
+                return None;
+            };
+            unpacked_expression_dimensions(
+                argument,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                dimensions,
+            )
+        }
+        sv_parser::SystemTfCall::ArgOptionl(_) => None,
+    }
+}
+
+fn unpacked_expression_dimensions(
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
+) -> Option<usize> {
+    if let sv_parser::Expression::Primary(primary) = argument {
+        match &**primary {
+            sv_parser::Primary::MintypmaxExpression(grouped) => {
+                if let sv_parser::MintypmaxExpression::Expression(argument) =
+                    &grouped.nodes.0.nodes.1
+                {
+                    return unpacked_expression_dimensions(
+                        argument,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                        dimensions,
+                    );
+                }
+            }
+            sv_parser::Primary::PrimaryLiteral(literal)
+                if unwrap_node!(RefNode::PrimaryLiteral(literal), StringLiteral, RealNumber)
+                    .is_some() =>
+            {
+                return Some(0);
+            }
+            sv_parser::Primary::Hierarchical(hierarchical) => {
+                let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)?;
+                let selected =
+                    |count: usize| count.saturating_sub(hierarchical.nodes.2.nodes.1.nodes.0.len());
+                if let Some(dimensions) = dimensions
+                    && dimensions.scope_types_complete
+                    && let Some(ty) = dimensions.get(&name)
+                {
+                    return Some(selected(ty.unpacked.len()));
+                }
+                // Preliminary discovery must honor formals and locals, then
+                // the current generate scope's markers, before module signals.
+                if dimensions.is_none_or(|dimensions| !dimensions.scope_types_complete)
+                    && let Some(locals) = containing_function_dimensions(
+                        RefNode::Expression(argument),
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )
+                    && let Some(ty) = locals.get(&name)
+                {
+                    return Some(selected(ty.unpacked.len()));
+                }
+                if let Some(count) = const_env.get(&variable_unpacked_dimensions_marker(&name)) {
+                    return Some(selected(usize::try_from(*count).ok()?));
+                }
+                if let Some(ty) = dimensions.and_then(|dimensions| dimensions.get(&name)) {
+                    return Some(selected(ty.unpacked.len()));
+                }
+                // Integral parameters are not unpacked arrays. Array parameters
+                // have signal metadata collected from their declarations.
+                if parameter_type_from_const_env(const_env, &name).is_some() {
+                    return Some(0);
+                }
+                if let Some(ty) = type_aliases.get(&name) {
+                    return Some(selected(ty.unpacked_ranges().len()));
+                }
+                if dimensions.is_none_or(|dimensions| !dimensions.scope_types_complete)
+                    && let Some(context) = containing_packed_dimensions(
+                        RefNode::Expression(argument),
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )
+                    && let Some(ty) = context.get(&name)
+                {
+                    return Some(selected(ty.unpacked.len()));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Resolve the operand's type without expanding/evaluating function bodies.
+    // Remaining supported expressions have an integral, packed result.
+    size_function_expression_type(
+        argument,
+        syntax_tree,
+        const_env,
+        type_aliases,
+        false,
+        dimensions,
+    )
+    .map(|_| 0)
+}
+
 pub(super) fn size_system_function_expr_type(
     primary: &sv_parser::ConstantPrimary,
     syntax_tree: &SyntaxTree,
@@ -14,6 +156,14 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0.nodes.0 else {
         return None;
     };
+    if let Some(count) =
+        unpacked_dimensions_call_value(call, syntax_tree, const_env, type_aliases, None)
+    {
+        return Some(ExprType {
+            width: count,
+            signed: false,
+        });
+    }
     size_system_function_call_type(call, syntax_tree, const_env, type_aliases, None)
 }
 
@@ -500,8 +650,20 @@ fn containing_packed_dimensions(
         let _guard = ActivePackedDimensionsGuard { module_span };
         let ports =
             ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        let signals =
+        let mut signals =
             signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        signals.extend(
+            array_parameters::array_parameters_from_module_node(
+                module.clone(),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .ok()?
+            .into_iter()
+            .map(|parameter| parameter.signal),
+        );
+        signals.extend(scope::imported().signals.iter().cloned());
         let mut dimensions =
             packed_dimensions_from_ports_and_signals(&ports, &signals, const_env, type_aliases);
         if let Some(locals) =
@@ -537,14 +699,14 @@ fn containing_function_dimensions(
         let mut dimensions = HashMap::default();
         let (params, locals) = match &declaration.nodes.2 {
             sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-                let params = body
-                    .nodes
-                    .3
-                    .nodes
-                    .1
-                    .as_ref()
-                    .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
-                    .unwrap_or_default();
+                let params = procedural::subroutine_param_declarations(
+                    body.nodes.3.nodes.1.as_ref(),
+                    &[],
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .ok()?;
                 let locals = function_local_packed_dimensions_from_block_items(
                     &body.nodes.5,
                     syntax_tree,
@@ -554,7 +716,14 @@ fn containing_function_dimensions(
                 (params, locals)
             }
             sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
-                let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
+                let params = procedural::subroutine_param_declarations(
+                    None,
+                    &body.nodes.4,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .ok()?;
                 let items = body.nodes.4.iter().filter_map(|item| match item {
                     sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
                     sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
@@ -568,16 +737,16 @@ fn containing_function_dimensions(
                 (params, locals)
             }
         };
-        dimensions.extend(params.into_iter().map(|param| {
+        dimensions.extend(params.into_iter().map(|(name, _, ty, _)| {
             (
-                param.name,
+                name,
                 VariableDimensions {
-                    packed: param.packed_dimensions,
-                    unpacked: Vec::new(),
-                    signed: param.signed,
-                    is_2state: param.is_2state,
-                    members: Vec::new(),
-                    signed_element_depth: param.signed_element_depth,
+                    packed: function_packed_dimension_widths(ty.packed_ranges()),
+                    unpacked: unpacked_dimension_widths(ty.unpacked_ranges()),
+                    signed: ty.is_signed(),
+                    is_2state: ty.kind() == TypeKind::Bit,
+                    members: ty.members.clone(),
+                    signed_element_depth: ty.signed_element_depth,
                 },
             )
         }));
@@ -901,6 +1070,10 @@ pub(super) fn variable_signed_marker(name: &str) -> String {
     format!("__variable::signed::{name}")
 }
 
+pub(super) fn variable_unpacked_dimensions_marker(name: &str) -> String {
+    format!("__variable::unpacked_dimensions::{name}")
+}
+
 pub(super) fn variable_size_function_width(
     const_env: &HashMap<String, i128>,
     name: &str,
@@ -925,6 +1098,10 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
     for (name, r#type) in variables {
+        const_env.insert(
+            variable_unpacked_dimensions_marker(name),
+            r#type.unpacked_ranges().len() as i128,
+        );
         let dimension_width = |range: &PackedRange| {
             let left = eval_ast_const_expr(range.left(), const_env)?;
             let right = eval_ast_const_expr(range.right(), const_env)?;

@@ -2483,6 +2483,50 @@
       "tags": []
     },
     {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_counts_declared_arrays",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_is_independent_of_unknown_values",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",

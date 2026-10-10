@@ -583,6 +583,15 @@ fn expr_from_system_function_call(
     )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
+        "$unpacked_dimensions" => dimensions::unpacked_dimensions_call_value(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+        .map(|count| Expr::Literal(count.to_string()))
+        .ok_or_else(operand_error),
         // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
         "$bits" | "$size" => dimensions::size_system_function_call_type(
             call,

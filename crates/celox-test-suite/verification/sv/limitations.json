@@ -126,7 +126,8 @@
     ],
     "cases": {
       "icarus": [
-        "procedural::aggregate_parameters_are_constant_tables"
+        "procedural::aggregate_parameters_are_constant_tables",
+        "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes"
       ]
     }
   },
@@ -576,6 +577,40 @@
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_partial_array",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_preserves_selection_and_return_types"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_element",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_is_independent_of_unknown_values"
       ]
     }
   }
