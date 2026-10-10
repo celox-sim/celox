@@ -10,6 +10,7 @@
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::{
+    borrow::Cow,
     cell::RefCell,
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -1112,8 +1113,15 @@ impl Parameter {
     ) -> Option<Expr> {
         // A previous elaboration pass may have left this declaration's numeric
         // value in the environment. Evaluate its initializer, not that value.
-        let mut evaluation_constants = constants.clone();
-        evaluation_constants.remove(self.name());
+        let evaluation_constants = if constants.contains_key(self.name()) {
+            #[cfg(test)]
+            parameters::LITERAL_ENV_COPIES.with(|copies| copies.set(copies.get() + 1));
+            let mut masked = constants.clone();
+            masked.remove(self.name());
+            Cow::Owned(masked)
+        } else {
+            Cow::Borrowed(constants)
+        };
         let mut parameter = self.clone();
         parameter.value = self.value.clone().map(|value| {
             substitute_typed_parameter_literals(value, &evaluation_constants, parameter_types)

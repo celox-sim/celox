@@ -68,6 +68,10 @@ pub(super) struct ParameterEnvironment<'a> {
     values: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
+    // Only a nonnumeric prefix binding with an inherited numeric value makes
+    // the range-lowering and width-evaluation projections differ. Track that
+    // conservatively as the prefix grows, without rescanning its literals.
+    has_inherited_literal_shadow: bool,
     // Numeric environments cannot represent X/Z. Keep resolved literals for
     // evaluating later declarations without dropping their state bits.
     literals: HashMap<String, Expr>,
@@ -83,6 +87,9 @@ impl<'a> ParameterEnvironment<'a> {
         }
         let mut constants = base.clone();
         constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
+        let has_inherited_literal_shadow = literals
+            .keys()
+            .any(|name| !values.contains_key(name) && base.contains_key(name));
         for name in literals.keys() {
             if !values.contains_key(name) {
                 constants.remove(name);
@@ -93,6 +100,7 @@ impl<'a> ParameterEnvironment<'a> {
             values,
             types,
             constants,
+            has_inherited_literal_shadow,
             literals,
         }
     }
@@ -109,6 +117,7 @@ impl<'a> ParameterEnvironment<'a> {
         let name = parameter.name();
         if self.literals.contains_key(name) && !self.values.contains_key(name) {
             self.constants.remove(name);
+            self.has_inherited_literal_shadow |= self.base.contains_key(name);
         }
         let mut keys = vec![
             name.to_string(),
@@ -314,11 +323,12 @@ fn parameter_declared_width(
             .map(|ty| ty.width)
             .or_else(|| unwrap_node!(node, IntegerVectorType).is_some().then_some(1));
     }
-    // With the same immutable base and a numeric-only prefix, both former
-    // copies have exactly the contents of `constants`. A pure type header has
-    // no sibling assignments to seed or self-values to mask.
+    // With the same immutable base and no inherited numeric value shadowed
+    // by a nonnumeric literal, both former copies have exactly the contents
+    // of `constants`. A pure type header has no sibling assignments to seed
+    // or self-values to mask.
     if std::ptr::eq(environment.base, base_const_env)
-        && environment.literals.is_empty()
+        && !environment.has_inherited_literal_shadow
         && !node
             .clone()
             .into_iter()
@@ -1249,6 +1259,7 @@ pub(super) fn infer_parameter_value_type(
 thread_local! {
     static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static LITERAL_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
