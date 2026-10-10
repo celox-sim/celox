@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 /// The module that instantiates the top with a rejection case's parameters.
 const PARAMETERS_TOP: &str = "celox_suite_parameters";
 
+/// The time scale every compiled source gets: a script time unit is 1 ns,
+/// and the generated testbench settles in 1 ps steps between them. The
+/// directive persists across the files that follow it in one compilation.
+const TIMESCALE: &str = "`timescale 1ns/1ps\n";
+
 /// A design translated to SystemVerilog for an external simulator.
 pub struct PreparedDesign {
     /// SystemVerilog sources to compile, in order.
@@ -63,7 +68,9 @@ pub(crate) fn stage(
     let prepared =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
-    let mut paths = Vec::new();
+    let timescale = directory.join("timescale.sv");
+    write_if_changed(&timescale, TIMESCALE.as_bytes())?;
+    let mut paths = vec![timescale];
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
         write_if_changed(&path, source.as_bytes())?;

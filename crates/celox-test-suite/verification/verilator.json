@@ -9387,6 +9387,7 @@
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
   "schema_version": 3,
+  "suite": "veryl",
   "suite_version": "0.10.1",
   "tool": "verilator",
   "version": "Verilator 5.052 2026-09-05 rev v5.052"

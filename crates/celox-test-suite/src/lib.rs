@@ -233,6 +233,7 @@ impl script::ScriptCase {
             top: self.top.clone(),
             four_state: self.four_state,
             parameters: self.parameters.clone(),
+            timed: self.is_timed(),
         }
     }
 }

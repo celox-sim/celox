@@ -123,6 +123,8 @@ mod suite;
 mod synthesizable;
 #[path = "frontends/systemverilog/system_functions.rs"]
 mod system_functions;
+#[path = "frontends/systemverilog/timing.rs"]
+mod timing;
 #[path = "frontends/systemverilog/types.rs"]
 mod types;
 
