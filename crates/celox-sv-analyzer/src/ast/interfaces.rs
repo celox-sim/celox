@@ -840,9 +840,14 @@ impl<'a> Design<'a> {
                             if let RefNode::Identifier(identifier) = node {
                                 let span = file.span(RefNode::Identifier(identifier))?;
                                 // A qualified name does not resolve to the
-                                // compilation unit.
-                                if matches!(file.previous_token(span.0), Some("." | "::"))
-                                    || file.next_token(span.1) == Some("::")
+                                // compilation unit, unless `$unit::` names it.
+                                let unit_scope = file.code[..span.0]
+                                    .trim_end()
+                                    .strip_suffix("::")
+                                    .is_some_and(|before| before.trim_end().ends_with("$unit"));
+                                if !unit_scope
+                                    && (matches!(file.previous_token(span.0), Some("." | "::"))
+                                        || file.next_token(span.1) == Some("::"))
                                 {
                                     continue;
                                 }

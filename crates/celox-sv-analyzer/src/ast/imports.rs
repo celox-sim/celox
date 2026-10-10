@@ -767,6 +767,25 @@ pub(super) fn resolve_imports(
     // declares nor imports is looked up among the unit's items declared
     // before it, and then through the unit's imports before it.
     if let Some(unit) = unit {
+        // Explicit imports of one name into the unit must import one
+        // declaration, whether or not the module uses it (IEEE 1800-2023
+        // 26.3).
+        let mut explicit: HashMap<&String, String> = HashMap::default();
+        for (_, package_name, item) in &unit.visibility.imports {
+            let Some(name) = item else {
+                continue;
+            };
+            let target = provided(package_name, name)?;
+            if let Some(known) = explicit.get(name)
+                && *known != target
+            {
+                return Err(AnalyzerError::ImportConflict {
+                    name: name.clone(),
+                    detail: format!("explicitly imported as both `{known}` and `{target}`"),
+                });
+            }
+            explicit.insert(name, target);
+        }
         let unit_imports: Vec<_> = unit
             .visibility
             .imports

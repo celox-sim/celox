@@ -1163,6 +1163,23 @@ fn const_expr_from_function_subroutine_call(
                     .and_then(expr_to_const),
             );
         }
+        // `$unit::x` names an item of the compilation unit.
+        sv_parser::SubroutineCall::TfCall(tf_call)
+            if RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0)
+                .into_iter()
+                .any(|node| {
+                    matches!(
+                        node,
+                        RefNode::PackageScope(sv_parser::PackageScope::Unit(_))
+                    )
+                }) =>
+        {
+            return Ok(reference_name(
+                RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
+                syntax_tree,
+            )
+            .map(ConstExpr::Ident));
+        }
         _ => return Ok(None),
     };
     let (name, args) = some!(system_tf_call_parts(system_call, syntax_tree));

@@ -236,3 +236,41 @@ fn unit_imports_conflict_and_stay_in_their_scope() {
         .is_err()
     );
 }
+
+/// Review cases: unit import conflicts without a reference, `$unit::` in a
+/// parameter override, and interfaces that name unit items.
+#[test]
+fn unit_conflicts_overrides_and_interfaces() {
+    let detail = error(&[(
+        "package p; localparam int X = 3; endpackage
+         package q; localparam int X = 5; endpackage
+         import p::X; import q::X;
+         module Top(output logic [7:0] y); assign y = 0; endmodule",
+        "unit.sv",
+    )]);
+    assert!(detail.contains("`X`"), "{detail}");
+    assert_eq!(
+        output(
+            "localparam int W = 6;
+             module Child #(parameter int N = 1) (output logic [7:0] v); assign v = N; endmodule
+             module Top(output logic [7:0] y); Child #(.N($unit::W)) c(.v(y)); endmodule"
+        ),
+        6
+    );
+    let error = build(&[
+        (
+            "localparam int W = 2;
+             interface I; logic [$unit::W-1:0] v; endinterface",
+            "a.sv",
+        ),
+        (
+            "module Top(output logic [7:0] y); I i(); assign i.v = 1; assign y = i.v; endmodule",
+            "b.sv",
+        ),
+    ])
+    .expect_err("the interface names an item of another file's unit");
+    assert!(
+        error.to_string().contains("compilation-unit item"),
+        "{error}"
+    );
+}
