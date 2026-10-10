@@ -9,7 +9,7 @@
     "unexpected_accept": 0,
     "mismatch": 9,
     "emission_error": 0,
-    "compile_error": 7,
+    "compile_error": 13,
     "runtime_error": 1,
     "unsupported": 0,
     "ignored": 0
@@ -119,6 +119,50 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:10:22: Unsupported: Unbounded ('$') outside of queue or string operations\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   10 |       Child #(.LIMIT($)) c(.result(explicit_dollar));\n      |                      ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: <case>/source_0.sv:10:16: Can't convert defparam value to constant: Param 'LIMIT' of 'c'\n                                : ... note: In instance 'celox_suite_tb.dut'\n   10 |       Child #(.LIMIT($)) c(.result(explicit_dollar));\n      |                ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error-UNSUPPORTED: <case>/source_0.sv:7:25: Unsupported: Unbounded ('$') outside of queue or string operations\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    7 |       parameter int U = $;\n      |                         ^\n%Error: <case>/source_0.sv:11:16: Can't convert defparam value to constant: Param 'LIMIT' of 'd'\n                                : ... note: In instance 'celox_suite_tb.dut'\n   11 |       Child #(.LIMIT(U)) d(.result(forwarded));\n      |                ^~~~~\n%Error: Exiting due to 4 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:7:26: ../V3EmitCConstInit.h:110: Unknown node type reached EmitCConstInit: ISUNBOUNDED\n    7 |       localparam QUERY = $isunbounded(ARRAY);\n      |                          ^~~~~~~~~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:8:28: Operator VAR 'P' expects 1 bits on the Initial value, but Initial value's UNBOUNDED generates 32 bits.\n                                            : ... note: In instance 'celox_suite_tb.dut'\n    8 |           localparam logic P = $;\n      |                            ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-UNSUPPORTED: <case>/source_0.sv:8:32: Unsupported: Unbounded ('$') outside of queue or string operations\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    8 |           localparam logic P = $;\n      |                                ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_restores_procedural_parameter_bindings",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:6:28: Operator VAR 'P' expects 1 bits on the Initial value, but Initial value's UNBOUNDED generates 32 bits.\n                                            : ... note: In instance 'celox_suite_tb.dut'\n    6 |           localparam logic P = $;\n      |                            ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-UNSUPPORTED: <case>/source_0.sv:6:32: Unsupported: Unbounded ('$') outside of queue or string operations\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    6 |           localparam logic P = $;\n      |                                ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::isunbounded_restores_shadowed_function_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-TIMESCALEMOD: <case>/testbench.sv:3:8: Timescale missing on this module as other modules have it (IEEE 1800-2023 3.14.2.3)\n    3 | module celox_suite_tb;\n      |        ^~~~~~~~~~~~~~\n                       <case>/source_0.sv:2:12: ... Location of module with timescale\n    2 |     module Top(output logic ok);\n      |            ^~~\n                       ... For warning description see https://verilator.org/warn/TIMESCALEMOD?v=5.052\n                       ... Use \"/* verilator lint_off TIMESCALEMOD */\" and lint_on around source to disable this message.\n%Error: <case>/source_0.sv:5:26: Expecting expression to be constant, but can't convert a TIMEPRECISION to constant.\n                               : ... note: In instance 'celox_suite_tb.dut'\n    5 |       localparam int P = $timeprecision;\n      |                          ^~~~~~~~~~~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
       "expectation": "Simulation",
       "name": "system_functions::timescale_queries_are_constant_in_unqualified_calls",
@@ -168,6 +212,28 @@
       "name": "system_functions::timescale_queries_resolve_directives_and_hierarchy",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:21:28: syntax error, unexpected ')', expecting ::\n   21 |         && ($timeunit($unit) == -9) && ($timeprecision($unit) == -12)\n      |                            ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_accept_separate_initial_declarations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-MODDUP: <case>/source_0.sv:3:13: Duplicate declaration of package: 'P'\n    3 |     package P;\n      |             ^\n                 <case>/source_0.sv:2:12: ... Location of original declaration\n    2 |     module P(); timeunit 1us / 1ns; endmodule\n      |            ^\n                 ... For warning description see https://verilator.org/warn/MODDUP?v=5.052\n                 ... Use \"/* verilator lint_off MODDUP */\" and lint_on around source to disable this message.\n%Warning-MODDUP: <case>/source_0.sv:13:12: Duplicate declaration of module: 'Q'\n   13 |     module Q(); timeunit 10ns / 1ps; endmodule\n      |            ^\n                 <case>/source_0.sv:8:13: ... Location of original declaration\n    8 |     package Q;\n      |             ^\n%Warning-TIMESCALEMOD: <case>/testbench.sv:3:8: Timescale missing on this module as other modules have it (IEEE 1800-2023 3.14.2.3)\n    3 | module celox_suite_tb;\n      |        ^~~~~~~~~~~~~~\n                       <case>/source_0.sv:2:12: ... Location of module with timescale\n    2 |     module P(); timeunit 1us / 1ns; endmodule\n      |            ^\n                       ... For warning description see https://verilator.org/warn/TIMESCALEMOD?v=5.052\n                       ... Use \"/* verilator lint_off TIMESCALEMOD */\" and lint_on around source to disable this message.\n%Error: <case>/source_0.sv:19:13: Package/class for ':: reference' not found: 'P'\n   19 |         && (P::unit_value() == -7) && (P::precision_value() == -11)\n      |             ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:19:40: Package/class for ':: reference' not found: 'P'\n   19 |         && (P::unit_value() == -7) && (P::precision_value() == -11)\n      |                                        ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_keep_module_and_package_names_independent",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

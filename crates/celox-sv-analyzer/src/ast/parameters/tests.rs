@@ -543,7 +543,8 @@ fn copied_resolved_literal(
 
 #[test]
 fn borrowed_literal_environment_matches_self_masked_copy_with_types_and_unknowns() {
-    let mut constants = HashMap::from_iter([("A".into(), -2)]);
+    let mut constants =
+        HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
         &mut constants,
         "A",
@@ -671,7 +672,8 @@ fn separately_resolved_value_and_literal(
 
 #[test]
 fn retained_parameter_literals_match_separate_resolution_across_types_and_dependencies() {
-    let mut constants = HashMap::from_iter([("A".into(), -2)]);
+    let mut constants =
+        HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
         &mut constants,
         "A",
@@ -683,6 +685,8 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
     let types = parameter_types_from_const_env(&constants);
     let literals = HashMap::from_iter([("X".into(), Expr::Literal("8'b10xz0011".into()))]);
     let values = [
+        ConstExpr::Literal("$".into()),
+        ConstExpr::Ident("U".into()),
         ConstExpr::Literal("-1".into()),
         ConstExpr::Literal("'x".into()),
         ConstExpr::Literal("129'h1ffffffffffffffffffffffffffffffff".into()),
@@ -929,4 +933,64 @@ fn compare_retained_and_repeated_parameter_resolution() {
             samples[0][3], samples[1][3], calls[0], calls[1]
         );
     }
+}
+
+#[test]
+fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
+    let mut env = HashMap::default();
+    let mut types = HashMap::default();
+    let mut literals = HashMap::default();
+    for value in ["7", "$"] {
+        let parameter = Parameter::new(
+            "P".into(),
+            Some(ConstExpr::Literal(value.into())),
+            Some(8),
+            Some(false),
+            false,
+            true,
+            false,
+        );
+        assert!(bind_parameter(
+            &mut env,
+            &mut types,
+            &mut literals,
+            &parameter
+        ));
+        assert_eq!(env.get(&parameter_rank_marker("P")), Some(&1));
+        assert_eq!(types["P"].width, 8);
+    }
+    assert!(!env.contains_key("P"));
+    assert!(!env.contains_key(&parameter_marker("P")));
+    assert_eq!(env.get(&unbounded_parameter_marker("P")), Some(&1));
+    assert_eq!(literals["P"], Expr::Literal("$".into()));
+}
+
+#[test]
+fn unbounded_generate_binding_clears_inherited_numeric_values() {
+    let parameter = Parameter::new(
+        "P".into(),
+        Some(ConstExpr::Literal("$".into())),
+        Some(32),
+        Some(true),
+        true,
+        true,
+        true,
+    );
+    let mut env = HashMap::from_iter([
+        ("P".into(), 7),
+        (parameter_marker("P"), 7),
+        (local_parameter_marker("P"), 7),
+        (unbounded_parameter_marker("P"), 0),
+    ]);
+    let mut literals = HashMap::default();
+    bind_generate_parameter(parameter, &mut env, &mut literals);
+    assert_eq!(env.get(&unbounded_parameter_marker("P")), Some(&1));
+    for key in [
+        "P".to_string(),
+        parameter_marker("P"),
+        local_parameter_marker("P"),
+    ] {
+        assert!(!env.contains_key(&key), "numeric binding survives: {key}");
+    }
+    assert_eq!(literals.get("P"), Some(&Expr::Literal("$".into())));
 }

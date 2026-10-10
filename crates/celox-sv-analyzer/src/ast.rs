@@ -47,6 +47,7 @@ pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
 mod scope;
@@ -523,6 +524,19 @@ impl Module {
         )));
         extend_const_env_with_parameters(&mut const_env, &parameters);
 
+        let mut array_parameters = array_parameters::array_parameters_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for parameter in &array_parameters {
+            const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+
         match reject_silently_ignored_constructs(
             node.clone(),
             syntax_tree,
@@ -576,6 +590,12 @@ impl Module {
                 extend_const_env_with_parameters(&mut const_env, &parameters);
                 type_aliases =
                     type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+                array_parameters = array_parameters::array_parameters_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &type_aliases,
+                )?;
                 reject_silently_ignored_constructs(
                     node.clone(),
                     syntax_tree,
@@ -603,12 +623,6 @@ impl Module {
         }
         let mut signals =
             signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
-        let array_parameters = array_parameters::array_parameters_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
         signals.extend(
             array_parameters
                 .iter()
@@ -1203,6 +1217,12 @@ impl Parameter {
     ) -> Option<Expr> {
         #[cfg(test)]
         parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
+        if self
+            .value()
+            .is_some_and(|value| parameters::is_unbounded(value, constants))
+        {
+            return Some(Expr::Literal("$".into()));
+        }
         // A previous elaboration pass may have left this declaration's numeric
         // value in the environment. Evaluate its initializer, not that value.
         let evaluation_constants = if constants.contains_key(self.name()) {

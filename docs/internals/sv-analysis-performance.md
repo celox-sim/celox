@@ -683,6 +683,76 @@ remains expensive. Numeric and ranged modes also pass at 32/128/512 with IR
 value/width assertions. This step reduces repeated resolution rather than removing
 the remaining preliminary declaration walks or establishing universal linearity.
 
+## Borrowed constant-function environments
+
+A constant-function call previously copied every visible numeric binding and
+rebuilt the complete parameter type table. Calls now borrow the caller's
+value environment and own only their formal arguments, local variables,
+return variable, and typed temporaries. Width and signedness markers are
+queried for referenced names. Nested calls borrow the preceding frame, retaining
+its value precedence without copying its contents. Public evaluator signatures
+still accept the existing maps.
+
+The literal evaluator now checks whether it supports a function before calling
+it. Previously it executed user functions with an empty environment, discarded
+the result because their literal return types were unsupported, and then retried
+through numeric evaluation. In a recursive expression that repeated work could
+multiply at each level. An internal regression verifies that a 12-level recursion
+executes 13 calls and that exceeding the depth limit executes only 64 calls.
+Unsupported literal evaluation executes no user calls. Existing width, signedness,
+local shadowing, selected assignments, symbolic argument widths, unresolved values,
+and depth restoration are checked against the former copied frame initialization.
+
+A counted environment verifies identical lookup counts with 16, 256, and 4,096
+unrelated bindings, including nested calls. A paired manual probe compares the
+former initialization with the borrowed frame in one optimized process. Each row
+executes as many leaf calls as unrelated parameters, reads the same signed global,
+and checks every result. Seven repetitions alternate the two orders; times are
+medians and have no pass/fail threshold:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_borrowed_and_copied_function_environments -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Copied frame (ms) | Borrowed frame (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.292 | 0.029 |
+| 128 | 128 | 3.273 | 0.082 |
+| 512 | 512 | 53.946 | 0.305 |
+| 2,048 | 2,048 | 2,241.757 | 1.944 |
+
+This isolates frame initialization and evaluation; parsing, declaration discovery,
+and backend compilation are excluded. With a fixed body and bounded call depth,
+frame setup no longer performs work proportional to unrelated bindings.
+
+The standalone probe also supports a chain of `next_value(P_previous)` parameter
+initializers and checks the final IR value:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+Separate three-sample medians comparing `21eb07cf3` with this change were:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 4.382 / 4.926 | 26.663 / 16.563 | 0.152 / 0.084 |
+| 128 | 21.416 / 16.421 | 232.298 / 121.052 | 0.887 / 0.372 |
+| 512 | 56.719 / 51.676 | 2,652.147 / 1,170.084 | 5.608 / 0.957 |
+
+These samples show lower costs for this workload, with shared-machine timing
+variation. Whole AST lowering still scales nonlinearly: other collectors repeatedly
+resolve parameter prefixes. Removing per-call copies and speculative recursive
+execution does not eliminate those repeated bindings or establish universal
+linear scaling. Borrowed value lookup traverses enclosing frames, bounded by the
+existing depth limit; expressions, locals, temporaries, and loop iterations still
+contribute to evaluation cost. The debug AST probe at 256 parameters also
+exceeds a default Rust test thread's stack on the baseline commit; its regression
+uses an 8 MiB thread stack. The optimized standalone probe passes at 512. This
+change does not remove the existing stack use in recursive parameter substitution.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -744,3 +814,69 @@ cargo test --locked -p celox-test-suite --features verilator,icarus
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-verilator -- --filter generate::size_queries_use_generate_local_parameter_types
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-icarus -- --filter generate::size_queries_use_generate_local_parameter_types
 ```
+
+## Constant-call argument contexts
+
+Lowering each user-function parameter initializer used to construct a
+`PackedDimensions` context by cloning every visible numeric binding and alias.
+Profiling a 512-parameter `next_value(P_previous)` chain with the borrowed-frame
+optimization applied attributed about 20% of samples directly to the numeric
+map clone in this constructor; allocation and copying also contributed.
+A counted diagnostic run at 16/64/256 parameters executed 18N function calls.
+The call count itself is linear; repeating collection passes alone does not
+explain the nonlinear timings. Per-call environment copies and early unresolved
+parameter-expression expansion remain distinct sources of growing costs.
+
+Constant-call lowering now classifies the operands before constructing that
+context. Literals, bare identifiers, unary/binary expressions, parentheses, and
+nested user calls with those operands use an empty context, because their
+expression-lowering branches do not consult declaration metadata. Parameter
+types are still substituted during evaluation. Selections, casts, system calls,
+patterns, conditional expressions, named arguments, and omitted arguments retain
+the complete contextual path. An empty argument list retains its existing meaning.
+
+The owning-crate regression compares the resulting constant expressions against
+the former full-context path with 4,096 unrelated bindings, including signed
+parameters, symbolic cast widths, typedef casts, selected operands, size queries,
+zero divisions, nested calls, and unsupported argument forms. At 16/64/256
+parameters, a source-to-IR arithmetic argument chain verifies every value and
+zero context copies. The large debug probe uses an 8 MiB thread stack for the
+existing recursive parameter substitution, as in the earlier standalone probe.
+
+A manual paired probe alternates old/new order over seven repetitions in one
+optimized process. It converts and checks the same scalar call once per
+unrelated parameter, excluding source parsing and function-body execution:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_lazy_and_copied_scalar_call_contexts -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Full context (ms) | Classified context (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.153 | 0.085 |
+| 128 | 128 | 1.702 | 0.384 |
+| 512 | 512 | 23.827 | 1.473 |
+| 2,048 | 2,048 | 408.296 | 5.962 |
+
+The standalone source probe supports constant-function parameter chains:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+These separate three-sample medians compare master `281f7bd9c` with the classified
+context change, independently of the borrowed-frame optimization:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 5.272 / 5.431 | 19.841 / 22.680 | 0.171 / 0.246 |
+| 128 | 14.900 / 20.624 | 181.059 / 158.147 | 0.575 / 0.645 |
+| 512 | 49.174 / 53.607 | 2,699.106 / 1,720.513 | 5.114 / 5.489 |
+
+Shared-machine timing varies, and the smallest sample became slower. Operand
+classification and its lowering now avoid work proportional to unrelated
+bindings for the accepted forms. Whole AST lowering still scales nonlinearly;
+this change does not eliminate full-context work for other operands, function
+frame copies, preliminary declaration walks, or expanded unresolved expressions.

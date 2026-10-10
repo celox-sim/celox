@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
+    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
+
     fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
         @setup {
             let source = r#"
@@ -33,6 +36,17 @@ sv_backends! {
     fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
     fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
 
+    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
+    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
+    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
+    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
+    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
+    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
+    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
+    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
+    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
+    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
     fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
     fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
     fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }

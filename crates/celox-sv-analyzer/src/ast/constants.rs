@@ -100,6 +100,18 @@ pub(super) fn bind_generate_parameter_with_types(
     parameter_literals: &mut HashMap<String, Expr>,
     parameter_types: &mut HashMap<String, ExprType>,
 ) {
+    let unbounded = parameter
+        .value()
+        .is_some_and(|value| parameters::is_unbounded(value, const_env));
+    if unbounded {
+        const_env.remove(parameter.name());
+        const_env.remove(&parameter_marker(parameter.name()));
+        const_env.remove(&local_parameter_marker(parameter.name()));
+    }
+    const_env.insert(
+        parameters::unbounded_parameter_marker(parameter.name()),
+        i128::from(unbounded),
+    );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
         parameter.resolved_value_and_literal(const_env, parameter_types, parameter_literals);
@@ -584,6 +596,7 @@ fn const_expr_from_primary(
     syntax_tree: &SyntaxTree,
 ) -> Converted<Option<ConstExpr>> {
     match primary {
+        sv_parser::Primary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         sv_parser::Primary::PrimaryLiteral(_) => Ok(primary_literal_text(
             RefNode::Primary(primary),
             syntax_tree,
@@ -838,6 +851,7 @@ pub(super) fn const_expr_from_constant_param_with_env(
             }
             sv_parser::ConstantMintypmaxExpression::Ternary(_) => Ok(None),
         },
+        sv_parser::ConstantParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         _ => Ok(None),
     }
 }
@@ -853,7 +867,8 @@ pub(super) fn const_expr_from_param_expression(
             }
             sv_parser::MintypmaxExpression::Ternary(_) => Ok(None),
         },
-        sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => Ok(None),
+        sv_parser::ParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
+        sv_parser::ParamExpression::DataType(_) => Ok(None),
     }
 }
 
@@ -927,6 +942,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
             sv_parser::ConstantExpression::Inside(_) => Ok(None),
         },
         RefNode::ConstantPrimary(primary) => match primary {
+            sv_parser::ConstantPrimary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
             sv_parser::ConstantPrimary::PrimaryLiteral(_) => {
                 Ok(primary_literal_text(node, syntax_tree).map(ConstExpr::Literal))
             }
@@ -970,6 +986,22 @@ pub(super) fn const_expr_from_ref_node_with_env(
                             true,
                         ))));
                     }
+                    parameters::reject_unbounded_data_query(
+                        system_call,
+                        syntax_tree,
+                        const_env,
+                        false,
+                    )?;
+                    if name == "$isunbounded" {
+                        // Imported aliases may not be bound in preliminary
+                        // collection. Retain the query for later resolution,
+                        // including its one-bit type for dependent queries.
+                        return const_expr_from_function_subroutine_call(
+                            &call.nodes.0,
+                            syntax_tree,
+                            const_env,
+                        );
+                    }
                     if name == "$dimensions"
                         && let Some(count) = dimensions::dimensions_system_function_call_value(
                             system_call,
@@ -1000,10 +1032,20 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         .and_then(expr_to_const));
                     }
                 }
-                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
+                if let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0
+                    && tf_call.nodes.2.is_some()
                 {
-                    let dimensions =
-                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    // Plain scalar operands do not read declaration metadata
+                    // while lowering. Their types are substituted later during
+                    // parameter evaluation; avoid copying the whole environment
+                    // for every initializer in a growing declaration prefix.
+                    let dimensions = if call_arguments_are_context_free(tf_call) {
+                        PackedDimensions::default()
+                    } else {
+                        #[cfg(test)]
+                        CALL_CONTEXT_COPIES.with(|count| count.set(count.get() + 1));
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases)
+                    };
                     return Ok(expr_from_function_subroutine_call(
                         &call.nodes.0,
                         syntax_tree,
@@ -1106,6 +1148,69 @@ fn const_expr_from_constant_expression_ternary_with_env(
     }))
 }
 
+/// These operands follow only expression-lowering branches that do not read
+/// `PackedDimensions`. Keep selections, casts, system calls, and patterns on
+/// the contextual path so their ranges, aliases, and parameter types survive.
+fn call_arguments_are_context_free(call: &sv_parser::TfCall) -> bool {
+    let Some(paren) = &call.nodes.2 else {
+        return false;
+    };
+    let sv_parser::ListOfArguments::Ordered(args) = &paren.nodes.1 else {
+        return false;
+    };
+    let args = args.nodes.0.contents();
+    // The parser represents `f()` as one omitted argument.
+    if args.len() == 1 && args[0].is_none() {
+        return true;
+    }
+    args.iter()
+        .all(|arg| arg.as_ref().is_some_and(context_free_expression))
+}
+
+fn context_free_expression(expr: &sv_parser::Expression) -> bool {
+    match expr {
+        sv_parser::Expression::Primary(primary) => context_free_primary(primary),
+        sv_parser::Expression::Unary(unary) => context_free_primary(&unary.nodes.2),
+        sv_parser::Expression::Binary(binary) => {
+            context_free_expression(&binary.nodes.0) && context_free_expression(&binary.nodes.3)
+        }
+        _ => false,
+    }
+}
+
+fn context_free_primary(primary: &sv_parser::Primary) -> bool {
+    match primary {
+        sv_parser::Primary::PrimaryLiteral(_) => true,
+        sv_parser::Primary::Hierarchical(primary) => {
+            let select = &primary.nodes.2;
+            select.nodes.0.is_none()
+                && select.nodes.1.nodes.0.is_empty()
+                && select.nodes.2.is_none()
+                && !packed_structs::has_member_access(
+                    RefNode::HierarchicalIdentifier(&primary.nodes.1),
+                    RefNode::Select(select),
+                )
+        }
+        sv_parser::Primary::MintypmaxExpression(primary) => match &primary.nodes.0.nodes.1 {
+            sv_parser::MintypmaxExpression::Expression(expr) => context_free_expression(expr),
+            sv_parser::MintypmaxExpression::Ternary(_) => false,
+        },
+        sv_parser::Primary::FunctionSubroutineCall(call) => match &call.nodes.0 {
+            sv_parser::SubroutineCall::TfCall(call) => call_arguments_are_context_free(call),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALL_CONTEXT_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;
+
 fn const_select_expr(
     base: ConstExpr,
     select: &sv_parser::ConstantSelect,
@@ -1195,6 +1300,16 @@ fn const_expr_from_function_subroutine_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    if name == "$isunbounded" {
+        if let Some(value) = parameters::isunbounded_call(system_call, syntax_tree, const_env)? {
+            return Ok(Some(value));
+        }
+        let argument = expressions::single_expression_argument(system_call).unwrap();
+        return Ok(Some(ConstExpr::call(
+            name.into(),
+            vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
+        )));
+    }
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };

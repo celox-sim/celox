@@ -581,11 +581,25 @@ fn expr_from_system_function_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    parameters::reject_unbounded_data_query(
+        call,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        packed_dimensions.scope_types_complete,
+    )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
         "$timeunit" | "$timeprecision" => timescales::query(call, syntax_tree).map(|value| {
             Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))
         }),
+        "$isunbounded" => {
+            parameters::isunbounded_call(call, syntax_tree, &packed_dimensions.const_env)?
+                .map(const_expr_to_expr)
+                .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                })
+        }
         "$dimensions" => dimensions::dimensions_system_function_call_value(
             call,
             syntax_tree,
@@ -678,7 +692,9 @@ fn expr_from_system_function_call(
 }
 
 /// The one expression argument of a system function call such as `$clog2(x)`.
-fn single_expression_argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
+pub(super) fn single_expression_argument(
+    call: &sv_parser::SystemTfCall,
+) -> Option<&sv_parser::Expression> {
     let sv_parser::SystemTfCall::ArgExpression(call) = call else {
         return None;
     };

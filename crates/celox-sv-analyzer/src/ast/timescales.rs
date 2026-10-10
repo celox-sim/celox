@@ -14,13 +14,21 @@ struct Scale {
     precision: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeKind {
+    Definition,
+    Package,
+}
+
 #[derive(Debug, Clone)]
 struct Scope {
     name: String,
+    kind: ScopeKind,
     start: usize,
     end: usize,
     scale: Scale,
-    first_declaration: Option<usize>,
+    time_items_end: usize,
+    specified: (bool, bool),
     instances: HashMap<String, String>,
 }
 
@@ -35,7 +43,8 @@ pub(super) struct Timescales {
     // Identical preprocessed text has identical scope offsets. Content keys
     // remain valid when ParsedSource values move or their trees are dropped.
     units: HashMap<String, Unit>,
-    scopes: HashMap<String, Scope>,
+    definitions: HashMap<String, Scope>,
+    packages: HashMap<String, Scope>,
     precision: Option<i32>,
     instantiated: HashSet<String>,
 }
@@ -165,52 +174,119 @@ fn merge(
     Ok(())
 }
 
+/// Only direct time declarations and compiler directives leave the initial
+/// time-declaration region open. Nested declarations never extend that region.
+fn time_item(node: &RefNode<'_>) -> bool {
+    use sv_parser::{
+        InterfaceItem, ModuleItem, NonPortInterfaceItem, NonPortModuleItem, NonPortProgramItem,
+        PackageItem, ProgramItem,
+    };
+    match node {
+        RefNode::NonPortModuleItem(NonPortModuleItem::TimeunitsDeclaration(_))
+        | RefNode::NonPortInterfaceItem(NonPortInterfaceItem::TimeunitsDeclaration(_))
+        | RefNode::NonPortProgramItem(NonPortProgramItem::TimeunitsDeclaration(_))
+        | RefNode::PackageItem(PackageItem::TimeunitsDeclaration(_))
+        | RefNode::Description(sv_parser::Description::ResetallCompilerDirective(_)) => true,
+        RefNode::ModuleItem(ModuleItem::NonPortModuleItem(item)) => {
+            matches!(&**item, NonPortModuleItem::TimeunitsDeclaration(_))
+        }
+        RefNode::InterfaceItem(InterfaceItem::NonPortInterfaceItem(item)) => {
+            matches!(&**item, NonPortInterfaceItem::TimeunitsDeclaration(_))
+        }
+        RefNode::ProgramItem(ProgramItem::NonPortProgramItem(item)) => {
+            matches!(&**item, NonPortProgramItem::TimeunitsDeclaration(_))
+        }
+        RefNode::Description(sv_parser::Description::PackageItem(item)) => {
+            matches!(item.nodes.1, PackageItem::TimeunitsDeclaration(_))
+        }
+        _ => false,
+    }
+}
+
 fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
-    let (name, end, declaration) = match &node {
+    let kind = if matches!(node, RefNode::PackageDeclaration(_)) {
+        ScopeKind::Package
+    } else {
+        ScopeKind::Definition
+    };
+    let (name, end, items) = match &node {
         RefNode::ModuleDeclarationAnsi(v) => (
             identifier_text(RefNode::ModuleIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::NonPortModuleItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::ModuleDeclarationNonansi(v) => (
             identifier_text(RefNode::ModuleIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::ModuleItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::InterfaceDeclarationAnsi(v) => (
             identifier_text(RefNode::InterfaceIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::NonPortInterfaceItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::InterfaceDeclarationNonansi(v) => (
             identifier_text(RefNode::InterfaceIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::InterfaceItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::ProgramDeclarationAnsi(v) => (
             identifier_text(RefNode::ProgramIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::NonPortProgramItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::ProgramDeclarationNonansi(v) => (
             identifier_text(RefNode::ProgramIdentifier(&v.nodes.0.nodes.3), tree)?,
             v.nodes.3.nodes.0.offset,
-            v.nodes.1.as_ref(),
+            v.nodes
+                .2
+                .iter()
+                .map(RefNode::ProgramItem)
+                .collect::<Vec<_>>(),
         ),
         RefNode::PackageDeclaration(v) => (
             identifier_text(RefNode::PackageIdentifier(&v.nodes.3), tree)?,
             v.nodes.7.nodes.0.offset,
-            v.nodes.5.as_ref(),
+            v.nodes
+                .6
+                .iter()
+                .map(|(_, item)| RefNode::PackageItem(item))
+                .collect::<Vec<_>>(),
         ),
         _ => return None,
     };
     Some(Scope {
         name,
+        kind,
         start: offset(node)?,
         end,
         scale: DEFAULT,
-        first_declaration: declaration
-            .and_then(|value| offset(RefNode::TimeunitsDeclaration(value))),
+        time_items_end: items
+            .into_iter()
+            .find(|item| !time_item(item))
+            .and_then(offset)
+            .unwrap_or(end),
+        specified: (false, false),
         instances: HashMap::default(),
     })
 }
@@ -218,6 +294,9 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
 impl Timescales {
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
         let mut design = Self::default();
+        // Each bit records whether a design element uses a default (1) or an
+        // explicit/inherited setting (2), independently for unit and precision.
+        let mut specified = [0u8; 2];
         for (tree, _) in trees {
             let mut scopes: Vec<_> = tree
                 .into_iter()
@@ -226,14 +305,19 @@ impl Timescales {
             scopes.sort_by_key(|s| s.start);
             let mut declarations = vec![(None, None); scopes.len()];
             let mut unit_decl = (None, None);
-            let unit_first = tree.into_iter().find_map(|node| match node {
-                RefNode::SourceText(source) => source
-                    .nodes
-                    .1
-                    .as_ref()
-                    .and_then(|value| offset(RefNode::TimeunitsDeclaration(value))),
-                _ => None,
-            });
+            let unit_time_items_end = tree
+                .into_iter()
+                .find_map(|node| match node {
+                    RefNode::SourceText(source) => source
+                        .nodes
+                        .2
+                        .iter()
+                        .map(RefNode::Description)
+                        .find(|item| !time_item(item))
+                        .and_then(offset),
+                    _ => None,
+                })
+                .unwrap_or(usize::MAX);
             let mut directives = Vec::new();
             let mut generate_depth = 0;
             for event in tree.into_iter().event() {
@@ -262,11 +346,12 @@ impl Timescales {
                             .filter(|(_, s)| s.start <= at && at < s.end)
                             .min_by_key(|(_, s)| s.end - s.start)
                             .map(|(i, _)| i);
-                        let first = target.map_or(unit_first, |i| scopes[i].first_declaration);
+                        let time_items_end =
+                            target.map_or(unit_time_items_end, |i| scopes[i].time_items_end);
                         let previous = target.map_or(&mut unit_decl, |i| &mut declarations[i]);
                         if (previous.0.is_none() && value.0.is_some()
                             || previous.1.is_none() && value.1.is_some())
-                            && first != Some(at)
+                            && at >= time_items_end
                         {
                             return Err(unsupported(
                                 "timeunit or timeprecision first declared after other scope items",
@@ -347,16 +432,23 @@ impl Timescales {
                     .iter()
                     .filter(|s| s.start < scopes[i].start && scopes[i].end < s.end)
                     .min_by_key(|s| s.end - s.start)
-                    .map(|s| s.scale);
+                    .map(|s| (s.scale, s.specified));
                 let inherited = enclosing
                     .or_else(|| {
                         directives
                             .iter()
                             .rev()
                             .find(|(at, _)| *at < scopes[i].start)
-                            .and_then(|(_, scale)| *scale)
+                            .and_then(|(_, scale)| scale.map(|scale| (scale, (true, true))))
                     })
-                    .unwrap_or(unit);
+                    .unwrap_or((unit, (unit_decl.0.is_some(), unit_decl.1.is_some())));
+                let (inherited, inherited_specified) = inherited;
+                scopes[i].specified = (
+                    declarations[i].0.is_some() || inherited_specified.0,
+                    declarations[i].1.is_some() || inherited_specified.1,
+                );
+                specified[0] |= if scopes[i].specified.0 { 2 } else { 1 };
+                specified[1] |= if scopes[i].specified.1 { 2 } else { 1 };
                 scopes[i].scale = Scale {
                     unit: declarations[i].0.unwrap_or(inherited.unit),
                     precision: declarations[i].1.unwrap_or(inherited.precision),
@@ -364,9 +456,11 @@ impl Timescales {
                 if scopes[i].scale.precision > scopes[i].scale.unit {
                     return Err(unsupported("timeprecision coarser than timeunit"));
                 }
-                design
-                    .scopes
-                    .insert(scopes[i].name.clone(), scopes[i].clone());
+                match scopes[i].kind {
+                    ScopeKind::Definition => &mut design.definitions,
+                    ScopeKind::Package => &mut design.packages,
+                }
+                .insert(scopes[i].name.clone(), scopes[i].clone());
             }
             design.units.insert(
                 key(tree).to_string(),
@@ -375,6 +469,11 @@ impl Timescales {
                     scopes,
                 },
             );
+        }
+        if specified.contains(&3) {
+            return Err(unsupported(
+                "mixed explicit and default time units or precisions across design elements",
+            ));
         }
         Ok(design)
     }
@@ -472,9 +571,19 @@ impl Timescales {
                             )));
                         }
                         (
-                            self.scopes
+                            self.definitions
                                 .get(first)
-                                .or_else(|| unit.scopes.iter().find(|s| s.name == *first))
+                                .or_else(|| {
+                                    unit.scopes.iter().find(|s| {
+                                        s.kind == ScopeKind::Definition && s.name == *first
+                                    })
+                                })
+                                .or_else(|| self.packages.get(first))
+                                .or_else(|| {
+                                    unit.scopes
+                                        .iter()
+                                        .find(|s| s.kind == ScopeKind::Package && s.name == *first)
+                                })
                                 .ok_or_else(|| {
                                     unsupported(format!(
                                         "unknown timescale query design element `{first}`"
@@ -488,9 +597,13 @@ impl Timescales {
                             unsupported(format!("unknown timescale query design element `{part}`"))
                         })?;
                         target = self
-                            .scopes
+                            .definitions
                             .get(module)
-                            .or_else(|| unit.scopes.iter().find(|s| s.name == *module))
+                            .or_else(|| {
+                                unit.scopes
+                                    .iter()
+                                    .find(|s| s.kind == ScopeKind::Definition && s.name == *module)
+                            })
                             .ok_or_else(|| {
                                 unsupported(format!("unknown timescale query module `{module}`"))
                             })?;
@@ -575,6 +688,60 @@ mod tests {
     fn generated_instances_are_not_visible_in_the_parent_scope() {
         let source = "module Child(); timeunit 1ns / 1ps; endmodule module Top(output int y); timeunit 1ns / 1ps; if (1) begin : g Child child(); end assign y = $timeunit(child); endmodule";
         assert!(crate::analyze_source(source, Path::new("generate_scope.sv")).is_err());
+    }
+
+    #[test]
+    fn allows_separate_time_declarations_before_other_items() {
+        for code in [
+            "module Top(); timeunit 1ns; timeunit 1ns; timeprecision 1ps; localparam U=$timeunit(); localparam P=$timeprecision(); endmodule",
+            "timeunit 1ns; timeunit 1ns; timeprecision 1ps; module Top(); localparam U=$timeunit($unit); localparam P=$timeprecision($unit); endmodule",
+            "package P; timeprecision 1ps; timeprecision 1ps; timeunit 1ns; function automatic int u(); return $timeunit(); endfunction endpackage module Top(); timeunit 1ns / 1ps; localparam U=P::u(); endmodule",
+        ] {
+            let result = crate::analyze_source(code, Path::new("separate_times.sv"));
+            assert!(result.is_ok(), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_mixed_explicit_and_default_design_elements() {
+        for code in [
+            "module A(); timeunit 1ns / 1ns; endmodule module B(); endmodule",
+            "module B(); endmodule module A(); timeunit 1ns / 1ns; endmodule",
+            "module A(); timeunit 1ns / 1ns; endmodule package P; endpackage",
+        ] {
+            let tree = crate::syntax::parse_source(code, Path::new("mixed_times.sv")).unwrap();
+            assert!(
+                Timescales::collect(&[(&tree, Path::new("mixed_times.sv"))]).is_err(),
+                "accepted {code}"
+            );
+        }
+        let explicit = crate::syntax::parse_source(
+            "module A(); timeunit 1ns / 1ns; endmodule",
+            Path::new("a.sv"),
+        )
+        .unwrap();
+        let default =
+            crate::syntax::parse_source("module B(); endmodule", Path::new("b.sv")).unwrap();
+        assert!(
+            Timescales::collect(&[
+                (&explicit, Path::new("a.sv")),
+                (&default, Path::new("b.sv"))
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn keeps_package_and_definition_time_scopes_independent() {
+        let code = "module P(); timeunit 1us / 1ns; endmodule package P; timeunit 100ns / 10ps; endpackage module Top(); timeunit 1ns / 1ps; P p_inst(); localparam U=$timeunit(p_inst); localparam T=$timeprecision(p_inst); endmodule";
+        let result = crate::analyze_source(code, Path::new("namespaces.sv")).unwrap();
+        let top = result.modules().iter().find(|m| m.name() == "Top").unwrap();
+        let values: Vec<_> = top
+            .parameters()
+            .iter()
+            .map(|p| p.resolved_value())
+            .collect();
+        assert_eq!(values, [Some(-6), Some(-9)]);
     }
 
     #[test]

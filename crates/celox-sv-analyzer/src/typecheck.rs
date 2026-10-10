@@ -53,7 +53,7 @@ impl std::fmt::Display for UnpackedArrayType {
     }
 }
 
-/// Width and signedness of supported numeric system functions (20.4, 20.8, 20.9).
+/// Width and signedness of the supported integral system functions.
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
     if matches!(name, "$timeunit" | "$timeprecision") {
         return (arity <= 1).then_some((32, true));
@@ -66,7 +66,7 @@ pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usiz
     }
     match name {
         "$countones" | "$clog2" => Some((32, true)),
-        "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
+        "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some((1, false)),
         _ => None,
     }
 }
@@ -79,24 +79,50 @@ pub fn resolve_packed_width_with_env(
     ranges: &[PackedRange],
     constants: &HashMap<String, i128>,
 ) -> Option<usize> {
+    resolve_packed_width_in_env(ranges, constants)
+}
+
+pub(crate) fn resolve_packed_width_in_env(
+    ranges: &[PackedRange],
+    constants: &dyn ConstantEnvironment,
+) -> Option<usize> {
     if ranges.is_empty() {
         return Some(1);
     }
 
     ranges.iter().try_fold(1usize, |acc, range| {
-        let left = eval_const_expr(range.left(), constants)?;
-        let right = eval_const_expr(range.right(), constants)?;
+        let left = eval_const_expr_in_env(range.left(), constants)?;
+        let right = eval_const_expr_in_env(range.right(), constants)?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     })
 }
 
+/// Value lookup shared by immutable module environments and function frames.
+/// Dynamic dispatch keeps recursive calls from nesting generic frame types.
+pub(crate) trait ConstantEnvironment {
+    fn get(&self, name: &str) -> Option<&i128>;
+}
+
+impl ConstantEnvironment for HashMap<String, i128> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        HashMap::get(self, name)
+    }
+}
+
 pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<i128> {
+    eval_const_expr_in_env(expr, constants)
+}
+
+pub(crate) fn eval_const_expr_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+) -> Option<i128> {
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
         ConstExpr::Select { expr, bit } => {
-            let bit = eval_const_expr(bit, constants)?;
+            let bit = eval_const_expr_in_env(bit, constants)?;
             let bit = usize::try_from(bit).ok()?;
             if let ConstExpr::Literal(value) = &**expr {
                 let value = parse_integral_literal(value)?;
@@ -105,7 +131,7 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 }
                 return Some(value.value.bit(bit as u64) as i128);
             }
-            let value = eval_const_expr(expr, constants)?;
+            let value = eval_const_expr_in_env(expr, constants)?;
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
@@ -116,7 +142,7 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             {
                 return Some(value);
             }
-            let value = eval_const_expr(operand, constants)?;
+            let value = eval_const_expr_in_env(operand, constants)?;
             match op {
                 UnaryOp::Plus => Some(value),
                 UnaryOp::Minus => value.checked_neg(),
@@ -134,6 +160,18 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
         ConstExpr::Binary { left, op, right } => {
+            // Numeric declaration bounds need the same short-circuiting as
+            // four-state generate conditions (11.3.5, 6.20.7).
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
+                && let Some(Some(truth)) = eval_const_truth(left, constants)
+            {
+                if (*op == BinaryOp::LogicAnd && !truth) || (*op == BinaryOp::LogicOr && truth) {
+                    return Some(i128::from(truth));
+                }
+                // Reuse the known left truth; reevaluating it recursively
+                // would double the work at every level of a logical chain.
+                return eval_const_truth(right, constants)?.map(i128::from);
+            }
             if let Some(result) = eval_literal_binary(left, *op, right) {
                 return Some(result);
             }
@@ -144,8 +182,8 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             {
                 return Some(result as i128);
             }
-            let left = eval_const_expr(left, constants)?;
-            let right = eval_const_expr(right, constants)?;
+            let left = eval_const_expr_in_env(left, constants)?;
+            let right = eval_const_expr_in_env(right, constants)?;
             match op {
                 BinaryOp::Add => left.checked_add(right),
                 BinaryOp::Sub => left.checked_sub(right),
@@ -185,8 +223,8 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             then_expr,
             else_expr,
         } => match eval_const_truth(condition, constants)? {
-            Some(true) => eval_const_expr(then_expr, constants),
-            Some(false) => eval_const_expr(else_expr, constants),
+            Some(true) => eval_const_expr_in_env(then_expr, constants),
+            Some(false) => eval_const_expr_in_env(else_expr, constants),
             None => merge_unknown_const_mux_arms(then_expr, else_expr, constants),
         },
     }
@@ -221,8 +259,25 @@ pub(crate) fn eval_const_integral_literal_with_lookup(
     constants: &HashMap<String, i128>,
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<IntegralLiteral> {
+    eval_const_integral_literal_in_env(expr, constants, types)
+}
+
+pub(crate) fn eval_const_integral_literal_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+) -> Option<IntegralLiteral> {
     let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     integral_literal_from_const_expr(&expr)
+}
+
+pub(crate) fn eval_const_expr_with_types_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+) -> Option<i128> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
+    eval_const_expr_in_env(&expr, constants)
 }
 
 /// Evaluate and resize a constant expression in a case selector's comparison
@@ -354,7 +409,7 @@ pub fn substitute_typed_constants(
 
 fn substitute_typed_constants_with_lookup(
     expr: ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> ConstExpr {
     match expr {
@@ -736,21 +791,21 @@ pub(crate) fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> 
     }
 }
 
-fn eval_const_truth(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<Option<bool>> {
+fn eval_const_truth(expr: &ConstExpr, constants: &dyn ConstantEnvironment) -> Option<Option<bool>> {
     if let Some(literal) = integral_literal_from_const_expr(expr) {
         return Some(integral_literal_truth(&literal));
     }
-    eval_const_expr(expr, constants).map(|value| Some(value != 0))
+    eval_const_expr_in_env(expr, constants).map(|value| Some(value != 0))
 }
 
 fn merge_unknown_const_mux_arms(
     then_expr: &ConstExpr,
     else_expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
     if let (Some(then_value), Some(else_value)) = (
-        eval_const_expr(then_expr, constants),
-        eval_const_expr(else_expr, constants),
+        eval_const_expr_in_env(then_expr, constants),
+        eval_const_expr_in_env(else_expr, constants),
     ) && then_value == else_value
     {
         return Some(then_value);
@@ -836,12 +891,14 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                 literal.signed = name == "$signed";
                 return Some(literal);
             }
-            let value = eval_const_function(name, args, &HashMap::default())?;
+            // Check support before executing: user functions are evaluated
+            // by the numeric fallback with the caller's environment.
             let (width, signing) = match name.as_str() {
                 "$clog2" | "$countones" | "$countbits" => (32, "s"),
                 "$onehot" | "$onehot0" | "$isunknown" => (1, ""),
                 _ => return None,
             };
+            let value = eval_const_function(name, args, &HashMap::default())?;
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
         }
         ConstExpr::Select { expr, bit } => {
@@ -892,6 +949,14 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             // Logical operands are self-determined; only the truth result
             // has width one, including an unknown result.
             let left = integral_literal_from_const_expr(left)?;
+            // IEEE 1800-2023 11.3.5: do not evaluate a skipped operand,
+            // which can legally reference an unbounded parameter (6.20.7).
+            let truth = integral_literal_truth(&left);
+            if (*op == BinaryOp::LogicAnd && truth == Some(false))
+                || (*op == BinaryOp::LogicOr && truth == Some(true))
+            {
+                return Some(integral_literal_from_truth(truth));
+            }
             let right = integral_literal_from_const_expr(right)?;
             eval_four_state_binary_literal(&left, *op, &right, false)
         }
@@ -1125,7 +1190,7 @@ fn signed_extension(literal: &IntegralLiteral, signed: bool) -> (bool, bool) {
 fn eval_const_function(
     name: &str,
     args: &[ConstExpr],
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
     if !crate::system_functions::is_system_name(name) {
         return crate::ast::const_functions::eval_call(name, args, constants);
@@ -1169,12 +1234,12 @@ fn eval_const_function(
             let literal = self_determined_integral_literal(arg)?;
             integral_literal_as_i128(&literal, name == "$signed")
         }
-        "$clog2" => clog2(eval_const_expr(arg, constants)?),
+        "$clog2" => clog2(eval_const_expr_in_env(arg, constants)?),
         "$isunknown" => {
             if let Some(literal) = self_determined_integral_literal(arg) {
                 Some((literal.mask != BigUint::default()) as i128)
             } else {
-                eval_const_expr(arg, constants).map(|_| 0)
+                eval_const_expr_in_env(arg, constants).map(|_| 0)
             }
         }
         "$countones" | "$onehot" | "$onehot0" => {
@@ -1193,24 +1258,24 @@ fn eval_const_function(
 
 fn const_countbits_literal(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<IntegralLiteral> {
     self_determined_integral_literal(expr).or_else(|| {
-        let value = eval_const_expr(expr, constants)?;
+        let value = eval_const_expr_in_env(expr, constants)?;
         parse_integral_literal(&format_typed_constant_literal(value, 32, true))
     })
 }
 
 fn const_expr_known_one_bits(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<BigUint> {
     if let Some(literal) = self_determined_integral_literal(expr) {
         // IEEE 1800-2023 20.9 counts only bits equal to 1; X/Z do not
         // contribute, and onehot/onehot0 always return a two-state bit.
         return Some(&literal.value ^ (&literal.value & &literal.mask));
     }
-    let value = eval_const_expr(expr, constants)?;
+    let value = eval_const_expr_in_env(expr, constants)?;
     (value >= 0).then(|| BigUint::from(value as u128))
 }
 
@@ -1467,6 +1532,20 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn evaluates_nested_logical_parameter_chains() {
+        let constants = HashMap::from_iter([("P".to_string(), 1)]);
+        let mut expr = ConstExpr::Ident("P".into());
+        for _ in 0..64 {
+            expr = ConstExpr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(ConstExpr::Ident("P".into())),
+            };
+        }
+        assert_eq!(eval_const_expr(&expr, &constants), Some(1));
+    }
 
     #[test]
     fn folds_masked_bit_selects_with_invalid_indices() {
