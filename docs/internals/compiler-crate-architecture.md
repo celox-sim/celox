@@ -186,7 +186,7 @@ for.
 | `celox-backend-x86` | x86 MIR, instruction selection, target allocation policy, and machine-code emission | Frontend or runtime policy |
 | `celox-backend-cranelift` | Cranelift translation and JIT construction | Frontend or x86-specific MIR |
 | `celox-backend-wasm` | WebAssembly module generation | Host runtime behavior |
-| `celox-testbench` | Source-independent testbench bytecode and values | Veryl AST traversal or simulator memory ownership |
+| `celox-testbench` | Source-independent testbench components, bytecode and values | Veryl AST traversal or simulator memory ownership |
 | `celox-runtime` | Events, timed scheduling, VCD output, testbench execution, and backend contracts | Frontend, SIR optimization, or concrete backend internals |
 | `celox` | Public API, compilation orchestration, and backend selection | New reusable compiler algorithms |
 
@@ -227,7 +227,7 @@ state addresses can now be resolved without consulting Veryl source objects.
 ### `RuntimeProgram`
 
 The source-independent metadata retained after code generation: elaborated design
-metadata, public path lookup, runtime schema, and bound testbench bytecode. A
+metadata, public path lookup, runtime schema, and bound testbench components. A
 running `Simulator` stores this artifact beside the executable backend; compiler
 IR and layout requirements do not remain live during simulation.
 
@@ -249,8 +249,9 @@ The following rules define the intended architecture:
    their backend; target-independent allocation mechanisms belong in
    `celox-backend-common`.
 6. Runtime code depends on backend contracts, not concrete compiler pipelines.
-7. Testbench execution uses source-independent bytecode; only the frontend parses
-   Veryl testbench syntax.
+7. Testbench execution uses process kernels of the runtime schema (or, as a
+   fallback, source-independent bytecode); only the frontend parses Veryl
+   testbench syntax.
 8. The facade coordinates phases but does not become a second owner of their
    algorithms or data structures.
 

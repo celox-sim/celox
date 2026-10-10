@@ -821,6 +821,74 @@ fn clock_waits_interleave_with_delays_and_checkpoints() {
     assert_eq!(sim.get(count), 20u32.into());
 }
 
+/// IEEE 1800-2023 Table 9-2: a change from 0, or from x to 1, is a posedge;
+/// a change from 1, or from x to 0, is a negedge.
+#[test]
+fn four_state_edges_count_transitions_into_and_out_of_unknown() {
+    let bit = ValueType::new(1, false, true).unwrap();
+    let byte = ValueType::new(8, false, true).unwrap();
+    let mut module = ModuleBuilder::new("UnknownEdges").unwrap();
+    // One signal per edge kind, driven alike.
+    let clk_rising = module.internal("clk_rising", bit).unwrap();
+    let clk_falling = module.internal("clk_falling", bit).unwrap();
+    let rising = module.output("rising", byte).unwrap();
+    let falling = module.output("falling", byte).unwrap();
+    for clk in [clk_rising, clk_falling] {
+        module
+            .set_initial(clk, Constant::two_state(0u8, 1).unwrap())
+            .unwrap();
+    }
+    for signal in [rising, falling] {
+        module
+            .set_initial(signal, Constant::two_state(0u8, 8).unwrap())
+            .unwrap();
+    }
+    let one = constant(&mut module, 1, 8);
+    for (signal, clk, edge) in [
+        (rising, clk_rising, Edge::Posedge),
+        (falling, clk_falling, Edge::Negedge),
+    ] {
+        let value = module.read(signal).unwrap();
+        let next = module.binary(BinaryOp::Add, value, one, byte).unwrap();
+        let target = module.whole(signal).unwrap();
+        module
+            .register(target, next, clk, edge, None, None)
+            .unwrap();
+    }
+    let five = constant(&mut module, 5, 8);
+    let targets = [
+        module.whole(clk_rising).unwrap(),
+        module.whole(clk_falling).unwrap(),
+    ];
+    // 0 -> x -> 1 -> x -> 0 -> x: three posedges and two negedges.
+    let mut body = Vec::new();
+    for (payload, mask) in [(0u8, 1u8), (1, 0), (0, 1), (0, 0), (0, 1)] {
+        body.push(Statement::Delay { amount: five });
+        let value = module.constant(Constant::four_state(payload, mask, 1).unwrap());
+        for target in targets {
+            body.push(Statement::Assign { target, value });
+        }
+    }
+    body.push(Statement::Finish);
+    module.process(body).unwrap();
+    let artifact = module.finish();
+
+    fn check(mut sim: Simulation<impl celox::SimBackend>) {
+        let rising = sim.signal("rising");
+        let falling = sim.signal("falling");
+        sim.run_until(100).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(rising), 3u8.into());
+        assert_eq!(sim.get(falling), 2u8.into());
+    }
+    let builder = || Simulation::from_frontend(artifact.clone()).four_state(true);
+    check(builder().build_interpreter().unwrap());
+    check(builder().build_cranelift().unwrap());
+    check(builder().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(builder().build_native().unwrap());
+}
+
 /// A step whose clock waits ran as fused ticks reports the time it reached.
 #[test]
 fn a_fused_step_returns_the_time_it_reached() {

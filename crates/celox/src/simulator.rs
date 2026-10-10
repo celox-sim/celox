@@ -101,6 +101,12 @@ mod host {
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
+        /// The random number generators of a running kernel testbench.
+        pub(crate) testbench_random: Option<crate::testbench::RandomTable>,
+        /// Runtime events of a running kernel testbench the executor took
+        /// out of the ring when a kernel yielded, until the runner drains
+        /// them.
+        pub(crate) testbench_events: Vec<(Option<usize>, RuntimeEvent)>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
@@ -140,6 +146,10 @@ mod host {
         },
         /// The design executed `$finish`. The host decides whether to stop.
         Finish,
+        /// An assertion of a testbench process held.
+        AssertPass {
+            message: String,
+        },
         Missed {
             count: u64,
         },
@@ -348,6 +358,12 @@ mod host {
                     }
                     'x'
                 }
+                RuntimeEventKind::AssertPass => {
+                    if args.is_empty() {
+                        return "assertion passed".to_string();
+                    }
+                    'x'
+                }
             };
             return args
                 .iter()
@@ -428,6 +444,7 @@ mod host {
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
                     RuntimeEventKind::Finish => RuntimeEvent::Finish,
+                    RuntimeEventKind::AssertPass => RuntimeEvent::AssertPass { message },
                 })
             }
         }
@@ -650,6 +667,8 @@ mod host {
                 warnings,
                 components: Default::default(),
                 component_simulation: None,
+                testbench_random: None,
+                testbench_events: Vec::new(),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
@@ -826,6 +845,41 @@ mod host {
                 self.eval_comb_for_runtime_event_drain().unwrap();
             }
             self.collect_formatted_runtime_events(ctx)
+        }
+
+        /// The runtime events with the site each came from, settling the
+        /// combinational observers first as
+        /// [`Self::drain_runtime_events_deferred_with_context`] does.
+        pub(crate) fn collect_sited_runtime_events(
+            &mut self,
+            ctx: RuntimeFormatContext<'_>,
+        ) -> Vec<(Option<usize>, RuntimeEvent)> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+            );
+            if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
+                self.eval_comb_for_runtime_event_drain().unwrap();
+            }
+            if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
+            self.collect_backend_runtime_events()
+                .into_iter()
+                .filter_map(|raw| {
+                    let site = match &raw {
+                        RawRuntimeEvent::Event { site_id, .. } => Some(*site_id),
+                        RawRuntimeEvent::Missed { .. } => None,
+                    };
+                    let event = render_raw_runtime_event(
+                        raw,
+                        &self.program.runtime_schema.runtime_event_sites,
+                        ctx,
+                    )?;
+                    Some((site, event))
+                })
+                .collect()
         }
 
         fn eval_comb_for_runtime_event_drain(&mut self) -> Result<(), RuntimeErrorCode> {

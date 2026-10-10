@@ -179,7 +179,7 @@ pub trait LayoutSource<A> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(
-    serialize = "A: Serialize + Eq + Hash",
+    serialize = "A: Serialize + Eq + Hash + Ord",
     deserialize = "A: Deserialize<'de> + Eq + Hash"
 ))]
 pub struct MemoryLayout<A> {
@@ -188,20 +188,27 @@ pub struct MemoryLayout<A> {
     pub four_state: bool,
     pub mode: MemoryLayoutMode,
     /// Stable region offsets. Includes all declared state objects.
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub offsets: HashMap<A, usize>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub widths: HashMap<A, usize>,
     /// Whether each state object has a four-state source type.
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub is_4states: HashMap<A, bool>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub unpacked_arrays: HashMap<A, UnpackedArrayLayout>,
     /// Stable region size in bytes.
     pub total_size: usize,
 
     /// Working region offsets. Includes only actually-used state objects.
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub working_offsets: HashMap<A, usize>,
     pub working_base_offset: usize,
     /// Copy-on-write next-state data for dynamically addressed FF targets.
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub sparse_offsets: HashMap<A, usize>,
     pub sparse_base_offset: usize,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub sparse_layouts: HashMap<A, SparseWorkingLayout>,
     pub sparse_active_bits_offset: usize,
     pub sparse_active_capacity: usize,

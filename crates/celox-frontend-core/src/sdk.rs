@@ -2,9 +2,9 @@
 
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId,
-    PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessClock,
-    ProcessSlots, RegionedVarAddrBase, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    VariableMetadata, WORKING_REGION,
+    PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH, PROCESS_RELEASE_WIDTH, PROCESS_STATUS_WIDTH,
+    PortTypeKind, ProcessClock, ProcessSlots, RegionedVarAddrBase, STABLE_REGION, TriggerSet,
+    UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
 };
 use celox_frontend_sdk::{
     ActiveLevel, Direction, Edge, ExprId, ExprNode, FrontendArtifact, SignalId, SignalSlice,
@@ -1143,7 +1143,7 @@ fn lower_statements(
                     kernel.builder(),
                     &mut cache,
                 )?;
-                kernel.wait_clock(index as u32, count)?;
+                kernel.wait_clock(index as u32, count, None)?;
             }
             Statement::Finish => {
                 kernel.finish();
@@ -1199,6 +1199,9 @@ fn lower_processes(
                 status: declare(name("status"), PROCESS_STATUS_WIDTH),
                 delay: declare(name("delay"), PROCESS_DELAY_WIDTH),
                 clock: declare(name("clock"), PROCESS_CLOCK_WIDTH),
+                release: declare(name("release"), PROCESS_RELEASE_WIDTH),
+                releases: Vec::new(),
+                host_requests: Vec::new(),
                 clocks: clocks
                     .iter()
                     .map(|clock| {

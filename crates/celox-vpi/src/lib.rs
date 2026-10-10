@@ -1303,6 +1303,7 @@ fn process_runtime_events() {
             RuntimeEvent::AssertContinue { message } => {
                 let _ = writeln!(std::io::stderr().lock(), "assertion failed: {message}");
             }
+            RuntimeEvent::AssertPass { .. } => {}
             RuntimeEvent::AssertFatal { message } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),

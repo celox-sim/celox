@@ -9,7 +9,11 @@ pub(crate) fn project_observability(
 ) -> Result<(), celox_frontend_veryl::ParserError> {
     let (sites, read_variables) =
         celox_frontend_veryl::collect_testbench_observability(lookup, source)?;
-    runtime_schema.runtime_event_sites.extend(sites);
+    // Kernels register their own sites; the roots still keep the state the
+    // testbench reads alive.
+    if !source.kernels {
+        runtime_schema.runtime_event_sites.extend(sites);
+    }
     runtime_schema.testbench_read_roots = read_variables;
     Ok(())
 }

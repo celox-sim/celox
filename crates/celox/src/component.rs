@@ -753,6 +753,20 @@ impl ComponentRuntime {
         result
     }
 
+    /// The events bound as resets of components.
+    pub(crate) fn reset_event_ids(&self) -> Vec<usize> {
+        let mut ids: Vec<usize> = self
+            .components
+            .iter()
+            .flat_map(|component| &component.events)
+            .filter(|event| event.reset)
+            .map(|event| event.event_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     pub(crate) fn begin_reset_cycles(&mut self, reset_event_id: Option<usize>) {
         if let Some(id) = reset_event_id {
             self.active_reset_events.push((None, id));
@@ -885,7 +899,14 @@ pub(crate) fn host_value_from_argument(
     width: usize,
     is_string: bool,
 ) -> HostValue {
-    let value = value.to_biguint();
+    host_value_from_bits(value.to_biguint(), width, is_string)
+}
+
+pub(crate) fn host_value_from_bits(
+    value: num_bigint::BigUint,
+    width: usize,
+    is_string: bool,
+) -> HostValue {
     if is_string {
         let byte_len = width.div_ceil(8);
         let mut bytes = value.to_bytes_be();
