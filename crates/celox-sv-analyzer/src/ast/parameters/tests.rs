@@ -414,3 +414,237 @@ fn four_state_prefix_keeps_the_separate_range_projection() {
     assert_eq!(parameters[1].declared_width(), Some(8));
     assert_eq!(const_env_from_parameters(&parameters)["Q"], 255);
 }
+
+#[test]
+fn four_state_parameter_chains_do_not_copy_growing_environments() {
+    for count in [16, 64, 256] {
+        let mut code = String::from("module Top();\n");
+        for index in 0..count {
+            let value = if index == 0 {
+                "'x".into()
+            } else {
+                format!("P{}+1", index - 1)
+            };
+            writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
+        }
+        code.push_str("endmodule");
+        let tree =
+            crate::syntax::parse_source(&code, Path::new("four_state_prefix_scaling.sv")).unwrap();
+        DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
+        LITERAL_ENV_COPIES.with(|copies| copies.set(0));
+        let source = Source::from_syntax(&tree).unwrap();
+        let parameters = source.modules()[0].parameters();
+        let values = parameter_value_env(parameters, &const_env_from_parameters(parameters));
+        assert_eq!(values.len(), count);
+        for parameter in parameters {
+            assert_eq!(parameter.declared_width(), Some(32));
+            let Expr::Literal(value) = &values[parameter.name()] else {
+                panic!("unknown value must fold")
+            };
+            let value = typecheck::parse_integral_literal(value).unwrap();
+            assert_eq!(value.width, 32);
+            assert_eq!(value.mask, u32::MAX.into());
+        }
+        let ir = crate::analyze::analyze_source(source).unwrap();
+        assert_eq!(ir.modules()[0].parameters().len(), count);
+        assert!(
+            ir.modules()[0]
+                .parameters()
+                .iter()
+                .all(|parameter| parameter.resolved_value().is_none())
+        );
+        assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
+        assert_eq!(LITERAL_ENV_COPIES.with(|copies| copies.get()), 0);
+    }
+}
+
+#[test]
+fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_shadows() {
+    let tree = crate::syntax::parse_source(
+        "module Top(); parameter logic [3:0] P='x; parameter logic [P:0] Q='0; parameter logic [129:0] W='z; parameter logic [7:0] R='1; endmodule",
+        Path::new("literal_prefix_projection.sv"),
+    ).unwrap();
+    for inherited_p in [None, Some(2)] {
+        let base = inherited_p
+            .map(|value| HashMap::from_iter([("P".into(), value)]))
+            .unwrap_or_default();
+        let copied_base = base.clone();
+        let mut borrowed = Vec::new();
+        let mut copied = Vec::new();
+        let mut borrowed_env = ParameterEnvironment::new(&borrowed, &base);
+        let mut copied_env = ParameterEnvironment::new(&copied, &copied_base);
+        for declaration in scope_declarations(module_node(&tree)) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) =
+                declaration
+            else {
+                continue;
+            };
+            parameters_from_ref_node_with_environment(
+                RefNode::ParameterDeclaration(&declaration.0),
+                &tree,
+                &mut borrowed,
+                false,
+                &base,
+                &HashMap::default(),
+                &HashMap::default(),
+                &mut borrowed_env,
+            )
+            .unwrap();
+            parameters_from_ref_node_with_environment(
+                RefNode::ParameterDeclaration(&declaration.0),
+                &tree,
+                &mut copied,
+                false,
+                &base,
+                &HashMap::default(),
+                &HashMap::default(),
+                &mut copied_env,
+            )
+            .unwrap();
+            let rebuilt = ParameterEnvironment::new(&borrowed, &base);
+            assert_eq!(
+                borrowed_env.has_inherited_literal_shadow,
+                rebuilt.has_inherited_literal_shadow
+            );
+        }
+        assert_eq!(borrowed, copied);
+        assert_eq!(borrowed[0].declared_width(), Some(4));
+        // The old separate projection intentionally retains inherited P for
+        // width evaluation, while initializer lowering masks its numeric value.
+        assert_eq!(borrowed[1].declared_width(), inherited_p.map(|_| 3));
+        assert_eq!(borrowed[2].declared_width(), Some(130));
+        assert_eq!(borrowed[3].declared_width(), Some(8));
+    }
+}
+
+fn copied_resolved_literal(
+    parameter: &Parameter,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, ExprType>,
+    literals: &HashMap<String, Expr>,
+) -> Option<Expr> {
+    let mut evaluation_constants = constants.clone();
+    evaluation_constants.remove(parameter.name());
+    let mut substituted = parameter.clone();
+    substituted.value = parameter
+        .value
+        .clone()
+        .map(|value| substitute_typed_parameter_literals(value, &evaluation_constants, types));
+    if let Some(ty) = parameter.resolved_type(types) {
+        substituted.declared_width = Some(ty.width);
+        substituted.declared_signed = Some(ty.signed);
+    }
+    let value = parameter_value_env(std::slice::from_ref(&substituted), &evaluation_constants)
+        .remove(parameter.name())?;
+    let value = substitute_expr_idents(value, literals);
+    let value = fold_const_integral_expr_preserving_mask(value, &evaluation_constants);
+    matches!(value, Expr::Literal(_)).then_some(value)
+}
+
+#[test]
+fn borrowed_literal_environment_matches_self_masked_copy_with_types_and_unknowns() {
+    let mut constants = HashMap::from_iter([("A".into(), -2)]);
+    insert_parameter_type_markers(
+        &mut constants,
+        "A",
+        ExprType {
+            width: 8,
+            signed: true,
+        },
+    );
+    for index in 0..4096 {
+        insert_parameter_type_markers(
+            &mut constants,
+            &format!("unrelated{index}"),
+            ExprType {
+                width: 32,
+                signed: false,
+            },
+        );
+    }
+    let types = parameter_types_from_const_env(&constants);
+    let literals = HashMap::from_iter([("X".into(), Expr::Literal("8'bxz010101".into()))]);
+    let cases = [
+        ConstExpr::Literal("'x".into()),
+        ConstExpr::Literal("129'bz".into()),
+        ConstExpr::Ident("X".into()),
+        ConstExpr::Ident("missing".into()),
+        ConstExpr::Ident("P".into()),
+        ConstExpr::Binary {
+            left: Box::new(ConstExpr::Ident("A".into())),
+            op: BinaryOp::Shr,
+            right: Box::new(ConstExpr::Literal("1".into())),
+        },
+        ConstExpr::Binary {
+            left: Box::new(ConstExpr::Ident("X".into())),
+            op: BinaryOp::BitAnd,
+            right: Box::new(ConstExpr::Literal("8'h0f".into())),
+        },
+    ];
+    for stale_self in [None, Some(91)] {
+        for value in &cases {
+            let mut env = constants.clone();
+            if let Some(value) = stale_self {
+                env.insert("P".into(), value);
+            }
+            for (width, signed, two_state) in
+                [(8, false, false), (129, true, false), (8, true, true)]
+            {
+                let parameter = Parameter::new(
+                    "P".into(),
+                    Some(value.clone()),
+                    Some(width),
+                    Some(signed),
+                    two_state,
+                    true,
+                    false,
+                );
+                LITERAL_ENV_COPIES.with(|copies| copies.set(0));
+                let borrowed = parameter.resolved_literal(&env, &types, &literals);
+                assert_eq!(
+                    LITERAL_ENV_COPIES.with(|copies| copies.get()),
+                    usize::from(stale_self.is_some())
+                );
+                assert_eq!(
+                    borrowed,
+                    copied_resolved_literal(&parameter, &env, &types, &literals),
+                    "{value:?}, stale={stale_self:?}, width={width}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reverse_generate_literal_chains_borrow_width_and_initializer_environments() {
+    for count in [16, 64, 256] {
+        let mut code = String::from("module Top(); if(1) begin:g\n");
+        for index in 0..count {
+            let value = if index + 1 == count {
+                "'x".into()
+            } else {
+                format!("P{}+1", index + 1)
+            };
+            writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
+        }
+        code.push_str("logic [$bits(P0)-1:0] s; assign s=P0; end endmodule");
+        let tree =
+            crate::syntax::parse_source(&code, Path::new("generate_literal_prefix_scaling.sv"))
+                .unwrap();
+        DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
+        LITERAL_ENV_COPIES.with(|copies| copies.set(0));
+        let source = Source::from_syntax(&tree).unwrap();
+        let ir = crate::analyze::analyze_source(source).unwrap();
+        assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
+        assert_eq!(LITERAL_ENV_COPIES.with(|copies| copies.get()), 0);
+        let module = &ir.modules()[0];
+        assert_eq!(module.signals()[0].name(), "g.s");
+        assert_eq!(module.signals()[0].r#type().resolved_width(), Some(32));
+        let crate::ir::Expr::Literal(value) = module.assignments()[0].rhs() else {
+            panic!("unknown generate value must fold")
+        };
+        let value = typecheck::parse_integral_literal(value).unwrap();
+        assert_eq!(value.width, 32);
+        assert_eq!(value.mask, u32::MAX.into());
+    }
+}

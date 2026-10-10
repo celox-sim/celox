@@ -557,6 +557,67 @@ exclude backend compilation and simulation. The change removes the visible
 environment factor from constant-folding type substitution; it does not establish
 linear behavior for every expression shape or scope pattern.
 
+## Borrowing four-state parameter environments
+
+This step starts from `7e4f3f1bc`, synchronizing master `3cefd457f` and retaining
+the constant-folding lookup change. Resolving an X/Z or otherwise nonnumeric
+parameter copied the numeric environment to remove the parameter's stale value.
+When that name is absent, removal changes nothing: literal resolution now borrows
+the same immutable map. A stale numeric self-value still selects the previous
+copied and masked environment.
+
+Range headers also no longer require an entirely numeric prefix for borrowing.
+The range-lowering and width-evaluation projections differ only when a nonnumeric
+prefix binding masks an inherited numeric value. `ParameterEnvironment` determines
+that condition during construction and conservatively updates it for each appended
+binding with a direct inherited-name lookup. It does not rescan the growing prefix.
+Different base identities, headers containing assignments and inherited numeric
+shadows retain the copied projections. Explicit parameter widths, signedness and
+unknown masks are preserved (IEEE 1800-2023 6.20.2).
+
+Owning-crate regressions count zero range-context and literal-resolution copies
+for 16/64/256 four-state module declarations and reverse generate dependencies,
+through complete AST construction and IR conversion. They check every module
+parameter's 32-bit X mask, generated signal width/name and assigned X mask.
+Additional comparisons use the former copied literal resolver with a 4,096-entry
+unrelated environment, stale self-values, signed shifts, two-state conversions,
+wide values and unresolved names. Borrowed/copied range projection comparisons
+check constructor/appended-prefix parity and preserve an inherited numeric value
+used by the old width-evaluation projection. Existing override/alias regressions
+remain in place; no shared executable cases or external adapters change.
+
+The phase-separated probe adds `--four-state-parameters`. Module parameters form
+a forward chain starting with `'x`; the generate chain is reversed and ends with
+a `$bits(P0)` signal declaration and a continuous assignment of its unknown value.
+The probe verifies IR widths and masks before reporting medians of three fresh runs:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries -- --four-state-parameters 32 128 512
+```
+
+| Workload | Parameters | AST before (ms) | AST after (ms) | Parse before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| four-state module declarations | 32 | 25.513 | 71.532 | 8.853 / 25.036 |
+| four-state module declarations | 128 | 140.524 | 219.675 | 26.518 / 84.651 |
+| four-state module declarations | 512 | 1,807.363 | 633.479 | 115.117 / 166.772 |
+| four-state reverse generate dependencies | 32 | 1,033.913 | 493.074 | 24.783 / 13.301 |
+| four-state reverse generate dependencies | 128 | 6,596.133 | 2,495.723 | 54.196 / 44.447 |
+| four-state reverse generate dependencies | 512 | 10,672.026 | 9,170.822 | 146.045 / 214.184 |
+
+The after module input grows 16x (32→512), while AST time grows 8.9x; the generate
+input grows 18.6x in AST time. Module IR conversion before/after at 512 parameters
+is 7.533/10.871 ms, and generated IR conversion is 0.036/0.034 ms. The larger
+module AST sample is about 2.9x faster, but small module samples became slower as
+parsing also slowed. Shared-machine load varied substantially across both sets.
+Timing ratios alone do not establish a universal gain; counters establish the
+removed per-declaration copies independently of load.
+
+The generated query remains costly: preliminary `$bits` discovery can rebuild
+enclosing declarations. This step does not optimize that separate path or claim a
+material overall generate speedup. Existing numeric and ranged modes also pass
+at 32/128/512, checking values and widths. These probes exclude backend compilation
+and simulation, and do not establish linear behavior for every scope pattern.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -574,8 +635,10 @@ Those preliminary queries still discover enclosing declarations by walking
 syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
 modules with enums still rebuild some environments. Consecutive single-parameter
 generate runs now reuse their prefixes; grouped declarations and interruptions
-can still rebuild them. Numeric range headers borrow compatible environments,
-while four-state or assignment-containing headers retain their copied contexts. Dimension/literal views now materialize once per
+can still rebuild them. Numeric and four-state range headers borrow compatible
+environments; inherited numeric shadows and assignment-containing headers retain
+their copied contexts. Literal resolution still copies when masking a stale numeric
+self-value. Dimension/literal views now materialize once per
 immutable scope in each collector. Many distinct scopes with large inherited
 parameter/function tables can therefore differ from a single large block of
 signals. Applying parameter dimensions and materializing scoped literals still
