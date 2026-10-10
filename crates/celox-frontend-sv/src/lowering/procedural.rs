@@ -50,6 +50,9 @@ pub(super) struct ProcModule<'a> {
     pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
     /// Every event counter declared, for its zero initial value.
     pub event_counter_ids: Vec<SourceVarId>,
+    /// The initial values of the `static` locals with initializers, which
+    /// run once, before time zero (IEEE 1800-2023 6.21).
+    pub static_initial_values: Vec<InitialStateValue<SourceVarId>>,
 }
 
 /// An event expression some process waits on, and the hidden state that
@@ -79,6 +82,11 @@ pub(super) struct EventCounters {
 /// unknown mask.
 /// Bits of an event counter; the counters wrap, as only equality matters.
 pub const EVENT_COUNTER_WIDTH: usize = 32;
+
+/// The counters of a package variable, as `variable@purpose` in the package
+/// and in every module denoting the variable (see
+/// [`super::ff::declare_event_counters`]).
+pub const PACKAGE_EVENT_COUNTERS: [&str; 3] = ["changes", "rises", "falls"];
 
 pub(super) struct MemoryWord {
     pub access: BitAccess,
@@ -175,6 +183,7 @@ impl<'a> ProcModule<'a> {
             event_watchers: Vec::new(),
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
+            static_initial_values: Vec::new(),
         }
     }
 
@@ -366,6 +375,63 @@ impl<'a> ProcModule<'a> {
 
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
         &self.variables[&id]
+    }
+
+    /// Give the `static` local `id` its initial value `init`, evaluated
+    /// once: the initializer of a static variable runs before time zero
+    /// (IEEE 1800-2023 6.21), so it must be constant. The inlined body of a
+    /// subroutine declares the local at every call site; the first one
+    /// records the value.
+    pub fn static_initial(
+        &mut self,
+        id: SourceVarId,
+        init: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        if self
+            .static_initial_values
+            .iter()
+            .any(|value| value.address == id)
+        {
+            return Ok(());
+        }
+        let name = self.var(id).path[0].clone();
+        if !self.var(id).array_dims.is_empty() {
+            return Err(unsupported(format!(
+                "static local array `{name}` with an initializer"
+            )));
+        }
+        let mut arena = SLTNodeArena::new();
+        let constant = (!self.calls(init))
+            .then(|| {
+                lower_expr_with_context(
+                    &expr_for_state_mode(init, self.four_state),
+                    self.variables,
+                    self.name_to_id,
+                    self.constants,
+                    self.parameter_types,
+                    &mut arena,
+                    None,
+                    None,
+                )
+            })
+            .flatten()
+            .and_then(|(node, _)| slt_const(&arena, &mut ConstCache::default(), node));
+        let Some((value, _)) = constant else {
+            return Err(unsupported(format!(
+                "static local `{name}` with an initializer that is not constant"
+            )));
+        };
+        let width = self.var(id).width;
+        let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        self.static_initial_values.push(InitialStateValue {
+            address: id,
+            data: InitialStateData::Packed {
+                value: value & &written_mask,
+                mask: BigUint::default(),
+                written_mask,
+            },
+        });
+        Ok(())
     }
 
     pub fn is_hidden(&self, id: SourceVarId) -> bool {
@@ -1497,6 +1563,7 @@ pub(super) fn canonical_for_loop(
             sv::ir::Stmt::Local {
                 name,
                 init: Some(start),
+                ..
             },
         ] => (name.clone(), start.clone()),
         [

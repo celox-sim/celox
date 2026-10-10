@@ -575,7 +575,7 @@ impl Frame {
                 let value = self.eval(rhs)?;
                 self.assign(lhs, value)?;
             }
-            Stmt::Local { name, init } => {
+            Stmt::Local { name, init, .. } => {
                 let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
                 self.declare(name, &r#type)?;
                 let value = match init {

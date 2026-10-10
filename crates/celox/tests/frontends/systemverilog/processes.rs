@@ -623,6 +623,7 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
             logic a = 1'b0;
             logic b = 1'b0;
             logic [7:0] c = 8'd0;
+            logic [7:0] arr [2];
             function automatic logic id(input logic v);
                 return v;
             endfunction
@@ -636,6 +637,8 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
             endfunction
             initial begin
                 woken = 8'd0;
+                arr[0] = 8'd0;
+                arr[1] = 8'd0;
                 #1 a = 1'b1;
                 a = 1'b0;
                 #1 b = 1'b1;
@@ -643,6 +646,8 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 b = 1'b1;
                 c = 8'd1;
                 c = 8'd0;
+                arr[0] = 8'd1;
+                arr[0] = 8'd0;
                 #1 $finish;
             end
             initial begin
@@ -685,6 +690,11 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 $display("c read by a function c=%0d", c);
                 woken = woken + 8'd1;
             end
+            initial begin
+                @(arr[0]);
+                $display("array element arr[0]=%0d", arr[0]);
+                woken = woken + 8'd1;
+            end
         endmodule
     "#;
     for (four_state, mut sim) in [
@@ -703,11 +713,91 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 (2, "b fell b=1"),
                 (2, "b and fell"),
                 (2, "c read by a function c=0"),
+                (2, "array element arr[0]=0"),
             ]),
             "four_state={four_state}"
         );
-        assert_eq!(sim.get(woken), 8u8.into(), "four_state={four_state}");
+        assert_eq!(sim.get(woken), 9u8.into(), "four_state={four_state}");
     }
+}
+
+/// A function an event expression calls may not have an effect besides its
+/// result: the expression is evaluated whenever an operand may have changed.
+#[test]
+fn rejects_event_expressions_calling_impure_functions() {
+    let error = build_error(
+        r#"module Top(output logic [7:0] count);
+            logic a = 1'b0;
+            function automatic logic observe(input logic v);
+                count = count + 8'd1;
+                return v;
+            endfunction
+            initial begin
+                count = 8'd0;
+                @(observe(a));
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression calling `observe`"),
+        "{error}"
+    );
+    let error = build_error(
+        r#"module Top(output logic [7:0] count);
+            logic a = 1'b0;
+            function automatic logic tally(input logic v, inout logic [7:0] n);
+                n = n + 8'd1;
+                return v;
+            endfunction
+            initial begin
+                count = 8'd0;
+                @(tally(a, count));
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression calling `tally`"),
+        "{error}"
+    );
+}
+
+/// A process waiting on an expression two cascaded registers change is
+/// woken between their updates: the expression changed, even though it has
+/// its old value again once the cascade has settled.
+#[test]
+fn events_between_cascaded_register_updates_wake_waiters() {
+    let source = r#"
+        module Top(input logic clk, output logic [7:0] woken, output logic q, output logic r);
+            initial begin
+                q = 1'b0;
+                r = 1'b0;
+            end
+            always_ff @(posedge clk) q <= 1'b1;
+            always_ff @(posedge q) r <= 1'b1;
+            initial begin
+                woken = 8'd0;
+                @(q ^ r);
+                $display("q=%0d r=%0d", q, r);
+                woken = woken + 8'd1;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (woken, q, r) = (sim.signal("woken"), sim.signal("q"), sim.signal("r"));
+    sim.add_clock("clk", 10, 5);
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(sim.get(r), 1u8.into());
+    assert_eq!(sim.get(woken), 1u8.into());
+    let displays: Vec<String> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::Display { message } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displays, ["q=1 r=0"]);
 }
 
 /// Each process has its own activation of an `automatic` task that
@@ -789,6 +879,198 @@ fn waits_on_private_formals_see_only_their_activation() {
     sim.run_until(5).unwrap();
     assert!(sim.is_finished());
     assert_eq!(sim.get(woken), 0u8.into());
+}
+
+/// A task is timed for the `always` constructs of the scope that resolves
+/// its name: a task of another generate scope, or of an inactive branch,
+/// with the same name does not make an edge-sensitive `always` a process.
+#[test]
+fn timed_task_classification_follows_generate_scopes() {
+    let source = r#"
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                y = 8'd0;
+                z = 8'd0;
+            end
+            generate
+                if (1) begin : untimed
+                    task t(input logic [7:0] v);
+                        y <= v;
+                    endtask
+                    always @(posedge clk) t(y + 8'd1);
+                end
+                if (0) begin : inactive
+                    task t(input logic [7:0] v);
+                        #1 z = v;
+                    endtask
+                    always @(posedge clk) t(8'd99);
+                end
+                if (1) begin : timed
+                    task t(input logic [7:0] v);
+                        #1 z = v;
+                    endtask
+                    always @(posedge clk) t(z + 8'd1);
+                end
+            endgenerate
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (y, z) = (sim.signal("y"), sim.signal("z"));
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    assert_eq!(sim.get(z), 0u8.into());
+    sim.run_until(6).unwrap();
+    assert_eq!(sim.get(z), 1u8.into());
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+    assert_eq!(sim.get(z), 2u8.into());
+}
+
+/// A `static` local keeps its value between activations, also those of an
+/// automatic subroutine, and its initializer runs once, before time zero
+/// (IEEE 1800-2023 6.21).
+#[test]
+fn static_locals_keep_their_values_between_calls() {
+    let source = r#"
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            task count;
+                static logic [7:0] n = 8'd10;
+                #1 n = n + 8'd1;
+                $display("n=%0d", n);
+            endtask
+            task automatic tally;
+                static int calls = 0;
+                logic [7:0] fresh = 8'd0;
+                fresh = fresh + 8'd1;
+                calls = calls + 1;
+                #1 $display("calls=%0d fresh=%0d", calls, fresh);
+            endtask
+            task automatic bias(input logic [7:0] v, output logic [7:0] out);
+                static logic [7:0] b = 8'd3;
+                out = v + b;
+            endtask
+            always_comb bias(y, z);
+            initial begin
+                y = 8'd0;
+                count();
+                count();
+                tally();
+                y = 8'd4;
+            end
+            initial tally();
+            initial begin
+                #5 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let z = sim.signal("z");
+    assert_eq!(
+        displays(&mut sim),
+        lines(&[
+            (1, "n=11"),
+            (1, "calls=1 fresh=1"),
+            (2, "n=12"),
+            (3, "calls=2 fresh=1"),
+        ])
+    );
+    assert_eq!(sim.get(z), 7u8.into());
+}
+
+/// A local with an initializer in a static task needs an explicit lifetime
+/// keyword (IEEE 1800-2023 6.21): without one, the static lifetime would
+/// run the initializer once while the source suggests a per-call value.
+#[test]
+fn rejects_initialized_locals_of_static_tasks_without_a_lifetime() {
+    let error = build_error(
+        r#"module Top(output logic [7:0] y);
+            task count;
+                logic [7:0] n = 8'd0;
+                #1 n = n + 8'd1;
+                y = n;
+            endtask
+            initial count();
+        endmodule"#,
+    );
+    assert!(
+        error.contains("local `n` with an initializer in a static subroutine"),
+        "{error}"
+    );
+}
+
+/// The event counters of a package variable are the package's: a store of
+/// a process in one module wakes a waiter in another, also when the value
+/// is restored before the storing process suspends.
+#[test]
+fn package_variable_events_cross_modules() {
+    let source = r#"
+        package p;
+            logic a = 1'b0;
+            logic [7:0] n = 8'd0;
+        endpackage
+        module Writer;
+            initial begin
+                #1 p::a = 1'b1;
+                p::a = 1'b0;
+                #1 p::n = 8'd5;
+                p::n = 8'd0;
+            end
+        endmodule
+        module Top(output logic [7:0] woken);
+            import p::*;
+            Writer writer();
+            initial begin
+                woken = 8'd0;
+                @(a);
+                $display("a changed a=%0d", a);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(posedge p::a);
+                $display("a rose");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(n or a);
+                $display("n or a n=%0d", n);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                #3 $finish;
+            end
+        endmodule
+    "#;
+    for (four_state, mut sim) in [
+        (false, simulation(source)),
+        (true, four_state_simulation(source)),
+    ] {
+        let woken = sim.signal("woken");
+        assert_eq!(
+            displays(&mut sim),
+            lines(&[(1, "a changed a=0"), (1, "a rose"), (1, "n or a n=0")]),
+            "four_state={four_state}"
+        );
+        assert_eq!(sim.get(woken), 3u8.into(), "four_state={four_state}");
+    }
+
+    let error = build_error(
+        r#"package p;
+            logic a = 1'b0;
+        endpackage
+        module Top(output logic y);
+            initial begin
+                y = 1'b0;
+                @(p::a ^ 1'b0);
+                y = 1'b1;
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression reading package variable `p::a`"),
+        "{error}"
+    );
 }
 
 /// A package's `automatic` default lifetime gives each activation of a

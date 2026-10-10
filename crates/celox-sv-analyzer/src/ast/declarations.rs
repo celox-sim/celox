@@ -467,7 +467,7 @@ fn signals_from_module_common_item(
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item
-        && always_kind(always, syntax_tree) == AlwaysKind::Comb
+        && always_kind(always) == AlwaysKind::Comb
     {
         // A variable declared inside an `always_comb` block is hoisted to a
         // module signal. A clash with another signal of the same name is
