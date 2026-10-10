@@ -2306,6 +2306,83 @@ fn records_continuous_assignments() {
 }
 
 #[test]
+fn folds_countbits_with_four_state_parameter_operands_and_controls() {
+    let ir = analyze_source(
+        r#"
+            module Top #(
+                parameter logic [7:0] MIXED = 8'b10xz_11xz,
+                parameter ALIAS = MIXED,
+                parameter logic [7:0] CTRL = 8'bxxxx_xxxz,
+                parameter logic signed [3:0] SIGNED_X = 4'bx001,
+                parameter logic signed [7:0] EXTENDED_X = SIGNED_X,
+                parameter X = $countbits(ALIAS, 'x),
+                parameter Z = $countbits(MIXED, CTRL, CTRL),
+                parameter ALL = $countbits(MIXED, '0, '1, 'x, 'z),
+                parameter EXTENDED = $countbits(EXTENDED_X, 'x),
+                parameter logic [255:0] WIDE = 'x,
+                parameter W = $countbits(WIDE, 'x)
+            )(output logic [X-1:0] y);
+                assign y = '0;
+            endmodule
+        "#,
+        Path::new("countbits_parameters.sv"),
+    )
+    .expect("four-state countbits parameters should be evaluated");
+    let module = &ir.modules()[0];
+    for (index, expected) in [(5, 2), (6, 2), (7, 8), (8, 5), (10, 256)] {
+        assert_eq!(module.parameters()[index].resolved_value(), Some(expected));
+        assert_eq!(module.parameters()[index].resolved_width(), Some(32));
+        assert_eq!(module.parameters()[index].resolved_signed(), Some(true));
+    }
+    assert_eq!(module.parameters()[1].resolved_width(), Some(8));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(2));
+}
+
+#[test]
+fn folds_countbits_with_self_determined_argument_and_control_types() {
+    let ir = analyze_source(
+        r#"
+            module Top #(
+                parameter logic signed [7:0] NEG = -1,
+                parameter C = $countbits(NEG, '1, '1),
+                parameter X = $countbits(8'b10xz_11xz, 'x),
+                parameter Z = $countbits(8'b10xz_11xz, 'z),
+                parameter ALL = $countbits(8'b10xz_11xz, '0, '1, 'x, 'z),
+                parameter F = $countbits('1, '1),
+                parameter N = $countbits(-1, '1),
+                parameter W = $countbits(256'hx, 'x),
+                parameter S = ($countbits(NEG, '1) - 32'sd9) < 0,
+                parameter B = $bits($countbits(NEG, '1)),
+                parameter D = $size($countbits(NEG, '1)),
+                parameter LSB = $countbits(8'hfe, 8'hfe),
+                parameter logic [7:0] MASK = 8'hfe,
+                parameter SELECTED = $countbits(MASK[0], '0)
+            )(output logic [C-1:0] y);
+                assign y = '0;
+            endmodule
+        "#,
+        Path::new("countbits.sv"),
+    )
+    .expect("countbits constants should be evaluated");
+    let module = &ir.modules()[0];
+    for (parameter, expected) in module
+        .parameters()
+        .iter()
+        .zip([-1, 8, 2, 2, 8, 1, 32, 256, 1, 32, 32, 1, 254, 1])
+    {
+        assert_eq!(
+            parameter.resolved_value(),
+            Some(expected),
+            "{}",
+            parameter.name()
+        );
+    }
+    assert_eq!(module.parameters()[1].resolved_width(), Some(32));
+    assert_eq!(module.parameters()[1].resolved_signed(), Some(true));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+}
+
+#[test]
 fn folds_countones_with_self_determined_argument_types() {
     let ir = analyze_source(
         r#"
@@ -2567,7 +2644,7 @@ fn rejects_package_variables_and_nets() {
             "package variable or net `p::w`",
         ),
     ] {
-        let error = source_packages(code, Path::new("state.sv")).unwrap_err();
+        let error = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap_err();
         assert_eq!(error, AnalyzerError::Unsupported(construct.to_string()));
         assert_eq!(error.tracking_issue(), 1146);
     }
@@ -2575,30 +2652,42 @@ fn rejects_package_variables_and_nets() {
     let code = "package p; const int K = 3; localparam int W = 4;\n\
                 function automatic int f(int x); int t; t = x + K; return t; endfunction\n\
                 endpackage";
-    assert_eq!(
-        source_packages(code, Path::new("state.sv")).unwrap().len(),
-        1
+    let packages = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap();
+    assert_eq!(packages.names().collect::<Vec<_>>(), ["p"]);
+}
+
+#[test]
+fn package_functions_give_shapes_to_instance_connections() {
+    // The untyped assignment pattern takes the type of the package
+    // function's formal argument.
+    let code = "package p;
+                  function automatic int sum(input int v [2]); return v[0] + v[1]; endfunction
+                endpackage
+                module Child(input int x); endmodule
+                module Top; Child c(.x(p::sum('{1, 2}))); endmodule";
+    let ir = analyze_source(code, Path::new("shapes.sv")).unwrap();
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let connection = &top.instances()[0].port_connections()[0];
+    assert!(
+        matches!(connection.actual_expr(), Some(ir::Expr::Call { name, .. }) if name == "p::sum"),
+        "{connection:?}"
     );
 }
 
 #[test]
-fn package_inlining_keeps_source_text_after_a_dpi_import() {
-    // The preprocessor widens the space after `"DPI-C"`, so syntax tree
-    // offsets after it no longer match the source text.
+fn imports_a_dpi_function_declared_in_a_package() {
     let code = "package p; import \"DPI-C\" function int twice(input int x); endpackage\n\
-                module Top(input int a, output int y); import p::*; assign y = a; endmodule\n";
-    let path = Path::new("dpi.sv");
-    let packages = source_packages(code, path)
-        .unwrap()
-        .into_iter()
-        .map(|package| (package.name.clone(), package))
-        .collect::<HashMap<_, _>>();
-    let inlined = inline_module_packages(code, path, "Top", &packages)
-        .unwrap()
-        .unwrap();
-    assert!(
-        inlined.contains("\nimport \"DPI-C\" function int twice(input int x); \nendmodule"),
-        "{inlined}"
+                module Top(input int a, output int y); import p::*; assign y = twice(a); endmodule\n";
+    let ir = analyze_source(code, Path::new("dpi.sv")).unwrap();
+    let imports = ir.modules()[0].dpi_imports();
+    assert_eq!(imports.len(), 1);
+    assert_eq!(
+        (imports[0].name(), imports[0].c_name()),
+        ("p::twice", "twice")
     );
 }
 
@@ -3681,4 +3770,32 @@ fn analyzing_a_source_again_gives_the_same_call_sites() {
     let first = analyze_source(code, path).unwrap();
     let second = analyze_source(code, path).unwrap();
     assert_eq!(first, second);
+}
+
+#[test]
+fn countbits_alias_parameter_keeps_unknown_bits_in_assignments() {
+    let ir = analyze_source(
+        r#"module Child #(parameter logic [7:0] MASK = 8'b10xz_11xz,
+                         parameter int C = $countbits(MASK, 'x, 'z))
+                        (output logic [C:0] y, output int count);
+            localparam ALIAS = MASK;
+            assign y = '1;
+            assign count = $countbits(ALIAS, 'x, 'z);
+        endmodule"#,
+        Path::new("countbits_alias.sv"),
+    )
+    .unwrap();
+    let module = &ir.modules()[0];
+    assert_eq!(module.parameters()[2].resolved_value(), None);
+    let ir::Expr::Literal(literal) = module.assignments()[1].rhs() else {
+        panic!(
+            "a constant count should be folded: {:?}",
+            module.assignments()[1].rhs()
+        );
+    };
+    let literal = typecheck::parse_integral_literal(literal).unwrap();
+    assert_eq!(literal.width, 32);
+    assert!(literal.signed);
+    assert_eq!(literal.value, num_bigint::BigUint::from(4u8));
+    assert_eq!(literal.mask, num_bigint::BigUint::default());
 }

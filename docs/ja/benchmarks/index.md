@@ -73,11 +73,15 @@ python3 scripts/compare-vcd-verilator.py
 [VCD の測定条件と結果](../../internals/vcd-performance.md#verilator-comparison)には、
 idle・sparse・dense の各負荷で、記録なし／ありを比較した結果をまとめています。
 
-CodSpeed ワークフローは pull request と `master` でベンチマークを実行します。
-CodSpeed は `merge_group` event をサポートしていないため、merge queue では
-workflow check を維持しつつ CodSpeed を実行しません。pull request は決定的な CPU
-simulation を使って `master` の基準値と比較されます。ローカル実行では
-ベンチマーク suite が動作することだけを確認します。
+CodSpeed ワークフローは毎日 02:17 UTC（11:17 JST）にデフォルトブランチで
+実行し、任意のブランチでの手動実行にも対応します。pull request、merge queue、
+push では実行しません。決定的な CPU simulation の測定結果を CodSpeed に送信し、
+リポジトリの CodSpeed 回帰しきい値に従って過去の測定と比較します。
+`master` と `develop` では、実行失敗や性能解析の失敗時に
+`CodSpeed is failing on <branch>` Issue を作成・更新し、次の実行と解析が
+成功すると閉じます。解析結果の欠落や未完了も失敗として報告します。
+Issue には実行へのリンクと、性能低下の場合は比較結果とベンチマークの詳細を
+含めます。ローカル実行ではベンチマーク suite が動作することだけを確認します。
 
 ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
 CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。
