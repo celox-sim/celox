@@ -1,6 +1,26 @@
 use super::*;
 
 sv_backends! {
+    fn dimensions_of_nonarray_handle_types(sim) {
+        @case "system_functions::dimensions_of_nonarray_handle_types";
+    }
+
+    fn dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::dimensions_is_independent_of_unknown_values";
+    }
+
+    fn dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::dimensions_counts_declared_arrays";
+    }
+
+    fn dimensions_preserves_selected_and_expression_types(sim) {
+        @case "system_functions::dimensions_preserves_selected_and_expression_types";
+    }
+
+    fn dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
+    }
+
     fn array_query_evaluates_dimension_function_once(sim) {
         @setup {
             let source = r#"
