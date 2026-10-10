@@ -1246,3 +1246,27 @@
     (assert_eq ff_or_hit or_effect)
     (assert_eq ff_and_result and_value)
     (assert_eq ff_or_result or_value)))
+
+(case partial_word_shift_sign_z_65
+  (four_state)
+  (source "top.sv" #"
+module Top(input logic signed [64:0] a, input logic [31:0] n,
+           output logic signed [64:0] y);
+    assign y = a >>> n;
+endmodule
+"#)
+  (top Top)
+  (modify (set a (fourstate 0x5 0x10000000000000000)) (set n 1))
+  (assert_eq y (fourstate 0x2 0x18000000000000000)))
+
+(case partial_word_shift_sign_x_65
+  (four_state)
+  (source "top.sv" #"
+module Top(input logic signed [64:0] a, input logic [31:0] n,
+           output logic signed [64:0] y);
+    assign y = a >>> n;
+endmodule
+"#)
+  (top Top)
+  (modify (set a (fourstate 0x10000000000000005 0x10000000000000000)) (set n 1))
+  (assert_eq y (fourstate 0x18000000000000002 0x18000000000000000)))

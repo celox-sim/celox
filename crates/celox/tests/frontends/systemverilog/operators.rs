@@ -1,4 +1,7 @@
 sv_backends! {
+    fn partial_word_shift_sign_z_65(sim) { @case "operators::partial_word_shift_sign_z_65"; }
+    fn partial_word_shift_sign_x_65(sim) { @case "operators::partial_word_shift_sign_x_65"; }
+
     fn simulates_systemverilog_top_comb_assign(sim) {
         @case "operators::simulates_systemverilog_top_comb_assign";
     }
