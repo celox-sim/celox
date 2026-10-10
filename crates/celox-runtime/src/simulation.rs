@@ -1023,8 +1023,9 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return Ok(None);
         }
-        let ready = self.take_ready_processes(time);
-        self.step_round(executor, time, Vec::new(), ready, true)?;
+        let mut events = Vec::new();
+        let ready = self.take_ready_processes(executor, time, &mut events);
+        self.step_round(executor, time, events, ready, true)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
         self.run_remaining_rounds(executor, time, u64::MAX)?;
