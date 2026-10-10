@@ -113,8 +113,8 @@ struct AnalyzedSvModule {
     /// The positional interface of every module in all sources, used to bind
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
-    /// The packages declared in all sources, inlined into the modules that use them.
-    packages: std::sync::Arc<HashMap<String, sv::PackageSource>>,
+    /// The packages declared in all sources, analyzed once.
+    packages: std::sync::Arc<sv::Packages>,
 }
 
 #[derive(Clone)]
@@ -202,13 +202,8 @@ fn analyze_sources(
         interfaces.extend(source.module_interfaces().clone());
     }
     let interfaces = std::sync::Arc::new(interfaces);
-    let mut packages = HashMap::default();
-    for (source, _, _) in &sources {
-        for package in source.packages()? {
-            packages.insert(package.name.clone(), package);
-        }
-    }
-    let packages = std::sync::Arc::new(packages);
+    let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
+    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -1087,8 +1082,9 @@ fn lower_module_with_overrides(
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
     let parameter_types = module
-        .parameters()
+        .imported_parameters()
         .iter()
+        .chain(module.parameters())
         .filter_map(|parameter| {
             Some((
                 parameter.name().to_string(),
@@ -2025,6 +2021,18 @@ fn lower_initial_processes(
     pm.runtime_event_sites = std::mem::take(runtime_event_sites);
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
+    let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
+    for counter in ff::declare_event_counters(&mut pm, &bodies) {
+        let written_mask = (BigUint::from(1u8) << ff::EVENT_COUNTER_WIDTH) - BigUint::from(1u8);
+        values.push(InitialStateValue {
+            address: counter,
+            data: InitialStateData::Packed {
+                value: BigUint::default(),
+                mask: BigUint::default(),
+                written_mask,
+            },
+        });
+    }
     let processes = runtime
         .into_iter()
         .zip(slots)
@@ -3243,21 +3251,34 @@ fn lower_glue_parent_expr(
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
-            let arg = &args[0];
-            let width =
-                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
-            let (inner, sources, source_ids) = lower_glue_parent_expr(
-                arg,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arena,
-                Some(width),
-                None,
-            )?;
+            let mut operands = Vec::with_capacity(args.len());
+            let mut sources = HashSet::default();
+            let mut source_ids = Vec::new();
+            for arg in args {
+                let width =
+                    sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+                let (inner, arg_sources, arg_source_ids) = lower_glue_parent_expr(
+                    arg,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    Some(width),
+                    None,
+                )?;
+                operands.push(inner);
+                sources.extend(arg_sources);
+                source_ids.extend(arg_source_ids);
+            }
             Some((
-                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(
+                    arena,
+                    name,
+                    &operands,
+                    context_width,
+                    context_signed,
+                )?,
                 sources,
                 source_ids,
             ))
@@ -3598,19 +3619,62 @@ fn permute_reversed_lvalue_rhs_slt(
     arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
-// IEEE 1800-2023 20.9: count only known ones; predicates return a two-state bit.
+// IEEE 1800-2023 20.9: bit vector functions return known counts/predicates.
 fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     name: &str,
-    inner: NodeId,
+    operands: &[NodeId],
     context_width: Option<usize>,
     context_signed: Option<bool>,
 ) -> Option<NodeId> {
+    let inner = *operands.first()?;
     let known = arena
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
-    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, 1)?;
-    let result = if name == "$clog2" {
+    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, operands.len())?;
+    let result = if name == "$countbits" {
+        let controls = operands[1..]
+            .iter()
+            .map(|&expr| {
+                arena
+                    .alloc(SLTNode::Slice {
+                        expr,
+                        access: BitAccess::new(0, 0),
+                    })
+                    .ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let operand_width = celox_slt::get_width(inner, arena);
+        let mut matches = Vec::with_capacity(operand_width);
+        for bit in (0..operand_width).rev() {
+            let selected = arena
+                .alloc(SLTNode::Slice {
+                    expr: inner,
+                    access: BitAccess::new(bit, bit),
+                })
+                .ok()?;
+            let mut matched = None;
+            for &control in &controls {
+                // Case equality distinguishes all four states and returns a
+                // known bit. OR makes repeated controls count only once.
+                let equal = arena
+                    .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                    .ok()?;
+                matched = Some(match matched {
+                    None => equal,
+                    Some(previous) => arena
+                        .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
+                        .ok()?,
+                });
+            }
+            matches.push((matched?, 1));
+        }
+        let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
+        let count = arena
+            .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
+            .ok()?;
+        coerce_node_width(arena, count, Some(32), false).ok()?
+    } else if name == "$clog2" {
         // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
         // (IEEE 1800-2023 20.8.1).
         let operand_width = celox_slt::get_width(known, arena);
@@ -4346,21 +4410,33 @@ fn lower_expr_with_context(
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
-            let arg = &args[0];
-            let width =
-                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
-            let (inner, sources) = lower_expr_with_context(
-                arg,
-                variables,
-                name_to_id,
-                constants,
-                parameter_types,
-                arena,
-                Some(width),
-                None,
-            )?;
+            let mut operands = Vec::with_capacity(args.len());
+            let mut sources = HashSet::default();
+
+            for arg in args {
+                let width =
+                    sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+                let (inner, arg_sources) = lower_expr_with_context(
+                    arg,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    Some(width),
+                    None,
+                )?;
+                operands.push(inner);
+                sources.extend(arg_sources);
+            }
             Some((
-                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(
+                    arena,
+                    name,
+                    &operands,
+                    context_width,
+                    context_signed,
+                )?,
                 sources,
             ))
         }
@@ -5826,6 +5902,12 @@ fn module_constants_with_overrides(
         })
         .collect();
     let mut constants = HashMap::default();
+    // The package parameters a module uses come before its own.
+    for parameter in module.imported_parameters() {
+        if let Some(value) = parameter.resolved_value() {
+            constants.insert(parameter.name().to_string(), value);
+        }
+    }
     for parameter in module.parameters() {
         let value = if let Some(override_value) = override_values.get(parameter.name()) {
             sv::typecheck::eval_const_expr(override_value, &constants)

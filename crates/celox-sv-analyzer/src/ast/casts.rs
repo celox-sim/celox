@@ -16,7 +16,7 @@ fn cast_target_type(
             let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
                 return None;
             };
-            let name = identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)?;
+            let name = reference_name(RefNode::PsTypeIdentifier(identifier), syntax_tree)?;
             if let Some(r#type) = type_aliases.get(&name) {
                 expr_type_from_type(r#type, const_env)
             } else {
@@ -312,7 +312,7 @@ fn cast_target_is_two_state(
             let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
                 return false;
             };
-            identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)
+            reference_name(RefNode::PsTypeIdentifier(identifier), syntax_tree)
                 .and_then(|name| type_aliases.get(&name))
                 .is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
         }
@@ -357,8 +357,7 @@ fn casting_type_is_numeric_size(
             let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
                 return false;
             };
-            let Some(name) =
-                identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)
+            let Some(name) = reference_name(RefNode::PsTypeIdentifier(identifier), syntax_tree)
             else {
                 return false;
             };
