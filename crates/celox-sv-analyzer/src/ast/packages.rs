@@ -179,9 +179,10 @@ impl Packages {
                 ));
             }
             // Modules find their unit by the path of their source.
-            if packages.units.contains_key(*path) {
+            if trees.iter().filter(|(_, other)| other == path).count() > 1 {
                 return Err(AnalyzerError::Unsupported(format!(
-                    "compilation-unit declarations in two sources named `{}`",
+                    "compilation-unit declarations in a source whose path `{}` another source \
+                     shares",
                     path.display()
                 )));
             }

@@ -213,5 +213,26 @@ fn unit_imports_conflict_and_stay_in_their_scope() {
         ),
     ])
     .expect_err("units of sources with one path are rejected");
-    assert!(error.to_string().contains("two sources named"), "{error}");
+    assert!(error.to_string().contains("another source"), "{error}");
+    // Also when only one of them declares unit items.
+    let error = build(&[
+        ("localparam int W = 7;", "same.sv"),
+        (
+            "module Top(output logic [7:0] y); assign y = 0; endmodule",
+            "same.sv",
+        ),
+    ])
+    .expect_err("units of sources with one path are rejected");
+    assert!(error.to_string().contains("another source"), "{error}");
+    // An import in a subroutine of the unit is not one of its siblings'.
+    assert!(
+        build(&[(
+            "package p; localparam int X = 3; endpackage
+             function automatic int f(); import p::X; return X; endfunction
+             localparam int Y = X;
+             module Top(output logic [7:0] y); assign y = Y; endmodule",
+            "unit.sv",
+        )])
+        .is_err()
+    );
 }
