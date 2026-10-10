@@ -880,3 +880,67 @@ classification and its lowering now avoid work proportional to unrelated
 bindings for the accepted forms. Whole AST lowering still scales nonlinearly;
 this change does not eliminate full-context work for other operands, function
 frame copies, preliminary declaration walks, or expanded unresolved expressions.
+
+## Referenced parameter literal values
+
+Generate-item collection previously expanded every parameter into a literal or
+symbolic expression before collecting functions and RTL objects. During initial
+function discovery, a function used in an initializer may not be installed yet.
+A chain such as `P_i = next_value(P_previous)` then retained nested symbolic calls:
+storing all prefixes copied progressively longer trees. Referring to the previous
+value twice could multiply the tree at every declaration, even when none of those
+expressions were needed by the items being collected.
+
+Collection now finds parameter references in non-parameter items, including
+function bodies, type-bearing declarations, and all nested or inactive generate
+branches. Array parameter initializers remain reference roots. An iterative
+initializer dependency closure selects the values to materialize. Inherited
+numeric values keep their former precedence and bypass value dependencies;
+the full declaration-order type prefix still supplies inferred width/signedness.
+The original full-map helper remains available to consumers that need every value.
+Identifier collection is deliberately conservative: declarations and shadowed names
+may select additional values rather than hide a required binding.
+
+Owning-crate regressions compare projected values with the full map for X/Z,
+wide/signed values, selects, conditionals, forward references, repeated names,
+self/cyclic references, and numeric overrides with inferred types. Reference scans
+cover packages, escaped identifiers, arrays, and nested/inactive branches. Cold
+item collection stores no unused expressions for incrementing and doubling
+function-call chains at 16/64/256 parameters; source-to-IR checks verify every
+result, including signed 32-bit wraparound. The 256-element chains pass on the
+default Rust test thread stack after the unused expansion is removed.
+
+A manual paired probe materializes one referenced root (`P0`) from an uninstalled
+function chain. It checks that this root matches the full environment and that
+only one value is produced. Seven repetitions alternate old/new order; medians
+include building and dropping the maps, excluding syntax parsing, declaration
+collection, and numeric function evaluation. The old deep expansion uses a
+16 MiB comparison-thread stack:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_full_and_referenced_parameter_values -- --ignored --nocapture
+```
+
+| Parameters | Full values | Projected values | Full map (ms) | Projection (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 32 | 1 | 0.173 | 0.014 |
+| 128 | 128 | 1 | 2.319 | 0.083 |
+| 512 | 512 | 1 | 79.692 | 0.148 |
+
+The standalone `type_queries --constant-functions 32 128 512` probe also passes
+with IR value assertions. Separate three-sample medians compare `65dff8a23`
+(including the borrowed-frame and classified-context optimizations) with this
+projection change:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 6.429 / 6.746 | 19.777 / 19.390 | 0.126 / 0.112 |
+| 128 | 14.662 / 20.474 | 60.054 / 58.018 | 0.245 / 0.377 |
+| 512 | 61.172 / 57.386 | 325.627 / 222.730 | 0.916 / 0.925 |
+
+Shared-machine timing varies. Unused initializer chains no longer require their
+expanded trees; this does not establish linearity for every workload. A referenced
+unresolved root still expands its dependency prefixes, and repeated symbolic
+references can still multiply those live trees. Conservative roots, preliminary
+type queries, scope environments, and consumers of the full map retain costs.
