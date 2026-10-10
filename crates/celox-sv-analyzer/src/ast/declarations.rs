@@ -22,6 +22,9 @@ pub(super) fn scope_name_from_node(
     syntax_tree: &SyntaxTree,
 ) -> Result<String, AnalyzerError> {
     if let RefNode::PackageDeclaration(package) = node {
+        if packages::is_unit(package) {
+            return Ok(packages::UNIT.to_string());
+        }
         return identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
             .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()));
     }

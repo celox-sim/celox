@@ -113,7 +113,7 @@ fn calls_subroutine(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
             ConstExpr::Function { name, args, .. } => {
-                !name.starts_with('$') || args.iter().any(constant)
+                !system_functions::is_system_name(name) || args.iter().any(constant)
             }
             ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
             ConstExpr::Unary { expr, .. } => constant(expr),
@@ -127,7 +127,9 @@ fn calls_subroutine(expr: &Expr) -> bool {
         }
     }
     match expr {
-        Expr::Call { name, args } => !name.starts_with('$') || args.iter().any(calls_subroutine),
+        Expr::Call { name, args } => {
+            !system_functions::is_system_name(name) || args.iter().any(calls_subroutine)
+        }
         Expr::Ident(_) | Expr::Literal(_) => false,
         Expr::Select { expr, msb, lsb, .. } => {
             calls_subroutine(expr) || constant(msb) || constant(lsb)

@@ -214,6 +214,14 @@ impl<'a> File<'a> {
             .map(|index| self.text(self.tokens[index]))
     }
 
+    /// Whether the identifier at `start` is qualified by `$unit::`.
+    fn unit_qualified(&self, start: usize) -> bool {
+        let index = self.tokens.partition_point(|&(_, end)| end <= start);
+        index >= 2
+            && self.text(self.tokens[index - 1]) == "::"
+            && self.text(self.tokens[index - 2]) == "$unit"
+    }
+
     /// Whether `span` has a use `.name.` or `.name[` of `name` after one of
     /// the generate block names `blocks`, such as `g.h.x` or `g[0].h.x` for
     /// an instance `h` in a generate block `g`.
@@ -840,9 +848,10 @@ impl<'a> Design<'a> {
                             if let RefNode::Identifier(identifier) = node {
                                 let span = file.span(RefNode::Identifier(identifier))?;
                                 // A qualified name does not resolve to the
-                                // compilation unit.
-                                if matches!(file.previous_token(span.0), Some("." | "::"))
-                                    || file.next_token(span.1) == Some("::")
+                                // compilation unit, unless `$unit::` names it.
+                                if !file.unit_qualified(span.0)
+                                    && (matches!(file.previous_token(span.0), Some("." | "::"))
+                                        || file.next_token(span.1) == Some("::"))
                                 {
                                     continue;
                                 }
@@ -2979,7 +2988,7 @@ fn unit_names(file: &File<'_>) -> Result<HashSet<String>, AnalyzerError> {
 }
 
 /// The names that a package item declares.
-fn package_item_names(
+pub(super) fn package_item_names(
     item: &sv_parser::PackageItem,
     syntax_tree: &SyntaxTree,
 ) -> Result<HashSet<String>, AnalyzerError> {

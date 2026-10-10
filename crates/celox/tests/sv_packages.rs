@@ -894,3 +894,17 @@ fn exports_loops_and_self_qualified_exports() {
     );
     assert!(detail.contains("no item `X`"), "{detail}");
 }
+
+/// A wildcard import binds a type used to declare a variable, and the
+/// target of a continuous assignment.
+#[test]
+fn wildcard_imports_bind_declaration_types_and_assignment_targets() {
+    assert_eq!(
+        output(
+            "package p; typedef logic [3:0] nib_t; logic [7:0] g; endpackage
+             module Top(output logic [7:0] y); import p::*;
+               nib_t n; assign n = 4'h9; assign g = 8'd4; assign y = p::g + n; endmodule"
+        ),
+        13
+    );
+}
