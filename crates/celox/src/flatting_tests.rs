@@ -130,6 +130,10 @@ fn setup_to_flatting(
         &global_boundaries,
         &HashMap::default(),
         &mut arena,
+        &|instance_id, var_id| SourceAddr {
+            instance_id,
+            var_id,
+        },
     );
     (r.unwrap().relocation.comb_blocks, modules, arena)
 }

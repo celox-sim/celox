@@ -111,7 +111,7 @@ const fn function(name: &'static str, min_args: usize, max_args: usize) -> Syste
 pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.2 Simulation control system tasks
     task("$finish", ProceduralAndInitial, 0, Some(1)),
-    task("$stop", ProceduralAndInitial, 0, Some(1)),
+    unsupported("$stop", Task),
     unsupported("$exit", Task),
     // 20.3 Simulation time system functions
     unsupported("$time", Function),
@@ -140,12 +140,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$isunbounded", Function),
     // 20.7 Array query functions
     function("$dimensions", 1, 1),
-    unsupported("$unpacked_dimensions", Function),
-    unsupported("$left", Function),
-    unsupported("$right", Function),
-    unsupported("$low", Function),
-    unsupported("$high", Function),
-    unsupported("$increment", Function),
+    function("$unpacked_dimensions", 1, 1),
+    function("$left", 1, 2),
+    function("$right", 1, 2),
+    function("$low", 1, 2),
+    function("$high", 1, 2),
+    function("$increment", 1, 2),
     function("$size", 1, 2),
     // 20.8 Math functions
     function("$clog2", 1, 1),

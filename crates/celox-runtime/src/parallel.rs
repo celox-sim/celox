@@ -117,7 +117,8 @@ pub trait LaneTaskRunner: Sync {
     fn run_task(&self, task: usize) -> i64;
 }
 
-/// The failure with the lowest task index of one kernel execution.
+/// A kernel failure. Non-fatal failures take precedence over combinational
+/// fatal captures; within either class the lowest task index wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaneTaskFailure {
     pub task: usize,
@@ -172,7 +173,12 @@ impl Shared {
             .failure
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if slot.is_none_or(|current| failure.task < current.task) {
+        if slot.is_none_or(|current| {
+            let priority = |failure: LaneTaskFailure| {
+                (crate::comb_fatal_site(failure.code).is_some(), failure.task)
+            };
+            priority(failure) < priority(current)
+        }) {
             *slot = Some(failure);
         }
         self.abort.0.store(true, Ordering::Release);
@@ -297,7 +303,8 @@ impl LanePool {
         self.shared.lanes as u32
     }
 
-    /// Execute one kernel and return its lowest-indexed task failure.
+    /// Execute one kernel and return its failure, preferring non-fatal errors
+    /// to captured assertions before comparing task indices.
     ///
     /// After a failure, tasks that have not started are skipped; every lane
     /// still finishes before this call returns.
@@ -545,6 +552,60 @@ mod tests {
         let runner = recorder(predecessors, None);
         pool.run(&schedule, &runner).unwrap();
         assert_eq!(runner.calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn concurrent_loop_and_internal_failures_take_precedence_over_fatal_captures() {
+        struct Runner {
+            started: std::sync::Barrier,
+            codes: [i64; 2],
+        }
+        impl LaneTaskRunner for Runner {
+            fn run_task(&self, task: usize) -> i64 {
+                self.started.wait();
+                self.codes[task]
+            }
+        }
+        let schedule = LaneSchedule::new(
+            2,
+            vec![
+                LaneTaskSpec {
+                    lane: 0,
+                    waits: vec![],
+                },
+                LaneTaskSpec {
+                    lane: 1,
+                    waits: vec![],
+                },
+            ],
+        )
+        .unwrap();
+        let mut pool = LanePool::new(2).unwrap();
+        for code in [1, 2000, LANE_TASK_PANICKED] {
+            for task in [0, 1] {
+                let mut codes = [crate::comb_fatal_code(1); 2];
+                codes[task] = code;
+                let runner = Runner {
+                    started: std::sync::Barrier::new(2),
+                    codes,
+                };
+                assert_eq!(
+                    pool.run(&schedule, &runner),
+                    Err(LaneTaskFailure { task, code })
+                );
+            }
+        }
+        let runner = Runner {
+            started: std::sync::Barrier::new(2),
+            codes: [crate::comb_fatal_code(2), crate::comb_fatal_code(1)],
+        };
+        assert_eq!(
+            pool.run(&schedule, &runner),
+            Err(LaneTaskFailure {
+                task: 0,
+                code: crate::comb_fatal_code(2),
+            })
+        );
     }
 
     #[test]

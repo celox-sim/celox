@@ -367,26 +367,32 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .collect(),
         },
         Expr::Call { name, args } => {
-            let is_countbits = name == "$countbits";
-            let call = Expr::Call {
-                name,
-                args: args
-                    .into_iter()
-                    .map(|arg| {
-                        substitute_expr_constants_with_parameter_literals(
-                            arg,
-                            const_env,
-                            parameter_literals,
-                        )
-                    })
-                    .collect(),
-            };
-            if is_countbits {
-                // Resolve constant calls before SLT lowering. This retains X/Z
-                // masks and avoids building one comparison per constant bit.
-                fold_const_integral_expr_preserving_mask(call, const_env)
+            let args: Vec<_> = args
+                .into_iter()
+                .map(|arg| {
+                    substitute_expr_constants_with_parameter_literals(
+                        arg,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .collect();
+            if matches!(name.as_str(), "$signed" | "$unsigned")
+                && let [arg] = args.as_slice()
+                && let Some(constant) = expr_to_const(arg.clone())
+                && let Some(ty) =
+                    infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
+            {
+                Expr::Resize {
+                    expr: Box::new(arg.clone()),
+                    width: ty.width,
+                    signed: name == "$signed",
+                }
+            } else if name == "$countbits" {
+                // Resolve constant calls before SLT lowering while retaining X/Z masks.
+                fold_const_integral_expr_preserving_mask(Expr::Call { name, args }, const_env)
             } else {
-                call
+                Expr::Call { name, args }
             }
         }
     }
@@ -969,6 +975,24 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         )
                     {
                         return Ok(Some(ConstExpr::Literal(count.to_string())));
+                    }
+                    if matches!(
+                        name,
+                        "$left"
+                            | "$right"
+                            | "$low"
+                            | "$high"
+                            | "$increment"
+                            | "$unpacked_dimensions"
+                    ) {
+                        return Ok(dimensions::array_query_call(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                        .and_then(expr_to_const));
                     }
                 }
                 if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())

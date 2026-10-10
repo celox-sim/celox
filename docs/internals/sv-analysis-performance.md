@@ -490,9 +490,9 @@ cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_qu
 
 For the ranged inputs, increasing the after input sixteenfold (32→512) increases
 AST time about 15.2x in the module and 15.7x in the generate block. The int reverse
-chain increases about 14.4x. The int module path does not use the borrowed range
-optimization and remains superlinear in these samples; no algorithmic improvement
-is claimed for it. Shared-machine load differed substantially: the 512-parameter
+chain increases about 14.4x. At this stage, the int module path does not use the
+borrowed range optimization and remains superlinear in these samples; no
+algorithmic improvement is claimed for it. Shared-machine load differed substantially: the 512-parameter
 ranged module parsed in 425.629/78.977 ms before/after, and the ranged generated
 input in 341.272/88.076 ms. These are sample timings, not universal speedup factors.
 The operation-count tests independently establish the removed repeated work.
@@ -502,6 +502,60 @@ with IR conversion 0.638/0.016 ms. Their ranged counterparts converted to IR in
 0.585/0.016 ms. Grouped declarations, many signal/parameter alternations, four-state
 prefixes, and many distinct scopes with large inherited tables still need separate
 scaling measurements. This follow-up does not claim linear behavior for them.
+
+## Looking up constant-folding types on demand
+
+Starting from `5cc44d993`, ordinary `int` module parameters still spent quadratic
+work in `parameter_value_env`. Each numeric value was already a sized literal,
+but the two-state conversion enclosing it caused constant folding to scan every
+visible binding and rebuild the parameter-type table. Declaration collectors
+materialize these values several times, multiplying the repeated scans.
+
+Mask-preserving constant folding now looks up a type only when substitution
+encounters an identifier. Selection, concatenation and resize folding pass the
+same lookup through their recursive calls. Literal-only two-state conversions
+perform no type lookups. Existing map-taking typecheck APIs and the indexed-select
+conversion entry point retain their signatures and supply equivalent map lookups.
+No cache or scope lifetime is introduced. The width, signedness, mask and
+expression-context evaluation rules remain unchanged (IEEE 1800-2023 11.8.1).
+
+Regressions compare complete-table and direct-lookup results for every expression
+shape, signed logical/arithmetic shifts, mixed signedness, unknown masks, unbased
+fills, out-of-range selections, 129-bit values, function calls and unresolved
+names. A 4,096-parameter unrelated environment does not add type lookups. The
+production `parameter_value_env` path scans zero type-table entries for 16/64/256
+numeric two-state parameters; a second counter bounds full AST construction's
+remaining type-table scans in proportion to the parameter count. These internal
+operation counts have no timing thresholds and add no shared executable cases.
+
+The same optimized profile and three-fresh-run medians give:
+
+| Workload | Parameters | AST before (ms) | AST after (ms) | Parse before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| int module declarations | 32 | 20.638 | 7.956 | 7.218 / 4.536 |
+| int module declarations | 128 | 85.661 | 32.582 | 35.738 / 18.759 |
+| int module declarations | 512 | 899.043 | 113.156 | 103.472 / 55.918 |
+| int module declarations | 1,024 | 2,220.206 | 228.531 | 137.642 / 121.080 |
+| int reverse generate dependencies | 32 | 12.409 | 8.532 | 5.811 / 4.392 |
+| int reverse generate dependencies | 128 | 42.287 | 31.006 | 20.145 / 13.702 |
+| int reverse generate dependencies | 512 | 138.360 | 121.087 | 58.867 / 54.530 |
+| int reverse generate dependencies | 1,024 | 259.254 | 254.760 | 116.797 / 115.437 |
+
+For the ordinary module, 32x input growth (32→1,024) increases after AST time
+about 28.7x, compared with 107.6x before. The 1,024-parameter sample is about
+9.7x faster. Parsing varied, especially at smaller sizes, so these are sample
+measurements on a shared machine rather than universal speedup factors. IR
+conversion before/after at 1,024 parameters was 2.308/1.164 ms for the module and
+0.019/0.017 ms for the generate block. The reverse chain was already near linear
+after the preceding prefix optimization and shows no material additional gain.
+
+The ranged probe also passes at 32/128/512/1,024 parameters. Its after AST times
+are 12.780/51.535/206.211/410.255 ms for module declarations and
+14.091/52.504/209.856/428.733 ms for reverse generate dependencies. This is an
+after-only range check for this step. All probes verify IR values/widths and
+exclude backend compilation and simulation. The change removes the visible
+environment factor from constant-folding type substitution; it does not establish
+linear behavior for every expression shape or scope pattern.
 
 ## Remaining boundaries
 
@@ -550,10 +604,12 @@ cargo doc --locked -p celox-sv-analyzer -p celox-frontend-sv --no-deps
 pnpm docs:build
 ```
 
-The type-query follow-up also validates the suite catalogue, including the
-retained-report integration tests, and the new shared case with both available
-independent simulators. Add each new case's observed results to both retained
-reports under `crates/celox-test-suite/verification/sv`:
+The earlier type-query follow-up also validated the suite catalogue, including
+retained-report integration tests, and its new shared case with both available
+independent simulators. Current analyzer-only changes against unchanged cases do
+not require external reruns. When executable shared cases or external adapters
+change, use focused filters as described in `CONTRIBUTING.md`; routine validation
+does not refresh checked-in verification reports or proof manifests:
 
 ```sh
 cargo test --locked -p celox-test-suite --features verilator,icarus

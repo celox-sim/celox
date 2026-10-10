@@ -240,6 +240,9 @@ fn expression_dimensions(
     expr_static_width(&expression, dimensions).map(|width| usize::from(width > 1))
 }
 
+mod queries;
+pub(super) use queries::array_query_call;
+
 pub(super) fn size_system_function_expr_type(
     primary: &sv_parser::ConstantPrimary,
     syntax_tree: &SyntaxTree,
@@ -1244,6 +1247,8 @@ pub(super) fn insert_parameter_type_markers(
 pub(super) fn parameter_types_from_const_env(
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, ExprType> {
+    #[cfg(test)]
+    PARAMETER_TYPE_SCAN_ENTRIES.with(|count| count.set(count.get() + const_env.len()));
     const PREFIX: &str = "__parameter::width::";
     const_env
         .iter()
@@ -1283,6 +1288,7 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     static SYNTAX_TYPE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static PARAMETER_TYPE_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

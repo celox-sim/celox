@@ -349,6 +349,9 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
+| `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
+| `sv_icarus_runtime_array_queries` | execute | icarus | 1 | Icarus 13.0 aborts on a runtime dimension argument. A standalone reproducer also rejects an integer variable as the dimension. IEEE 1800-2023 20.7 permits querying fixed-size dimensions with runtime expressions. |
+| `sv_icarus_immediate_cover_actions` | execute | icarus | 1 | Icarus 13.0 drops immediate cover pass statements even with `-gassertions`. IEEE 1800-2023 16.3 requires the action for a true condition. Verilator passes with the adapter's `--coverage-user` flag. |
 | `sv_icarus_generate_binding` | compile | icarus | 4 | Icarus 13.0 cannot bind generate-scope parameters and signals that the block declares after their use ("Unable to bind"). Verilator passes these cases. |
 | `sv_icarus_generate_forward_reference` | execute | icarus | 1 | Icarus 13.0 resolves a name used before its declaration in the same generate block to the enclosing scope. Verilator (which warns VARHIDDEN) and Celox resolve it to the block's own declaration. |
 | `sv_icarus_generate_case_context` | execute | icarus | 1 | Icarus 13.0 compares a case-generate selector without the common width and signedness of the selector and all labels; IEEE 1800-2023 12.5 makes the comparison unsigned when any operand is unsigned. Verilator agrees with the expected value. |
@@ -383,3 +386,10 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 | `sv_verilator_unpacked_array_extension` | compile | verilator | 2 | Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through "EXTEND unexpected in assignment to unpacked array" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_dimensions_type_queries` | compile | icarus | 2 | Icarus 13.0 rejects data type arguments to `$dimensions`, with syntax/type-name errors and an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case. |
 | `sv_verilator_chandle_dimensions` | execute | verilator | 1 | Verilator 5.052 returns 1 for `$dimensions(chandle)`; IEEE 1800-2023 6.14 and 20.7 require 0 for this nonarray pointer type. |
+
+The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
+retains the failed Icarus runs and minimal sources. Cover comparisons enable
+Verilator user coverage so pass actions execute; this adds no coverage-report
+contract to Celox. The readmem corroboration passes Icarus, which warns for
+both short and long files. Verilator 5.052 aborts on the negative-index memory
+in that reproducer; it is not counted as a successful comparison.

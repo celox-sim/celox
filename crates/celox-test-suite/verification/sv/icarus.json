@@ -1806,6 +1806,17 @@
       "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
+      "name": "operators::wide_arithmetic_shift_preserves_unknown_sign",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "operators::zero_extends_mixed_signed_arithmetic_operands",
       "phase": "execute",
       "status": "passed",
@@ -2894,6 +2905,52 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_runtime_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "execute",
+        "reason": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_handle_runtime_dimensions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_constant_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_preserve_bounds_and_dimensions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "",
       "expectation": "Simulation",
       "name": "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports",
@@ -3155,6 +3212,51 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "system_functions::display_unknown_bits_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 discards immediate cover pass statements, including with -gassertions. IEEE 1800-2023 16.3 requires the pass statement to execute when the condition is true. Verilator passes when --coverage-user is enabled by the adapter.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_immediate_cover_actions",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "execute",
+        "reason": "Icarus 13.0 discards immediate cover pass statements, including with -gassertions. IEEE 1800-2023 16.3 requires the pass statement to execute when the condition is true. Verilator passes when --coverage-user is enabled by the adapter.",
+        "upstream": []
+      },
+      "name": "system_functions::immediate_cover_executes_pass_statement",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::immediate_cover_handles_unknown_conditions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::signed_casts_in_parameters",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,
