@@ -616,3 +616,48 @@ module Top (
         "{error:?}"
     );
 }
+
+#[test]
+fn package_writers_may_initialize_disjoint_slices() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared; endpackage
+             module Low; initial p::shared[3:0] = 4'd1; endmodule
+             module High; initial p::shared[7:4] = 4'd2; endmodule
+             module Top(output logic [7:0] y); Low l(); High h(); assign y = p::shared; endmodule"
+        ),
+        0x21
+    );
+}
+
+#[test]
+fn a_self_qualified_package_variable_keeps_one_driver() {
+    // The package names its own variable, so its state module binds an alias
+    // of it; its initializer is still not a driver.
+    assert_eq!(
+        output(
+            "package p;
+               logic [7:0] shared = 8'd1;
+               function automatic logic [7:0] get(); return p::shared; endfunction
+             endpackage
+             module Top(output logic [7:0] y);
+               assign p::shared = 8'd9;
+               assign y = p::get();
+             endmodule"
+        ),
+        9
+    );
+}
+
+#[test]
+fn instance_paths_ending_in_scope_separators_keep_their_dot() {
+    let source = "module C(output logic [7:0] y); assign y = 8'd4; endmodule
+        module Top(output logic [7:0] y); C \\u:: (.y(y)); endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("escaped.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let program = simulator.program();
+    let address = program.get_addr(&[("\\u::", 0)], &["y"]).unwrap();
+    assert_eq!(program.get_path(&address), "\\u::.y");
+}

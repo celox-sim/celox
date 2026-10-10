@@ -277,6 +277,7 @@ fn check_package_variable_drivers(
     bindings: &PackageBindings,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
+    package_instances: &HashMap<ModuleId, InstanceId>,
     comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
 ) -> Result<(), ParserError> {
     let packages: HashSet<AbsoluteAddr> = bindings.targets.values().copied().collect();
@@ -344,13 +345,30 @@ fn check_package_variable_drivers(
     let mut initial_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
     for (&instance, module_id) in instance_modules {
         let module = &modules[module_id];
-        if module.package_bindings.is_empty() {
+        if package_instances.contains_key(module_id) {
             continue;
         }
         for initial in &module.initial_memory_values {
             let address = bindings.locate(instance, initial.address);
-            if packages.contains(&address) {
-                let access = BitAccess::new(0, width(&address).saturating_sub(1));
+            if !packages.contains(&address) {
+                continue;
+            }
+            // The bits the initial value writes.
+            let accesses = match &initial.data {
+                celox_design::InitialStateData::Packed { written_mask, .. } => {
+                    let bits = written_mask.bits() as usize;
+                    written_mask
+                        .trailing_zeros()
+                        .map(|lsb| vec![BitAccess::new(lsb as usize, bits.saturating_sub(1))])
+                        .unwrap_or_default()
+                }
+                celox_design::InitialStateData::Writes(runs) => runs
+                    .iter()
+                    .filter(|run| run.bit_width > 0)
+                    .map(|run| BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1))
+                    .collect(),
+            };
+            for access in accesses {
                 initial_writes.push(((instance, usize::MAX), address, access));
             }
         }
@@ -637,7 +655,13 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
-    check_package_variable_drivers(bindings, &instance_modules, &modules, &comb_blocks)?;
+    check_package_variable_drivers(
+        bindings,
+        &instance_modules,
+        &modules,
+        &package_instances,
+        &comb_blocks,
+    )?;
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -863,6 +887,7 @@ pub fn schedule_symbolic_rtl(
                 source_to_state: HashMap::default(),
                 state_to_source: HashMap::default(),
                 event_aliases: HashMap::default(),
+                package_instances: package_instances.values().copied().collect(),
             };
             let source_locations = scheduler_source_locations(&error, &modules, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
@@ -1366,6 +1391,7 @@ pub fn schedule_symbolic_rtl(
             source_to_state,
             state_to_source,
             event_aliases,
+            package_instances: package_instances.values().copied().collect(),
         },
         runtime_schema: RuntimeSchema {
             runtime_errors,

@@ -90,6 +90,7 @@ pub struct RuntimeDesign {
     instances: HashMap<InstanceId, RuntimeInstance>,
     instance_ids: HashMap<InstancePath, InstanceId>,
     variables: HashMap<AbsoluteAddr, RuntimeVariable>,
+    package_instances: crate::HashSet<InstanceId>,
 }
 
 impl std::ops::Deref for RuntimeDesign {
@@ -190,6 +191,7 @@ impl RuntimeDesign {
             instances,
             instance_ids: frontend.instance_ids,
             variables,
+            package_instances: frontend.package_instances,
         };
         design
             .validate()
@@ -255,15 +257,21 @@ impl RuntimeDesign {
         let Some(instance) = self.instances.get(&address.instance_id) else {
             return address.to_string();
         };
-        // A package instance is named `p::`, and its variables `p::v`.
-        let mut path = String::new();
-        for segment in instance.display_path.iter().chain(&variable.path) {
-            if !path.is_empty() && !path.ends_with("::") {
-                path.push('.');
-            }
-            path.push_str(segment);
+        // The instance of package `p` is named `p::`, and its variables `p::v`.
+        if self.package_instances.contains(&address.instance_id) {
+            return format!(
+                "{}{}",
+                instance.display_path.join("."),
+                variable.path.join(".")
+            );
         }
-        path
+        instance
+            .display_path
+            .iter()
+            .chain(&variable.path)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
