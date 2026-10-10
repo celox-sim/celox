@@ -344,6 +344,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
 ];
 
 /// The catalog entry for `name`, which includes the leading `$`.
+/// Whether `name` names a system task or function, `$f`, rather than an
+/// item of the compilation unit, `$unit::f`.
+pub fn is_system_name(name: &str) -> bool {
+    name.starts_with('$') && !name.starts_with("$unit::")
+}
+
 pub fn lookup(name: &str) -> Option<&'static SystemTf> {
     SYSTEM_TFS.iter().find(|tf| tf.name == name)
 }

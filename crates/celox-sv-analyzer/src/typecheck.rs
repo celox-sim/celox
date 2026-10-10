@@ -1124,7 +1124,7 @@ fn eval_const_function(
     args: &[ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<i128> {
-    if !name.starts_with('$') {
+    if !crate::system_functions::is_system_name(name) {
         return crate::ast::const_functions::eval_call(name, args, constants);
     }
     if name == "$countbits" {

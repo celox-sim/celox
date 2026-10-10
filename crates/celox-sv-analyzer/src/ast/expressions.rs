@@ -697,6 +697,23 @@ pub(super) fn expr_from_tf_call(
         syntax_tree,
     )
     .ok_or_else(|| unsupported("subroutine name"))?;
+    // `$unit::x` without arguments parses as a call, but names a parameter
+    // or variable of the compilation unit unless `x` is a subroutine.
+    if call.nodes.2.is_none()
+        && RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0)
+            .into_iter()
+            .any(|node| {
+                matches!(
+                    node,
+                    RefNode::PackageScope(sv_parser::PackageScope::Unit(_))
+                )
+            })
+        && (packed_dimensions.const_env.contains_key(&name)
+            || packed_dimensions.parameter_values.contains_key(&name)
+            || packed_dimensions.get(&name).is_some())
+    {
+        return Ok(Expr::Ident(name));
+    }
     let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
         None => Vec::new(),
         Some(sv_parser::ListOfArguments::Ordered(args)) => {

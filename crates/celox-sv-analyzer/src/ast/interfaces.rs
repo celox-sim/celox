@@ -2979,7 +2979,7 @@ fn unit_names(file: &File<'_>) -> Result<HashSet<String>, AnalyzerError> {
 }
 
 /// The names that a package item declares.
-fn package_item_names(
+pub(super) fn package_item_names(
     item: &sv_parser::PackageItem,
     syntax_tree: &SyntaxTree,
 ) -> Result<HashSet<String>, AnalyzerError> {

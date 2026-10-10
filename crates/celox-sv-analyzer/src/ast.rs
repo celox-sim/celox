@@ -13,6 +13,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     ops::{Deref, DerefMut},
+    path::Path,
     sync::Arc,
 };
 
@@ -211,7 +212,7 @@ impl Source {
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -220,6 +221,7 @@ impl Source {
                         RefNode::ModuleDeclarationAnsi(module),
                         syntax_tree,
                         &packages,
+                        packages.unit(Path::new("")),
                     )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         module,
@@ -271,9 +273,10 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let index = module_index::ModuleIndex::new(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
         Self::from_indexed_syntax_module(
             syntax_tree,
+            Path::new(""),
             &index,
             module_name,
             parameter_overrides,
@@ -282,9 +285,12 @@ impl Source {
         )
     }
 
-    /// `packages` are the packages the module may use, from any source.
+    /// `packages` are the packages the module may use, from any source, and
+    /// the compilation units of the sources; `path` names the source of
+    /// `syntax_tree`.
     pub(crate) fn from_indexed_syntax_module(
         syntax_tree: &SyntaxTree,
+        path: &Path,
         index: &module_index::ModuleIndex,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
@@ -300,7 +306,12 @@ impl Source {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
-                    let imported = imports::imported_symbols(node.clone(), syntax_tree, packages)?;
+                    let imported = imports::imported_symbols(
+                        node.clone(),
+                        syntax_tree,
+                        packages,
+                        packages.unit(path),
+                    )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -1646,7 +1657,7 @@ pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
 impl ConstExpr {
     /// A call of `name`; a user subroutine call gets a site of its own.
     fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        let site = (!name.starts_with('$'))
+        let site = (!system_functions::is_system_name(&name))
             .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
         ConstExpr::Function { name, args, site }
     }

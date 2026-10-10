@@ -476,12 +476,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 }
             }
             // Package scopes and imports resolve through the imported
-            // packages; compilation-unit declarations are not analyzed.
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
-                return Err(AnalyzerError::Unsupported(
-                    "compilation-unit scope reference `$unit::`".to_string(),
-                ));
-            }
+            // packages and the compilation unit.
             RefNode::ParamAssignment(parameter)
                 if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
                     matches!(
