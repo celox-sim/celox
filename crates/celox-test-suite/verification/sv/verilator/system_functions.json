@@ -269,6 +269,98 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ and a parameter whose value is $ as an instance parameter override (UNSUPPORTED / cannot convert defparam value to constant). IEEE 1800-2023 6.20.7 permits assigning the symbolic value to another parameter. Slang accepts all four instances and preserves the unbounded value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_parameter_overrides",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ and a parameter whose value is $ as an instance parameter override (UNSUPPORTED / cannot convert defparam value to constant). IEEE 1800-2023 6.20.7 permits assigning the symbolic value to another parameter. Slang accepts all four instances and preserves the unbounded value.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 raises an internal error in V3EmitCConstInit.h for $isunbounded on an unpacked array parameter. IEEE 1800-2023 6.20.2 permits aggregate value parameters, and 20.6.3 returns false when the parameter is not $. Slang accepts the case and evaluates QUERY to 1'b0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_isunbounded_array_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 raises an internal error in V3EmitCConstInit.h for $isunbounded on an unpacked array parameter. IEEE 1800-2023 6.20.2 permits aggregate value parameters, and 20.6.3 returns false when the parameter is not $. Slang accepts the case and evaluates QUERY to 1'b0.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_scalar_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_bindings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_scalar_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_shadowed_function_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "system_functions::signed_casts_in_parameters",

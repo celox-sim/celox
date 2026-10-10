@@ -53,7 +53,7 @@ impl std::fmt::Display for UnpackedArrayType {
     }
 }
 
-/// Width and signedness of the supported bit vector system functions (20.9).
+/// Width and signedness of the supported integral system functions.
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
     if name == "$countbits" {
         return (arity >= 2).then_some((32, true));
@@ -63,7 +63,7 @@ pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usiz
     }
     match name {
         "$countones" | "$clog2" => Some((32, true)),
-        "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
+        "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some((1, false)),
         _ => None,
     }
 }
@@ -157,6 +157,18 @@ pub(crate) fn eval_const_expr_in_env(
             }
         }
         ConstExpr::Binary { left, op, right } => {
+            // Numeric declaration bounds need the same short-circuiting as
+            // four-state generate conditions (11.3.5, 6.20.7).
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
+                && let Some(Some(truth)) = eval_const_truth(left, constants)
+            {
+                if (*op == BinaryOp::LogicAnd && !truth) || (*op == BinaryOp::LogicOr && truth) {
+                    return Some(i128::from(truth));
+                }
+                // Reuse the known left truth; reevaluating it recursively
+                // would double the work at every level of a logical chain.
+                return eval_const_truth(right, constants)?.map(i128::from);
+            }
             if let Some(result) = eval_literal_binary(left, *op, right) {
                 return Some(result);
             }
@@ -934,6 +946,14 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             // Logical operands are self-determined; only the truth result
             // has width one, including an unknown result.
             let left = integral_literal_from_const_expr(left)?;
+            // IEEE 1800-2023 11.3.5: do not evaluate a skipped operand,
+            // which can legally reference an unbounded parameter (6.20.7).
+            let truth = integral_literal_truth(&left);
+            if (*op == BinaryOp::LogicAnd && truth == Some(false))
+                || (*op == BinaryOp::LogicOr && truth == Some(true))
+            {
+                return Some(integral_literal_from_truth(truth));
+            }
             let right = integral_literal_from_const_expr(right)?;
             eval_four_state_binary_literal(&left, *op, &right, false)
         }
@@ -1503,6 +1523,20 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn evaluates_nested_logical_parameter_chains() {
+        let constants = HashMap::from_iter([("P".to_string(), 1)]);
+        let mut expr = ConstExpr::Ident("P".into());
+        for _ in 0..64 {
+            expr = ConstExpr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(ConstExpr::Ident("P".into())),
+            };
+        }
+        assert_eq!(eval_const_expr(&expr, &constants), Some(1));
+    }
 
     #[test]
     fn folds_masked_bit_selects_with_invalid_indices() {

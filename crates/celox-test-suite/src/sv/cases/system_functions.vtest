@@ -1011,3 +1011,280 @@ a=0a  10
   (assert_eq local_parameter 1)
   (assert_eq for_index 1)
   (assert_eq foreach_index 1))
+
+(case isunbounded_preserves_parameter_values_and_result_type
+  (source "isunbounded.sv" #"
+    module Top(output logic [7:0] flags, output logic [63:0] wide,
+               output int result_bits, output logic [7:0] inverted,
+               output logic [7:0] generated);
+      parameter int U = $;
+      parameter UNTYPED = $;
+      localparam int ALIAS = U;
+      localparam int FINITE = -1;
+      localparam logic [127:0] LARGE = '1;
+      localparam logic [7:0] X = 'x;
+      localparam logic [7:0] Z = 'z;
+      localparam Q = $isunbounded(U);
+      assign flags = {$isunbounded(U), $isunbounded(UNTYPED), $isunbounded(ALIAS),
+                      $isunbounded(FINITE), $isunbounded(LARGE),
+                      $isunbounded(X), $isunbounded(Z), $isunbounded(Q)};
+      assign wide = $isunbounded(U);
+      assign result_bits = $bits(Q);
+      assign inverted = ~$isunbounded(U);
+      if ($isunbounded(U)) begin : selected
+        assign generated = 8'h5a;
+      end else begin
+        assign generated = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq flags 0xe0)
+  (assert_eq wide 1)
+  (assert_eq result_bits 1)
+  (assert_eq inverted 0xfe)
+  (assert_eq generated 0x5a))
+
+(case isunbounded_handles_overrides_and_forwarding
+  (source "isunbounded_overrides.sv" #"
+    module Child #(parameter int LIMIT = $, parameter int COPY = LIMIT)
+                 (output logic [1:0] result);
+      assign result = {$isunbounded(LIMIT), $isunbounded(COPY)};
+    endmodule
+    module Top(output logic [1:0] defaults, finite, explicit_dollar, forwarded);
+      parameter int U = $;
+      Child a(.result(defaults));
+      Child #(.LIMIT(7)) b(.result(finite));
+      Child #(.LIMIT($)) c(.result(explicit_dollar));
+      Child #(.LIMIT(U)) d(.result(forwarded));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq defaults 3)
+  (assert_eq finite 0)
+  (assert_eq explicit_dollar 3)
+  (assert_eq forwarded 3))
+
+(case isunbounded_resolves_package_and_local_parameters
+  (source "isunbounded_scopes.sv" #"
+    package Limits;
+      parameter int U = $;
+      parameter int F = 42;
+      localparam bit Q = $isunbounded(U);
+    endpackage
+    module Top(input logic clk, output logic [3:0] flags,
+               output logic [1:0] local_flags, registered);
+      import Limits::*;
+      assign flags = {$isunbounded(Limits::U), $isunbounded(U),
+                      $isunbounded(Limits::F), Q};
+      always_comb begin
+        localparam int LOCAL_U = $;
+        localparam int LOCAL_F = 10;
+        local_flags = {$isunbounded(LOCAL_U), $isunbounded(LOCAL_F)};
+        $isunbounded(LOCAL_U);
+      end
+      always_ff @(posedge clk) begin
+        localparam int LOCAL_U = $;
+        registered <= {$isunbounded(LOCAL_U), $isunbounded(F)};
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq flags 0xd)
+  (assert_eq local_flags 2)
+  (tick clk)
+  (assert_eq registered 2))
+
+(case isunbounded_preserves_lexical_scopes_and_short_circuits
+  (source "isunbounded_scopes_generate.sv" #"
+    module Top(output logic [2:0] local_flags, output logic [1:0] generated,
+               output logic function_result);
+      parameter int U = $;
+      always_comb begin
+        local_flags[2] = $isunbounded(U);
+        begin
+          localparam int U = 7;
+          local_flags[1] = $isunbounded(U);
+        end
+        local_flags[0] = $isunbounded(U);
+      end
+      if (!$isunbounded(U) && U == 0) begin
+        assign generated[1] = 0;
+      end else begin
+        assign generated[1] = 1;
+      end
+      if (1) begin : g
+        localparam int U = 5;
+        assign generated[0] = $isunbounded(U);
+      end
+      function automatic bit query();
+        localparam int INNER = $;
+        return $isunbounded(INNER);
+      endfunction
+      assign function_result = query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_flags 5)
+  (assert_eq generated 2)
+  (assert_eq function_result 1))
+
+(case isunbounded_reports_bounded_parameters
+  (source "isunbounded_bounded.sv" #"
+    module Child #(parameter int P = -1) (output logic y);
+      assign y = $isunbounded(P);
+    endmodule
+    module Top(output logic [1:0] result, output logic [7:0] constant_value,
+               output int nested_bits);
+      parameter int P = -1;
+      localparam Q = $isunbounded(P);
+      Child #(.P(Q)) c(.y(result[1]));
+      assign result[0] = $isunbounded(Q);
+      assign constant_value = Q;
+      assign nested_bits = $bits($isunbounded(P));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 0)
+  (assert_eq constant_value 0)
+  (assert_eq nested_bits 1))
+
+(case isunbounded_reports_bounded_array_parameters
+  (source "isunbounded_array.sv" #"
+    package P;
+      localparam logic [7:0] ARRAY [0:1] = '{8'd1, 8'd2};
+    endpackage
+    module Top(output logic [1:0] result);
+      localparam logic [7:0] ARRAY [0:1] = '{8'd3, 8'd4};
+      localparam QUERY = $isunbounded(ARRAY);
+      assign result = {QUERY, $isunbounded(P::ARRAY)};
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 0))
+
+(case isunbounded_binds_procedural_aliases_in_declaration_order
+  (source "isunbounded_aliases.sv" #"
+    module Top(input logic clk, output logic [2:0] comb, registered, initialized,
+               output logic [2:0] via_function);
+      function automatic logic [2:0] query();
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        return {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      endfunction
+      initial begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        initialized = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_comb begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        comb = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_ff @(posedge clk) begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        registered <= {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      assign via_function = query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (expand name (comb initialized via_function)
+    (assert_eq {name} 7))
+  (tick clk)
+  (assert_eq registered 7))
+
+(case isunbounded_restores_procedural_parameter_bindings
+  (source "isunbounded_restore.sv" #"
+    module Top(output logic [7:0] value, output logic [3:0] flags,
+               output int width, rank, left_bound);
+      parameter logic [7:0] P = 8'h27;
+      always_comb begin
+        flags[3] = $isunbounded(P);
+        begin
+          localparam logic P = $;
+          flags[2] = $isunbounded(P);
+          begin
+            localparam logic [1:0] P = 2'd1;
+            flags[1] = $isunbounded(P);
+          end
+          flags[0] = $isunbounded(P);
+        end
+        value = P;
+        width = $bits(P);
+        rank = $dimensions(P);
+        left_bound = $left(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq value 0x27)
+  (assert_eq flags 5)
+  (assert_eq width 8)
+  (assert_eq rank 1)
+  (assert_eq left_bound 7))
+
+(case isunbounded_restores_procedural_parameter_type_metadata
+  (source "isunbounded_restore_type.sv" #"
+    module Top(output int inner_bits, outer_bits, inner_rank, outer_rank);
+      parameter logic [2:0][1:0] P = 6'h27;
+      always_comb begin
+        begin
+          localparam logic P = 1'b1;
+          inner_bits = $bits(P);
+          inner_rank = $dimensions(P);
+        end
+        outer_bits = $bits(P);
+        outer_rank = $dimensions(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq inner_bits 1)
+  (assert_eq inner_rank 0)
+  (assert_eq outer_bits 6)
+  (assert_eq outer_rank 2))
+
+(case isunbounded_restores_shadowed_function_arguments
+  (source "isunbounded_restore_argument.sv" #"
+    module Top(input logic [7:0] data, output logic [8:0] y);
+      function automatic logic [8:0] query(input logic [7:0] P);
+        bit q;
+        begin
+          localparam logic P = $;
+          q = $isunbounded(P);
+        end
+        return {q, P};
+      endfunction
+      assign y = query(data);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 0x27 0x80 0xff)
+    (modify (set data value))
+    (assert_eq y (+ 0x100 value))))
+
+(case isunbounded_generate_guards_preserve_short_circuit_bounds
+  (source "isunbounded_guarded_bounds.sv" #"
+    module Top(output int and_bits, or_bits);
+      parameter int P = 7;
+      if (1) begin : g
+        localparam int P = $;
+        logic [(!$isunbounded(P) && P == 0):0] a;
+        logic [($isunbounded(P) || P == 0):0] b;
+        assign and_bits = $bits(a);
+        assign or_bits = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq and_bits 1)
+  (assert_eq or_bits 2))

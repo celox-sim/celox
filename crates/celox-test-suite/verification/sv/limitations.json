@@ -110,6 +110,7 @@
         "indexed_select::indexed_size_queries_preserve_parameter_dimensions",
         "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
         "system_functions::dimensions_is_independent_of_unknown_values",
+        "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
         "types::packed_parameters_of_signed_named_types_have_signed_elements"
       ]
     }
@@ -119,7 +120,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+    "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -128,7 +129,8 @@
     "cases": {
       "icarus": [
         "procedural::aggregate_parameters_are_constant_tables",
-        "system_functions::dimensions_resolves_package_array_constants"
+        "system_functions::dimensions_resolves_package_array_constants",
+        "system_functions::isunbounded_reports_bounded_array_parameters"
       ]
     }
   },
@@ -737,6 +739,83 @@
       "verilator": [
         "system_functions::dimensions_preserves_one_bit_vectors",
         "system_functions::dimensions_signing_conversions_are_vectors"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_isunbounded",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order",
+        "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds",
+        "system_functions::isunbounded_handles_overrides_and_forwarding",
+        "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits",
+        "system_functions::isunbounded_preserves_parameter_values_and_result_type",
+        "system_functions::isunbounded_reports_bounded_parameters",
+        "system_functions::isunbounded_resolves_package_and_local_parameters",
+        "system_functions::isunbounded_restores_procedural_parameter_bindings",
+        "system_functions::isunbounded_restores_shadowed_function_arguments"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_unbounded_parameter_overrides",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects $ and a parameter whose value is $ as an instance parameter override (UNSUPPORTED / cannot convert defparam value to constant). IEEE 1800-2023 6.20.7 permits assigning the symbolic value to another parameter. Slang accepts all four instances and preserves the unbounded value.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::isunbounded_handles_overrides_and_forwarding"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_isunbounded_array_parameter",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 raises an internal error in V3EmitCConstInit.h for $isunbounded on an unpacked array parameter. IEEE 1800-2023 6.20.2 permits aggregate value parameters, and 20.6.3 returns false when the parameter is not $. Slang accepts the case and evaluates QUERY to 1'b0.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::isunbounded_reports_bounded_array_parameters"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_unbounded_scalar_parameter",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects $ assigned to scalar logic parameters in procedural blocks (UNSUPPORTED: Unbounded outside of queue or string operations). IEEE 1800-2023 6.20.7 permits $ for simple bit vector parameter types, including logic (6.11.1). Slang accepts both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::isunbounded_restores_procedural_parameter_bindings",
+        "system_functions::isunbounded_restores_shadowed_function_arguments"
       ]
     }
   }
