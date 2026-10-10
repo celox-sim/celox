@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
+    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
+    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
+    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
+
     fn dimensions_resolves_procedural_scopes(sim) {
         @case "system_functions::dimensions_resolves_procedural_scopes";
     }
@@ -706,5 +711,17 @@ fn dimensions_rejects_zero_size_casts() {
         "localparam N = $dimensions(real); assign y = N'(1'b1);",
     ] {
         build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
     }
 }

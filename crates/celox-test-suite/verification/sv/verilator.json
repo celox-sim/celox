@@ -2473,28 +2473,6 @@
     },
     {
       "category": "Functions",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "system_functions::dimensions_counts_declared_arrays",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Functions",
-      "detail": "four-state expectations",
-      "expectation": "Simulation",
-      "name": "system_functions::dimensions_is_independent_of_unknown_values",
-      "phase": "compile",
-      "status": "unsupported",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Functions",
       "detail": "Verilator 5.052 returns 1 for $dimensions(chandle). IEEE 1800-2023 6.14 and 20.7 make a chandle a nonarray pointer type, not an integral bit vector, so the expected result is 0.",
       "expectation": "Simulation",
       "known_issue": {
@@ -2518,7 +2496,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+      "detail": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_disagreement",
@@ -2529,7 +2507,7 @@
         "id": "sv_verilator_one_bit_expression_dimensions",
         "observed_version": "Verilator 5.052",
         "phase": "execute",
-        "reason": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+        "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
         "upstream": []
       },
       "name": "system_functions::dimensions_preserves_one_bit_vectors",
@@ -2541,22 +2519,23 @@
     },
     {
       "category": "Functions",
-      "detail": "",
+      "detail": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
       "expectation": "Simulation",
-      "name": "system_functions::dimensions_preserves_selected_and_expression_types",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Functions",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "system_functions::dimensions_resolves_types_and_constant_scopes",
-      "phase": "execute",
-      "status": "passed",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_one_bit_expression_dimensions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_signing_conversions_are_vectors",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

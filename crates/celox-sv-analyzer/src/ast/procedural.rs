@@ -1512,6 +1512,30 @@ pub(super) fn subroutine_declared_dimensions(
     Some(dimensions)
 }
 
+/// Formal shapes are needed to type assignment-pattern call arguments,
+/// even when a type query deliberately leaves the subroutine body unexpanded.
+pub(super) fn subroutine_declared_parameter_shapes(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Option<(String, Vec<VariableDimensions>)> {
+    let syntax = match node {
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        _ => None,
+    }?;
+    let params =
+        subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    Some((
+        syntax.name,
+        params
+            .into_iter()
+            .map(|(_, _, ty, _)| dimensions_from_type(&ty))
+            .collect(),
+    ))
+}
+
 /// The argument names of every function and task in the active generate
 /// items, in declaration order, keyed by their (qualified) names.
 pub(super) fn subroutine_argument_names(

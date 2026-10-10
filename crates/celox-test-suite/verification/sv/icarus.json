@@ -3061,17 +3061,6 @@
     },
     {
       "category": "Functions",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "system_functions::dimensions_counts_declared_arrays",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Functions",
       "detail": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
       "expectation": "Simulation",
       "known_issue": {
@@ -3118,7 +3107,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_disagreement",
@@ -3129,7 +3118,7 @@
         "id": "sv_icarus_one_bit_expression_dimensions",
         "observed_version": "Icarus 13.0",
         "phase": "execute",
-        "reason": "Icarus 13.0 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
         "upstream": []
       },
       "name": "system_functions::dimensions_preserves_one_bit_vectors",
@@ -3210,7 +3199,30 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_one_bit_expression_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_procedural_parameters_and_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -3221,7 +3233,7 @@
         "id": "sv_icarus_subroutine_unpacked_ports",
         "observed_version": "Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
         "upstream": []
       },
       "name": "system_functions::dimensions_resolves_procedural_scopes",
@@ -3248,6 +3260,52 @@
         "upstream": []
       },
       "name": "system_functions::dimensions_resolves_types_and_constant_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_one_bit_expression_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_signing_conversions_are_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_subroutine_unpacked_ports",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_types_function_pattern_arguments",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

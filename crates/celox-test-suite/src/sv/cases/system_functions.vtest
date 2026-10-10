@@ -926,3 +926,88 @@ a=0a  10
   (assert_eq qualified_rank 2)
   (assert_eq local_rank 1)
   (expect_output ""))
+(case dimensions_resolves_preceding_block_declarations
+  (source "preceding_dimensions.sv" #"
+    module Top(output int first_rank, second_rank, width_value);
+      always_comb begin
+        logic [7:0] a [0:1];
+        logic [$dimensions(a):0] b;
+        logic [7:0] c [0:$dimensions(a)];
+        first_rank = $dimensions(a);
+        second_rank = $dimensions(c);
+        width_value = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq first_rank 2)
+  (assert_eq second_rank 2)
+  (assert_eq width_value 3))
+
+
+(case dimensions_types_function_pattern_arguments
+  (source "dimension_patterns.sv" #"
+    module Top(output int constant_rank, runtime_rank);
+      function automatic logic [7:0] f(input logic [7:0] a [0:1]);
+        $display("must not execute");
+        return a[0];
+      endfunction
+      localparam N = $dimensions(f('{8'h1, 8'h2}));
+      assign constant_rank = N;
+      assign runtime_rank = $dimensions(f('{8'h3, 8'h4}));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 1)
+  (assert_eq runtime_rank 1)
+  (expect_output ""))
+
+; IEEE 1800-2023 6.24.1: signing casts produce a single packed [n-1:0]
+; vector; $signed/$unsigned have the same results (also 11.7).
+(case dimensions_signing_conversions_are_vectors
+  (source "signing_dimensions.sv" #"
+    module Top(input logic s, input logic [1:0][3:0] p,
+               output int scalar_rank, packed_rank, signed_scalar, unsigned_scalar,
+               output int cast_signed_scalar, cast_unsigned_scalar, signed_packed, cast_signed_packed);
+      assign scalar_rank = $dimensions(s);
+      assign packed_rank = $dimensions(p);
+      assign signed_scalar = $dimensions($signed(s));
+      assign unsigned_scalar = $dimensions($unsigned(s));
+      assign cast_signed_scalar = $dimensions(signed'(s));
+      assign cast_unsigned_scalar = $dimensions(unsigned'(s));
+      assign signed_packed = $dimensions($signed(p));
+      assign cast_signed_packed = $dimensions(signed'(p));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1) (set p 0x5a))
+  (assert_eq scalar_rank 0)
+  (assert_eq packed_rank 2)
+  (assert_eq signed_scalar 1)
+  (assert_eq unsigned_scalar 1)
+  (assert_eq cast_signed_scalar 1)
+  (assert_eq cast_unsigned_scalar 1)
+  (assert_eq signed_packed 1)
+  (assert_eq cast_signed_packed 1))
+
+(case dimensions_resolves_procedural_parameters_and_indices
+  (source "procedural_dimensions.sv" #"
+    module Top(output int local_parameter, for_index, foreach_index);
+      logic [7:0] a [0:1];
+      always_comb begin
+        localparam logic [0:0] P = 0;
+        local_parameter = $dimensions(P);
+        for_index = 0;
+        for (int i = 0; i < 1; i++) for_index = $dimensions(i);
+        foreach_index = 0;
+        foreach (a[j]) foreach_index = $dimensions(j);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_parameter 1)
+  (assert_eq for_index 1)
+  (assert_eq foreach_index 1))

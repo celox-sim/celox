@@ -673,7 +673,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+    "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -681,7 +681,8 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::dimensions_resolves_procedural_scopes"
+        "system_functions::dimensions_resolves_procedural_scopes",
+        "system_functions::dimensions_types_function_pattern_arguments"
       ]
     }
   },
@@ -707,7 +708,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+    "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -715,7 +716,9 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::dimensions_preserves_one_bit_vectors"
+        "system_functions::dimensions_preserves_one_bit_vectors",
+        "system_functions::dimensions_resolves_procedural_parameters_and_indices",
+        "system_functions::dimensions_signing_conversions_are_vectors"
       ]
     }
   },
@@ -724,7 +727,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Verilator 5.052",
-    "reason": "Verilator 5.052 returns 0 for $dimensions(1'b0), losing the single packed dimension of the sized literal. IEEE 1800-2023 6.11.1 and 20.7 require vector rank 1; Slang 12.0.0 also reports 1 for the literal, concatenation, replication and size cast.",
+    "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/verilator.json",
@@ -732,7 +735,8 @@
     ],
     "cases": {
       "verilator": [
-        "system_functions::dimensions_preserves_one_bit_vectors"
+        "system_functions::dimensions_preserves_one_bit_vectors",
+        "system_functions::dimensions_signing_conversions_are_vectors"
       ]
     }
   }
