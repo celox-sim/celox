@@ -836,7 +836,11 @@ pub fn prepare_external_hierarchy(
         .filter(|(key, _)| key.parameter_overrides.is_empty())
         .map(|(key, &module_id)| (key.name.clone(), module_id))
         .collect();
-    Ok(ExternalHierarchy { modules, roots })
+    Ok(ExternalHierarchy {
+        modules,
+        roots,
+        packages: Vec::new(),
+    })
 }
 
 /// Analyze SystemVerilog sources and lower the selected top through Celox's
@@ -960,6 +964,7 @@ pub fn schedule_sources(
         modules,
         module_names,
         root_id,
+        packages: Vec::new(),
     };
     celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl(
         symbolic,
@@ -1331,6 +1336,7 @@ fn lower_module_with_overrides(
             arena: SLTNodeArena::new(),
             reset_clock_map,
             processes,
+            package_bindings: HashMap::default(),
         },
         variables,
         port_order,

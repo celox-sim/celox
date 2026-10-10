@@ -102,6 +102,7 @@ fn flatten_with_trace(
     global_boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    bindings: &PackageBindings,
     trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
 ) -> Result<RelocationModule, celox_slt::SLTNodeFactsError> {
@@ -112,6 +113,7 @@ fn flatten_with_trace(
         global_boundaries,
         unpacked_element_widths,
         arena,
+        &|instance_id, var_id| bindings.locate(instance_id, var_id),
     )?;
 
     if let Some(trace) = trace.as_deref_mut()
@@ -164,6 +166,107 @@ fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
                 None,
             )
         })
+}
+
+/// Where the variables of each instance live. A module variable bound to a
+/// package variable (IEEE 1800-2023 26.2) is that package's one object, in
+/// the package's instance; every other variable belongs to its instance.
+#[derive(Default)]
+pub(crate) struct PackageBindings {
+    targets: HashMap<AbsoluteAddr, AbsoluteAddr>,
+}
+
+impl PackageBindings {
+    fn new(
+        instance_modules: &HashMap<InstanceId, ModuleId>,
+        modules: &HashMap<ModuleId, SimModule>,
+        package_instances: &HashMap<ModuleId, InstanceId>,
+    ) -> Result<Self, ParserError> {
+        let mut targets = HashMap::default();
+        for (&instance_id, module_id) in instance_modules {
+            let module = &modules[module_id];
+            for (&var_id, binding) in &module.package_bindings {
+                let package_instance =
+                    package_instances.get(&binding.package).ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "package variable binding",
+                            format!(
+                                "module `{}` binds a variable to a module that is not a package",
+                                module.name
+                            ),
+                            None,
+                        )
+                    })?;
+                let package = &modules[&binding.package];
+                let (Some(variable), Some(target)) = (
+                    module.variables.get(&var_id),
+                    package.variables.get(&binding.var_id),
+                ) else {
+                    return Err(ParserError::illegal_context(
+                        "package variable binding",
+                        format!(
+                            "module `{}` binds an unknown variable of package `{}`",
+                            module.name, package.name
+                        ),
+                        None,
+                    ));
+                };
+                if variable.metadata != target.metadata {
+                    return Err(ParserError::illegal_context(
+                        "package variable binding",
+                        format!(
+                            "module `{}` binds a variable to `{}` of package `{}` with another \
+                             type",
+                            module.name,
+                            target.path.join("."),
+                            package.name
+                        ),
+                        None,
+                    ));
+                }
+                targets.insert(
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id,
+                    },
+                    AbsoluteAddr {
+                        instance_id: *package_instance,
+                        var_id: binding.var_id,
+                    },
+                );
+            }
+        }
+        Ok(Self { targets })
+    }
+
+    /// The object variable `var_id` of instance `instance_id` denotes.
+    pub(crate) fn locate(&self, instance_id: InstanceId, var_id: SourceVarId) -> AbsoluteAddr {
+        let address = AbsoluteAddr {
+            instance_id,
+            var_id,
+        };
+        self.targets.get(&address).copied().unwrap_or(address)
+    }
+
+    pub(crate) fn locate_regioned(
+        &self,
+        region: u32,
+        instance_id: InstanceId,
+        var_id: SourceVarId,
+    ) -> RegionedAbsoluteAddr {
+        let address = self.locate(instance_id, var_id);
+        RegionedAbsoluteAddr {
+            region,
+            instance_id: address.instance_id,
+            var_id: address.var_id,
+        }
+    }
+
+    /// Whether the variable is bound to a package variable, and so has no
+    /// state object of its own.
+    fn is_bound(&self, address: &AbsoluteAddr) -> bool {
+        self.targets.contains_key(address)
+    }
 }
 
 fn create_absolute_addr(
@@ -299,6 +402,7 @@ pub fn schedule_symbolic_rtl(
         modules,
         module_names,
         root_id,
+        packages,
     } = symbolic;
     let flatten_timing = trace_opts.phase_timing;
     macro_rules! timed_sub {
@@ -320,11 +424,21 @@ pub fn schedule_symbolic_rtl(
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules, indexed_instances) =
+    let (mut expanded, mut instance_modules, indexed_instances) =
         timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
+    // Each package with variables is one instance outside the hierarchy,
+    // named by a path segment no instance name can take.
+    let mut package_instances = HashMap::default();
+    for (name, module_id) in &packages {
+        let id = InstanceId(instance_modules.len());
+        expanded.insert(InstancePath(vec![(format!("{name}::"), 0)]), id);
+        instance_modules.insert(id, *module_id);
+        package_instances.insert(*module_id, id);
+    }
+    let bindings = &PackageBindings::new(&instance_modules, &modules, &package_instances)?;
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
-        propagate_boundaries(&expanded, &instance_modules, &modules)
+        propagate_boundaries(bindings, &expanded, &instance_modules, &modules)
     );
     let unpacked_element_widths = instance_modules
         .iter()
@@ -339,20 +453,15 @@ pub fn schedule_symbolic_rtl(
                         .iter()
                         .try_fold(1usize, |total, &dim| total.checked_mul(dim))?;
                     let element_width = variable.metadata.width.checked_div(element_count)?;
-                    (element_count > 1 && element_width > 0).then_some((
-                        AbsoluteAddr {
-                            instance_id,
-                            var_id,
-                        },
-                        element_width,
-                    ))
+                    (element_count > 1 && element_width > 0)
+                        .then_some((bindings.locate(instance_id, var_id), element_width))
                 })
         })
         .collect::<HashMap<_, _>>();
 
     let clock_domains = timed_sub!(
         "unify_clock_domains",
-        unify_clock_domains(&expanded, &instance_modules, &modules)
+        unify_clock_domains(bindings, &expanded, &instance_modules, &modules)
     );
     let mut parallel_ff_units = HashMap::default();
     let (
@@ -372,6 +481,7 @@ pub fn schedule_symbolic_rtl(
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
+            bindings,
             &expanded,
             &instance_modules,
             &modules,
@@ -401,14 +511,8 @@ pub fn schedule_symbolic_rtl(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (reset_var_id, clock_var_id) in &sim_module.reset_clock_map {
-            let reset_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: *reset_var_id,
-            };
-            let clock_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: *clock_var_id,
-            };
+            let reset_addr = bindings.locate(*id, *reset_var_id);
+            let clock_addr = bindings.locate(*id, *clock_var_id);
             // Use canonical clock domain if available
             let canonical_clock = clock_domains
                 .get(&clock_addr)
@@ -425,6 +529,7 @@ pub fn schedule_symbolic_rtl(
     let (topological_clocks, cascaded_clocks) = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
+            bindings,
             &mut eval_apply_ffs,
             &mut eval_only_ffs,
             &mut apply_ffs,
@@ -453,29 +558,19 @@ pub fn schedule_symbolic_rtl(
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
         .iter()
         .flat_map(|(&inst_id, &mod_id)| {
-            modules[&mod_id].variables.iter().map(move |(var_id, var)| {
-                (
-                    AbsoluteAddr {
-                        instance_id: inst_id,
-                        var_id: *var_id,
-                    },
-                    var.metadata.width,
-                )
-            })
+            modules[&mod_id]
+                .variables
+                .iter()
+                .map(move |(var_id, var)| (bindings.locate(inst_id, *var_id), var.metadata.width))
         })
         .collect();
     let var_signedness: HashMap<AbsoluteAddr, bool> = instance_modules
         .iter()
         .flat_map(|(&inst_id, &mod_id)| {
-            modules[&mod_id].variables.iter().map(move |(var_id, var)| {
-                (
-                    AbsoluteAddr {
-                        instance_id: inst_id,
-                        var_id: *var_id,
-                    },
-                    var.signed,
-                )
-            })
+            modules[&mod_id]
+                .variables
+                .iter()
+                .map(move |(var_id, var)| (bindings.locate(inst_id, *var_id), var.signed))
         })
         .collect();
 
@@ -514,6 +609,7 @@ pub fn schedule_symbolic_rtl(
 
     let fused_inputs = if fused_ff_factory.is_some() {
         let actions = build_fused_ff_actions(
+            bindings,
             &modules,
             &instance_modules,
             &clock_domains,
@@ -896,6 +992,8 @@ pub fn schedule_symbolic_rtl(
     };
 
     let (mod_vars, mod_path_idx) = module_variables(&modules);
+    // A variable bound to a package variable has no state object or initial
+    // value of its own; the package's instance holds them.
     let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -910,6 +1008,7 @@ pub fn schedule_symbolic_rtl(
                     data: init.data.clone(),
                 })
         })
+        .filter(|init| !bindings.is_bound(&init.address))
         .collect();
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
@@ -927,6 +1026,7 @@ pub fn schedule_symbolic_rtl(
                     )
                 })
         })
+        .filter(|(address, _)| !bindings.is_bound(address))
         .collect();
     let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
         .iter()
@@ -966,6 +1066,9 @@ pub fn schedule_symbolic_rtl(
             var_id: object,
         };
         source_to_state.insert(source, state);
+    }
+    for (alias, target) in &bindings.targets {
+        source_to_state.insert(*alias, source_to_state[target]);
     }
     let project = |source: AbsoluteAddr| source_to_state[&source];
     let project_regioned = |source: RegionedAbsoluteAddr| RegionedStateAddr {
@@ -1146,6 +1249,10 @@ fn module_variables(
         let mut variables = HashMap::default();
         let mut paths: HashMap<Vec<String>, Option<SourceVarId>> = HashMap::default();
         for (&source_id, variable) in &module.variables {
+            // A package variable belongs to the package's instance.
+            if module.package_bindings.contains_key(&source_id) {
+                continue;
+            }
             // Only module-scope variables are externally addressable. Locals
             // may share the same VarPath, but must not make a legal
             // hierarchical or public lookup appear ambiguous.
@@ -1244,6 +1351,7 @@ fn extend_boundaries(
 }
 
 fn propagate_boundaries(
+    bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
@@ -1255,10 +1363,7 @@ fn propagate_boundaries(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (var_id, boundaries) in &sim_module.comb_boundaries {
-            let addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: *var_id,
-            };
+            let addr = bindings.locate(*id, *var_id);
             current_boundaries.insert(addr, boundaries.clone());
         }
     }
@@ -1282,17 +1387,11 @@ fn propagate_boundaries(
                         if let Some(target) = child_addr.target.var()
                             && let GlueAddr::Child(child_var_id) = target.id
                         {
-                            let child_abs = AbsoluteAddr {
-                                instance_id: child_id,
-                                var_id: child_var_id,
-                            };
+                            let child_abs = bindings.locate(child_id, child_var_id);
 
                             // Collect boundaries from all parent variables connected to this port
                             for parent_var in parent_vars {
-                                let parent_abs = AbsoluteAddr {
-                                    instance_id: *id,
-                                    var_id: *parent_var,
-                                };
+                                let parent_abs = bindings.locate(*id, *parent_var);
                                 changed |= extend_boundaries(
                                     &mut current_boundaries,
                                     parent_abs,
@@ -1307,17 +1406,11 @@ fn propagate_boundaries(
                         // logic_path.target is Parent. logic_path.sources contains Child.
                         for source in &logic_path.sources {
                             if let GlueAddr::Child(child_var_id) = source.id {
-                                let child_abs = AbsoluteAddr {
-                                    instance_id: child_id,
-                                    var_id: child_var_id,
-                                };
+                                let child_abs = bindings.locate(child_id, child_var_id);
 
                                 // Child -> Parent
                                 for parent_var in parent_vars {
-                                    let parent_abs = AbsoluteAddr {
-                                        instance_id: *id,
-                                        var_id: *parent_var,
-                                    };
+                                    let parent_abs = bindings.locate(*id, *parent_var);
                                     changed |= extend_boundaries(
                                         &mut current_boundaries,
                                         child_abs,
@@ -1329,10 +1422,7 @@ fn propagate_boundaries(
                                 // If the parent wire connected to this output has boundaries (e.g. used in slices),
                                 // those boundaries should propagate to the child output port so it drives them appropriately.
                                 for parent_var in parent_vars {
-                                    let parent_abs = AbsoluteAddr {
-                                        instance_id: *id,
-                                        var_id: *parent_var,
-                                    };
+                                    let parent_abs = bindings.locate(*id, *parent_var);
                                     changed |= extend_boundaries(
                                         &mut current_boundaries,
                                         parent_abs,
@@ -1457,6 +1547,7 @@ fn relocate_executation_unit_with_errors<A, B>(
 }
 
 fn unify_clock_domains(
+    bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
@@ -1480,14 +1571,9 @@ fn unify_clock_domains(
                     let Some(target) = logic_path.target.var() else {
                         continue;
                     };
-                    let target_abs = AbsoluteAddr {
-                        instance_id: *id,
-                        var_id: target.id,
-                    };
-                    let source_abs = AbsoluteAddr {
-                        instance_id: *id,
-                        var_id: logic_path.sources.iter().next().unwrap().id,
-                    };
+                    let target_abs = bindings.locate(*id, target.id);
+                    let source_abs =
+                        bindings.locate(*id, logic_path.sources.iter().next().unwrap().id);
                     drive_graph.entry(source_abs).or_default().push(target_abs);
                 }
             }
@@ -1503,15 +1589,9 @@ fn unify_clock_domains(
                     if let Some(target) = logic_path.target.var()
                         && let GlueAddr::Child(child_var_id) = target.id
                     {
-                        let child_abs = AbsoluteAddr {
-                            instance_id: child_id,
-                            var_id: child_var_id,
-                        };
+                        let child_abs = bindings.locate(child_id, child_var_id);
                         for parent_var in parent_vars {
-                            let parent_abs = AbsoluteAddr {
-                                instance_id: *id,
-                                var_id: *parent_var,
-                            };
+                            let parent_abs = bindings.locate(*id, *parent_var);
                             drive_graph.entry(parent_abs).or_default().push(child_abs);
                         }
                     }
@@ -1519,16 +1599,10 @@ fn unify_clock_domains(
                 // Outputs: Child -> Parent (Child drives Parent)
                 for (parent_vars, logic_path) in &glue_block.output_ports {
                     for parent_var in parent_vars {
-                        let parent_abs = AbsoluteAddr {
-                            instance_id: *id,
-                            var_id: *parent_var,
-                        };
+                        let parent_abs = bindings.locate(*id, *parent_var);
                         for source in &logic_path.sources {
                             if let GlueAddr::Child(child_var_id) = source.id {
-                                let child_abs = AbsoluteAddr {
-                                    instance_id: child_id,
-                                    var_id: child_var_id,
-                                };
+                                let child_abs = bindings.locate(child_id, child_var_id);
                                 drive_graph.entry(child_abs).or_default().push(parent_abs);
                             }
                         }
@@ -1584,6 +1658,7 @@ fn unify_clock_domains(
 }
 
 fn build_fused_ff_actions(
+    bindings: &PackageBindings,
     modules: &HashMap<ModuleId, SimModule>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -1599,10 +1674,8 @@ fn build_fused_ff_actions(
         let mut summaries = module.ff_access_summaries.iter().collect::<Vec<_>>();
         summaries.sort_unstable_by_key(|(trigger, _)| (*trigger).clone());
         for (trigger, summary) in summaries {
-            let relocate = |address: RegionedVarAddr| RegionedAbsoluteAddr {
-                region: address.region,
-                instance_id,
-                var_id: address.var_id,
+            let relocate = |address: RegionedVarAddr| {
+                bindings.locate_regioned(address.region, instance_id, address.var_id)
             };
             let summary = FfAccessSummary {
                 reads: summary
@@ -1617,21 +1690,15 @@ fn build_fused_ff_actions(
                     .writes
                     .iter()
                     .map(|write| VarAtomBase {
-                        id: RegionedAbsoluteAddr {
-                            region: STABLE_REGION,
-                            instance_id,
-                            var_id: write.id.var_id,
-                        },
+                        id: bindings.locate_regioned(STABLE_REGION, instance_id, write.id.var_id),
                         access: write.access,
                     })
                     .collect(),
                 dynamic_writes: summary
                     .dynamic_writes
                     .iter()
-                    .map(|address| RegionedAbsoluteAddr {
-                        region: STABLE_REGION,
-                        instance_id,
-                        var_id: address.var_id,
+                    .map(|address| {
+                        bindings.locate_regioned(STABLE_REGION, instance_id, address.var_id)
                     })
                     .collect(),
             };
@@ -1644,17 +1711,11 @@ fn build_fused_ff_actions(
                 runtime: runtime_relocations[&instance_id].clone(),
             };
             next_action_id += 1;
-            let clock = AbsoluteAddr {
-                instance_id,
-                var_id: trigger.clock,
-            };
+            let clock = bindings.locate(instance_id, trigger.clock);
             let clock = clock_domains.get(&clock).copied().unwrap_or(clock);
             result.entry(clock).or_default().push(action.clone());
             for &reset_id in &trigger.resets {
-                let reset = AbsoluteAddr {
-                    instance_id,
-                    var_id: reset_id,
-                };
+                let reset = bindings.locate(instance_id, reset_id);
                 let reset = clock_domains.get(&reset).copied().unwrap_or(reset);
                 result.entry(reset).or_default().push(action.clone());
             }
@@ -1664,6 +1725,7 @@ fn build_fused_ff_actions(
 }
 
 fn relocate_units(
+    bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
@@ -1726,11 +1788,8 @@ fn relocate_units(
             )
         })?;
         let relocate_ff_summary = |summary: &FfAccessSummary<RegionedVarAddr>| {
-            let relocate_addr = |addr: RegionedVarAddr| RegionedAbsoluteAddr {
-                region: addr.region,
-                instance_id: *id,
-                var_id: addr.var_id,
-            };
+            let relocate_addr =
+                |addr: RegionedVarAddr| bindings.locate_regioned(addr.region, *id, addr.var_id);
             FfAccessSummary {
                 reads: summary
                     .reads
@@ -1757,10 +1816,7 @@ fn relocate_units(
             }
         };
         for (trigger_set, summary) in &sim_module.ff_access_summaries {
-            let clock_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: trigger_set.clock,
-            };
+            let clock_addr = bindings.locate(*id, trigger_set.clock);
             let canonical_clock = clock_domains
                 .get(&clock_addr)
                 .copied()
@@ -1770,10 +1826,7 @@ fn relocate_units(
                 .or_default()
                 .push(relocate_ff_summary(summary));
             for &reset in &trigger_set.resets {
-                let reset_addr = AbsoluteAddr {
-                    instance_id: *id,
-                    var_id: reset,
-                };
+                let reset_addr = bindings.locate(*id, reset);
                 let canonical_reset = clock_domains
                     .get(&reset_addr)
                     .copied()
@@ -1797,10 +1850,7 @@ fn relocate_units(
                         .signals
                         .iter()
                         .filter(|var_id| sim_module.variables.contains_key(var_id))
-                        .map(|&var_id| AbsoluteAddr {
-                            instance_id: *id,
-                            var_id,
-                        })
+                        .map(|&var_id| bindings.locate(*id, var_id))
                         .collect(),
                 },
             );
@@ -1849,11 +1899,7 @@ fn relocate_units(
             let relocate = |unit: &ExecutionUnit<RegionedVarAddr>| {
                 relocate_executation_unit_with_errors(
                     unit,
-                    &|addr| RegionedAbsoluteAddr {
-                        region: addr.region,
-                        instance_id: *id,
-                        var_id: addr.var_id,
-                    },
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
@@ -1878,10 +1924,7 @@ fn relocate_units(
                     }
                 };
                 let canonical = |var_id| {
-                    let address = AbsoluteAddr {
-                        instance_id: *id,
-                        var_id,
-                    };
+                    let address = bindings.locate(*id, var_id);
                     clock_domains.get(&address).copied().unwrap_or(address)
                 };
                 let events = std::iter::once(canonical(trigger_set.clock))
@@ -1904,6 +1947,7 @@ fn relocate_units(
             global_boundaries,
             unpacked_element_widths,
             &mut global_arena,
+            bindings,
             trace_opts,
             trace.as_deref_mut(),
         )?;
@@ -1921,10 +1965,7 @@ fn relocate_units(
 
         // Relocate sequential blocks for this instance
         for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
-            let clock_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: trigger_set.clock,
-            };
+            let clock_addr = bindings.locate(*id, trigger_set.clock);
             let canonical_addr = clock_domains
                 .get(&clock_addr)
                 .copied()
@@ -1933,11 +1974,7 @@ fn relocate_units(
             eval_apply_ffs.entry(canonical_addr).or_default().push(
                 relocate_executation_unit_with_errors(
                     eu,
-                    &|addr| RegionedAbsoluteAddr {
-                        region: addr.region,
-                        instance_id: *id,
-                        var_id: addr.var_id,
-                    },
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
@@ -1945,10 +1982,7 @@ fn relocate_units(
             );
 
             for &reset in &trigger_set.resets {
-                let reset_addr = AbsoluteAddr {
-                    instance_id: *id,
-                    var_id: reset,
-                };
+                let reset_addr = bindings.locate(*id, reset);
                 let canonical_addr = clock_domains
                     .get(&reset_addr)
                     .copied()
@@ -1956,11 +1990,7 @@ fn relocate_units(
                 eval_apply_ffs.entry(canonical_addr).or_default().push(
                     relocate_executation_unit_with_errors(
                         eu,
-                        &|addr| RegionedAbsoluteAddr {
-                            region: addr.region,
-                            instance_id: *id,
-                            var_id: addr.var_id,
-                        },
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
@@ -1970,10 +2000,7 @@ fn relocate_units(
         }
 
         for (trigger_set, eu) in &sim_module.eval_only_ff_blocks {
-            let clock_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: trigger_set.clock,
-            };
+            let clock_addr = bindings.locate(*id, trigger_set.clock);
             let canonical_addr = clock_domains
                 .get(&clock_addr)
                 .copied()
@@ -1981,11 +2008,7 @@ fn relocate_units(
             eval_only_ffs.entry(canonical_addr).or_default().push(
                 relocate_executation_unit_with_errors(
                     eu,
-                    &|addr| RegionedAbsoluteAddr {
-                        region: addr.region,
-                        instance_id: *id,
-                        var_id: addr.var_id,
-                    },
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
@@ -1993,10 +2016,7 @@ fn relocate_units(
             );
 
             for &reset in &trigger_set.resets {
-                let reset_addr = AbsoluteAddr {
-                    instance_id: *id,
-                    var_id: reset,
-                };
+                let reset_addr = bindings.locate(*id, reset);
                 let canonical_addr = clock_domains
                     .get(&reset_addr)
                     .copied()
@@ -2004,11 +2024,7 @@ fn relocate_units(
                 eval_only_ffs.entry(canonical_addr).or_default().push(
                     relocate_executation_unit_with_errors(
                         eu,
-                        &|addr| RegionedAbsoluteAddr {
-                            region: addr.region,
-                            instance_id: *id,
-                            var_id: addr.var_id,
-                        },
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
@@ -2023,28 +2039,18 @@ fn relocate_units(
                 RelocatedProcess {
                     kernel: relocate_executation_unit_with_errors(
                         &process.kernel,
-                        &|addr| RegionedAbsoluteAddr {
-                            region: addr.region,
-                            instance_id: *id,
-                            var_id: addr.var_id,
-                        },
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
                     ),
-                    slots: process.slots.map(|var_id| AbsoluteAddr {
-                        instance_id: *id,
-                        var_id,
-                    }),
+                    slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
                 },
             ));
         }
 
         for (trigger_set, eu) in &sim_module.apply_ff_blocks {
-            let clock_addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: trigger_set.clock,
-            };
+            let clock_addr = bindings.locate(*id, trigger_set.clock);
             let canonical_addr = clock_domains
                 .get(&clock_addr)
                 .copied()
@@ -2052,11 +2058,7 @@ fn relocate_units(
             apply_ffs.entry(canonical_addr).or_default().push(
                 relocate_executation_unit_with_errors(
                     eu,
-                    &|addr| RegionedAbsoluteAddr {
-                        region: addr.region,
-                        instance_id: *id,
-                        var_id: addr.var_id,
-                    },
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
@@ -2064,10 +2066,7 @@ fn relocate_units(
             );
 
             for &reset in &trigger_set.resets {
-                let reset_addr = AbsoluteAddr {
-                    instance_id: *id,
-                    var_id: reset,
-                };
+                let reset_addr = bindings.locate(*id, reset);
                 let canonical_addr = clock_domains
                     .get(&reset_addr)
                     .copied()
@@ -2075,11 +2074,7 @@ fn relocate_units(
                 apply_ffs.entry(canonical_addr).or_default().push(
                     relocate_executation_unit_with_errors(
                         eu,
-                        &|addr| RegionedAbsoluteAddr {
-                            region: addr.region,
-                            instance_id: *id,
-                            var_id: addr.var_id,
-                        },
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
@@ -2752,6 +2747,7 @@ fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
 }
 
 fn analyze_clock_dependencies(
+    bindings: &PackageBindings,
     eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -2787,10 +2783,7 @@ fn analyze_clock_dependencies(
             ) {
                 continue;
             }
-            let addr = AbsoluteAddr {
-                instance_id: *id,
-                var_id: *var_id,
-            };
+            let addr = bindings.locate(*id, *var_id);
             let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
             unique_clocks.insert(canonical);
             eval_apply_ffs.entry(canonical).or_default();
@@ -2993,10 +2986,7 @@ fn analyze_clock_dependencies(
                     | DomainKind::ResetAsyncLow
             );
             if is_trigger {
-                let addr = AbsoluteAddr {
-                    instance_id: *id,
-                    var_id: *var_id,
-                };
+                let addr = bindings.locate(*id, *var_id);
                 let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
                 // Add empty execution units so it becomes a valid event domain for scheduling
                 eval_apply_ffs.entry(canonical).or_default();

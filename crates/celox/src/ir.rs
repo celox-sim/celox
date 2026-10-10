@@ -969,6 +969,26 @@ impl RuntimeProgram {
         instance_path: &[(&str, usize)],
         var_path: &[&str],
     ) -> Result<AbsoluteAddr, AddrLookupError> {
+        let found = self.instance_addr(instance_path, var_path);
+        // `p::v` at the top names variable `v` of package `p`, which lives in
+        // the package's instance outside the hierarchy.
+        if let (Err(AddrLookupError::VariableNotFound { .. }), [], [name]) =
+            (&found, instance_path, var_path)
+            && let Some((package, variable)) = name.rsplit_once("::")
+        {
+            let package = format!("{package}::");
+            if let Ok(address) = self.instance_addr(&[(&package, 0)], &[variable]) {
+                return Ok(address);
+            }
+        }
+        found
+    }
+
+    fn instance_addr(
+        &self,
+        instance_path: &[(&str, usize)],
+        var_path: &[&str],
+    ) -> Result<AbsoluteAddr, AddrLookupError> {
         let instance_path: Vec<(String, usize)> = instance_path
             .iter()
             .map(|(name, index)| ((*name).to_string(), *index))
