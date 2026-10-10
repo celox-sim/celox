@@ -820,3 +820,139 @@ fn clock_waits_interleave_with_delays_and_checkpoints() {
     assert_eq!(sim.get(seen), 10u32.into());
     assert_eq!(sim.get(count), 20u32.into());
 }
+
+/// A step whose clock waits ran as fused ticks reports the time it reached.
+#[test]
+fn a_fused_step_returns_the_time_it_reached() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    // Edges at 0, 2, ..., 18 run as one step.
+    assert_eq!(sim.step().unwrap(), Some(18));
+    assert_eq!(sim.time(), 18);
+    assert_eq!(sim.ticks(), 10);
+}
+
+/// A process clock that is high when a wait begins falls first: only real
+/// rising edges count, so the registers see every counted edge.
+#[test]
+fn a_high_process_clock_falls_before_its_first_counted_edge() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    module
+        .set_initial(clk, Constant::two_state(1u8, 1).unwrap())
+        .unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(seen), 3u32.into());
+    assert_eq!(sim.ticks(), 3);
+}
+
+/// A clock edge that would lie beyond simulation time is an error, like a
+/// delay that overflows.
+#[test]
+fn clock_edges_beyond_simulation_time_are_an_error() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let late = module.constant(Constant::two_state(u64::MAX - 2, 64).unwrap());
+    let two = constant(&mut module, 2, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: late },
+            Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    loop {
+        match sim.step() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the overflowing edge was not reported"),
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("overflows simulation time"),
+                    "{error}"
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// A design whose registers drive another clock keeps the scheduler's
+/// rounds: the derived clock's domain fires on every clock wait too.
+#[test]
+fn clock_waits_keep_derived_clocks_running() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let bit = ValueType::bits(1).unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let half = module.internal("half", bit).unwrap();
+    module
+        .set_initial(half, Constant::two_state(0u8, 1).unwrap())
+        .unwrap();
+    let half_expr = module.read(half).unwrap();
+    let toggled = module.unary(UnaryOp::BitNot, half_expr, bit).unwrap();
+    let half_target = module.whole(half).unwrap();
+    module
+        .register(half_target, toggled, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let slow = module.output("slow", word).unwrap();
+    module
+        .set_initial(slow, Constant::two_state(0u8, 32).unwrap())
+        .unwrap();
+    let slow_expr = module.read(slow).unwrap();
+    let one = constant(&mut module, 1, 32);
+    let next = module.binary(BinaryOp::Add, slow_expr, one, word).unwrap();
+    let slow_target = module.whole(slow).unwrap();
+    module
+        .register(slow_target, next, half, Edge::Posedge, None, None)
+        .unwrap();
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let slow = sim.signal("slow");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(count), 10u32.into());
+    // `half` rises on every second edge of `clk`.
+    assert_eq!(sim.get(slow), 5u32.into());
+}

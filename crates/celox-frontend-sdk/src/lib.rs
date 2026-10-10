@@ -860,6 +860,43 @@ impl FrontendArtifact {
         for process in &self.processes {
             self.validate_statements(&process.body, &driver_ranges)?;
         }
+        // The same requirements as `ModuleBuilder::clock_period` and
+        // `ModuleBuilder::process` put on the clocks processes wait on.
+        for (clock, period) in &self.clock_periods {
+            let signal = self
+                .signal(*clock)
+                .ok_or(BuildError::UnknownSignal(clock.index()))?;
+            if signal.value_type.width() != 1 {
+                return Err(BuildError::InvalidControlWidth {
+                    name: signal.name.clone(),
+                });
+            }
+            if *period < 2 {
+                return Err(BuildError::InvalidClockPeriod { period: *period });
+            }
+        }
+        for process in &self.processes {
+            let mut clocks = Vec::new();
+            collect_process_clocks(&process.body, &mut clocks);
+            for clock in clocks {
+                let known = self
+                    .clock_periods
+                    .iter()
+                    .any(|(signal, _)| *signal == clock)
+                    && self
+                        .registers
+                        .iter()
+                        .any(|register| register.clock == clock);
+                if !known {
+                    let name = self
+                        .signal(clock)
+                        .ok_or(BuildError::UnknownSignal(clock.index()))?
+                        .name
+                        .clone();
+                    return Err(BuildError::UnknownProcessClock { name });
+                }
+            }
+        }
         let mut ordered_ports = FxHashMap::default();
         for signal in &self.port_order {
             let signal = self
@@ -1992,6 +2029,51 @@ mod tests {
             error,
             ArtifactJsonError::InvalidArtifact(BuildError::ZeroWidth)
         ));
+    }
+
+    #[test]
+    fn revalidates_process_clocks_from_json() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("ProcessClocks").unwrap();
+        let clock = module.internal("clock", bit).unwrap();
+        let count = module.output("count", bit).unwrap();
+        let toggled = module.read(count).unwrap();
+        let toggled = module.unary(UnaryOp::BitNot, toggled, bit).unwrap();
+        let target = module.whole(count).unwrap();
+        module
+            .register(target, toggled, clock, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clock, 4).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        module
+            .process(vec![Statement::ClockCycles { clock, count: one }])
+            .unwrap();
+        let artifact = module.finish();
+        let json = serde_json::to_value(&artifact).unwrap();
+
+        // Without its period, the clock clocks nothing.
+        let mut unknown = json.clone();
+        unknown["clock_periods"] = serde_json::json!([]);
+        let error = FrontendArtifact::from_json(&unknown.to_string()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ArtifactJsonError::InvalidArtifact(BuildError::UnknownProcessClock { .. })
+            ),
+            "{error:?}"
+        );
+
+        // A period below two cannot have distinct edges.
+        let mut short = json.clone();
+        short["clock_periods"][0][1] = 1.into();
+        let error = FrontendArtifact::from_json(&short.to_string()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ArtifactJsonError::InvalidArtifact(BuildError::InvalidClockPeriod { period: 1 })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
