@@ -578,7 +578,7 @@ impl Frame {
                 let value = self.eval(rhs)?;
                 self.assign(lhs, value)?;
             }
-            Stmt::Local { name, init } => {
+            Stmt::Local { name, init, .. } => {
                 let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
                 self.declare(name, &r#type)?;
                 let value = match init {
@@ -696,7 +696,11 @@ impl Frame {
             // Messages have no effect on the value. Unknown and unsupported
             // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
-            Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
+            Stmt::AssignConcat { .. }
+            | Stmt::Call { .. }
+            | Stmt::Delay(_)
+            | Stmt::WaitEvent(_)
+            | Stmt::Wait(_) => return None,
         }
         Some(Flow::Next)
     }

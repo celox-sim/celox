@@ -178,14 +178,14 @@ its boundaries.
 
 ### Process kernels
 
-A procedural process with delays is compiled into a process kernel: one SIR
-execution unit that runs the process from its last suspension point to the
-next. Each process owns three hidden two-state state objects:
+A procedural process with timing controls is compiled into a process kernel:
+one SIR execution unit that runs the process from its last suspension point
+to the next. Each process owns three hidden two-state state objects:
 
 - a resume slot, which the kernel's entry block dispatches on with a `Switch`
   (two levels beyond 255 suspension points);
-- a status slot, in which the kernel reports a delay, the end of the process,
-  or `$finish` before it returns;
+- a status slot, in which the kernel reports a delay, a wait, the end of the
+  process, or `$finish` before it returns;
 - a delay slot, which holds the wait amount.
 
 A suspension stores these slots and returns, so no backend needs a new
@@ -193,15 +193,33 @@ terminator. Kernels are never merged with each other or with a phase, and
 every backend compiles each one as its own function, invoked through
 `SimBackend::run_process`.
 
-The timed scheduler keeps a queue of process wakeups next to its event queue.
-At each time it applies the scheduled values, then runs the processes that
-resume at that time in declaration order. It detects the clock edges they cause
-by comparing event signals before and after, and then settles as for scheduled
-events. Processes that waited for zero time resume in a further round at the
-same time, which repeats the edge detection and settling. Because the slots are ordinary state, a checkpoint captures suspended
-processes. The optimizer does not yet optimize kernels, but it treats their
-accesses like those of FF domains, so identity aliasing and dead-store
-elimination keep the state they use.
+An event control (`@(posedge clk)`, `@(a or b)`) or a level wait
+(`wait (expr)`) is a suspension whose condition the kernel evaluates itself.
+Before an event wait suspends, the kernel samples each event expression into a
+hidden state object of the process. Its resume point compares the current
+values with the samples, refreshes the samples and either runs on or reports
+that the wait is still pending. The runtime therefore needs no per-signal
+waiter lists, four-state edge rules stay inside the generated code, and a
+checkpoint captures a waiting process like any other state.
+
+The timed scheduler keeps a queue of process wakeups next to its event queue
+and a set of the processes waiting for an event or a condition. At each time
+it applies the scheduled values, then runs the processes that resume at that
+time together with the waiting ones, in declaration order, repeating the pass
+while a process ran, so that a process another one wakes runs before the
+registers of that time evaluate; this matches the active-region order in
+which a process woken by a clock edge reads the registers' previous values.
+It detects the clock edges the processes cause by comparing event signals
+before and after, and then settles as for scheduled events. Processes that
+waited for zero time, or that the settled state wakes, resume in a further
+round at the same time, which repeats the edge detection and settling; a
+round in which every waiting process reports a pending wait ends the time.
+`Simulation::step` and `run_until` also run such a round first, so a host
+write between steps wakes the processes that wait for it. Because the slots
+are ordinary state, a checkpoint captures suspended processes. The optimizer
+does not yet optimize kernels, but it treats their accesses like those of FF
+domains, so identity aliasing and dead-store elimination keep the state they
+use.
 
 A running simulator retains the elaborated design, source lookup, runtime schema,
 bound testbench bytecode, and compiled backend. The backend owns the finalized

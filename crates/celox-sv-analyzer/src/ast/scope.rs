@@ -668,7 +668,12 @@ impl Renamer<'_> {
                 name: self.name(&name),
                 args,
             },
-            Stmt::Local { name, init } => Stmt::Local {
+            Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => Stmt::Local {
+                r#static,
                 name: self.name(&name),
                 init,
             },
@@ -741,7 +746,12 @@ impl Renamer<'_> {
                 name: self.name(&name),
                 args,
             },
-            Stmt::Local { name, init } => Stmt::Local {
+            Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => Stmt::Local {
+                r#static,
                 name: self.name(&name),
                 init,
             },

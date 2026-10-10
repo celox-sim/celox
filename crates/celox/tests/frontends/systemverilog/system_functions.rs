@@ -635,7 +635,7 @@ fn rejects_nonblocking_assignments_in_initial_processes() {
         endmodule"#,
     );
     assert!(
-        error.contains("nonblocking assignment in an initial block that runs as a process"),
+        error.contains("nonblocking assignment in a process that runs with timing"),
         "{error}"
     );
 }

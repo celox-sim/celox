@@ -8,8 +8,12 @@
 
 use super::*;
 use crate::procedural::{
-    CaseItemBase, CaseKind, CaseLabel, LoopKind, ParamDirection, SystemTaskArg,
+    CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
+    SystemTaskArg,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
@@ -53,6 +57,8 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    /// Tasks use persistent local storage when their lifetime is static.
+    is_task: bool,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -120,6 +126,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             type_aliases,
             local_constants: HashMap::default(),
             body,
+            is_task: false,
         }
     }
 
@@ -511,17 +518,143 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sv_parser::StatementItem::ProceduralAssertionStatement(assertion) => {
                 self.assertion(assertion)
             }
-            sv_parser::StatementItem::ProceduralTimingControlStatement(_)
-            | sv_parser::StatementItem::WaitStatement(_)
-            | sv_parser::StatementItem::EventTrigger(_) => {
-                Err(unsupported("procedural timing control"))
+            sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
+                let mut stmts = vec![self.timing_control(&timing.nodes.0)?];
+                stmts.extend(self.statement_or_null(&timing.nodes.1)?);
+                Ok(stmts)
             }
+            sv_parser::StatementItem::WaitStatement(wait) => match &**wait {
+                sv_parser::WaitStatement::Wait(wait) => {
+                    let condition = self.expr(&wait.nodes.1.nodes.1)?;
+                    let mut stmts = vec![Stmt::Wait(condition)];
+                    stmts.extend(self.statement_or_null(&wait.nodes.2)?);
+                    Ok(stmts)
+                }
+                sv_parser::WaitStatement::Fork(_) | sv_parser::WaitStatement::Order(_) => {
+                    Err(unsupported("wait fork or wait order statement"))
+                }
+            },
+            sv_parser::StatementItem::EventTrigger(_) => Err(unsupported("event trigger")),
             sv_parser::StatementItem::ProceduralContinuousAssignment(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
             sv_parser::StatementItem::DisableStatement(_) => Err(unsupported("disable statement")),
             sv_parser::StatementItem::ParBlock(_) => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),
+        }
+    }
+
+    /// The suspension a procedural timing control stands for: a delay or an
+    /// event control.
+    fn timing_control(
+        &self,
+        control: &sv_parser::ProceduralTimingControl,
+    ) -> Result<Stmt, AnalyzerError> {
+        match control {
+            sv_parser::ProceduralTimingControl::DelayControl(delay) => {
+                self.delay_control(delay).map(Stmt::Delay)
+            }
+            sv_parser::ProceduralTimingControl::EventControl(control) => {
+                self.event_control(control).map(Stmt::WaitEvent)
+            }
+            sv_parser::ProceduralTimingControl::CycleDelay(_) => Err(unsupported("cycle delay")),
+        }
+    }
+
+    /// The amount of a `#` delay control as an expression in time units.
+    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
+        match delay {
+            sv_parser::DelayControl::Delay(delay) => match &delay.nodes.1 {
+                sv_parser::DelayValue::UnsignedNumber(number) => Ok(Expr::Literal(
+                    self.tree
+                        .get_str(&number.nodes.0)
+                        .ok_or_else(|| unsupported("delay value"))?
+                        .replace('_', ""),
+                )),
+                sv_parser::DelayValue::PsIdentifier(identifier) => {
+                    if identifier.nodes.0.is_some() {
+                        return Err(unsupported("package-scoped delay value"));
+                    }
+                    let name = identifier_text(RefNode::Identifier(&identifier.nodes.1), self.tree)
+                        .ok_or_else(|| unsupported("delay value"))?;
+                    let mut expr = Expr::Ident(name);
+                    self.rename_expr(&mut expr);
+                    Ok(expr)
+                }
+                sv_parser::DelayValue::HierarchicalIdentifier(identifier) => {
+                    let name =
+                        identifier_text(RefNode::HierarchicalIdentifier(identifier), self.tree)
+                            .ok_or_else(|| unsupported("delay value"))?;
+                    let mut expr = Expr::Ident(name);
+                    self.rename_expr(&mut expr);
+                    Ok(expr)
+                }
+                sv_parser::DelayValue::RealNumber(_)
+                | sv_parser::DelayValue::TimeLiteral(_)
+                | sv_parser::DelayValue::Step1(_) => Err(unsupported("delay value")),
+            },
+            sv_parser::DelayControl::Mintypmax(delay) => match &delay.nodes.1.nodes.1 {
+                sv_parser::MintypmaxExpression::Expression(expr) => self.expr(expr),
+                sv_parser::MintypmaxExpression::Ternary(_) => Err(unsupported("min:typ:max delay")),
+            },
+        }
+    }
+
+    /// The items of an `@` event control.
+    fn event_control(
+        &self,
+        control: &sv_parser::EventControl,
+    ) -> Result<Vec<EventItemBase<Expr>>, AnalyzerError> {
+        match control {
+            sv_parser::EventControl::EventExpression(control) => {
+                let mut items = Vec::new();
+                self.event_items(&control.nodes.1.nodes.1, &mut items)?;
+                Ok(items)
+            }
+            sv_parser::EventControl::EventIdentifier(_) => Err(unsupported("named event")),
+            sv_parser::EventControl::Asterisk(_) | sv_parser::EventControl::ParenAsterisk(_) => {
+                Err(unsupported("`@*` in a process"))
+            }
+            sv_parser::EventControl::SequenceIdentifier(_) => {
+                Err(unsupported("sequence event control"))
+            }
+        }
+    }
+
+    fn event_items(
+        &self,
+        expr: &sv_parser::EventExpression,
+        items: &mut Vec<EventItemBase<Expr>>,
+    ) -> Result<(), AnalyzerError> {
+        match expr {
+            sv_parser::EventExpression::Expression(expr) => {
+                if expr.nodes.2.is_some() {
+                    return Err(unsupported("iff-qualified event"));
+                }
+                let edge = match &expr.nodes.0 {
+                    None => EventEdge::Any,
+                    Some(sv_parser::EdgeIdentifier::Posedge(_)) => EventEdge::Pos,
+                    Some(sv_parser::EdgeIdentifier::Negedge(_)) => EventEdge::Neg,
+                    Some(sv_parser::EdgeIdentifier::Edge(_)) => {
+                        return Err(unsupported("`edge` event"));
+                    }
+                };
+                let expr = self.expr(&expr.nodes.1)?;
+                items.push(EventItemBase { edge, expr });
+                Ok(())
+            }
+            sv_parser::EventExpression::Or(expr) => {
+                self.event_items(&expr.nodes.0, items)?;
+                self.event_items(&expr.nodes.2, items)
+            }
+            sv_parser::EventExpression::Comma(expr) => {
+                self.event_items(&expr.nodes.0, items)?;
+                self.event_items(&expr.nodes.2, items)
+            }
+            sv_parser::EventExpression::Paren(expr) => {
+                self.event_items(&expr.nodes.0.nodes.1, items)
+            }
+            sv_parser::EventExpression::Sequence(_) => Err(unsupported("sequence event")),
         }
     }
 
@@ -596,17 +729,28 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
                 None => None,
             };
+            // A local of a static task is static unless declared
+            // `automatic`; an initializer then needs an explicit lifetime
+            // keyword (IEEE 1800-2023 6.21).
+            let automatic = is_automatic(variable.nodes.2.as_ref(), self.automatic);
+            if self.is_task && !automatic && init.is_some() && variable.nodes.2.is_none() {
+                return Err(unsupported(format!(
+                    "local `{}` with an initializer in a static subroutine without an explicit `static` or `automatic` lifetime",
+                    signal.name()
+                )));
+            }
             let name = self.declare(signal.name(), signal.r#type().clone());
-            let automatic = match &variable.nodes.2 {
-                Some(sv_parser::Lifetime::Automatic(_)) => true,
-                Some(sv_parser::Lifetime::Static(_)) => false,
-                None => self.automatic,
-            };
             if !automatic {
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
                 self.state.statics.push((name.clone(), r#type));
             }
-            stmts.push(Stmt::Local { name, init });
+            stmts.push(Stmt::Local {
+                name,
+                init,
+                // Process locals are handled by `keep_static_locals`; task
+                // locals retain their lifetime in IR across inline calls.
+                r#static: self.is_task && !automatic,
+            });
         }
         Ok(stmts)
     }
@@ -1083,6 +1227,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         init.push(Stmt::Local {
                             name,
                             init: Some(value_expr),
+                            r#static: false,
                         });
                     }
                 }
@@ -1185,6 +1330,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 init: vec![Stmt::Local {
                     name: name.clone(),
                     init: Some(Expr::Literal(left.to_string())),
+                    r#static: false,
                 }],
                 condition: Some(Expr::Binary {
                     left: Box::new(index.clone()),
@@ -1414,8 +1560,8 @@ pub(super) fn subroutine_param_declarations<'t>(
 /// The syntax of one function or task body.
 struct SubroutineSyntax<'t> {
     name: String,
-    lifetime: Option<&'t sv_parser::Lifetime>,
     is_task: bool,
+    automatic: bool,
     return_type: Option<&'t sv_parser::FunctionDataTypeOrImplicit>,
     ports: Option<&'t sv_parser::TfPortList>,
     items: &'t [sv_parser::TfItemDeclaration],
@@ -1423,9 +1569,37 @@ struct SubroutineSyntax<'t> {
     statements: Vec<&'t sv_parser::Statement>,
 }
 
+/// Whether a subroutine's lifetime is `automatic`: its own keyword, or the
+/// module's default lifetime when it has none.
+fn is_automatic(lifetime: Option<&sv_parser::Lifetime>, default_automatic: bool) -> bool {
+    match lifetime {
+        Some(sv_parser::Lifetime::Automatic(_)) => true,
+        Some(sv_parser::Lifetime::Static(_)) => false,
+        None => default_automatic,
+    }
+}
+
+/// Whether a module header, or a package, declares the `automatic` default
+/// lifetime.
+fn module_default_automatic(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|child| match child {
+        RefNode::ModuleAnsiHeader(header) => {
+            matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        RefNode::ModuleNonansiHeader(header) => {
+            matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        RefNode::PackageDeclaration(package) => {
+            matches!(package.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        _ => false,
+    })
+}
+
 fn function_syntax<'t>(
     declaration: &'t sv_parser::FunctionDeclaration,
     tree: &SyntaxTree,
+    default_automatic: bool,
 ) -> Option<SubroutineSyntax<'t>> {
     let statements = |list: &'t [sv_parser::FunctionStatementOrNull]| {
         list.iter()
@@ -1438,8 +1612,8 @@ fn function_syntax<'t>(
     Some(match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
             is_task: false,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: Some(&body.nodes.0),
             ports: body.nodes.3.nodes.1.as_ref(),
             items: &[],
@@ -1448,8 +1622,8 @@ fn function_syntax<'t>(
         },
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
             is_task: false,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: Some(&body.nodes.0),
             ports: None,
             items: &body.nodes.4,
@@ -1470,6 +1644,7 @@ fn function_syntax<'t>(
 fn task_syntax<'t>(
     declaration: &'t sv_parser::TaskDeclaration,
     tree: &SyntaxTree,
+    default_automatic: bool,
 ) -> Option<SubroutineSyntax<'t>> {
     let statements = |list: &'t [sv_parser::StatementOrNull]| {
         list.iter()
@@ -1482,8 +1657,8 @@ fn task_syntax<'t>(
     Some(match &declaration.nodes.2 {
         sv_parser::TaskBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
             is_task: true,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: None,
             ports: body.nodes.2.nodes.1.as_ref(),
             items: &[],
@@ -1492,8 +1667,8 @@ fn task_syntax<'t>(
         },
         sv_parser::TaskBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
             is_task: true,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: None,
             ports: None,
             items: &body.nodes.3,
@@ -1518,9 +1693,12 @@ pub(super) fn subroutine_declared_dimensions(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<VariablePackedDimensions> {
+    // This lexical metadata lookup reads only declarations, not `automatic`
+    // or lowered statements. Its placeholder default cannot affect lifetime;
+    // actual lowering supplies the enclosing module/package's default.
     let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree, false),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree, false),
         _ => None,
     }?;
     let params =
@@ -1546,9 +1724,11 @@ pub(super) fn subroutine_declared_parameter_shapes(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<(String, Vec<VariableDimensions>)> {
+    // As in `subroutine_declared_dimensions`, lifetime is unused here: only
+    // the name and formal declarations contribute to lexical shape metadata.
     let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree, false),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree, false),
         _ => None,
     }?;
     let params =
@@ -1579,12 +1759,17 @@ pub(super) fn subroutine_argument_names(
 > {
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
+    let default_automatic = module_default_automatic(node.clone());
     let mut directions = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+                RefNode::FunctionDeclaration(declaration) => {
+                    function_syntax(declaration, tree, default_automatic)
+                }
+                RefNode::TaskDeclaration(declaration) => {
+                    task_syntax(declaration, tree, default_automatic)
+                }
                 _ => continue,
             };
             let Some(syntax) = syntax else {
@@ -1653,6 +1838,7 @@ pub(super) fn subroutines_from_module_node_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
+    let default_automatic = module_default_automatic(node.clone());
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
@@ -1661,8 +1847,12 @@ pub(super) fn subroutines_from_module_node_with(
         }
         for child in item.node.node() {
             let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+                RefNode::FunctionDeclaration(declaration) => {
+                    function_syntax(declaration, tree, default_automatic)
+                }
+                RefNode::TaskDeclaration(declaration) => {
+                    task_syntax(declaration, tree, default_automatic)
+                }
                 _ => continue,
             };
             let Some(syntax) = syntax else {
@@ -1700,11 +1890,8 @@ pub(super) fn subroutines_from_module_node_with(
                     state,
                     system_functions::Body::Subroutine,
                 );
-                builder.automatic = match syntax.lifetime {
-                    Some(sv_parser::Lifetime::Automatic(_)) => true,
-                    Some(sv_parser::Lifetime::Static(_)) => false,
-                    None => builder.automatic,
-                };
+                builder.automatic = syntax.automatic;
+                builder.is_task = syntax.is_task;
                 let first_static = builder.state.statics.len();
                 builder.push_scope();
                 let mut lowered_params = Vec::new();
@@ -1752,6 +1939,7 @@ pub(super) fn subroutines_from_module_node_with(
                 let mut subroutine = Subroutine {
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
+                    automatic: syntax.automatic,
                     return_type: return_type.map(|r#type| {
                         crate::ir::Type::from_ast(scoped_type(r#type, &item.env), &item.env)
                     }),
@@ -1773,11 +1961,16 @@ pub(super) fn subroutines_from_module_node_with(
                         );
                     }
                 }
-                lifetimes::check_subroutine_statics(
-                    &subroutine,
-                    &statics,
-                    builder.state.subroutine_directions,
-                )?;
+                // Functions are also expanded as expressions, which cannot
+                // carry persistent local state. Tasks lower as statements and
+                // preserve their static locals in IR, including timed calls.
+                if !subroutine.is_task {
+                    lifetimes::check_subroutine_statics(
+                        &subroutine,
+                        &statics,
+                        builder.state.subroutine_directions,
+                    )?;
+                }
                 if !builder.automatic {
                     lifetimes::check_static_result(
                         &subroutine,
@@ -1916,17 +2109,34 @@ pub(super) fn initial_processes_from_module_node(
         else {
             continue;
         };
-        let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
-            continue;
-        };
         let (item_dimensions, literals) = views.get(item);
-        let mut builder = BodyBuilder::new(
-            tree,
-            item_dimensions,
-            state,
-            system_functions::Body::Initial,
-        );
-        let mut body = builder.statement_or_null(&initial.nodes.1)?;
+        let mut body = match &module_item.nodes.1 {
+            sv_parser::ModuleCommonItem::InitialConstruct(initial) => {
+                let mut builder = BodyBuilder::new(
+                    tree,
+                    item_dimensions,
+                    state,
+                    system_functions::Body::Initial,
+                );
+                builder.statement_or_null(&initial.nodes.1)?
+            }
+            // An `always` with timing controls restarts its statement
+            // whenever it ends (IEEE 1800-2023 9.2.2).
+            sv_parser::ModuleCommonItem::AlwaysConstruct(always)
+                if always_kind(always) == AlwaysKind::Process =>
+            {
+                let mut builder =
+                    BodyBuilder::new(tree, item_dimensions, state, system_functions::Body::Always);
+                vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body: builder.statement(&always.nodes.1)?,
+                }]
+            }
+            _ => continue,
+        };
         for stmt in &mut body {
             substitute_stmt_constants(stmt, &item.env, literals);
             qualify_stmt(item, stmt);

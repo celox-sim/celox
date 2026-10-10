@@ -275,7 +275,8 @@ pub(super) fn lower_instruction(
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
             match offset {
                 SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
-                    ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
+                    ctx.reg_addrs
+                        .insert(*dst, (*addr, *bit_offset, ctx.inst_index));
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                     ctx.reg_addrs.remove(dst);
@@ -3066,10 +3067,13 @@ pub(super) fn lower_instruction(
             let dst_vreg = ctx.reg_map.get(*dst);
             let src_width = ctx.sir_width(src);
 
-            // If src has a known sim-state address (from a preceding Load/Store)
-            // load directly from memory. This handles partial Stores that
-            // updated memory without rewriting the source register's VRegs.
-            if let Some((addr, source_bit_offset)) = ctx.reg_addrs.get(src).cloned() {
+            // A value loaded from sim state earlier in this block, which
+            // nothing has written since, is sliced by loading the range from
+            // memory: the register's shift and mask are saved. A store in
+            // between leaves the register as the only holder of the value.
+            if let Some((addr, source_bit_offset, loaded_at)) = ctx.reg_addrs.get(src).cloned()
+                && ctx.memory_unchanged_since(&addr, source_bit_offset, src_width, loaded_at)
+            {
                 let slice_bit_offset = source_bit_offset + *bit_offset;
                 let value_base = ctx.byte_offset(&addr, slice_bit_offset);
                 let intra = ctx.static_byte_and_intra(&addr, slice_bit_offset).1;

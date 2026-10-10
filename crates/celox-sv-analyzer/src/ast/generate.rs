@@ -1133,22 +1133,32 @@ impl<'a> Elaborator<'a, '_> {
                             ));
                         }
                         for node in RefNode::ModuleOrGenerateItem(item) {
-                            if let RefNode::FunctionDeclaration(function) = node {
-                                let identifier = match &function.nodes.2 {
+                            // A subroutine of the scope is known by its
+                            // qualified name, like a variable of the scope.
+                            let identifier = match node {
+                                RefNode::FunctionDeclaration(function) => match &function.nodes.2 {
                                     sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-                                        &body.nodes.2
+                                        RefNode::FunctionIdentifier(&body.nodes.2)
                                     }
                                     sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
-                                        &body.nodes.2
+                                        RefNode::FunctionIdentifier(&body.nodes.2)
                                     }
-                                };
-                                let name = identifier_text(
-                                    RefNode::FunctionIdentifier(identifier),
-                                    self.tree,
-                                )
-                                .ok_or_else(|| {
-                                    AnalyzerError::Unsupported("function name".to_string())
-                                })?;
+                                },
+                                RefNode::TaskDeclaration(task) => match &task.nodes.2 {
+                                    sv_parser::TaskBodyDeclaration::WithPort(body) => {
+                                        RefNode::TaskIdentifier(&body.nodes.1)
+                                    }
+                                    sv_parser::TaskBodyDeclaration::WithoutPort(body) => {
+                                        RefNode::TaskIdentifier(&body.nodes.1)
+                                    }
+                                },
+                                _ => continue,
+                            };
+                            {
+                                let name =
+                                    identifier_text(identifier, self.tree).ok_or_else(|| {
+                                        AnalyzerError::Unsupported("function name".to_string())
+                                    })?;
                                 if !declared.insert(name.clone()) {
                                     return Err(AnalyzerError::Unsupported(format!(
                                         "duplicate generate-local declaration `{name}`"

@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeSet, BinaryHeap},
+};
 
 use bit_set::BitSet;
 use celox_design::{DomainKind, ProcessStatus};
@@ -133,6 +136,9 @@ pub struct SimulationState<B: SimBackend> {
     signal_to_id: FxHashMap<SignalRef, usize>,
     processes: Vec<ProcessRefs>,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    /// Processes suspended at an event or level wait, which their kernels
+    /// re-check whenever the state may have changed.
+    waiting: BTreeSet<usize>,
     /// A process requested the end of the simulation.
     finished: bool,
 }
@@ -209,6 +215,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .map(|process| Reverse((0, process)))
                 .collect(),
             processes,
+            waiting: BTreeSet::new(),
             finished: false,
         }
     }
@@ -266,18 +273,55 @@ impl<B: SimBackend> SimulationState<B> {
             Vec::new()
         };
         let ready = self.take_ready_processes(current_time);
-        self.step_round(executor, current_time, events_to_process, ready)?;
-        // A process that waited for zero time resumes in a later round of
-        // this time, after the previous round's edges have been handled.
-        while !self.finished {
-            let ready = self.take_ready_processes(current_time);
-            if ready.is_empty() {
-                break;
-            }
-            self.step_round(executor, current_time, Vec::new(), ready)?;
-        }
+        self.step_round(executor, current_time, events_to_process, ready, true)?;
+        self.run_remaining_rounds(executor, current_time)?;
         executor.finish_timed_step(current_time);
         Ok(Some(current_time))
+    }
+
+    /// Run the further rounds of `current_time`: a process that waited for
+    /// zero time resumes in a later round, after the previous round's edges
+    /// have been handled, and the settled state may wake a process waiting
+    /// for an event or a condition. A round in which no process ran changes
+    /// nothing and ends the time.
+    fn run_remaining_rounds<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        while !self.finished {
+            let ready = self.take_ready_processes(current_time);
+            if ready.is_empty() && self.waiting.is_empty() {
+                break;
+            }
+            if !self.step_round(executor, current_time, Vec::new(), ready, false)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resume the processes waiting for an event or a condition at the
+    /// current time, for state that was changed from outside the scheduler,
+    /// and settle what they drive. Returns whether a process ran; nothing
+    /// happens when none wakes.
+    pub fn poll_waiting<E>(&mut self, executor: &mut E) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.finished || self.waiting.is_empty() {
+            return Ok(false);
+        }
+        let time = self.scheduler.time;
+        if !self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
+            return Ok(false);
+        }
+        self.run_remaining_rounds(executor, time)?;
+        executor.finish_timed_step(time);
+        Ok(true)
     }
 
     /// Remove the processes waiting for `time`, in declaration order.
@@ -293,41 +337,74 @@ impl<B: SimBackend> SimulationState<B> {
         ready
     }
 
-    /// Run `ready` processes in order until each suspends or ends. A process
-    /// that waits for zero time is queued for the next round of this time.
+    /// Run `ready` processes, and the processes waiting for an event or a
+    /// condition, in declaration order until each suspends or ends. A
+    /// process another one wakes runs in a further pass of the same round,
+    /// before any register the round triggers updates. A process that waits
+    /// for zero time is queued for the next round of this time. Returns
+    /// whether any process ran a statement.
     fn run_processes<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         ready: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+    ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        for process in ready {
-            executor.run_process(process)?;
-            let refs = self.processes[process];
-            let status: u8 = executor.backend().get_as(refs.status);
-            match ProcessStatus::from_code(status) {
-                Some(ProcessStatus::Delay) => {
-                    let delay: u64 = executor.backend().get_as(refs.delay);
-                    let time = current_time.checked_add(delay).ok_or_else(|| {
-                        SimulatorErrorCode::Runtime {
-                            message: format!("process {process} delay overflows simulation time"),
-                            signals: Vec::new(),
-                        }
-                    })?;
-                    self.process_wakeups.push(Reverse((time, process)));
-                }
-                Some(ProcessStatus::Done) => {}
-                Some(ProcessStatus::Finish) => {
-                    self.finished = true;
-                    break;
-                }
-                None => return Err(SimulatorErrorCode::InternalError),
+        let mut progressed = false;
+        let mut pass = ready;
+        loop {
+            pass.extend(self.waiting.iter().copied());
+            pass.sort_unstable();
+            pass.dedup();
+            if pass.is_empty() {
+                return Ok(progressed);
             }
+            let mut any_ran = false;
+            for process in pass.drain(..) {
+                executor.run_process(process)?;
+                let refs = self.processes[process];
+                let status: u8 = executor.backend().get_as(refs.status);
+                match ProcessStatus::from_code(status) {
+                    Some(ProcessStatus::Delay) => {
+                        let delay: u64 = executor.backend().get_as(refs.delay);
+                        let time = current_time.checked_add(delay).ok_or_else(|| {
+                            SimulatorErrorCode::Runtime {
+                                message: format!(
+                                    "process {process} delay overflows simulation time"
+                                ),
+                                signals: Vec::new(),
+                            }
+                        })?;
+                        self.waiting.remove(&process);
+                        self.process_wakeups.push(Reverse((time, process)));
+                        any_ran = true;
+                    }
+                    Some(ProcessStatus::Done) => {
+                        self.waiting.remove(&process);
+                        any_ran = true;
+                    }
+                    Some(ProcessStatus::Finish) => {
+                        self.waiting.remove(&process);
+                        self.finished = true;
+                        return Ok(true);
+                    }
+                    Some(ProcessStatus::Wait) => {
+                        self.waiting.insert(process);
+                        any_ran = true;
+                    }
+                    // The kernel found its wait condition unmet and ran
+                    // nothing; it stays waiting.
+                    Some(ProcessStatus::Pending) => {}
+                    None => return Err(SimulatorErrorCode::InternalError),
+                }
+            }
+            if !any_ran {
+                return Ok(progressed);
+            }
+            progressed = true;
         }
-        Ok(())
     }
 
     /// Whether a process requested the end of the simulation.
@@ -337,6 +414,8 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Settle externally driven state against the previous edge baseline even
     /// when no clock/reset signal is explicitly scheduled at this timestamp.
+    /// The events and process wakeups due before `time` are processed first,
+    /// at their own times, and the processes due at `time` run.
     pub fn settle_at<E>(
         &mut self,
         executor: &mut E,
@@ -345,20 +424,33 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.step_round(executor, time, Vec::new(), Vec::new())?;
+        while self.next_event_time().is_some_and(|next| next < time) {
+            self.step(executor)?;
+        }
+        if self.finished {
+            return Ok(None);
+        }
+        let ready = self.take_ready_processes(time);
+        self.step_round(executor, time, Vec::new(), ready, true)?;
+        // A process the settled state woke may wait for zero time: the
+        // rounds of this time are drained, as `step` drains them.
+        self.run_remaining_rounds(executor, time)?;
         executor.finish_timed_step(time);
         Ok(Some(time))
     }
 
-    /// Apply `events_to_process`, run `ready_processes`, and settle the
-    /// edges they cause.
+    /// Apply `events_to_process`, run `ready_processes` and the waiting
+    /// processes, and settle the edges they cause. Without `settle_idle`,
+    /// a round with no event in which no process ran is skipped, and
+    /// `false` is returned.
     fn step_round<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         events_to_process: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+        settle_idle: bool,
+    ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -401,13 +493,16 @@ impl<B: SimBackend> SimulationState<B> {
         // see the state settled at the previous time. The event signals they
         // change are edges of this time, like scheduled events.
         let mut process_driven = Vec::new();
-        if !ready_processes.is_empty() {
+        if !ready_processes.is_empty() || !self.waiting.is_empty() {
             let before: Vec<u8> = self
                 .topo_signals
                 .iter()
                 .map(|(signal, _, _)| executor.backend().get_as(*signal))
                 .collect();
-            self.run_processes(executor, current_time, ready_processes)?;
+            let progressed = self.run_processes(executor, current_time, ready_processes)?;
+            if !progressed && !settle_idle && events_to_process.is_empty() {
+                return Ok(false);
+            }
             for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                 if *id == usize::MAX {
                     continue;
@@ -439,16 +534,7 @@ impl<B: SimBackend> SimulationState<B> {
         for (id, is_nonzero) in scheduled {
             track_stable_edges = true;
             let was_nonzero = self.last_clock_values.contains(id);
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
-            if triggered {
+            if self.edge_triggers(id, was_nonzero, is_nonzero) {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
             }
@@ -544,9 +630,29 @@ impl<B: SimBackend> SimulationState<B> {
                 break;
             }
 
-            for id in &newly_triggered {
+            // A register update may wake a waiting process: it runs before
+            // the registers of the next stage update, as a process does in
+            // the active region that follows an NBA region (IEEE 1800-2023
+            // 4.5). The domains of a cascade commit one at a time, and the
+            // waiting processes run between the commits too, so they see
+            // every value their expressions take. The event signals they
+            // change are edges of the next stage.
+            let polled = !self.waiting.is_empty() && !self.finished;
+            let before: Vec<u8> = if polled {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut any_process_ran = false;
+            for (position, id) in newly_triggered.iter().enumerate() {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
+                }
+                if polled && position + 1 < newly_triggered.len() {
+                    any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
                 }
             }
             for id in &newly_triggered {
@@ -561,6 +667,34 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.eval_comb()?;
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
+            }
+
+            if polled {
+                any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
+                if any_process_ran {
+                    let mut driven = BitSet::with_capacity(num_events);
+                    for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
+                        if *id == usize::MAX {
+                            continue;
+                        }
+                        let value: u8 = executor.backend().get_as(*signal);
+                        if value != before && self.edge_triggers(*id, before != 0, value != 0) {
+                            driven.insert(*id);
+                            executor.backend_mut().mark_triggered_bit(*id);
+                        }
+                    }
+                    executor.eval_comb()?;
+                    if track_stable_edges {
+                        if driven.is_empty() {
+                            self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        } else {
+                            executor.backend_mut().clear_triggered_bits();
+                            for id in driven.iter() {
+                                executor.backend_mut().mark_triggered_bit(id);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -589,7 +723,21 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// Whether a change of event signal `id` from `was_nonzero` to
+    /// `is_nonzero` is the edge its domain triggers on.
+    fn edge_triggers(&self, id: usize, was_nonzero: bool, is_nonzero: bool) -> bool {
+        match self.domain_kinds[id] {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                !was_nonzero && is_nonzero
+            }
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                was_nonzero && !is_nonzero
+            }
+            _ => !was_nonzero && is_nonzero,
+        }
     }
 
     pub fn time(&self) -> u64 {
@@ -633,6 +781,7 @@ impl<B: SimBackend> SimulationState<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            waiting: self.waiting.clone(),
             finished: self.finished,
         }
     }
@@ -666,6 +815,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.last_clock_values
             .clone_from(&snapshot.last_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
+        self.waiting.clone_from(&snapshot.waiting);
         self.finished = snapshot.finished;
         Ok(())
     }
@@ -686,6 +836,8 @@ pub struct ScheduleParts<B: SimBackend> {
     pub high_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
+    /// Processes waiting for an event or a condition, in ascending order.
+    pub waiting_processes: Vec<usize>,
     /// A process requested the end of the simulation.
     pub finished: bool,
 }
@@ -729,6 +881,7 @@ impl<B: SimBackend> SimulationState<B> {
                 wakeups.sort_unstable();
                 wakeups
             },
+            waiting_processes: self.waiting.iter().copied().collect(),
             finished: self.finished,
         }
     }
@@ -760,6 +913,7 @@ impl<B: SimBackend> SimulationState<B> {
             .into_iter()
             .map(|(process, time)| Reverse((time, process)))
             .collect();
+        self.waiting = parts.waiting_processes.into_iter().collect();
         self.finished = parts.finished;
     }
 }
@@ -772,6 +926,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    waiting: BTreeSet<usize>,
     finished: bool,
 }
 
@@ -784,6 +939,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            waiting: self.waiting.clone(),
             finished: self.finished,
         }
     }
