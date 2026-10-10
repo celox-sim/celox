@@ -546,6 +546,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -624,6 +630,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -716,6 +728,7 @@ pub(super) fn task_from_declaration(
         outputs,
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })
@@ -895,6 +908,22 @@ pub(super) fn function_return_type(
             )
         }
     }
+}
+
+/// The declared return shape is needed by `$dimensions`, before call inlining.
+pub(super) fn function_return_dimensions(
+    node: &sv_parser::FunctionDataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<usize> {
+    function_type_from_ref_node(
+        RefNode::FunctionDataTypeOrImplicit(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .map(|ty| ty.unpacked_ranges().len() + ty.packed_ranges().len())
 }
 
 pub(super) fn function_return_first_packed_dimension_width(
@@ -1897,6 +1926,12 @@ fn function_signature_from_declaration(
         outputs: Vec::new(),
         return_width: return_type.map(|r#type| r#type.width),
         return_first_packed_dimension_width,
+        return_dimensions: function_return_dimensions(
+            return_node,
+            syntax_tree,
+            const_env,
+            type_aliases,
+        ),
         return_signed: return_type.is_some_and(|r#type| r#type.signed),
         return_is_2state: function_return_is_2state(return_node, syntax_tree, type_aliases),
     })
@@ -1932,6 +1967,7 @@ fn task_signature_from_declaration(
         outputs: Vec::new(),
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })

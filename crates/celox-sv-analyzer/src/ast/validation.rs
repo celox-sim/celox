@@ -142,7 +142,10 @@ fn reject_silently_ignored_constructs_with_dimensions(
 ) -> Result<(), AnalyzerError> {
     let const_env = &indexed_dimensions.const_env;
     let type_aliases = &indexed_dimensions.type_aliases;
-    let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
+    let is_module = matches!(
+        node,
+        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+    );
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.
@@ -199,6 +202,24 @@ fn reject_silently_ignored_constructs_with_dimensions(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
+    // Procedure locals, parameters and loop indices are installed by
+    // BodyBuilder. Validate their queries while lowering that scoped body.
+    let procedural_queries: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::AlwaysConstruct(_)
+                    | RefNode::InitialConstruct(_)
+            )
+        })
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
     for child in validation_nodes(node.clone(), is_module) {
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
@@ -219,6 +240,17 @@ fn reject_silently_ignored_constructs_with_dimensions(
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$dimensions")
+                    && !procedural_queries.contains(&call) =>
+            {
+                // Preliminary parameter lowering may defer a type query.
+                // Check even unused declarations once their scope is known.
+                dimensions::dimensions_system_function_call_value(
+                    call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
+                ).ok_or_else(|| unsupported(format!("operand of `$dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
+            }
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)

@@ -126,6 +126,7 @@ impl<'a> ParameterEnvironment<'a> {
             parameter_width_marker(name),
             parameter_signed_marker(name),
             parameter_dimensions_marker(name),
+            parameter_rank_marker(name),
             parameter_signed_element_marker(name),
         ];
         for index in 0..parameter.packed_ranges.len() {
@@ -500,18 +501,19 @@ fn bind_parameter(
 ) -> bool {
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
-    let value = parameter.resolved_value_with_literals(env, types, literals);
-    let literal = if value.is_none() {
-        let Some(literal) = parameter.resolved_literal(env, types, literals) else {
-            return false;
-        };
-        Some(literal)
-    } else {
-        None
-    };
+    let (value, literal) = parameter.resolved_value_and_literal(env, types, literals);
+    if value.is_none() && literal.is_none() {
+        return false;
+    }
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
+        let rank = if parameter.packed_ranges.is_empty() {
+            usize::from(!parameter.has_declared_type || ty.width > 1)
+        } else {
+            parameter.packed_ranges.len()
+        };
+        env.insert(parameter_rank_marker(parameter.name()), rank as i128);
     }
     if let Some(literal) = literal {
         // Shadow a numeric inherited binding with the four-state declaration.
@@ -1265,6 +1267,7 @@ thread_local! {
     static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static LITERAL_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static LITERAL_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
