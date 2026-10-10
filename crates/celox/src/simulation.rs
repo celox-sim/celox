@@ -433,7 +433,8 @@ impl<B: SimBackend> Simulation<B> {
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
         self.simulator.eval_comb()?;
-        self.state.poll_waiting(&mut self.simulator)
+        self.state.poll_waiting(&mut self.simulator)?;
+        Ok(())
     }
 
     /// Advance time and run until `end_time` (inclusive). As for
