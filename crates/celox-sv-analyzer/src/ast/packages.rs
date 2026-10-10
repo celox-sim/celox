@@ -160,6 +160,19 @@ fn package_variables(
             continue;
         };
         match declaration.as_ref() {
+            // `word_t v;` with a typedef `word_t` is a variable; user-defined
+            // net types are not supported.
+            PackageOrGenerateItemDeclaration::NetDeclaration(net)
+                if matches!(**net, sv_parser::NetDeclaration::NetTypeIdentifier(_)) =>
+            {
+                for node in RefNode::NetDeclaration(net) {
+                    if let RefNode::NetIdentifier(_) = node
+                        && let Some(variable) = identifier_text(node, syntax_tree)
+                    {
+                        variables.insert(variable);
+                    }
+                }
+            }
             PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
                 let identifier = RefNode::NetDeclaration(net).into_iter().find_map(|node| {
                     matches!(node, RefNode::NetIdentifier(_))

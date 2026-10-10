@@ -269,6 +269,99 @@ impl PackageBindings {
     }
 }
 
+/// Reject a package variable that two flip-flop processes, or a flip-flop
+/// process and a continuous driver, write. Instances of one module are
+/// separate drivers. Overlapping continuous drivers are rejected by the
+/// scheduler.
+fn check_package_variable_drivers(
+    bindings: &PackageBindings,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
+) -> Result<(), ParserError> {
+    let packages: HashSet<AbsoluteAddr> = bindings.targets.values().copied().collect();
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let width = |address: &AbsoluteAddr| {
+        modules[&instance_modules[&address.instance_id]].variables[&address.var_id]
+            .metadata
+            .width
+    };
+    let error = |address: &AbsoluteAddr| {
+        let package = &modules[&instance_modules[&address.instance_id]];
+        ParserError::unsupported(
+            1146,
+            crate::LoweringPhase::SimulatorParser,
+            "package variable drivers",
+            format!(
+                "multiple drivers of package variable `{}::{}`",
+                package.name,
+                package.variables[&address.var_id].path.join(".")
+            ),
+            None,
+        )
+    };
+    // Units of one clock are merged across instances when relocated, so
+    // writers are told apart before: one per trigger group of an instance.
+    let mut ff_writes: Vec<((InstanceId, usize), AbsoluteAddr, BitAccess)> = Vec::new();
+    let mut instances = instance_modules.iter().collect::<Vec<_>>();
+    instances.sort_unstable_by_key(|(instance, _)| instance.0);
+    for (&instance, module_id) in instances {
+        let module = &modules[module_id];
+        let units = module.eval_apply_ff_blocks.iter().chain(
+            module
+                .eval_only_ff_blocks
+                .iter()
+                .filter(|(trigger, _)| !module.eval_apply_ff_blocks.contains_key(*trigger)),
+        );
+        for (group, (_, unit)) in units.enumerate() {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    let (address, offset, bits) = match instruction {
+                        SIRInstruction::Store(address, offset, bits, ..)
+                        | SIRInstruction::Commit(_, address, offset, bits, _) => {
+                            (bindings.locate(instance, address.var_id), offset, *bits)
+                        }
+                        _ => continue,
+                    };
+                    if !packages.contains(&address) {
+                        continue;
+                    }
+                    let access = offset
+                        .constant_bit_offset()
+                        .zip(bits.checked_sub(1))
+                        .and_then(|(lsb, tail)| Some(BitAccess::new(lsb, lsb.checked_add(tail)?)))
+                        .unwrap_or_else(|| BitAccess::new(0, width(&address).saturating_sub(1)));
+                    ff_writes.push(((instance, group), address, access));
+                }
+            }
+        }
+    }
+    for (index, (writer, address, access)) in ff_writes.iter().enumerate() {
+        if ff_writes[index + 1..]
+            .iter()
+            .any(|(other, other_address, other_access)| {
+                other != writer && other_address == address && other_access.overlaps(access)
+            })
+        {
+            return Err(error(address));
+        }
+    }
+    for path in comb_blocks {
+        let celox_slt::LogicPathTarget::Var(target) = &path.target else {
+            continue;
+        };
+        if ff_writes
+            .iter()
+            .any(|(_, address, access)| *address == target.id && access.overlaps(&target.access))
+        {
+            return Err(error(&target.id));
+        }
+    }
+    Ok(())
+}
+
 fn create_absolute_addr(
     instance_path: &[(String, usize)],
     var_path: &[String],
@@ -495,6 +588,7 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
+    check_package_variable_drivers(bindings, &instance_modules, &modules, &comb_blocks)?;
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -1363,8 +1457,12 @@ fn propagate_boundaries(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (var_id, boundaries) in &sim_module.comb_boundaries {
+            // Every alias of a package variable adds its boundaries.
             let addr = bindings.locate(*id, *var_id);
-            current_boundaries.insert(addr, boundaries.clone());
+            current_boundaries
+                .entry(addr)
+                .or_insert_with(BTreeSet::new)
+                .extend(boundaries.iter().copied());
         }
     }
 

@@ -574,34 +574,42 @@ fn validate_package_variable_drivers<'a>(
     for root in roots {
         count(root, 1, module_ids, modules, &mut instances);
     }
-    let mut drivers: HashMap<(String, String), Vec<Option<(i128, i128)>>> = HashMap::default();
-    for (module_id, module) in modules {
-        let multiplicity = instances.get(module_id).copied().unwrap_or(0);
+    // A driver is one process or child output of one instance; a process may
+    // assign the variable several times.
+    type Driver = (ModuleId, usize, bool, usize);
+    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>)>> =
+        HashMap::default();
+    for (&module_id, module) in modules {
+        let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         for (var_id, package, variable) in &module.package_variables {
             let name = &module.variables[var_id].path[0];
-            let ranges = local_driver_ranges(
+            let local = local_driver_ranges(
                 &module.source,
                 name,
                 &module.constants,
                 &module.parameter_types,
-            )
-            .into_iter()
-            .chain(child_output_driver_ranges(
-                module, name, module_ids, modules,
-            ))
-            .map(|(_, range)| range)
-            .collect::<Vec<_>>();
+            );
+            let children = child_output_driver_ranges(module, name, module_ids, modules);
             let entry = drivers
                 .entry((package.clone(), variable.clone()))
                 .or_default();
-            for _ in 0..multiplicity {
-                entry.extend(ranges.iter().copied());
+            for copy in 0..multiplicity {
+                for &(driver, range) in &local {
+                    entry.push(((module_id, copy, false, driver), range));
+                }
+                for &(driver, range) in &children {
+                    entry.push(((module_id, copy, true, driver), range));
+                }
             }
         }
     }
     for ((package, variable), ranges) in drivers {
-        let indexed = ranges.into_iter().enumerate().collect::<Vec<_>>();
-        if driver_ranges_overlap(&indexed) {
+        let overlap = ranges.iter().enumerate().any(|(index, (driver, range))| {
+            ranges[index + 1..].iter().any(|(other, other_range)| {
+                other != driver && net_driver_ranges_overlap(*range, *other_range)
+            })
+        });
+        if overlap {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "multiple drivers of package variable `{package}::{variable}`"
             )));
@@ -989,22 +997,8 @@ pub fn prepare_external_hierarchy(
     };
     let package_states =
         lower_package_states(&any_module.packages, module_ids.len(), four_state, false)?;
-    // Each module no other SV module instantiates counts once: how often the
-    // design instantiates it is not known here.
-    let instantiated: HashSet<LoweredSvModuleKey> = lowered_modules
-        .values()
-        .flat_map(|module| {
-            module
-                .instances
-                .iter()
-                .map(LoweredSvModuleKey::instance_key)
-        })
-        .collect();
-    validate_package_variable_drivers(
-        module_ids.keys().filter(|key| !instantiated.contains(*key)),
-        &module_ids,
-        &lowered_modules,
-    )?;
+    // How often the design instantiates these modules is not known here;
+    // assembly checks the drivers of package variables across instances.
     let mut sim_modules: HashMap<ModuleId, SimModule> = modules
         .iter()
         .map(|(&module_id, module)| (module_id, module.sim_module.clone()))

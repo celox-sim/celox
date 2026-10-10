@@ -209,9 +209,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   A package variable is one object shared by every module that uses it,
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
-  variable are rejected, counting every instance of a module that writes it
-  (in a Veryl design, each SystemVerilog module Veryl instantiates counts
-  once). A package variable cannot be a clock or reset yet, and package nets,
+  variable are rejected, counting every instance of a module that writes it.
+  A package variable cannot be a clock or reset yet, and package nets,
   `export` declarations and compilation-unit (`$unit`) declarations are not
   supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
 - **Interfaces** are expanded into the modules that use them before

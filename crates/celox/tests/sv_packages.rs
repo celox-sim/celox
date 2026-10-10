@@ -472,3 +472,62 @@ fn package_variables_cannot_be_clocks_yet() {
         "{error}"
     );
 }
+
+#[test]
+fn package_variables_take_typedefs_slices_and_several_assignments() {
+    // One process may assign a package variable several times; modules may
+    // drive disjoint slices of one; and its type may be a typedef.
+    assert_eq!(
+        output(
+            "package p; typedef logic [7:0] word_t; word_t shared; endpackage
+             module Low(input logic a);
+               always_comb begin p::shared[3:0] = 4'd1; if (a) p::shared[3:0] = 4'd2; end
+             endmodule
+             module High; assign p::shared[7:4] = 4'd3; endmodule
+             module Top(output logic [7:0] y);
+               Low l(.a(1'b1)); High h();
+               assign y = p::shared;
+             endmodule"
+        ),
+        0x32
+    );
+}
+
+#[test]
+fn escaped_package_variables_are_found_by_name() {
+    let source = "package p; logic [7:0] \\v::w  = 8'd5; endpackage
+        module Top(output logic [7:0] y); assign y = p::\\v::w ; endmodule";
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("escaped.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    // The escaped name keeps its backslash.
+    let variable = simulator.signal("p::\\v::w");
+    assert_eq!(simulator.get(variable), 5u8.into());
+}
+
+#[test]
+fn veryl_instances_of_one_writer_are_several_drivers() {
+    let sv = "package p; logic [7:0] shared; endpackage
+        module W(input logic clk, input logic [7:0] a); always_ff @(posedge clk) p::shared <= a; endmodule";
+    let veryl = r#"
+module Top (
+    clk: input clock,
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w1: $sv::W (clk, a);
+    inst w2: $sv::W (clk, a);
+    assign y = a;
+}
+"#;
+    let error = Simulator::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("writers.sv"))])
+        .build()
+        .expect_err("two instances writing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
+        "{error:?}"
+    );
+}

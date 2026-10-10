@@ -972,13 +972,15 @@ impl RuntimeProgram {
         let found = self.instance_addr(instance_path, var_path);
         // `p::v` at the top names variable `v` of package `p`, which lives in
         // the package's instance outside the hierarchy.
+        // An escaped name may contain `::` itself, so try each prefix.
         if let (Err(AddrLookupError::VariableNotFound { .. }), [], [name]) =
             (&found, instance_path, var_path)
-            && let Some((package, variable)) = name.rsplit_once("::")
         {
-            let package = format!("{package}::");
-            if let Ok(address) = self.instance_addr(&[(&package, 0)], &[variable]) {
-                return Ok(address);
+            for (index, _) in name.match_indices("::") {
+                let (package, variable) = (&name[..index + 2], &name[index + 2..]);
+                if let Ok(address) = self.instance_addr(&[(package, 0)], &[variable]) {
+                    return Ok(address);
+                }
             }
         }
         found
