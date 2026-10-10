@@ -1105,6 +1105,128 @@ fn package_lifetime_decides_the_activations_of_an_imported_timed_task() {
     assert_eq!(displays(&mut sim), lines(&[(1, "put 4"), (1, "put 4")]));
 }
 
+/// A suspended procedural block uses its enclosing module's lifetime,
+/// including when the same declaration is entered again by a loop.
+#[test]
+fn timed_block_locals_follow_the_module_lifetime() {
+    for (lifetime, expected) in [
+        ("static", lines(&[(1, "1"), (2, "2"), (3, "3")])),
+        ("automatic", lines(&[(1, "1"), (2, "1"), (3, "1")])),
+    ] {
+        for declaration in ["bit [7:0] count;", "logic [7:0] count = 0;"] {
+            let source = format!(
+                "module {lifetime} Top;
+                   initial begin
+                     repeat (3) begin
+                       {declaration}
+                       #1; count++; $display(\"%0d\", count);
+                     end
+                     $finish;
+                   end
+                 endmodule"
+            );
+            for four_state in [false, true] {
+                let mut sim = if four_state {
+                    four_state_simulation(&source)
+                } else {
+                    simulation(&source)
+                };
+                assert_eq!(
+                    displays(&mut sim),
+                    expected,
+                    "{source}, four_state={four_state}"
+                );
+            }
+        }
+    }
+}
+
+/// Tasks keep static storage even when their own body has no suspension:
+/// a timed caller can invoke them repeatedly, in modules and packages.
+#[test]
+fn timed_callers_preserve_static_locals_of_untimed_tasks() {
+    for parent in ["module", "package"] {
+        for lifetime in ["static", "automatic"] {
+            let tasks = r#"
+                task count;
+                    static bit [7:0] n = 0;
+                    n++;
+                    $display("%0d", n);
+                endtask
+                task later;
+                    #1; count();
+                endtask
+            "#;
+            let calls = "initial begin later(); later(); $finish; end";
+            let source = if parent == "module" {
+                format!("module {lifetime} Top; {tasks} {calls} endmodule")
+            } else {
+                format!(
+                    "package {lifetime} p; {tasks} endpackage
+                     module Top; import p::*; {calls} endmodule"
+                )
+            };
+            assert_eq!(
+                displays(&mut simulation(&source)),
+                lines(&[(1, "1"), (2, "2")]),
+                "{parent} {lifetime}"
+            );
+        }
+    }
+}
+
+/// Timing operands count as reads of a local's previous entry value, even
+/// when ordinary statements overwrite that local before reading it.
+#[test]
+fn static_locals_read_only_by_timing_controls_keep_their_values() {
+    let delay = r#"
+        module Top;
+            initial begin
+                repeat (2) begin
+                    bit [7:0] pause;
+                    #pause; pause = 2; $display("done");
+                end
+                $finish;
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(delay)),
+        lines(&[(0, "done"), (2, "done")])
+    );
+
+    let wait = r#"
+        module Top;
+            bit trigger;
+            initial begin #1; trigger = 1; #2; $finish; end
+            initial repeat (2) begin
+                bit ready;
+                wait (ready || trigger);
+                ready = 1; trigger = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(wait)),
+        lines(&[(1, "done"), (1, "done")])
+    );
+
+    let event = r#"
+        module Top;
+            bit pulse;
+            initial begin
+                #1; pulse = 1; #1; pulse = 0; #1; pulse = 1; #1; $finish;
+            end
+            initial repeat (2) begin
+                static bit enabled = 1;
+                @(enabled && pulse);
+                enabled = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(displays(&mut simulation(event)), lines(&[(1, "done")]));
+}
+
 /// A task a package exports is classified like a local one: an
 /// edge-sensitive `always` calling an imported task with timing controls is
 /// a process.

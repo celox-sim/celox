@@ -34,6 +34,14 @@ pub(super) struct BodyState<'a> {
     pub counter: &'a mut usize,
     /// Positional argument names of each subroutine, for named arguments.
     pub subroutine_params: &'a HashMap<String, Vec<String>>,
+    /// The argument directions of each subroutine.
+    pub subroutine_directions: &'a lifetimes::Directions,
+    /// Whether the variables of the scope's subroutines and blocks are
+    /// automatic by default (IEEE 1800-2023 6.21).
+    pub automatic: bool,
+    /// The locals declared with a static lifetime: their unique names and
+    /// types.
+    pub statics: Vec<(String, Type)>,
 }
 
 /// Converts the statements of one procedural body.
@@ -47,9 +55,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     local_constants: HashMap<String, String>,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
-    /// Whether the body is a static subroutine's: its locals without a
-    /// lifetime keyword are static (IEEE 1800-2023 6.21).
-    static_subroutine: bool,
+    /// Whether the body's variables are automatic by default.
+    automatic: bool,
+    /// Tasks use persistent local storage when their lifetime is static.
+    is_task: bool,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -105,7 +114,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         body: system_functions::Body,
     ) -> Self {
         let type_aliases = dims.type_aliases.clone();
+        let automatic = state.automatic;
         Self {
+            automatic,
             tree,
             dims: dims.clone(),
             scopes: vec![Scope {
@@ -115,7 +126,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             type_aliases,
             local_constants: HashMap::default(),
             body,
-            static_subroutine: false,
+            is_task: false,
         }
     }
 
@@ -718,25 +729,27 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
                 None => None,
             };
-            // A local of a static subroutine is static unless declared
+            // A local of a static task is static unless declared
             // `automatic`; an initializer then needs an explicit lifetime
             // keyword (IEEE 1800-2023 6.21).
-            let r#static = match variable.nodes.2 {
-                Some(sv_parser::Lifetime::Static(_)) => true,
-                Some(sv_parser::Lifetime::Automatic(_)) => false,
-                None => self.static_subroutine,
-            };
-            if r#static && init.is_some() && variable.nodes.2.is_none() {
+            let automatic = is_automatic(variable.nodes.2.as_ref(), self.automatic);
+            if self.is_task && !automatic && init.is_some() && variable.nodes.2.is_none() {
                 return Err(unsupported(format!(
                     "local `{}` with an initializer in a static subroutine without an explicit `static` or `automatic` lifetime",
                     signal.name()
                 )));
             }
             let name = self.declare(signal.name(), signal.r#type().clone());
+            if !automatic {
+                let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
+                self.state.statics.push((name.clone(), r#type));
+            }
             stmts.push(Stmt::Local {
                 name,
                 init,
-                r#static,
+                // Process locals are handled by `keep_static_locals`; task
+                // locals retain their lifetime in IR across inline calls.
+                r#static: self.is_task && !automatic,
             });
         }
         Ok(stmts)
@@ -1740,12 +1753,14 @@ pub(super) fn subroutine_argument_names(
     (
         HashMap<String, Vec<String>>,
         HashMap<String, Vec<VariableDimensions>>,
+        lifetimes::Directions,
     ),
     AnalyzerError,
 > {
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     let default_automatic = module_default_automatic(node.clone());
+    let mut directions = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
@@ -1774,6 +1789,10 @@ pub(super) fn subroutine_argument_names(
                     dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
                 })
                 .collect();
+            let param_directions: Vec<ParamDirection> =
+                params.iter().map(|(_, direction, ..)| *direction).collect();
+            directions.insert(syntax.name.clone(), param_directions.clone());
+            directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
             names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
@@ -1781,7 +1800,7 @@ pub(super) fn subroutine_argument_names(
             shapes.insert(qualified, param_shapes);
         }
     }
-    Ok((names, shapes))
+    Ok((names, shapes, directions))
 }
 
 /// Every function and task of the active generate items, with statement
@@ -1871,7 +1890,9 @@ pub(super) fn subroutines_from_module_node_with(
                     state,
                     system_functions::Body::Subroutine,
                 );
-                builder.static_subroutine = !syntax.automatic;
+                builder.automatic = syntax.automatic;
+                builder.is_task = syntax.is_task;
+                let first_static = builder.state.statics.len();
                 builder.push_scope();
                 let mut lowered_params = Vec::new();
                 for (source, direction, r#type, default) in params {
@@ -1899,6 +1920,13 @@ pub(super) fn subroutines_from_module_node_with(
                     body.extend(builder.statement(stmt)?);
                 }
                 builder.pop_scope();
+                let statics: HashSet<String> = builder
+                    .state
+                    .statics
+                    .split_off(first_static)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
                 if return_var.is_some() {
                     let mut expressionless = false;
                     for stmt in &body {
@@ -1932,6 +1960,22 @@ pub(super) fn subroutines_from_module_node_with(
                             literals,
                         );
                     }
+                }
+                // Functions are also expanded as expressions, which cannot
+                // carry persistent local state. Tasks lower as statements and
+                // preserve their static locals in IR, including timed calls.
+                if !subroutine.is_task {
+                    lifetimes::check_subroutine_statics(
+                        &subroutine,
+                        &statics,
+                        builder.state.subroutine_directions,
+                    )?;
+                }
+                if !builder.automatic {
+                    lifetimes::check_static_result(
+                        &subroutine,
+                        builder.state.subroutine_directions,
+                    )?;
                 }
                 Ok(subroutine)
             })();
