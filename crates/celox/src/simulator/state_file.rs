@@ -442,6 +442,7 @@ impl<B: SimBackend> Simulator<B> {
             high_events: record.high_events.iter().map(|name| events[name]).collect(),
             // State files are rejected for designs with processes.
             process_wakeups: Vec::new(),
+            waiting_processes: Vec::new(),
             finished: false,
         })
     }

@@ -1686,6 +1686,66 @@ fn records_always_ff_case_branches() {
     assert!(default.is_some());
 }
 
+#[test]
+fn always_blocks_with_timing_controls_are_processes() {
+    let ir = analyze_source(
+        r#"
+            module Top(input logic clk, input logic a, input logic b, output logic y, output logic q);
+                parameter int HALF = 5;
+                logic c;
+                always #HALF c = ~c;
+                always @(a or b) y = a & b;
+                always @(posedge clk) begin
+                    q <= a;
+                    #1;
+                end
+                always @(posedge clk) q <= b;
+                initial begin
+                    @(posedge clk, negedge a);
+                    wait (a) #2 y = 1'b1;
+                end
+            endmodule
+        "#,
+        Path::new("timing.sv"),
+    )
+    .expect("SV analysis should succeed");
+
+    let module = &ir.modules()[0];
+    assert_eq!(module.ff_processes().len(), 1);
+    assert_eq!(module.comb_processes().len(), 0);
+    let processes = module.initial_processes();
+    assert_eq!(processes.len(), 4);
+    for process in &processes[..3] {
+        let [
+            crate::ir::Stmt::Loop {
+                kind: crate::ir::LoopKind::Forever,
+                body,
+                ..
+            },
+        ] = process.body()
+        else {
+            panic!("expected a forever loop: {:?}", process.body());
+        };
+        assert!(matches!(
+            body[0],
+            crate::ir::Stmt::Delay(_) | crate::ir::Stmt::WaitEvent(_)
+        ));
+    }
+    let [
+        crate::ir::Stmt::WaitEvent(items),
+        crate::ir::Stmt::Wait(_),
+        crate::ir::Stmt::Delay(_),
+        crate::ir::Stmt::Assign { .. },
+    ] = processes[3].body()
+    else {
+        panic!("unexpected body: {:?}", processes[3].body());
+    };
+    assert_eq!(
+        items.iter().map(|item| item.edge).collect::<Vec<_>>(),
+        vec![crate::ir::EventEdge::Pos, crate::ir::EventEdge::Neg]
+    );
+}
+
 /// The assignments a statement body contains, at any depth.
 fn assignment_count(body: &[crate::ir::Stmt]) -> usize {
     let mut count = 0;

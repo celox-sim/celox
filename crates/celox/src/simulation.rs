@@ -391,17 +391,38 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Advance time to the next scheduled event and process all events at that time.
     /// Returns the new simulation time, or None if no events are scheduled.
+    ///
+    /// A process waiting for an event or a condition that a host write
+    /// since the previous call satisfied resumes at the current time
+    /// instead: the call then returns the current time without advancing,
+    /// so what the process did is observable at its own time.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.settle_host_writes()?;
+        if self.state.poll_waiting(&mut self.simulator)? {
+            return Ok(Some(self.state.time()));
+        }
         self.state.step(&mut self.simulator)
     }
 
-    /// Advance time and run until `end_time` (inclusive).
+    /// Settle the combinational logic a host write left dirty, so a process
+    /// waiting for a derived value sees it.
+    fn settle_host_writes(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.simulator.dirty {
+            self.simulator.eval_comb()?;
+        }
+        Ok(())
+    }
+
+    /// Advance time and run until `end_time` (inclusive). As for
+    /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        self.settle_host_writes()?;
+        self.state.poll_waiting(&mut self.simulator)?;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
             }
-            self.step()?;
+            self.state.step(&mut self.simulator)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -721,5 +742,231 @@ mod process_tests {
     #[test]
     fn long_processes_dispatch_through_two_switch_levels() {
         check_all_backends(false, 300);
+    }
+}
+
+/// Event and level waits of SystemVerilog processes on every backend.
+#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+mod wait_tests {
+    use std::path::Path;
+
+    use super::Simulation;
+    use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+    const SOURCE: &str = r#"
+        module Top(output logic [7:0] edges, output logic [7:0] levels,
+                   output logic [7:0] changes, output logic [7:0] q);
+            logic clk = 1'b0;
+            logic [7:0] d = 8'd0;
+            logic go = 1'b0;
+            always #5 clk = ~clk;
+            always_ff @(posedge clk) q <= d;
+            initial begin
+                edges = 8'd0;
+                forever begin
+                    @(posedge clk);
+                    edges = edges + 8'd1;
+                end
+            end
+            initial begin
+                levels = 8'd0;
+                wait (edges == 8'd3) levels = 8'd1;
+                wait (go);
+                levels = 8'd2;
+            end
+            initial begin
+                changes = 8'd0;
+                forever begin
+                    @(d or go);
+                    changes = changes + 8'd1;
+                end
+            end
+            initial begin
+                #12 d = 8'd1;
+                #10 d = 8'd1;
+                #10 d = 8'd2;
+                @(negedge clk);
+                go = 1'b1;
+                @(posedge clk);
+                $finish;
+            end
+        endmodule
+    "#;
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let edges = sim.signal("edges");
+        let levels = sim.signal("levels");
+        let changes = sim.signal("changes");
+        let q = sim.signal("q");
+        // Rising edges at 5, 15 and 25; `d` changes at 12 and 32.
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.get(edges), 2u8.into());
+        assert_eq!(sim.get(levels), 0u8.into());
+        assert_eq!(sim.get(changes), 1u8.into());
+        assert_eq!(sim.get(q), 1u8.into());
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(edges), 3u8.into());
+        assert_eq!(sim.get(levels), 1u8.into());
+        sim.run_until(u64::MAX - 1).unwrap();
+        assert!(sim.is_finished());
+        // `go` rises at the negedge at 40; the process finishes at 45.
+        assert_eq!(sim.time(), 45);
+        assert_eq!(sim.get(edges), 5u8.into());
+        assert_eq!(sim.get(levels), 2u8.into());
+        assert_eq!(sim.get(changes), 3u8.into());
+        assert_eq!(sim.get(q), 2u8.into());
+    }
+
+    fn builder(four_state: bool) -> SimulatorBuilder<'static, Simulator> {
+        Simulator::from_sv_sources(vec![(SOURCE, Path::new("waits.sv"))], "Top")
+            .four_state(four_state)
+            .emit_triggers()
+    }
+
+    fn check_all_backends(four_state: bool) {
+        check(Simulation::new(
+            builder(four_state).build_interpreter().unwrap(),
+        ));
+        check(Simulation::new(
+            builder(four_state).build_cranelift().unwrap(),
+        ));
+        check(Simulation::new(builder(four_state).build_wasm().unwrap()));
+        check(Simulation::new(builder(four_state).build_tiered().unwrap()));
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        check(Simulation::new(builder(four_state).build_native().unwrap()));
+    }
+
+    #[test]
+    fn waits_run_on_every_backend() {
+        check_all_backends(false);
+    }
+
+    #[test]
+    fn four_state_waits_run_on_every_backend() {
+        check_all_backends(true);
+    }
+
+    /// A host write that `settle_at` settles wakes a waiting process; the
+    /// zero-delay continuations of that process run in the same call.
+    #[test]
+    fn settle_at_drains_the_rounds_of_its_time() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                logic go = 1'b0;
+                initial begin
+                    y = 8'd0;
+                    wait (go);
+                    #0 y = 8'd1;
+                    #0 y = 8'd2;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("settle.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        assert_eq!(sim.step().unwrap(), Some(0));
+        let go = sim.signal("go");
+        let y = sim.signal("y");
+        assert_eq!(sim.get(y), 0u8.into());
+        sim.simulator.set_wide(go, 1u8.into());
+        sim.state.settle_at(&mut sim.simulator, 0).unwrap();
+        assert_eq!(sim.get(y), 2u8.into());
+    }
+
+    /// `settle_at` runs the processes due at its time, and those due
+    /// before it first, at their own times.
+    #[test]
+    fn settle_at_resumes_the_processes_due_at_its_time() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                initial begin
+                    y = 8'd1;
+                    #5 y = 8'd2;
+                    #2 y = 8'd3;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("due.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let y = sim.signal("y");
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 5).unwrap(), Some(5));
+        assert_eq!(sim.get(y), 2u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 9).unwrap(), Some(9));
+        assert_eq!(sim.get(y), 3u8.into());
+        assert_eq!(sim.time(), 9);
+    }
+
+    /// A process waiting for a value combinational logic derives from a
+    /// host write sees the settled value.
+    #[test]
+    fn host_writes_settle_before_the_waiters_are_polled() {
+        const SOURCE: &str = r#"
+            module Top(input logic a, input logic b, output logic [7:0] y);
+                logic both;
+                assign both = a & b;
+                initial begin
+                    y = 8'd0;
+                    wait (both);
+                    y = 8'd1;
+                    @(negedge both);
+                    y = 8'd2;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("comb.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let (a, b, y) = (sim.signal("a"), sim.signal("b"), sim.signal("y"));
+        assert_eq!(sim.step().unwrap(), Some(0));
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        assert_eq!(sim.step().unwrap(), None);
+        assert_eq!(sim.get(y), 0u8.into());
+        sim.modify(|io| io.set(b, 1u8)).unwrap();
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        sim.modify(|io| io.set(a, 0u8)).unwrap();
+        sim.run_until(5).unwrap();
+        assert_eq!(sim.get(y), 2u8.into());
+    }
+
+    /// A process a host write wakes runs in a `step` of its own, at the
+    /// current time; the next scheduled time is stepped to afterwards.
+    #[test]
+    fn a_host_woken_process_runs_in_its_own_step() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                logic go = 1'b0;
+                initial begin
+                    y = 8'd0;
+                    wait (go);
+                    y = 8'd1;
+                    #10 y = 8'd2;
+                end
+                initial begin
+                    #10;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("woken.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let (go, y) = (sim.signal("go"), sim.signal("y"));
+        assert_eq!(sim.step().unwrap(), Some(0));
+        sim.simulator.set_wide(go, 1u8.into());
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.step().unwrap(), Some(10));
+        assert_eq!(sim.get(y), 2u8.into());
+        assert_eq!(sim.step().unwrap(), None);
     }
 }

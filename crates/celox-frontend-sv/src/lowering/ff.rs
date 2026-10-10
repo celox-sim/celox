@@ -11,7 +11,7 @@
 
 use super::procedural::*;
 use super::*;
-use celox_frontend_core::process::ProcessKernelBuilder;
+use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
@@ -50,6 +50,17 @@ pub(super) struct Ff<'p, 'a> {
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    /// The process's own copies of the formals and locals of the
+    /// `automatic` subroutines it calls that suspend: original -> copy. Its
+    /// kernel addresses the copy wherever the body names the original.
+    private: HashMap<SourceVarId, SourceVarId>,
+    /// The process's own event counters of the watchers that read one of
+    /// its private copies, by watcher index.
+    private_watchers: HashMap<usize, EventCounters>,
+    /// Whether a store is recording the events it makes: the stores of that
+    /// bookkeeping (a subroutine an event expression calls may store) are
+    /// not recorded themselves.
+    recording_events: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -89,6 +100,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             aliases: HashMap::default(),
             next_alias: u32::MAX,
             kernel: None,
+            private: HashMap::default(),
+            private_watchers: HashMap::default(),
+            recording_events: false,
         }
     }
 
@@ -96,7 +110,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// the working region, or stable state in a process kernel.
     fn target(&self, id: SourceVarId) -> Addr {
         if self.kernel.is_some() {
-            stable(id)
+            stable(*self.private.get(&id).unwrap_or(&id))
         } else {
             working(id)
         }
@@ -233,12 +247,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut mapped_arena = SLTNodeArena::<Addr>::new();
         let mut cache = HashMap::default();
         let aliases = &self.aliases;
+        let private = &self.private;
         let working_set = &self.working;
         let variables = &*self.m.variables;
         let direct = self.kernel.is_some();
         let map = |id: &SourceVarId| -> Addr {
             if direct {
-                stable(*aliases.get(id).unwrap_or(id))
+                let id = aliases.get(id).unwrap_or(id);
+                stable(*private.get(id).unwrap_or(id))
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
             } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
@@ -641,7 +657,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     (variable.width, variable.signed, variable.is_4state);
                 let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
                 let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
-                self.store(temp, SIROffset::Static(0), width, value);
+                self.store_raw(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
@@ -659,7 +675,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let value = self.eval(&read, Some((1, false)))?;
                 let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
-                self.store(temp, SIROffset::Static(0), 1, value);
+                self.store_raw(temp, SIROffset::Static(0), 1, value);
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
@@ -723,7 +739,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     r#type.is_signed(),
                     r#type.is_4state(),
                 );
-                self.store(temp, SIROffset::Static(0), r#type.width(), result);
+                self.store(temp, SIROffset::Static(0), r#type.width(), result)?;
                 Expr::Ident(temp_name)
             }
             Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
@@ -747,7 +763,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     )));
                 };
                 let value = self.eval(&Expr::Ident(result), Some((width, signed)))?;
-                self.store(temp, SIROffset::Static(0), width, value);
+                self.store(temp, SIROffset::Static(0), width, value)?;
                 Expr::Ident(temp_name)
             }
             Expr::Binary { left, op, right }
@@ -931,7 +947,115 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // ---------------------------------------------------------------- stores
 
-    fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+    /// Store `value` into `id`. In a process kernel, a store to a variable
+    /// some event expression reads records the events it makes.
+    fn store(
+        &mut self,
+        id: SourceVarId,
+        offset: SIROffset,
+        width: usize,
+        value: RegisterId,
+    ) -> Result<(), sv::AnalyzerError> {
+        let watchers = if self.kernel.is_some() && !self.recording_events {
+            let variable = self.aliases.get(&id).copied().unwrap_or(id);
+            self.m
+                .watchers_by_var
+                .get(&variable)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if watchers.is_empty() {
+            self.store_raw(id, offset, width, value);
+            return Ok(());
+        }
+        self.recording_events = true;
+        let result = self.store_recorded(&watchers, id, offset, width, value);
+        self.recording_events = false;
+        result
+    }
+
+    /// Store `value` into `id`, a variable the event expressions `watchers`
+    /// read, and record the events the store makes on their counters.
+    fn store_recorded(
+        &mut self,
+        watchers: &[usize],
+        id: SourceVarId,
+        offset: SIROffset,
+        width: usize,
+        value: RegisterId,
+    ) -> Result<(), sv::AnalyzerError> {
+        // The expressions before the store, then the store, then the
+        // events the store made.
+        let mut previous = Vec::with_capacity(watchers.len());
+        for &index in watchers {
+            let expr = self.m.event_watchers[index].expr.clone();
+            let value = self.eval(&expr, None)?;
+            let (width, four_state) = match *self.b.register(&value) {
+                RegisterType::Logic { width } => (width, true),
+                RegisterType::Bit { width, .. } => (width, false),
+            };
+            let (slot, name) = self.watcher_previous(index, width, four_state);
+            self.store_raw(slot, SIROffset::Static(0), width, value);
+            previous.push(name);
+        }
+        self.store_raw(id, offset, width, value);
+        for (&index, previous) in watchers.iter().zip(previous) {
+            let expr = self.m.event_watchers[index].expr.clone();
+            let counters = self.watcher_counters(index);
+            for (edge, counter) in [
+                (sv::ir::EventEdge::Any, &counters.changes),
+                (sv::ir::EventEdge::Pos, &counters.rises),
+                (sv::ir::EventEdge::Neg, &counters.falls),
+            ] {
+                let occurred =
+                    event_occurred(edge, sv::ir::Expr::Ident(previous.clone()), expr.clone());
+                let next = sv::ir::Expr::Binary {
+                    left: Box::new(sv::ir::Expr::Ident(counter.clone())),
+                    op: sv::ir::BinaryOp::Add,
+                    right: Box::new(sv::ir::Expr::Resize {
+                        expr: Box::new(occurred),
+                        width: EVENT_COUNTER_WIDTH,
+                        signed: false,
+                    }),
+                };
+                self.assign(&sv::ir::LValue::Ident(counter.clone()), &next)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The counters of watcher `index` this process reads and bumps: its own
+    /// when the expression reads one of its private copies.
+    fn watcher_counters(&self, index: usize) -> EventCounters {
+        self.private_watchers
+            .get(&index)
+            .unwrap_or(&self.m.event_watchers[index].state)
+            .clone()
+    }
+
+    /// The slot holding watcher `index`'s expression value before a store,
+    /// declared at the first store that needs it.
+    fn watcher_previous(
+        &mut self,
+        index: usize,
+        width: usize,
+        four_state: bool,
+    ) -> (SourceVarId, String) {
+        if let Some(previous) = self.watcher_counters(index).previous {
+            return previous;
+        }
+        let previous = self.m.temp("event_previous", width, false, four_state);
+        let state = match self.private_watchers.get_mut(&index) {
+            Some(state) => state,
+            None => &mut self.m.event_watchers[index].state,
+        };
+        state.previous = Some(previous.clone());
+        previous
+    }
+
+    fn store_raw(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
         let target = self.target(id);
         self.b.emit(SIRInstruction::Store(
             target,
@@ -971,11 +1095,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         reg
     }
 
-    fn init_default(&mut self, id: SourceVarId) {
+    fn init_default(&mut self, id: SourceVarId) -> Result<(), sv::AnalyzerError> {
         let width = self.m.var(id).width;
         let value = self.default_reg(id);
         let offset = sv_memory_offset(self.m.var(id), 0, width);
-        self.store(id, offset, width, value);
+        self.store(id, offset, width, value)
     }
 
     fn assign(
@@ -1065,7 +1189,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LValue::Ident(_) => {
                 let value = self.lower_slt(arena, node)?;
                 let offset = sv_memory_offset(self.m.var(id), 0, var_width);
-                self.store(id, offset, var_width, value);
+                self.store(id, offset, var_width, value)?;
                 Ok(())
             }
             sv::ir::LValue::Select { msb, lsb, .. } => {
@@ -1092,7 +1216,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .ok_or_else(|| unsupported("assignment lvalue order"))?;
                     let value = self.lower_slt(arena, node)?;
                     let offset = sv_memory_offset(self.m.var(id), low, width);
-                    self.store(id, offset, width, value);
+                    self.store(id, offset, width, value)?;
                     return Ok(());
                 }
                 if let Some((_, element_width, offset, access)) = dynamic_array_element_lvalue(
@@ -1235,7 +1359,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     };
                     let value = self.lower_slt(arena, updated)?;
                     let offset = sv_memory_offset(self.m.var(id), window.lsb, window_width);
-                    self.store(id, offset, window_width, value);
+                    self.store(id, offset, window_width, value)?;
                     return Ok(());
                 }
                 Err(unsupported(format!("assignment target `{}`", lhs.name())))
@@ -1338,7 +1462,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ));
                 let stored = self.b.alloc_logic(packed_element_width);
                 self.b.emit(SIRInstruction::Mux(stored, valid, part, old));
-                self.store(id, offset, packed_element_width, stored);
+                self.store(id, offset, packed_element_width, stored)?;
             }
             return Ok(());
         }
@@ -1358,7 +1482,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         ));
         let stored = self.b.alloc_logic(target_width);
         self.b.emit(SIRInstruction::Mux(stored, valid, value, old));
-        self.store(id, offset, target_width, stored);
+        self.store(id, offset, target_width, stored)?;
         Ok(())
     }
 
@@ -1391,7 +1515,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         // Capture the value before any part is written.
         let (temp, temp_name) = self.m.temp("concat", total, false, true);
         let value = self.lower_slt(&arena, node)?;
-        self.store(temp, SIROffset::Static(0), total, value);
+        self.store(temp, SIROffset::Static(0), total, value)?;
         let mut lsb = total;
         for (part, width) in parts.iter().zip(widths) {
             lsb -= width;
@@ -1432,14 +1556,24 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(parts, rhs)?;
                 Ok(true)
             }
-            sv::ir::Stmt::Local { name, init } => {
+            sv::ir::Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                if *r#static {
+                    if let Some(init) = init {
+                        self.m.static_initial(id, init)?;
+                    }
+                    return Ok(true);
+                }
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
-                    None => self.init_default(id),
+                    None => self.init_default(id)?,
                 }
                 Ok(true)
             }
@@ -1542,7 +1676,146 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Ok(true)
             }
             sv::ir::Stmt::SystemTask { name, args } => self.system_task(name, args),
+            sv::ir::Stmt::Delay(amount) => {
+                self.require_process("delay")?;
+                let signed = self.expr_signed(amount);
+                let amount = self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?;
+                let amount = self.two_state(amount);
+                self.with_kernel(|kernel| kernel.delay(amount))
+                    .map_err(kernel_error)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::WaitEvent(items) => {
+                self.require_process("event control")?;
+                self.wait_event(items)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Wait(condition) => {
+                self.require_process("wait statement")?;
+                let (truth, constant) = self.eval_truth(condition)?;
+                if constant == Some(true) {
+                    return Ok(true);
+                }
+                let wait_block = self.b.new_block();
+                let done = self.b.new_block();
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: truth,
+                    true_block: (done, Vec::new()),
+                    false_block: (wait_block, Vec::new()),
+                });
+                self.b.switch_to_block(wait_block);
+                self.with_kernel(ProcessKernelBuilder::begin_wait)
+                    .map_err(kernel_error)?;
+                let (truth, _) = self.eval_truth(condition)?;
+                self.with_kernel(|kernel| kernel.wake_if(truth));
+                self.jump(done);
+                self.b.switch_to_block(done);
+                Ok(true)
+            }
         }
+    }
+
+    fn require_process(&self, construct: &str) -> Result<(), sv::AnalyzerError> {
+        if self.kernel.is_some() {
+            Ok(())
+        } else {
+            Err(unsupported(format!("{construct} outside a process")))
+        }
+    }
+
+    /// `value` as a two-state register; unknown bits become zero.
+    fn two_state(&mut self, value: RegisterId) -> RegisterId {
+        let RegisterType::Logic { width } = *self.b.register(&value) else {
+            return value;
+        };
+        let two_state = self.b.alloc_bit(width, false);
+        self.b
+            .emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, value));
+        two_state
+    }
+
+    /// `@(items)`: sample every item, suspend, and at the resume point wake
+    /// when an item changed as its edge requires (IEEE 1800-2023 9.4.2).
+    /// The samples are refreshed at every check, so an edge is detected
+    /// against the value last observed.
+    fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut samples = Vec::with_capacity(items.len());
+        // (counter, its sample) of the items that name a counted variable:
+        // the counters also see the events a kernel's later store hides.
+        let mut counted = Vec::new();
+        for item in items {
+            if let Some(callee) = impure_callee(self.m, &item.expr) {
+                return Err(unsupported(format!(
+                    "event expression calling `{callee}`, which has an effect besides its result"
+                )));
+            }
+            let value = self.eval(&item.expr, None)?;
+            let (width, four_state) = match *self.b.register(&value) {
+                RegisterType::Logic { width } => (width, true),
+                RegisterType::Bit { width, .. } => (width, false),
+            };
+            let (id, name) = self.m.temp("event", width, false, four_state);
+            self.store(id, SIROffset::Static(0), width, value)?;
+            samples.push(name);
+            if let Some(index) = self
+                .m
+                .event_watchers
+                .iter()
+                .position(|watcher| watcher.expr == item.expr)
+            {
+                let counters = self.watcher_counters(index);
+                let counter = match item.edge {
+                    sv::ir::EventEdge::Any => counters.changes,
+                    sv::ir::EventEdge::Pos => counters.rises,
+                    sv::ir::EventEdge::Neg => counters.falls,
+                };
+                let four_state = self.m.four_state;
+                let (_, sample) =
+                    self.m
+                        .temp("event_count", EVENT_COUNTER_WIDTH, false, four_state);
+                self.assign(
+                    &sv::ir::LValue::Ident(sample.clone()),
+                    &sv::ir::Expr::Ident(counter.clone()),
+                )?;
+                counted.push((counter, sample));
+            }
+        }
+        self.with_kernel(ProcessKernelBuilder::begin_wait)
+            .map_err(kernel_error)?;
+        let occurred = items
+            .iter()
+            .zip(&samples)
+            .map(|(item, sample)| {
+                let sample = sv::ir::Expr::Ident(sample.clone());
+                event_occurred(item.edge, sample, item.expr.clone())
+            })
+            .chain(
+                counted
+                    .iter()
+                    .map(|(counter, sample)| sv::ir::Expr::Binary {
+                        left: Box::new(sv::ir::Expr::Ident(counter.clone())),
+                        op: sv::ir::BinaryOp::NeCase,
+                        right: Box::new(sv::ir::Expr::Ident(sample.clone())),
+                    }),
+            )
+            .reduce(|left, right| sv::ir::Expr::Binary {
+                left: Box::new(left),
+                op: sv::ir::BinaryOp::LogicOr,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| unsupported("empty event control"))?;
+        let (woken, _) = self.eval_truth(&occurred)?;
+        for (item, sample) in items.iter().zip(&samples) {
+            self.assign(&sv::ir::LValue::Ident(sample.clone()), &item.expr)?;
+        }
+        for (counter, sample) in &counted {
+            self.assign(
+                &sv::ir::LValue::Ident(sample.clone()),
+                &sv::ir::Expr::Ident(counter.clone()),
+            )?;
+        }
+        self.with_kernel(|kernel| kernel.wake_if(woken));
+        Ok(())
     }
 
     /// A system task statement: a runtime event, and for `$fatal` the end of
@@ -1587,7 +1860,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     SIRValue::new_four_state(word.value, word.mask),
                 ));
                 let offset = sv_memory_offset(self.m.var(id), word.access.lsb, width);
-                self.store(id, offset, width, reg);
+                self.store(id, offset, width, reg)?;
             }
             return Ok(true);
         }
@@ -1907,7 +2180,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             SIRValue::new(value.to_biguint().expect("a non-negative value")),
         ));
         let offset = sv_memory_offset(self.m.var(id), 0, width);
-        self.store(id, offset, width, register);
+        self.store_raw(id, offset, width, register);
     }
 
     fn runtime_loop(
@@ -1927,7 +2200,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
                 let value = self.eval(count, Some((64, signed)))?;
-                self.store(id, SIROffset::Static(0), 64, value);
+                self.store(id, SIROffset::Static(0), 64, value)?;
                 Some(name)
             }
             _ => None,
@@ -1996,7 +2269,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (width, signed) = (self.m.var(*id).width, self.m.var(*id).signed);
                 let (temp, temp_name) = self.m.temp("progress", width, signed, false);
                 let value = self.eval(&sv::ir::Expr::Ident(var.clone()), Some((width, signed)))?;
-                self.store(temp, SIROffset::Static(0), width, value);
+                self.store(temp, SIROffset::Static(0), width, value)?;
                 Some(temp_name)
             }
             None => None,
@@ -2104,14 +2377,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         for (id, value) in inputs {
             let width = self.m.var(id).width;
             let offset = sv_memory_offset(self.m.var(id), 0, width);
-            self.store(id, offset, width, value);
+            self.store(id, offset, width, value)?;
         }
         if let Some(return_var) = &subroutine.return_var {
             let id = self
                 .m
                 .id(return_var)
                 .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
-            self.init_default(id);
+            self.init_default(id)?;
         }
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {
@@ -2201,26 +2474,12 @@ impl Ff<'_, '_> {
     ) -> Result<ExecutionUnit<Addr>, sv::AnalyzerError> {
         // A nonblocking update would take effect in a later region of the
         // time step, after the process has run on.
-        for stmt in body {
-            let mut nonblocking = false;
-            stmt.walk(&mut |stmt| {
-                nonblocking |= matches!(
-                    stmt,
-                    sv::ir::Stmt::Assign {
-                        nonblocking: true,
-                        ..
-                    } | sv::ir::Stmt::AssignConcat {
-                        nonblocking: true,
-                        ..
-                    }
-                );
-            });
-            if nonblocking {
-                return Err(unsupported(
-                    "nonblocking assignment in an initial block that runs as a process",
-                ));
-            }
+        if self.has_nonblocking(body, &mut HashSet::default()) {
+            return Err(unsupported(
+                "nonblocking assignment in a process that runs with timing",
+            ));
         }
+        self.privatize_timed_subroutines(body);
         let mut kernel = ProcessKernelBuilder::new(slots);
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
@@ -2230,6 +2489,416 @@ impl Ff<'_, '_> {
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         Ok(unit)
+    }
+
+    /// Whether `stmts`, or a task they call, make a nonblocking assignment.
+    fn has_nonblocking(&self, stmts: &[sv::ir::Stmt], visited: &mut HashSet<String>) -> bool {
+        let mut found = false;
+        let mut calls = Vec::new();
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Assign {
+                    nonblocking: true, ..
+                }
+                | sv::ir::Stmt::AssignConcat {
+                    nonblocking: true, ..
+                } => found = true,
+                sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
+                _ => {}
+            });
+        }
+        found
+            || calls.into_iter().any(|name| {
+                visited.insert(name.clone())
+                    && self
+                        .m
+                        .subroutine(&name)
+                        .is_some_and(|subroutine| self.has_nonblocking(&subroutine.body, visited))
+            })
+    }
+
+    /// Give the process its own copies of the formals and locals of every
+    /// subroutine it calls that suspends (a task with timing controls, or
+    /// one calling such a task): the activations of concurrent processes
+    /// would otherwise share them across a suspension.
+    fn privatize_timed_subroutines(&mut self, body: &[sv::ir::Stmt]) {
+        let mut reachable = Vec::new();
+        self.collect_calls(body, &mut reachable);
+        let mut timed: HashSet<String> = reachable
+            .iter()
+            .filter(|name| {
+                self.m
+                    .subroutine(name)
+                    .is_some_and(|subroutine| has_own_timing(&subroutine.body))
+            })
+            .cloned()
+            .collect();
+        loop {
+            let before = timed.len();
+            for name in &reachable {
+                if timed.contains(name) {
+                    continue;
+                }
+                let Some(subroutine) = self.m.subroutine(name) else {
+                    continue;
+                };
+                let mut callees = Vec::new();
+                direct_calls(&subroutine.body, &mut callees);
+                if callees.iter().any(|callee| timed.contains(callee)) {
+                    timed.insert(name.clone());
+                }
+            }
+            if timed.len() == before {
+                break;
+            }
+        }
+        let mut names = Vec::new();
+        for name in &timed {
+            let Some(subroutine) = self.m.subroutine(name) else {
+                continue;
+            };
+            // A static subroutine shares its formals and locals between
+            // activations, as IEEE 1800-2023 13.3.1 says.
+            if !subroutine.automatic {
+                continue;
+            }
+            names.extend(subroutine.params.iter().map(|param| param.name.clone()));
+            names.extend(subroutine.return_var.clone());
+            // A `static` local is shared by the activations even of an
+            // automatic subroutine (IEEE 1800-2023 6.21).
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| {
+                    if let sv::ir::Stmt::Local {
+                        name,
+                        r#static: false,
+                        ..
+                    } = stmt
+                    {
+                        names.push(name.clone());
+                    }
+                });
+            }
+        }
+        names.sort();
+        names.dedup();
+        for name in names {
+            let Some(id) = self.m.id(&name) else {
+                continue;
+            };
+            let copy = self.m.private_copy(id);
+            if let Some(width) = unpacked_element_width(self.m.var(copy)) {
+                self.element_widths.insert(stable(copy), width);
+                self.element_widths.insert(working(copy), width);
+            }
+            self.private.insert(id, copy);
+        }
+        // A watcher reading a private copy counts this process's events on
+        // its own counters.
+        for index in 0..self.m.event_watchers.len() {
+            if self.m.event_watchers[index]
+                .dependencies
+                .iter()
+                .any(|dependency| self.private.contains_key(dependency))
+            {
+                let counters = self.m.new_event_counters();
+                self.private_watchers.insert(index, counters);
+            }
+        }
+    }
+
+    /// The subroutines `stmts` call, directly or through other calls.
+    fn collect_calls(&self, stmts: &[sv::ir::Stmt], reachable: &mut Vec<String>) {
+        let mut direct = Vec::new();
+        direct_calls(stmts, &mut direct);
+        for name in direct {
+            if reachable.contains(&name) {
+                continue;
+            }
+            reachable.push(name.clone());
+            if let Some(subroutine) = self.m.subroutine(&name) {
+                self.collect_calls(&subroutine.body, reachable);
+            }
+        }
+    }
+}
+
+/// Declare the watchers of the event expressions the processes `bodies`, or
+/// the subroutines they call, wait on. A kernel's store to a variable such
+/// an expression reads then records the events it makes, so an event a
+/// later store of the same kernel run hides (a value written and restored
+/// before the process suspends) still wakes a waiter, as IEEE 1800-2023
+/// 9.4.2 asks. An expression that calls a function reads what the function
+/// reads, directly or through its callees.
+///
+/// The counters of a package variable are the package's, shared by every
+/// module denoting the variable (`package_aliases` are the module's
+/// variables denoting one): a kernel of any module records the events of
+/// its stores there, and a waiter of any module reads them. Such a
+/// variable is watched by itself; an event expression that reads it as
+/// part of a larger expression could not be watched across modules and is
+/// rejected.
+pub fn declare_event_counters(
+    pm: &mut ProcModule<'_>,
+    bodies: &[&[sv::ir::Stmt]],
+    package_aliases: &[SourceVarId],
+) -> Result<(), sv::AnalyzerError> {
+    let mut shared = HashSet::default();
+    for &id in package_aliases {
+        let name = pm.var(id).path[0].clone();
+        let counter = |purpose: &str| format!("{name}@{purpose}");
+        let index = pm.event_watchers.len();
+        pm.watchers_by_var.entry(id).or_default().push(index);
+        pm.event_watchers.push(EventWatcher {
+            expr: sv::ir::Expr::Ident(name.clone()),
+            dependencies: vec![id],
+            state: EventCounters {
+                previous: None,
+                changes: counter("changes"),
+                rises: counter("rises"),
+                falls: counter("falls"),
+            },
+        });
+        shared.insert(id);
+    }
+    let mut exprs: Vec<sv::ir::Expr> = Vec::new();
+    let mut visited = HashSet::default();
+    let mut pending: Vec<&[sv::ir::Stmt]> = bodies.to_vec();
+    while let Some(stmts) = pending.pop() {
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::WaitEvent(items) => {
+                    for item in items {
+                        if !exprs.contains(&item.expr) {
+                            exprs.push(item.expr.clone());
+                        }
+                    }
+                }
+                sv::ir::Stmt::Call { name, .. } => {
+                    if visited.insert(name.clone())
+                        && let Some(subroutine) = pm.subroutine(name)
+                    {
+                        pending.push(&subroutine.body);
+                    }
+                }
+                _ => {}
+            });
+        }
+    }
+    for expr in exprs {
+        let mut names = HashSet::default();
+        expr_idents(&expr, &mut names);
+        subroutine_reads(pm, &expr, &mut names);
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        let dependencies: Vec<SourceVarId> = names.iter().filter_map(|name| pm.id(name)).collect();
+        if let Some(package) = dependencies.iter().find(|id| shared.contains(id)) {
+            if matches!(expr, sv::ir::Expr::Ident(_)) {
+                continue;
+            }
+            return Err(unsupported(format!(
+                "event expression reading package variable `{}` that is not the variable itself",
+                pm.var(*package).path[0]
+            )));
+        }
+        if dependencies.is_empty() {
+            continue;
+        }
+        let index = pm.event_watchers.len();
+        for &dependency in &dependencies {
+            pm.watchers_by_var
+                .entry(dependency)
+                .or_default()
+                .push(index);
+        }
+        let state = pm.new_event_counters();
+        pm.event_watchers.push(EventWatcher {
+            expr,
+            dependencies,
+            state,
+        });
+    }
+    Ok(())
+}
+
+/// Add to `names` the variables the subroutines `expr` calls read, directly
+/// or through their callees. The formals and locals of those subroutines
+/// are their own and are left out, as are the arguments of a DPI-C import,
+/// which `expr` reads itself.
+fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSet<String>) {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut visited = HashSet::default();
+    let mut own = HashSet::default();
+    let mut reads = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        own.extend(subroutine.params.iter().map(|param| param.name.clone()));
+        own.extend(subroutine.return_var.clone());
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    own.insert(name.clone());
+                }
+                stmt_reads(stmt, &mut reads);
+                let mut callees = Vec::new();
+                stmt_calls(stmt, &mut callees);
+                pending.extend(callees.into_iter().map(|(name, _)| name));
+            });
+        }
+    }
+    names.extend(reads.into_iter().filter(|name| !own.contains(name)));
+}
+
+/// A subroutine `expr` calls, directly or through another one, whose
+/// evaluation has an effect besides its result: a task, a function with
+/// `output` or `inout` arguments, one that assigns a variable other than its
+/// own formals and locals or runs a system task, or a DPI-C import that is
+/// not `pure`. An event expression is evaluated whenever an operand may have
+/// changed (IEEE 1800-2023 9.4.2), so such an effect would happen more often
+/// than the source shows.
+fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut visited = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(import) = pm.dpi_imports.get(&name) {
+            if !import.is_pure() {
+                return Some(name);
+            }
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        if subroutine.is_task
+            || subroutine
+                .params
+                .iter()
+                .any(|param| param.direction != sv::ir::ParamDirection::Input)
+        {
+            return Some(name);
+        }
+        let mut own: HashSet<String> = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .chain(subroutine.return_var.clone())
+            .collect();
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    own.insert(name.clone());
+                }
+            });
+        }
+        let mut impure = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => impure |= !own.contains(lhs.name()),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        impure |= parts.iter().any(|part| !own.contains(part.name()))
+                    }
+                    sv::ir::Stmt::SystemTask { .. } => impure = true,
+                    _ => {}
+                }
+                let mut callees = Vec::new();
+                stmt_calls(stmt, &mut callees);
+                pending.extend(callees.into_iter().map(|(name, _)| name));
+            });
+        }
+        if impure {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// The subroutines `stmts` call as statements.
+fn direct_calls(stmts: &[sv::ir::Stmt], calls: &mut Vec<String>) {
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            if let sv::ir::Stmt::Call { name, .. } = stmt {
+                calls.push(name.clone());
+            }
+        });
+    }
+}
+
+/// Whether `stmts` contain a timing control themselves.
+fn has_own_timing(stmts: &[sv::ir::Stmt]) -> bool {
+    let mut timed = false;
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            timed |= matches!(
+                stmt,
+                sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+            );
+        });
+    }
+    timed
+}
+
+fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
+    unsupported(error.to_string())
+}
+
+/// Whether the value of `current` differs from `previous` as `edge` requires.
+/// `posedge` and `negedge` look at the least significant bit and count a
+/// transition from or to an unknown value, but not one between `x` and `z`
+/// (IEEE 1800-2023 9.4.2).
+fn event_occurred(
+    edge: sv::ir::EventEdge,
+    previous: sv::ir::Expr,
+    current: sv::ir::Expr,
+) -> sv::ir::Expr {
+    use sv::ir::{BinaryOp, Expr};
+    let binary = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let lsb = |expr: Expr| Expr::Resize {
+        expr: Box::new(expr),
+        width: 1,
+        signed: false,
+    };
+    let literal = |text: &str| Expr::Literal(text.to_string());
+    let is = |expr: Expr, text: &str| binary(expr, BinaryOp::EqCase, literal(text));
+    let is_not = |expr: Expr, text: &str| binary(expr, BinaryOp::NeCase, literal(text));
+    let unknown = |expr: Expr| {
+        binary(
+            is_not(expr.clone(), "1'b0"),
+            BinaryOp::LogicAnd,
+            is_not(expr, "1'b1"),
+        )
+    };
+    // `from` -> anything else, or unknown -> `to`.
+    let edge_to = |previous: Expr, current: Expr, from: &str, to: &str| {
+        binary(
+            binary(
+                is(previous.clone(), from),
+                BinaryOp::LogicAnd,
+                is_not(current.clone(), from),
+            ),
+            BinaryOp::LogicOr,
+            binary(unknown(previous), BinaryOp::LogicAnd, is(current, to)),
+        )
+    };
+    match edge {
+        sv::ir::EventEdge::Any => binary(previous, BinaryOp::NeCase, current),
+        sv::ir::EventEdge::Pos => edge_to(lsb(previous), lsb(current), "1'b0", "1'b1"),
+        sv::ir::EventEdge::Neg => edge_to(lsb(previous), lsb(current), "1'b1", "1'b0"),
     }
 }
 

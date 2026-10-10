@@ -44,10 +44,50 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
+    /// The event expressions some process waits on.
+    pub event_watchers: Vec<EventWatcher>,
+    /// The watchers whose expression reads each variable, by index.
+    pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
+    /// Every event counter declared, for its zero initial value.
+    pub event_counter_ids: Vec<SourceVarId>,
+    /// The initial values of the `static` locals with initializers, which
+    /// run once, before time zero (IEEE 1800-2023 6.21).
+    pub static_initial_values: Vec<InitialStateValue<SourceVarId>>,
+}
+
+/// An event expression some process waits on, and the hidden state that
+/// records its events: a kernel's store to one of `dependencies` snapshots
+/// the expression before the store and counts the change, rise and fall it
+/// made after it. A waiter compares the counters with the ones it sampled,
+/// so an event a later store of the same kernel run hides is still seen.
+pub(super) struct EventWatcher {
+    pub expr: sv::ir::Expr,
+    pub dependencies: Vec<SourceVarId>,
+    /// The state shared by every process; a process with private copies of
+    /// a dependency keeps its own (see `Ff::private_watchers`).
+    pub state: EventCounters,
+}
+
+/// The counters of one watcher: how often its expression changed, rose and
+/// fell, and the value it had before the store being recorded.
+#[derive(Clone)]
+pub(super) struct EventCounters {
+    pub previous: Option<(SourceVarId, String)>,
+    pub changes: String,
+    pub rises: String,
+    pub falls: String,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
 /// unknown mask.
+/// Bits of an event counter; the counters wrap, as only equality matters.
+pub const EVENT_COUNTER_WIDTH: usize = 32;
+
+/// The counters of a package variable, as `variable@purpose` in the package
+/// and in every module denoting the variable (see
+/// [`super::ff::declare_event_counters`]).
+pub const PACKAGE_EVENT_COUNTERS: [&str; 3] = ["changes", "rises", "falls"];
+
 pub(super) struct MemoryWord {
     pub access: BitAccess,
     pub value: BigUint,
@@ -140,6 +180,10 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
+            event_watchers: Vec::new(),
+            watchers_by_var: HashMap::default(),
+            event_counter_ids: Vec::new(),
+            static_initial_values: Vec::new(),
         }
     }
 
@@ -292,8 +336,102 @@ impl<'a> ProcModule<'a> {
         self.name_to_id.get(name).copied()
     }
 
+    /// Fresh event counters, which start at zero. They follow the design's
+    /// state mode, as the expressions that read them do.
+    pub fn new_event_counters(&mut self) -> EventCounters {
+        let mut counter = |purpose: &str| {
+            let four_state = self.four_state;
+            let (id, name) = self.temp(purpose, EVENT_COUNTER_WIDTH, false, four_state);
+            self.event_counter_ids.push(id);
+            name
+        };
+        let changes = counter("event_changes");
+        let rises = counter("event_rises");
+        let falls = counter("event_falls");
+        EventCounters {
+            previous: None,
+            changes,
+            rises,
+            falls,
+        }
+    }
+
+    /// A hidden copy of variable `id` with its shape, for the activations
+    /// of one process. The copy has no name a body can refer to.
+    pub fn private_copy(&mut self, id: SourceVarId) -> SourceVarId {
+        let mut variable = self.variables[&id].clone();
+        variable.path = vec![format!(
+            "{}@p{}",
+            variable.path.join("."),
+            self.temp_counter
+        )];
+        self.temp_counter += 1;
+        variable.hidden = true;
+        let copy = next_var_id(&mut self.next_id);
+        self.variables.insert(copy, variable);
+        self.created.push(copy);
+        copy
+    }
+
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
         &self.variables[&id]
+    }
+
+    /// Give the `static` local `id` its initial value `init`, evaluated
+    /// once: the initializer of a static variable runs before time zero
+    /// (IEEE 1800-2023 6.21), so it must be constant. The inlined body of a
+    /// subroutine declares the local at every call site; the first one
+    /// records the value.
+    pub fn static_initial(
+        &mut self,
+        id: SourceVarId,
+        init: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        if self
+            .static_initial_values
+            .iter()
+            .any(|value| value.address == id)
+        {
+            return Ok(());
+        }
+        let name = self.var(id).path[0].clone();
+        if !self.var(id).array_dims.is_empty() {
+            return Err(unsupported(format!(
+                "static local array `{name}` with an initializer"
+            )));
+        }
+        let mut arena = SLTNodeArena::new();
+        let constant = (!self.calls(init))
+            .then(|| {
+                lower_expr_with_context(
+                    &expr_for_state_mode(init, self.four_state),
+                    self.variables,
+                    self.name_to_id,
+                    self.constants,
+                    self.parameter_types,
+                    &mut arena,
+                    None,
+                    None,
+                )
+            })
+            .flatten()
+            .and_then(|(node, _)| slt_const(&arena, &mut ConstCache::default(), node));
+        let Some((value, _)) = constant else {
+            return Err(unsupported(format!(
+                "static local `{name}` with an initializer that is not constant"
+            )));
+        };
+        let width = self.var(id).width;
+        let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        self.static_initial_values.push(InitialStateValue {
+            address: id,
+            data: InitialStateData::Packed {
+                value: value & &written_mask,
+                mask: BigUint::default(),
+                written_mask,
+            },
+        });
+        Ok(())
     }
 
     pub fn is_hidden(&self, id: SourceVarId) -> bool {
@@ -1425,6 +1563,7 @@ pub(super) fn canonical_for_loop(
             sv::ir::Stmt::Local {
                 name,
                 init: Some(start),
+                ..
             },
         ] => (name.clone(), start.clone()),
         [
@@ -1503,37 +1642,40 @@ pub(super) fn canonical_for_loop(
     })
 }
 
-/// The identifiers an expression reads.
-pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
-    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-        match expr {
-            sv::ir::ConstExpr::Ident(name) => {
-                names.insert(name.clone());
-            }
-            sv::ir::ConstExpr::Literal(_) => {}
-            sv::ir::ConstExpr::Select { expr, bit } => {
-                const_idents(expr, names);
-                const_idents(bit, names);
-            }
-            sv::ir::ConstExpr::Function { args, .. } => {
-                args.iter().for_each(|arg| const_idents(arg, names))
-            }
-            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
-            sv::ir::ConstExpr::Binary { left, right, .. } => {
-                const_idents(left, names);
-                const_idents(right, names);
-            }
-            sv::ir::ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                const_idents(condition, names);
-                const_idents(then_expr, names);
-                const_idents(else_expr, names);
-            }
+/// The identifiers a constant-expression operand, such as a run-time select
+/// index, reads.
+pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        sv::ir::ConstExpr::Literal(_) => {}
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_idents(expr, names);
+            const_idents(bit, names);
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().for_each(|arg| const_idents(arg, names))
+        }
+        sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_idents(left, names);
+            const_idents(right, names);
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_idents(condition, names);
+            const_idents(then_expr, names);
+            const_idents(else_expr, names);
         }
     }
+}
+
+/// The identifiers `expr` reads.
+pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());
@@ -1962,6 +2104,77 @@ pub(super) fn stmt_calls(
     }
     for expr in exprs {
         collect_calls(expr, calls);
+    }
+}
+
+/// The identifiers the expressions of `stmt` itself read: its nested
+/// statements are not visited. The variables an assignment writes are not
+/// reads, but the indices of its selects are.
+pub(super) fn stmt_reads(stmt: &sv::ir::Stmt, names: &mut HashSet<String>) {
+    fn lvalue_reads(lvalue: &sv::ir::LValue, names: &mut HashSet<String>) {
+        if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
+            const_idents(msb, names);
+            const_idents(lsb, names);
+        }
+    }
+    let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
+    match stmt {
+        sv::ir::Stmt::Call { args, .. } => exprs.extend(args.iter().flatten()),
+        sv::ir::Stmt::Assign { lhs, rhs, .. } => {
+            lvalue_reads(lhs, names);
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
+            parts.iter().for_each(|part| lvalue_reads(part, names));
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::Eval(rhs) | sv::ir::Stmt::Delay(rhs) | sv::ir::Stmt::Wait(rhs) => {
+            exprs.push(rhs)
+        }
+        sv::ir::Stmt::If { condition, .. } => exprs.push(condition),
+        sv::ir::Stmt::Case {
+            selector, items, ..
+        } => {
+            exprs.push(selector);
+            for item in items {
+                for label in &item.labels {
+                    match label {
+                        sv::ir::CaseLabel::Value(value) => exprs.push(value),
+                        sv::ir::CaseLabel::Range { low, high } => {
+                            exprs.push(low);
+                            exprs.push(high);
+                        }
+                    }
+                }
+            }
+        }
+        sv::ir::Stmt::Loop {
+            kind, condition, ..
+        } => {
+            if let sv::ir::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs.extend(condition);
+        }
+        sv::ir::Stmt::Return(Some(value)) => exprs.push(value),
+        sv::ir::Stmt::Local {
+            init: Some(init), ..
+        } => exprs.push(init),
+        sv::ir::Stmt::SystemTask { args, .. } => {
+            for arg in args {
+                if let sv::ir::SystemTaskArg::Expr(expr) = arg {
+                    exprs.push(expr);
+                }
+            }
+        }
+        sv::ir::Stmt::WaitEvent(items) => exprs.extend(items.iter().map(|item| &item.expr)),
+        sv::ir::Stmt::Return(None)
+        | sv::ir::Stmt::Local { init: None, .. }
+        | sv::ir::Stmt::Break
+        | sv::ir::Stmt::Continue => {}
+    }
+    for expr in exprs {
+        expr_idents(expr, names);
     }
 }
 

@@ -62,11 +62,40 @@ pub enum StmtBase<E, L> {
         args: Vec<SystemTaskArg<E>>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
-    /// to `init` or to the default value of its type.
+    /// to `init` or to the default value of its type. A `static` one keeps
+    /// its value between activations instead, and `init` runs once, before
+    /// time zero (IEEE 1800-2023 6.21).
     Local {
         name: String,
         init: Option<E>,
+        r#static: bool,
     },
+    /// `#amount`: suspend the process for `amount` time units.
+    Delay(E),
+    /// `@(items)`: suspend the process until one of the events occurs.
+    WaitEvent(Vec<EventItemBase<E>>),
+    /// `wait (condition)`: suspend the process until the condition is true.
+    Wait(E),
+}
+
+/// One item of an event control, `[edge] expr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventItemBase<E> {
+    pub edge: EventEdge,
+    pub expr: E,
+}
+
+/// Which transitions of an event expression are events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventEdge {
+    /// Any change of the value.
+    Any,
+    /// `posedge`: the least significant bit goes from 0 to 1, from 0 to
+    /// unknown, or from unknown to 1 (IEEE 1800-2023 9.4.2).
+    Pos,
+    /// `negedge`: the least significant bit goes from 1 to 0, from 1 to
+    /// unknown, or from unknown to 0.
+    Neg,
 }
 
 /// How a case statement compares its selector with the item labels.
@@ -243,10 +272,26 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             },
-            StmtBase::Local { name, init } => StmtBase::Local {
+            StmtBase::Local {
+                name,
+                init,
+                r#static,
+            } => StmtBase::Local {
+                r#static,
                 name,
                 init: init.map(fe),
             },
+            StmtBase::Delay(amount) => StmtBase::Delay(fe(amount)),
+            StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
+                items
+                    .into_iter()
+                    .map(|item| EventItemBase {
+                        edge: item.edge,
+                        expr: fe(item.expr),
+                    })
+                    .collect(),
+            ),
+            StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
         }
     }
 
@@ -346,12 +391,19 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
-            StmtBase::Local { name, init } => {
+            StmtBase::Local { name, init, .. } => {
                 fname(name);
                 if let Some(init) = init {
                     fe(init);
                 }
             }
+            StmtBase::Delay(amount) => fe(amount),
+            StmtBase::WaitEvent(items) => {
+                for item in items {
+                    fe(&mut item.expr);
+                }
+            }
+            StmtBase::Wait(condition) => fe(condition),
         }
     }
 
@@ -406,6 +458,10 @@ pub struct LocalVariableBase<T> {
 pub struct SubroutineBase<E, L, T> {
     pub name: String,
     pub is_task: bool,
+    /// Declared (or inherited from the module) `automatic` lifetime: each
+    /// activation has its own formals and locals. A static subroutine
+    /// shares them between activations (IEEE 1800-2023 13.3.1).
+    pub automatic: bool,
     /// `None` for a task or a `void` function.
     pub return_type: Option<T>,
     pub params: Vec<SubroutineParamBase<E, T>>,
@@ -435,6 +491,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
         SubroutineBase {
             name: self.name,
             is_task: self.is_task,
+            automatic: self.automatic,
             return_type: self.return_type.map(&mut *ft),
             params: self
                 .params
