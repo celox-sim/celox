@@ -85,10 +85,24 @@ pub(super) fn bind_generate_parameter(
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
-    let parameter_types = parameter_types_from_const_env(const_env);
-    let resolved_type = parameter.resolved_type(&parameter_types);
+    let mut parameter_types = parameter_types_from_const_env(const_env);
+    bind_generate_parameter_with_types(
+        parameter,
+        const_env,
+        parameter_literals,
+        &mut parameter_types,
+    );
+}
+
+pub(super) fn bind_generate_parameter_with_types(
+    parameter: Parameter,
+    const_env: &mut HashMap<String, i128>,
+    parameter_literals: &mut HashMap<String, Expr>,
+    parameter_types: &mut HashMap<String, ExprType>,
+) {
+    let resolved_type = parameter.resolved_type(parameter_types);
     let resolved =
-        parameter.resolved_value_with_literals(const_env, &parameter_types, parameter_literals);
+        parameter.resolved_value_with_literals(const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -98,7 +112,7 @@ pub(super) fn bind_generate_parameter(
         }))
     } else {
         parameter
-            .resolved_literal(const_env, &parameter_types, parameter_literals)
+            .resolved_literal(const_env, parameter_types, parameter_literals)
             .or_else(|| {
                 parameter_value_env(std::slice::from_ref(&parameter), const_env)
                     .remove(parameter.name())
@@ -107,6 +121,7 @@ pub(super) fn bind_generate_parameter(
     };
     if let Some(ty) = resolved_type {
         insert_parameter_type_markers(const_env, parameter.name(), ty);
+        parameter_types.insert(parameter.name().to_string(), ty);
     }
     if let Some(literal) = literal {
         parameter_literals.insert(parameter.name().to_string(), literal);

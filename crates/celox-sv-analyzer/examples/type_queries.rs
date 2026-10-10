@@ -5,7 +5,8 @@ use std::{fmt::Write, path::Path, time::Instant};
 
 use celox_sv_analyzer::{analyze, ast, syntax};
 
-fn source(kind: &str, count: usize) -> String {
+fn source(kind: &str, count: usize, ranged: bool) -> String {
+    let parameter_type = if ranged { "logic [31:0]" } else { "int" };
     let mut code = String::from("module Top(input logic [1:0][3:0] a);\n");
     if kind == "function_bits" {
         code.push_str(
@@ -22,7 +23,7 @@ fn source(kind: &str, count: usize) -> String {
             } else {
                 format!("P{} + 1", i - 1)
             };
-            writeln!(code, "localparam int P{i} = {value};").unwrap();
+            writeln!(code, "localparam {parameter_type} P{i} = {value};").unwrap();
         }
     } else if kind == "generate_dependencies" {
         code.push_str("if (1) begin : g\n");
@@ -32,7 +33,7 @@ fn source(kind: &str, count: usize) -> String {
             } else {
                 format!("P{} + 1", i + 1)
             };
-            writeln!(code, "localparam int P{i} = {value};").unwrap();
+            writeln!(code, "localparam {parameter_type} P{i} = {value};").unwrap();
         }
         code.push_str("logic [P0-1:0] s; assign s = '0; end\n");
     } else {
@@ -57,7 +58,8 @@ fn source(kind: &str, count: usize) -> String {
 
 fn main() {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
-    let parameters = args.first().is_some_and(|arg| arg == "--parameters");
+    let ranged = args.first().is_some_and(|arg| arg == "--ranged-parameters");
+    let parameters = ranged || args.first().is_some_and(|arg| arg == "--parameters");
     if parameters {
         args.remove(0);
     }
@@ -88,7 +90,7 @@ fn main() {
     println!("kind,count,bytes,parse_ms,ast_ms,ir_ms");
     for &kind in kinds {
         for &count in &counts {
-            let code = source(kind, count);
+            let code = source(kind, count, ranged);
             let mut samples = Vec::new();
             for _ in 0..3 {
                 let start = Instant::now();

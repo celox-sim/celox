@@ -63,7 +63,8 @@ pub(super) fn parameters_from_ref_node(
 /// A declaration-order prefix, independent of the inherited environment.
 /// Keep that prefix separate: its values and type markers override inherited
 /// bindings, but inherited values must not resolve a forward prefix reference.
-pub(super) struct ParameterEnvironment {
+pub(super) struct ParameterEnvironment<'a> {
+    base: &'a HashMap<String, i128>,
     values: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
@@ -72,8 +73,8 @@ pub(super) struct ParameterEnvironment {
     literals: HashMap<String, Expr>,
 }
 
-impl ParameterEnvironment {
-    pub(super) fn new(parameters: &[Parameter], base: &HashMap<String, i128>) -> Self {
+impl<'a> ParameterEnvironment<'a> {
+    pub(super) fn new(parameters: &[Parameter], base: &'a HashMap<String, i128>) -> Self {
         let mut values = HashMap::default();
         let mut types = HashMap::default();
         let mut literals = HashMap::default();
@@ -88,6 +89,7 @@ impl ParameterEnvironment {
             }
         }
         Self {
+            base,
             values,
             types,
             constants,
@@ -137,7 +139,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut ParameterEnvironment,
+    environment: &mut ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
     // Restrict declaration-type queries to the header. Walking the complete
     // declaration also visits data types and ranges nested in initializers,
@@ -295,7 +297,7 @@ fn parameter_declared_width(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     base_const_env: &HashMap<String, i128>,
-    environment: &ParameterEnvironment,
+    environment: &ParameterEnvironment<'_>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Option<usize> {
@@ -312,6 +314,27 @@ fn parameter_declared_width(
             .map(|ty| ty.width)
             .or_else(|| unwrap_node!(node, IntegerVectorType).is_some().then_some(1));
     }
+    // With the same immutable base and a numeric-only prefix, both former
+    // copies have exactly the contents of `constants`. A pure type header has
+    // no sibling assignments to seed or self-values to mask.
+    if std::ptr::eq(environment.base, base_const_env)
+        && environment.literals.is_empty()
+        && !node
+            .clone()
+            .into_iter()
+            .any(|child| matches!(child, RefNode::ParamAssignment(_)))
+    {
+        return parameter_width_from_environments(
+            node,
+            syntax_tree,
+            type_aliases,
+            declared_alias.as_ref(),
+            &environment.constants,
+            &environment.constants,
+        );
+    }
+    #[cfg(test)]
+    DECLARATION_ENV_COPIES.with(|count| count.set(count.get() + 2));
     let mut range_env = environment.constants.clone();
     // Numeric-size casts in a later parameter declaration can refer to an
     // earlier assignment in the same parameter-port list. Seed range lowering
@@ -368,9 +391,27 @@ fn parameter_declared_width(
             .iter()
             .map(|(name, value)| (name.clone(), *value)),
     );
+    parameter_width_from_environments(
+        node,
+        syntax_tree,
+        type_aliases,
+        declared_alias.as_ref(),
+        &range_env,
+        &env,
+    )
+}
+
+fn parameter_width_from_environments(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    declared_alias: Option<&Type>,
+    range_env: &HashMap<String, i128>,
+    env: &HashMap<String, i128>,
+) -> Option<usize> {
     let mut ranges =
-        packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, &range_env, type_aliases);
-    if let Some(alias) = &declared_alias {
+        packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, range_env, type_aliases);
+    if let Some(alias) = declared_alias {
         // Use-site dimensions enclose the aliased packed type, just as they
         // do for ports, signals, and function types.
         ranges.extend(alias.packed_ranges.iter().cloned());
@@ -385,8 +426,8 @@ fn parameter_declared_width(
         return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
     ranges.iter().try_fold(1usize, |acc, range| {
-        let left = eval_ast_const_expr(range.left(), &env)?;
-        let right = eval_ast_const_expr(range.right(), &env)?;
+        let left = eval_ast_const_expr(range.left(), env)?;
+        let right = eval_ast_const_expr(range.right(), env)?;
         acc.checked_mul(left.abs_diff(right) as usize + 1)
     })
 }
@@ -1206,7 +1247,8 @@ pub(super) fn infer_parameter_value_type(
 
 #[cfg(test)]
 thread_local! {
-    static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
