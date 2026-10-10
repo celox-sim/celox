@@ -423,6 +423,24 @@ fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
             RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(_)) => {
                 Some(node_range(child))
             }
+            // A single item is a scope too, except a conditional generate
+            // directly in a conditional one, which continues its scope.
+            RefNode::GenerateBlock(sv_parser::GenerateBlock::GenerateItem(item))
+                if !matches!(
+                    &**item,
+                    sv_parser::GenerateItem::ModuleOrGenerateItem(common)
+                        if matches!(
+                            &**common,
+                            sv_parser::ModuleOrGenerateItem::ModuleItem(common)
+                                if matches!(
+                                    common.nodes.1,
+                                    sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(_)
+                                )
+                        )
+                ) =>
+            {
+                Some(node_range(child))
+            }
             _ => None,
         })
         .collect()
@@ -926,7 +944,20 @@ pub(super) fn resolve_imports(
     if !scopes.is_empty() {
         let all_scopes = generate_scopes(node.clone(), tree);
         for scope in &all_scopes {
+            let mut explicit: HashMap<&String, String> = HashMap::default();
             for (package_name, name) in &scope.explicit {
+                // Every explicit import names an item of its package, and one
+                // declaration per name, whether or not a reference uses it.
+                let target = provided(package_name, name)?;
+                if let Some(known) = explicit.get(name)
+                    && *known != target
+                {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!("explicitly imported as both `{known}` and `{target}`"),
+                    });
+                }
+                explicit.insert(name, target);
                 if scope.declared.contains(name) {
                     return Err(AnalyzerError::ImportConflict {
                         name: name.clone(),
