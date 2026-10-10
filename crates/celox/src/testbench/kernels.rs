@@ -148,6 +148,9 @@ fn run<B: SimBackend>(
     state.set_tick_budget(tick_limit);
     let mut assertions = Vec::new();
     let mut error = None;
+    // A `$finish` of the design's own logic arrives as a runtime event; it
+    // ends the run like a kernel's.
+    let mut finish_observed = false;
     let mut finished = sim.components.finish_requested();
     let progress_every = sim
         .diagnostics
@@ -180,7 +183,8 @@ fn run<B: SimBackend>(
                 finished = true;
             }
         }
-        if drained.finished || state.is_finished() || sim.components.finish_requested() {
+        finish_observed |= drained.finished;
+        if finish_observed || state.is_finished() || sim.components.finish_requested() {
             finished = true;
         }
     }
@@ -190,7 +194,7 @@ fn run<B: SimBackend>(
     {
         error = Some(message);
     }
-    let finished = state.is_finished() || sim.components.finish_requested();
+    let finished = finish_observed || state.is_finished() || sim.components.finish_requested();
     KernelRun {
         assertions,
         error,
@@ -198,7 +202,7 @@ fn run<B: SimBackend>(
         ticks: state.ticks(),
         tick_limit_reached: tick_limit.is_some_and(|limit| state.ticks() >= limit)
             && !state.all_processes_done()
-            && !state.is_finished(),
+            && !finished,
     }
 }
 
@@ -335,6 +339,12 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             apply_component_writes(sim, writes);
             if sim.components.finish_requested() {
                 return Ok(false);
+            }
+            // The outputs the method wrote feed the design: the process
+            // resumes at once and reads the logic derived from them.
+            if sim.dirty {
+                sim.eval_comb_checked().map_err(|error| error.to_string())?;
+                sim.dirty = false;
             }
             let Some(result) = result else {
                 return Ok(true);

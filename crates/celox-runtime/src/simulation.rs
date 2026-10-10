@@ -302,6 +302,21 @@ pub struct SimulationState<B: SimBackend> {
     finished: bool,
 }
 
+/// The edges of a transition between sampled values `(nonzero, unknown)`,
+/// as `(posedge, negedge)` (IEEE 1800-2023 Table 9-2): a change from 0, or
+/// from x or z to 1, is a posedge, and a change from 1, or from x or z to 0,
+/// is a negedge; between x and z there is no edge.
+fn transition_edges(was: (bool, bool), is: (bool, bool)) -> (bool, bool) {
+    let (was_nonzero, was_unknown) = was;
+    let (is_nonzero, is_unknown) = is;
+    match (was_unknown, is_unknown) {
+        (true, true) => (false, false),
+        (true, false) => (is_nonzero, !is_nonzero),
+        (false, true) => (!was_nonzero, was_nonzero),
+        (false, false) => (!was_nonzero && is_nonzero, was_nonzero && !is_nonzero),
+    }
+}
+
 /// Whether an event signal is nonzero, and whether it is x or z.
 fn sample_event_signal<B: SimBackend>(backend: &B, signal: SignalRef) -> (bool, bool) {
     if backend.layout().four_state && signal.is_4state {
@@ -338,17 +353,16 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let was_nonzero = self.last_clock_values.contains(*id);
-            let was_unknown = self.unknown_clock_values.contains(*id);
-            let (is_nonzero, is_unknown) = sample_event_signal(backend, *signal);
+            let was = (
+                self.last_clock_values.contains(*id),
+                self.unknown_clock_values.contains(*id),
+            );
+            let is = sample_event_signal(backend, *signal);
+            let (posedge, negedge) = transition_edges(was, is);
             let triggered = match self.domain_kinds[*id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    (!was_nonzero || was_unknown) && is_nonzero && !is_unknown
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    (was_nonzero || was_unknown) && !is_nonzero && !is_unknown
-                }
-                _ => (was_nonzero, was_unknown) != (is_nonzero, is_unknown),
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+                _ => was != is,
             };
             if triggered {
                 backend.mark_triggered_bit(*id);
@@ -889,6 +903,9 @@ impl<B: SimBackend> SimulationState<B> {
                             }
                             any_ran = true;
                         }
+                        // A served host request resumes the same process at
+                        // once: the request is a zero-time call of the
+                        // statement, and no other process runs in between.
                         Some(ProcessStatus::Host) => {
                             let request: u64 = executor.backend().get_as(refs.delay);
                             self.waiting.remove(&process);
@@ -897,8 +914,8 @@ impl<B: SimBackend> SimulationState<B> {
                                 self.finished = true;
                                 return Ok(true);
                             }
-                            again.push(process);
                             any_ran = true;
+                            continue;
                         }
                         // The kernel found its wait condition unmet and ran
                         // nothing; it stays waiting.
@@ -988,8 +1005,9 @@ impl<B: SimBackend> SimulationState<B> {
         // Processes run after this time's scheduled values are applied and
         // see the state settled at the previous time. The event signals they
         // change are edges of this time, like scheduled events.
-        // (event, whether the signal is nonzero now, whether it was unknown
-        // before): a four-state edge from x or z counts as an edge.
+        // (event, the sampled value now): the edge is judged against the
+        // sampled value before, so transitions from and into x or z count
+        // as IEEE 1800-2023 Table 9-2 says.
         let mut process_driven = Vec::new();
         if !ready_processes.is_empty() || !self.waiting.is_empty() {
             let before: Vec<(bool, bool)> = self
@@ -1007,9 +1025,9 @@ impl<B: SimBackend> SimulationState<B> {
                 if *id == usize::MAX {
                     continue;
                 }
-                let (is_nonzero, is_unknown) = sample_event_signal(executor.backend(), *signal);
-                if (is_nonzero, is_unknown) != (was_nonzero, was_unknown) {
-                    process_driven.push((*id, is_nonzero, was_unknown));
+                let is = sample_event_signal(executor.backend(), *signal);
+                if is != (was_nonzero, was_unknown) {
+                    process_driven.push((*id, is));
                 }
             }
         }
@@ -1028,21 +1046,20 @@ impl<B: SimBackend> SimulationState<B> {
             .filter_map(|event| {
                 self.signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0, false))
+                    .map(|&id| (id, (event.next_val != 0, false)))
             })
             .chain(process_driven);
-        for (id, is_nonzero, from_unknown) in scheduled {
+        for (id, is) in scheduled {
             track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
-            let from_unknown = from_unknown || self.unknown_clock_values.contains(id);
+            let was = (
+                self.last_clock_values.contains(id),
+                self.unknown_clock_values.contains(id),
+            );
+            let (posedge, negedge) = transition_edges(was, is);
             let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    (!was_nonzero || from_unknown) && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    (was_nonzero || from_unknown) && !is_nonzero
-                }
-                _ => (!was_nonzero || from_unknown) && is_nonzero,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+                _ => posedge,
             };
             if triggered {
                 scheduled_trigger_ids.insert(id);

@@ -536,3 +536,105 @@ fn concurrent_runtime_assertions_use_event_time() {
         vec![Some("ff time=0"), Some("ff time=10"), Some("ff time=20")]
     );
 }
+
+fn check_passes_on_every_backend(code: &str) {
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass,
+            "backend={}",
+            std::any::type_name::<B>()
+        );
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}
+
+/// A read after a branch whose one side stored and whose other side waited
+/// sees the settled logic.
+#[test]
+fn read_after_branch_settles_the_store_of_the_other_side() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var source: logic<8>;
+        var cond: logic;
+        let derived: logic<8> = source + 8'd1;
+        initial {
+            cond = 1;
+            source = 8'd1;
+            if cond { source = 8'd41; } else { clk.next(); }
+            $assert(derived == 8'd42, "derived=%d", derived);
+            case cond {
+                1'b0: clk.next();
+                default: source = 8'd7;
+            }
+            $assert(derived == 8'd8, "derived=%d", derived);
+            $finish();
+        }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+/// Constructs a constant keeps out of the kernel take no scratch state, so
+/// a later statement gets the scratch planned for it.
+#[test]
+fn unreachable_loops_take_no_scratch_state() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var r: $tb::random::<u8>;
+        var x: u8;
+        initial {
+            if 1'b0 {
+                for i in 0..3 { clk.next(); }
+            }
+            for j in 3..3 { clk.next(); }
+            r.seed(7);
+            x = r.get_range(5, 5);
+            $assert(x == 8'd5, "x=%d", x);
+            $finish();
+        }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+/// A host request (a random number here) is a zero-time call: no other
+/// process runs between the statements around it.
+#[test]
+fn host_requests_do_not_interleave_other_processes() {
+    let code = r#"#[test(Top)] module Top {
+        var r: $tb::random::<u8>;
+        var x: u8;
+        var v: u8;
+        var seen: u8;
+        initial { x = 8'd1; v = r.get(); x = 8'd2; }
+        initial { seen = x; $assert(seen == 8'd2, "seen=%d", seen); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+/// A `$finish` of the design's own clocked logic completes the run.
+#[test]
+fn finish_from_design_logic_completes_the_run() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var count: logic<8>;
+        always_ff (clk) {
+            if count == 8'd3 { $finish(); }
+            count += 1;
+        }
+        initial { clk.next(10); }
+    }"#;
+    check_passes_on_every_backend(code);
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 100);
+        assert_eq!(result.result, TestResult::Pass);
+        assert!(!result.tick_limit_reached);
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+}

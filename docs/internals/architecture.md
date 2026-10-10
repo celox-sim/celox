@@ -213,7 +213,8 @@ while a process ran, so that a process another one wakes runs before the
 registers of that time evaluate; this matches the active-region order in
 which a process woken by a clock edge reads the registers' previous values.
 It detects the clock edges the processes cause by comparing event signals
-before and after, and then settles as for scheduled events. Processes that
+before and after (in four-state by IEEE 1800-2023 Table 9-2, so a change
+into or out of x or z is an edge), and then settles as for scheduled events. Processes that
 waited for zero time, or that the settled state wakes, resume in a further
 round at the same time, which repeats the edge detection and settling; a
 round in which every waiting process reports a pending wait ends the time.
@@ -254,8 +255,9 @@ clock wait; `rst.assert(n)` is a clock wait with a release, a write the
 scheduler makes when the wait ends, so the reset is deasserted even when the
 tick budget is spent. Random numbers and the methods of host components are
 host requests: the kernel stores the arguments in scratch state, reports the
-request's index, and the host serves it through the scratch state before
-resuming the kernel. `$assert` emits a runtime event on both outcomes, so the
+request's index, and the host serves it through the scratch state, settles
+the logic a component's output writes feed, and resumes the kernel at once,
+so no other process runs inside the statement. `$assert` emits a runtime event on both outcomes, so the
 detailed test result lists every evaluation with its source location.
 Formatted `%t` is the scheduler time, in which the default process clock has
 period 2.

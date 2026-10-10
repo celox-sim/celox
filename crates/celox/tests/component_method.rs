@@ -1686,6 +1686,7 @@ fn component_method_refreshes_inputs_and_applies_outputs_immediately() {
             inst clk: $tb::clock_gen;
             var d: logic<16>;
             var q: logic<16>;
+            let derived: logic<16> = ~q;
             inst component: $comp::celox_clocked #(STEP: 0) (
                 clk,
                 d: d[7:0],
@@ -1697,6 +1698,9 @@ fn component_method_refreshes_inputs_and_applies_outputs_immediately() {
                 component.check_input(8'h34);
                 component.drive(8'h5a);
                 $assert(q == 16'hab5a, "method output must update only the selected destination: %h", q);
+                // The logic derived from the output is settled before the
+                // next statement reads it.
+                $assert(derived == 16'h54a5, "derived logic must see the method output: %h", derived);
                 $finish();
             }
         }

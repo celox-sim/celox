@@ -346,12 +346,19 @@ fn collect_scratch_needs(
     let need = |needs: &mut Vec<ScratchNeed>, purpose: &'static str, width: usize| {
         needs.push(ScratchNeed { purpose, width });
     };
+    // The planning follows the lowering: a side a constant condition keeps
+    // out of the kernel, and a loop over a constant-empty range, take no
+    // scratch, as their slots would otherwise be handed to a later statement.
     for statement in statements {
         match statement {
-            Statement::If(stmt) => {
-                collect_scratch_needs(ir, &stmt.true_side, active, needs)?;
-                collect_scratch_needs(ir, &stmt.false_side, active, needs)?;
-            }
+            Statement::If(stmt) => match FfParser::get_constant_procedural_truth(&stmt.cond) {
+                Some(true) => collect_scratch_needs(ir, &stmt.true_side, active, needs)?,
+                Some(false) => collect_scratch_needs(ir, &stmt.false_side, active, needs)?,
+                None => {
+                    collect_scratch_needs(ir, &stmt.true_side, active, needs)?;
+                    collect_scratch_needs(ir, &stmt.false_side, active, needs)?;
+                }
+            },
             Statement::IfReset(stmt) => {
                 collect_scratch_needs(ir, &stmt.true_side, active, needs)?;
                 collect_scratch_needs(ir, &stmt.false_side, active, needs)?;
@@ -363,6 +370,9 @@ fn collect_scratch_needs(
                 collect_scratch_needs(ir, &stmt.default, active, needs)?;
             }
             Statement::For(stmt) => {
+                if constant_empty_range(&stmt.range) {
+                    continue;
+                }
                 let shape = loop_shape(ir, stmt)?;
                 need(needs, "for_start", shape.width);
                 need(needs, "for_end", shape.width);
@@ -1272,22 +1282,36 @@ impl<'a> BlockLowering<'a> {
             true_block: (then_block, Vec::new()),
             false_block: (else_block, Vec::new()),
         });
-        let mut joined = false;
+        // Each side starts from the state before the branch; the join is
+        // dirty when any side reaching it stored.
+        let dirty_before = self.dirty;
+        let mut joined = None;
         for (block, body) in [(then_block, true_side), (else_block, false_side)] {
             self.kernel.builder().switch_to_block(block);
+            self.dirty = dirty_before;
             if let Flow::Continue = self.lower_statements(body)? {
                 self.kernel
                     .builder()
                     .seal_block(SIRTerminator::Jump(join, Vec::new()));
-                joined = true;
+                joined = Some(joined.unwrap_or(false) || self.dirty);
             }
         }
+        self.join(join, joined)
+    }
+
+    /// Continue in `join`, which `joined` sides reach with that dirty state,
+    /// or end the block when no side reaches it.
+    fn join(&mut self, join: BlockId, joined: Option<bool>) -> Result<Flow, ParserError> {
         self.kernel.builder().switch_to_block(join);
-        if joined {
-            Ok(Flow::Continue)
-        } else {
-            self.kernel.builder().seal_block(SIRTerminator::Return);
-            Ok(Flow::Ended)
+        match joined {
+            Some(dirty) => {
+                self.dirty = dirty;
+                Ok(Flow::Continue)
+            }
+            None => {
+                self.kernel.builder().seal_block(SIRTerminator::Return);
+                Ok(Flow::Ended)
+            }
         }
     }
 
@@ -1317,28 +1341,24 @@ impl<'a> BlockLowering<'a> {
             true_block: (then_block, Vec::new()),
             false_block: (else_block, Vec::new()),
         });
-        let mut joined = false;
+        let dirty_before = self.dirty;
+        let mut joined = None;
         self.kernel.builder().switch_to_block(then_block);
         if let Flow::Continue = self.lower_statements(&case_arm.body)? {
             self.kernel
                 .builder()
                 .seal_block(SIRTerminator::Jump(join, Vec::new()));
-            joined = true;
+            joined = Some(self.dirty);
         }
         self.kernel.builder().switch_to_block(else_block);
+        self.dirty = dirty_before;
         if let Flow::Continue = self.lower_case_arm(stmt, arm + 1)? {
             self.kernel
                 .builder()
                 .seal_block(SIRTerminator::Jump(join, Vec::new()));
-            joined = true;
+            joined = Some(joined.unwrap_or(false) || self.dirty);
         }
-        self.kernel.builder().switch_to_block(join);
-        if joined {
-            Ok(Flow::Continue)
-        } else {
-            self.kernel.builder().seal_block(SIRTerminator::Return);
-            Ok(Flow::Ended)
-        }
+        self.join(join, joined)
     }
 
     fn lower_assign(&mut self, assign: &AssignStatement) -> Result<(), ParserError> {
@@ -1372,6 +1392,27 @@ impl<'a> BlockLowering<'a> {
                     Some(&destination.token),
                 )
             })?;
+            // The child's variable is checked like a local destination.
+            if let Some(target) = self.hierarchical.get(&id)
+                && let Some(module) = self.lookup.instance_module.get(&target.instance_id)
+                && let Some(info) = self
+                    .lookup
+                    .module_variables
+                    .get(module)
+                    .and_then(|variables| variables.get(&target.var_id))
+            {
+                crate::testbench::ExprCompiler::validate_target_bounds_parts(
+                    info,
+                    &destination.index,
+                    &destination.select,
+                )
+                .map_err(|error| match error {
+                    ParserError::IllegalContext {
+                        feature, detail, ..
+                    } => ParserError::illegal_context(feature, detail, Some(&destination.token)),
+                    other => other,
+                })?;
+            }
             rewritten = AssignStatement {
                 dst: vec![AssignDestination {
                     id,
