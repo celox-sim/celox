@@ -5,7 +5,7 @@ use std::{fmt::Write, path::Path, time::Instant};
 
 use celox_sv_analyzer::{analyze, ast, syntax};
 
-fn source(kind: &str, count: usize, ranged: bool) -> String {
+fn source(kind: &str, count: usize, ranged: bool, four_state: bool) -> String {
     let parameter_type = if ranged { "logic [31:0]" } else { "int" };
     let mut code = String::from("module Top(input logic [1:0][3:0] a);\n");
     if kind == "function_bits" {
@@ -19,7 +19,7 @@ fn source(kind: &str, count: usize, ranged: bool) -> String {
     if kind == "parameters" {
         for i in 0..count {
             let value = if i == 0 {
-                "1".into()
+                if four_state { "'x" } else { "1" }.into()
             } else {
                 format!("P{} + 1", i - 1)
             };
@@ -29,13 +29,17 @@ fn source(kind: &str, count: usize, ranged: bool) -> String {
         code.push_str("if (1) begin : g\n");
         for i in 0..count {
             let value = if i + 1 == count {
-                "1".into()
+                if four_state { "'x" } else { "1" }.into()
             } else {
                 format!("P{} + 1", i + 1)
             };
             writeln!(code, "localparam {parameter_type} P{i} = {value};").unwrap();
         }
-        code.push_str("logic [P0-1:0] s; assign s = '0; end\n");
+        if four_state {
+            code.push_str("logic [$bits(P0)-1:0] s; assign s = P0; end\n");
+        } else {
+            code.push_str("logic [P0-1:0] s; assign s = '0; end\n");
+        }
     } else {
         for i in 0..count {
             writeln!(code, "logic [31:0] q{i};").unwrap();
@@ -58,7 +62,10 @@ fn source(kind: &str, count: usize, ranged: bool) -> String {
 
 fn main() {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
-    let ranged = args.first().is_some_and(|arg| arg == "--ranged-parameters");
+    let four_state = args
+        .first()
+        .is_some_and(|arg| arg == "--four-state-parameters");
+    let ranged = four_state || args.first().is_some_and(|arg| arg == "--ranged-parameters");
     let parameters = ranged || args.first().is_some_and(|arg| arg == "--parameters");
     if parameters {
         args.remove(0);
@@ -90,7 +97,7 @@ fn main() {
     println!("kind,count,bytes,parse_ms,ast_ms,ir_ms");
     for &kind in kinds {
         for &count in &counts {
-            let code = source(kind, count, ranged);
+            let code = source(kind, count, ranged, four_state);
             let mut samples = Vec::new();
             for _ in 0..3 {
                 let start = Instant::now();
@@ -105,10 +112,27 @@ fn main() {
                     assert_eq!(module.parameters().len(), count);
                     assert_eq!(
                         module.parameters()[count - 1].resolved_value(),
-                        Some(count as i128)
+                        (!four_state).then_some(count as i128)
                     );
+                    if four_state {
+                        assert_eq!(module.parameters()[count - 1].resolved_width(), Some(32));
+                    }
                 } else if kind == "generate_dependencies" {
-                    assert_eq!(module.signals()[0].r#type().resolved_width(), Some(count));
+                    assert_eq!(
+                        module.signals()[0].r#type().resolved_width(),
+                        Some(if four_state { 32 } else { count })
+                    );
+                    if four_state {
+                        let celox_sv_analyzer::ir::Expr::Literal(value) =
+                            module.assignments()[0].rhs()
+                        else {
+                            panic!("unknown parameter must remain a literal")
+                        };
+                        let value =
+                            celox_sv_analyzer::typecheck::parse_integral_literal(value).unwrap();
+                        assert_eq!(value.width, 32);
+                        assert_eq!(value.mask, u32::MAX.into());
+                    }
                 } else {
                     assert_eq!(module.signals().len(), count);
                     assert_eq!(module.assignments().len(), count);
