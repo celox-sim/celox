@@ -209,7 +209,16 @@ pub fn eval_const_integral_literal_with_types(
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<IntegralLiteral> {
-    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    eval_const_integral_literal_with_lookup(expr, constants, &|name| types.get(name).copied())
+}
+
+/// Query only the types of identifiers encountered during substitution.
+pub(crate) fn eval_const_integral_literal_with_lookup(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     integral_literal_from_const_expr(&expr)
 }
 
@@ -337,43 +346,67 @@ pub fn substitute_typed_constants(
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
 ) -> ConstExpr {
+    substitute_typed_constants_with_lookup(expr, constants, &|name| types.get(name).copied())
+}
+
+fn substitute_typed_constants_with_lookup(
+    expr: ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+) -> ConstExpr {
     match expr {
-        ConstExpr::Ident(name) => match (constants.get(&name), types.get(&name)) {
+        ConstExpr::Ident(name) => match (constants.get(&name), types(&name)) {
             (Some(value), Some((width, signed))) => {
-                ConstExpr::Literal(format_typed_constant_literal(*value, *width, *signed))
+                ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
             }
             _ => ConstExpr::Ident(name),
         },
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
-            expr: Box::new(substitute_typed_constants(*expr, constants, types)),
-            bit: Box::new(substitute_typed_constants(*bit, constants, types)),
+            expr: Box::new(substitute_typed_constants_with_lookup(
+                *expr, constants, types,
+            )),
+            bit: Box::new(substitute_typed_constants_with_lookup(
+                *bit, constants, types,
+            )),
         },
         ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
             site,
             args: args
                 .into_iter()
-                .map(|arg| substitute_typed_constants(arg, constants, types))
+                .map(|arg| substitute_typed_constants_with_lookup(arg, constants, types))
                 .collect(),
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
-            expr: Box::new(substitute_typed_constants(*expr, constants, types)),
+            expr: Box::new(substitute_typed_constants_with_lookup(
+                *expr, constants, types,
+            )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-            left: Box::new(substitute_typed_constants(*left, constants, types)),
+            left: Box::new(substitute_typed_constants_with_lookup(
+                *left, constants, types,
+            )),
             op,
-            right: Box::new(substitute_typed_constants(*right, constants, types)),
+            right: Box::new(substitute_typed_constants_with_lookup(
+                *right, constants, types,
+            )),
         },
         ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => ConstExpr::Mux {
-            condition: Box::new(substitute_typed_constants(*condition, constants, types)),
-            then_expr: Box::new(substitute_typed_constants(*then_expr, constants, types)),
-            else_expr: Box::new(substitute_typed_constants(*else_expr, constants, types)),
+            condition: Box::new(substitute_typed_constants_with_lookup(
+                *condition, constants, types,
+            )),
+            then_expr: Box::new(substitute_typed_constants_with_lookup(
+                *then_expr, constants, types,
+            )),
+            else_expr: Box::new(substitute_typed_constants_with_lookup(
+                *else_expr, constants, types,
+            )),
         },
     }
 }
@@ -794,6 +827,12 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
         ConstExpr::Function { name, args, .. } => {
+            if matches!(name.as_str(), "$signed" | "$unsigned") {
+                let [arg] = args.as_slice() else { return None };
+                let mut literal = self_determined_integral_literal(arg)?;
+                literal.signed = name == "$signed";
+                return Some(literal);
+            }
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
                 "$clog2" | "$countones" | "$countbits" => (32, "s"),
@@ -1123,6 +1162,10 @@ fn eval_const_function(
         return None;
     };
     match name {
+        "$signed" | "$unsigned" => {
+            let literal = self_determined_integral_literal(arg)?;
+            integral_literal_as_i128(&literal, name == "$signed")
+        }
         "$clog2" => clog2(eval_const_expr(arg, constants)?),
         "$isunknown" => {
             if let Some(literal) = self_determined_integral_literal(arg) {

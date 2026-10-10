@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
 
 pub(super) fn simplify_constant_mux_conditions(
@@ -227,10 +230,10 @@ pub(super) fn fold_const_integral_expr_preserving_mask(
     if matches!(expr, Expr::Literal(_)) {
         return expr;
     }
-    let parameter_types = parameter_types_from_const_env(const_env)
-        .into_iter()
-        .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
-        .collect();
+    // Most parameter values are already literals wrapped in a two-state
+    // conversion. Do not scan every visible binding to fold each such value.
+    let parameter_types =
+        |name: &str| parameter_type_from_const_env(const_env, name).map(|ty| (ty.width, ty.signed));
     eval_const_integral_expr_preserving_mask(&expr, const_env, &parameter_types)
         .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
         .unwrap_or(expr)
@@ -239,7 +242,7 @@ pub(super) fn fold_const_integral_expr_preserving_mask(
 fn eval_const_integral_expr_preserving_mask(
     expr: &Expr,
     const_env: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
+    parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     match expr {
         Expr::Select { expr, msb, lsb, .. } => {
@@ -310,8 +313,13 @@ fn eval_const_integral_expr_preserving_mask(
         }
         _ => {
             let constant: crate::ir::ConstExpr =
-                constant_with_folded_selections(expr, const_env, parameter_types)?.into();
-            typecheck::eval_const_integral_literal_with_types(&constant, const_env, parameter_types)
+                constant_with_folded_selections_with_lookup(expr, const_env, parameter_types)?
+                    .into();
+            typecheck::eval_const_integral_literal_with_lookup(
+                &constant,
+                const_env,
+                parameter_types,
+            )
         }
     }
 }
@@ -323,7 +331,18 @@ pub(super) fn constant_with_folded_selections(
     const_env: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<ConstExpr> {
-    let convert = |expr: &Expr| constant_with_folded_selections(expr, const_env, parameter_types);
+    constant_with_folded_selections_with_lookup(expr, const_env, &|name| {
+        parameter_types.get(name).copied()
+    })
+}
+
+fn constant_with_folded_selections_with_lookup(
+    expr: &Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
+) -> Option<ConstExpr> {
+    let convert =
+        |expr: &Expr| constant_with_folded_selections_with_lookup(expr, const_env, parameter_types);
     match expr {
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
             let literal =
@@ -444,11 +463,8 @@ mod constant_concat_limits_tests {
                 count: ConstExpr::Literal(count.to_string()),
                 parts: vec![Expr::Literal("1'bx".to_string())],
             };
-            let result = eval_const_integral_expr_preserving_mask(
-                &expr,
-                &HashMap::default(),
-                &HashMap::default(),
-            );
+            let result =
+                eval_const_integral_expr_preserving_mask(&expr, &HashMap::default(), &|_| None);
             assert_eq!(result.is_some(), accepted);
             if let Some(result) = result {
                 assert_eq!(result.width, count);
@@ -460,12 +476,8 @@ mod constant_concat_limits_tests {
             parts: vec![Expr::Literal("2'bxz".to_string())],
         };
         assert!(
-            eval_const_integral_expr_preserving_mask(
-                &expr,
-                &HashMap::default(),
-                &HashMap::default(),
-            )
-            .is_none()
+            eval_const_integral_expr_preserving_mask(&expr, &HashMap::default(), &|_| None,)
+                .is_none()
         );
     }
 }

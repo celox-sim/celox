@@ -90,6 +90,7 @@ pub struct RuntimeDesign {
     instances: HashMap<InstanceId, RuntimeInstance>,
     instance_ids: HashMap<InstancePath, InstanceId>,
     variables: HashMap<AbsoluteAddr, RuntimeVariable>,
+    package_instances: crate::HashSet<InstanceId>,
 }
 
 impl std::ops::Deref for RuntimeDesign {
@@ -190,6 +191,7 @@ impl RuntimeDesign {
             instances,
             instance_ids: frontend.instance_ids,
             variables,
+            package_instances: frontend.package_instances,
         };
         design
             .validate()
@@ -255,6 +257,14 @@ impl RuntimeDesign {
         let Some(instance) = self.instances.get(&address.instance_id) else {
             return address.to_string();
         };
+        // The instance of package `p` is named `p::`, and its variables `p::v`.
+        if self.package_instances.contains(&address.instance_id) {
+            return format!(
+                "{}{}",
+                instance.display_path.join("."),
+                variable.path.join(".")
+            );
+        }
         instance
             .display_path
             .iter()
@@ -376,7 +386,7 @@ impl RuntimeDesign {
     }
 }
 
-/// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
+/// Error returned when a path-based variable or event lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
     #[error("Instance not found: {path}")]
@@ -385,6 +395,8 @@ pub enum AddrLookupError {
     VariableNotFound { path: String },
     #[error("Ambiguous variable path: {path} — multiple variables share this path")]
     AmbiguousPath { path: String },
+    #[error("Signal is not an event: {path}")]
+    NotAnEvent { path: String },
 }
 
 /// Internal consistency failure while consuming the frontend projection into
@@ -465,10 +477,41 @@ pub struct OptimizedSir {
 
 impl OptimizedSir {
     pub(crate) fn new(
-        sir: SirProgram,
+        mut sir: SirProgram,
         runtime: RuntimeProgram,
         layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
     ) -> Self {
+        // Frontend captures carry logical site IDs. Give every backend the
+        // same nonzero fatal status, disjoint from positive loop/error codes.
+        for unit in sir
+            .eval_comb
+            .iter_mut()
+            .chain(sir.eval_apply_ffs.values_mut().flatten())
+            .chain(sir.eval_comb_apply_ffs.values_mut().flatten())
+            .chain(sir.eval_only_ffs.values_mut().flatten())
+            .chain(sir.apply_ffs.values_mut().flatten())
+            .chain(sir.processes.iter_mut())
+            .chain(
+                sir.parallel
+                    .iter_mut()
+                    .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
+            )
+        {
+            for instruction in unit
+                .blocks
+                .values_mut()
+                .flat_map(|block| &mut block.instructions)
+            {
+                if let SIRInstruction::CombCaptureEvent {
+                    site_id,
+                    fatal_error_code: Some(code),
+                    ..
+                } = instruction
+                {
+                    *code = celox_runtime::comb_fatal_code(*site_id);
+                }
+            }
+        }
         Self {
             sir,
             layout_requirements,
@@ -965,6 +1008,28 @@ impl RuntimeProgram {
     }
 
     pub fn get_addr(
+        &self,
+        instance_path: &[(&str, usize)],
+        var_path: &[&str],
+    ) -> Result<AbsoluteAddr, AddrLookupError> {
+        let found = self.instance_addr(instance_path, var_path);
+        // `p::v` at the top names variable `v` of package `p`, which lives in
+        // the package's instance outside the hierarchy.
+        // An escaped name may contain `::` itself, so try each prefix.
+        if let (Err(AddrLookupError::VariableNotFound { .. }), [], [name]) =
+            (&found, instance_path, var_path)
+        {
+            for (index, _) in name.match_indices("::") {
+                let (package, variable) = (&name[..index + 2], &name[index + 2..]);
+                if let Ok(address) = self.instance_addr(&[(package, 0)], &[variable]) {
+                    return Ok(address);
+                }
+            }
+        }
+        found
+    }
+
+    fn instance_addr(
         &self,
         instance_path: &[(&str, usize)],
         var_path: &[&str],

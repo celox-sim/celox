@@ -98,8 +98,6 @@ y,
   (assert_eq y 0x55))
 
 (case test_instance_input_function_output_writeback
-  ; veryl-simulator currently evaluates the connection value but does
-  ; not write the function output actual back to the parent variable.
   (source "test.veryl" #"
 module Child (
 i: input logic,
