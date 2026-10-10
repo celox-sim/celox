@@ -648,3 +648,285 @@ fn reverse_generate_literal_chains_borrow_width_and_initializer_environments() {
         assert_eq!(value.mask, u32::MAX.into());
     }
 }
+
+fn separately_resolved_value_and_literal(
+    parameter: &Parameter,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, ExprType>,
+    literals: &HashMap<String, Expr>,
+) -> (Option<i128>, Option<Expr>) {
+    // The former two-stage caller: numeric fallback discards its literal,
+    // then a nonnumeric result requires literal resolution again.
+    let value = parameter.resolved_value(constants, types).or_else(|| {
+        let literal = parameter.resolved_literal(constants, types, literals)?;
+        eval_ast_const_expr(&expr_to_const(literal)?, constants)
+    });
+    let literal = if value.is_none() {
+        parameter.resolved_literal(constants, types, literals)
+    } else {
+        None
+    };
+    (value, literal)
+}
+
+#[test]
+fn retained_parameter_literals_match_separate_resolution_across_types_and_dependencies() {
+    let mut constants = HashMap::from_iter([("A".into(), -2)]);
+    insert_parameter_type_markers(
+        &mut constants,
+        "A",
+        ExprType {
+            width: 8,
+            signed: true,
+        },
+    );
+    let types = parameter_types_from_const_env(&constants);
+    let literals = HashMap::from_iter([("X".into(), Expr::Literal("8'b10xz0011".into()))]);
+    let values = [
+        ConstExpr::Literal("-1".into()),
+        ConstExpr::Literal("'x".into()),
+        ConstExpr::Literal("129'h1ffffffffffffffffffffffffffffffff".into()),
+        ConstExpr::Ident("X".into()),
+        ConstExpr::Ident("missing".into()),
+        ConstExpr::Ident("P".into()),
+        ConstExpr::Select {
+            expr: Box::new(ConstExpr::Ident("X".into())),
+            bit: Box::new(ConstExpr::Literal("0".into())),
+        },
+        ConstExpr::Binary {
+            left: Box::new(ConstExpr::Ident("A".into())),
+            op: BinaryOp::Shr,
+            right: Box::new(ConstExpr::Literal("1".into())),
+        },
+        ConstExpr::Binary {
+            left: Box::new(ConstExpr::Ident("X".into())),
+            op: BinaryOp::BitAnd,
+            right: Box::new(ConstExpr::Literal("8'h0f".into())),
+        },
+        ConstExpr::Function {
+            name: "$countones".into(),
+            args: vec![ConstExpr::Literal("8'h81".into())],
+            site: None,
+        },
+    ];
+    for stale_self in [None, Some(91)] {
+        let mut env = constants.clone();
+        if let Some(value) = stale_self {
+            env.insert("P".into(), value);
+        }
+        for value in &values {
+            for (width, signed, two_state) in
+                [(8, false, false), (129, true, false), (8, true, true)]
+            {
+                let parameter = Parameter::new(
+                    "P".into(),
+                    Some(value.clone()),
+                    Some(width),
+                    Some(signed),
+                    two_state,
+                    true,
+                    false,
+                );
+                LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+                let retained = parameter.resolved_value_and_literal(&env, &types, &literals);
+                assert!(LITERAL_RESOLUTIONS.with(|calls| calls.get()) <= 1);
+                assert!(!(retained.0.is_some() && retained.1.is_some()));
+                assert_eq!(
+                    retained,
+                    separately_resolved_value_and_literal(&parameter, &env, &types, &literals),
+                    "{value:?}, stale={stale_self:?}, width={width}, two-state={two_state}"
+                );
+            }
+        }
+    }
+    let numeric = Parameter::new(
+        "P".into(),
+        Some(ConstExpr::Literal("7".into())),
+        Some(8),
+        Some(true),
+        false,
+        true,
+        false,
+    );
+    LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+    assert_eq!(
+        numeric.resolved_value_and_literal(&constants, &types, &literals),
+        (Some(7), None)
+    );
+    assert_eq!(LITERAL_RESOLUTIONS.with(|calls| calls.get()), 0);
+    let two_state = Parameter::new(
+        "P".into(),
+        Some(ConstExpr::Ident("X".into())),
+        Some(8),
+        Some(true),
+        true,
+        true,
+        false,
+    );
+    LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+    assert_eq!(
+        two_state.resolved_value_and_literal(&constants, &types, &literals),
+        (Some(-125), None)
+    );
+    assert_eq!(LITERAL_RESOLUTIONS.with(|calls| calls.get()), 1);
+}
+
+#[test]
+fn module_parameter_bindings_and_ir_resolve_each_unknown_literal_once() {
+    for count in [16, 64, 256] {
+        let mut code = String::from("module Top();\n");
+        for index in 0..count {
+            let value = if index == 0 {
+                "'x".into()
+            } else {
+                format!("P{}+1", index - 1)
+            };
+            writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
+        }
+        code.push_str("endmodule");
+        let tree = crate::syntax::parse_source(&code, Path::new("single_parameter_resolution.sv"))
+            .unwrap();
+        LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+        PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
+        let source = Source::from_syntax(&tree).unwrap();
+        let ir = crate::analyze::analyze_source(source).unwrap();
+        assert_eq!(
+            LITERAL_RESOLUTIONS.with(|calls| calls.get()),
+            PARAMETER_BINDINGS.with(|bindings| bindings.get()) + count
+        );
+        assert_eq!(ir.modules()[0].parameters().len(), count);
+        assert!(
+            ir.modules()[0]
+                .parameters()
+                .iter()
+                .all(|parameter| parameter.resolved_value().is_none()
+                    && parameter.resolved_width() == Some(32))
+        );
+    }
+}
+
+#[test]
+fn generate_bindings_keep_numeric_literals_and_unresolved_fallback_order() {
+    for (initializer, two_state, expected_value) in
+        [("X", false, 91), ("X", true, -125), ("missing", false, 91)]
+    {
+        let mut env = HashMap::from_iter([("P".into(), 91)]);
+        let mut types = HashMap::default();
+        let mut literals = HashMap::from_iter([("X".into(), Expr::Literal("8'b10xz0011".into()))]);
+        let parameter = Parameter::new(
+            "P".into(),
+            Some(ConstExpr::Ident(initializer.into())),
+            Some(8),
+            Some(true),
+            two_state,
+            true,
+            false,
+        );
+        LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+        constants::bind_generate_parameter_with_types(
+            parameter,
+            &mut env,
+            &mut literals,
+            &mut types,
+        );
+        assert_eq!(LITERAL_RESOLUTIONS.with(|calls| calls.get()), 1);
+        assert_eq!(env["P"], expected_value);
+        assert_eq!(
+            types["P"],
+            ExprType {
+                width: 8,
+                signed: true
+            }
+        );
+        let Expr::Literal(value) = &literals["P"] else {
+            panic!("bound literal must remain available")
+        };
+        let value = typecheck::parse_integral_literal(value).unwrap();
+        assert_eq!(value.width, 8);
+        assert!(value.signed);
+        if initializer == "X" && !two_state {
+            assert_ne!(value.mask, 0u8.into());
+        } else {
+            assert_eq!(value.mask, 0u8.into());
+        }
+    }
+}
+
+/// Replay the same unknown prefix with each resolver in one process. Parsing,
+/// declaration discovery, backend compilation and simulation are excluded.
+#[test]
+#[ignore = "manual parameter resolution scaling probe"]
+fn compare_retained_and_repeated_parameter_resolution() {
+    use std::time::Instant;
+
+    fn replay(parameters: &[Parameter], repeated: bool) {
+        let mut env = HashMap::default();
+        let mut types = HashMap::default();
+        let mut literals = HashMap::default();
+        for parameter in parameters {
+            let (value, literal) = if repeated {
+                separately_resolved_value_and_literal(parameter, &env, &types, &literals)
+            } else {
+                parameter.resolved_value_and_literal(&env, &types, &literals)
+            };
+            assert!(value.is_none());
+            let ty = parameter.resolved_type(&types).unwrap();
+            types.insert(parameter.name().to_string(), ty);
+            insert_parameter_type_markers(&mut env, parameter.name(), ty);
+            let Expr::Literal(literal) = literal.unwrap() else {
+                panic!("unknown literal must fold")
+            };
+            let bits = typecheck::parse_integral_literal(&literal).unwrap();
+            assert_eq!(bits.width, 32);
+            assert_eq!(bits.mask, u32::MAX.into());
+            literals.insert(parameter.name().to_string(), Expr::Literal(literal));
+        }
+        std::hint::black_box(literals);
+    }
+
+    println!("parameters,repeated_ms,retained_ms,repeated_calls,retained_calls");
+    for count in [32, 128, 512] {
+        let parameters: Vec<_> = (0..count)
+            .map(|index| {
+                let value = if index == 0 {
+                    ConstExpr::Literal("'x".into())
+                } else {
+                    ConstExpr::Binary {
+                        left: Box::new(ConstExpr::Ident(format!("P{}", index - 1))),
+                        op: BinaryOp::Add,
+                        right: Box::new(ConstExpr::Literal("1".into())),
+                    }
+                };
+                Parameter::new(
+                    format!("P{index}"),
+                    Some(value),
+                    Some(32),
+                    Some(false),
+                    false,
+                    true,
+                    true,
+                )
+            })
+            .collect();
+        let mut samples = [Vec::new(), Vec::new()];
+        let mut calls = [0, 0];
+        for sample in 0..7 {
+            // Alternate order to reduce systematic warm-up/load bias.
+            for index in [sample % 2, (sample + 1) % 2] {
+                LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
+                let start = Instant::now();
+                replay(&parameters, index == 0);
+                samples[index].push(start.elapsed().as_secs_f64() * 1000.0);
+                calls[index] = LITERAL_RESOLUTIONS.with(|calls| calls.get());
+                assert_eq!(calls[index], count * if index == 0 { 2 } else { 1 });
+            }
+        }
+        for sample in &mut samples {
+            sample.sort_by(f64::total_cmp);
+        }
+        println!(
+            "{count},{:.3},{:.3},{},{}",
+            samples[0][3], samples[1][3], calls[0], calls[1]
+        );
+    }
+}

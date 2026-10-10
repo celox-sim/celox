@@ -1095,16 +1095,27 @@ impl Parameter {
         Some(value)
     }
 
-    pub(crate) fn resolved_value_with_literals(
+    /// Resolve once, retaining a nonnumeric literal for the caller to publish.
+    /// Numeric results take precedence, including numbers recovered from a
+    /// literal after two-state conversion or dependency substitution.
+    pub(crate) fn resolved_value_and_literal(
         &self,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
-    ) -> Option<i128> {
-        self.resolved_value(constants, parameter_types).or_else(|| {
-            let literal = self.resolved_literal(constants, parameter_types, literals)?;
-            eval_ast_const_expr(&expr_to_const(literal)?, constants)
-        })
+    ) -> (Option<i128>, Option<Expr>) {
+        if let Some(value) = self.resolved_value(constants, parameter_types) {
+            return (Some(value), None);
+        }
+        let literal = self.resolved_literal(constants, parameter_types, literals);
+        let value = literal
+            .as_ref()
+            .and_then(|literal| eval_ast_const_expr(&expr_to_const(literal.clone())?, constants));
+        if value.is_some() {
+            (value, None)
+        } else {
+            (None, literal)
+        }
     }
 
     pub(crate) fn resolved_literal(
@@ -1113,6 +1124,8 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
+        #[cfg(test)]
+        parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
         // A previous elaboration pass may have left this declaration's numeric
         // value in the environment. Evaluate its initializer, not that value.
         let evaluation_constants = if constants.contains_key(self.name()) {
