@@ -1622,12 +1622,14 @@ fn evaluated_parameter_overrides(
         let Some(value) = parameter.value.as_ref() else {
             continue;
         };
-        sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "non-integer module parameter override `{}`",
-                parameter.name
-            ))
-        })?;
+        if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
+            sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "non-integer module parameter override `{}`",
+                    parameter.name
+                ))
+            })?;
+        }
         evaluated.insert(parameter.name.clone(), value.clone());
     }
     Ok(evaluated)

@@ -221,6 +221,29 @@ fn reject_silently_ignored_constructs_with_dimensions(
         })
         .collect();
     for child in validation_nodes(node.clone(), is_module) {
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && !procedural_queries.contains(&call)
+        {
+            parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
+        }
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && system_tf_call_parts(call, syntax_tree)
+                .is_some_and(|(name, _)| name == "$isunbounded")
+        {
+            let (name, args) = system_tf_call_parts(call, syntax_tree).unwrap();
+            system_functions::check_call(
+                name,
+                args.as_deref(),
+                system_functions::CallSite::Expression,
+            )?;
+            let value = parameters::isunbounded_call(call, syntax_tree, const_env)?;
+            if value.is_none() && !procedural_queries.contains(&call) {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                });
+            }
+        }
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
