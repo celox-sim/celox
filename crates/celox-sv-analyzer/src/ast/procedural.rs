@@ -1195,33 +1195,34 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let sv_parser::ProceduralAssertionStatement::Immediate(assertion) = assertion else {
             return Err(unsupported("concurrent assertion"));
         };
-        let (keyword, expr, action, is_cover) = match &**assertion {
+        let (keyword, expr, action) = match &**assertion {
             sv_parser::ImmediateAssertionStatement::Simple(assertion) => match &**assertion {
                 sv_parser::SimpleImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.1.nodes.1, None, true)
+                    return Ok(vec![Stmt::If {
+                        condition: procedural_truth_condition(self.expr(&stmt.nodes.1.nodes.1)?),
+                        then_body: self.statement_or_null(&stmt.nodes.2)?,
+                        else_body: Vec::new(),
+                    }]);
                 }
             },
             sv_parser::ImmediateAssertionStatement::Deferred(assertion) => match &**assertion {
                 sv_parser::DeferredImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
                 sv_parser::DeferredImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
-                sv_parser::DeferredImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.2.nodes.1, None, true)
+                sv_parser::DeferredImmediateAssertionStatement::Cover(_) => {
+                    return Err(unsupported("deferred immediate cover"));
                 }
             },
         };
-        if is_cover {
-            return Ok(Vec::new());
-        }
         let condition = procedural_truth_condition(self.expr(expr)?);
         let (pass, fail) = match action {
             Some(sv_parser::ActionBlock::StatementOrNull(stmt)) => {

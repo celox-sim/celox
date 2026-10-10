@@ -1,4 +1,6 @@
 sv_backends! {
+    fn wide_arithmetic_shift_preserves_unknown_sign(sim) { @case "operators::wide_arithmetic_shift_preserves_unknown_sign"; }
+
     fn partial_word_shift_sign_z_65(sim) { @case "operators::partial_word_shift_sign_z_65"; }
     fn partial_word_shift_sign_x_65(sim) { @case "operators::partial_word_shift_sign_x_65"; }
 

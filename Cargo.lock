@@ -645,6 +645,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
