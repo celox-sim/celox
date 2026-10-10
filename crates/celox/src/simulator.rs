@@ -610,6 +610,13 @@ mod host {
         pub(crate) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
+                    if self.comb_fatal_site(code).is_some() {
+                        return RuntimeErrorCode::Runtime {
+                            message: "Fatal assertion (runtime event record overwritten)"
+                                .to_string(),
+                            signals: Vec::new(),
+                        };
+                    }
                     let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {
                         return RuntimeErrorCode::DetectedTrueLoop;
                     };
@@ -803,7 +810,7 @@ mod host {
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
             if self.dirty {
-                self.eval_comb_for_runtime_event_drain();
+                self.eval_comb_for_runtime_event_drain().unwrap();
             }
             self.collect_formatted_runtime_events(ctx)
         }
@@ -817,45 +824,41 @@ mod host {
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
             if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
-                self.eval_comb_for_runtime_event_drain();
+                self.eval_comb_for_runtime_event_drain().unwrap();
             }
             self.collect_formatted_runtime_events(ctx)
         }
 
-        fn eval_comb_for_runtime_event_drain(&mut self) {
-            let (result, events) = self.eval_comb_capturing_events();
-            self.check_comb_backend_result(result, &events).unwrap();
+        fn eval_comb_for_runtime_event_drain(&mut self) -> Result<(), RuntimeErrorCode> {
+            let (result, _) = self.eval_comb_capturing_events();
+            self.check_comb_backend_result(result)?;
             self.dirty = false;
+            Ok(())
         }
 
         fn check_comb_backend_result(
             &self,
             result: Result<(), RuntimeErrorCode>,
-            events: &[RawRuntimeEvent],
         ) -> Result<(), RuntimeErrorCode> {
-            // Generated fatal captures return their event site ID as the error
-            // code. Compare that raw identity before decorating the error.
+            // The status itself identifies a fatal capture even when its
+            // record has been overwritten in the bounded event buffer.
             match result {
                 Err(RuntimeErrorCode::DetectedTrueLoopCode(code))
-                    if events.iter().any(|event| {
-                        let RawRuntimeEvent::Event { site_id, .. } = event else {
-                            return false;
-                        };
-                        *site_id as i64 == code
-                            && self
-                                .program
-                                .runtime_schema
-                                .runtime_event_sites
-                                .get(*site_id)
-                                .is_some_and(|site| {
-                                    matches!(site.kind, RuntimeEventKind::AssertFatal)
-                                })
-                    }) =>
+                    if self.comb_fatal_site(code).is_some() =>
                 {
                     Ok(())
                 }
                 other => other.map_err(|error| self.decorate_runtime_error(error)),
             }
+        }
+
+        fn comb_fatal_site(&self, code: i64) -> Option<&RuntimeEventSite> {
+            let site = self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .get(celox_runtime::comb_fatal_site(code)? as usize)?;
+            matches!(site.kind, RuntimeEventKind::AssertFatal).then_some(site)
         }
 
         fn collect_formatted_runtime_events(
@@ -1092,26 +1095,34 @@ mod host {
             f(&mut ctx);
             self.dirty = true;
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
-                self.eval_comb_checked()?;
-                self.dirty = false;
+                self.eval_comb_for_runtime_event_drain()?;
             }
             Ok(())
         }
 
         pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
-                self.eval_comb_checked().unwrap();
-                self.dirty = false;
+                self.eval_comb_for_runtime_event_drain().unwrap();
             }
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
             let (result, events) = self.eval_comb_capturing_events();
+            let fatal_status = matches!(
+                &result,
+                Err(RuntimeErrorCode::DetectedTrueLoopCode(code)) if self.comb_fatal_site(*code).is_some()
+            );
             // Check the original backend code before formatting fatal records:
             // another parallel lane may have reported a loop or internal error.
-            self.check_comb_backend_result(result, &events)?;
+            self.check_comb_backend_result(result)?;
             if let Some(error) = self.fatal_comb_capture_error(&events) {
                 return Err(error);
+            }
+            if fatal_status {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: "Fatal assertion (runtime event record overwritten)".to_string(),
+                    signals: Vec::new(),
+                });
             }
             Ok(())
         }
@@ -1853,15 +1864,17 @@ mod host {
             let (result, events) = sim.eval_comb_capturing_events();
             assert!(matches!(
                 result,
-                Err(RuntimeErrorCode::DetectedTrueLoopCode(1))
+                Err(RuntimeErrorCode::DetectedTrueLoopCode(-2))
             ));
-            assert!(sim.check_comb_backend_result(result, &events).is_ok());
+            assert!(sim.check_comb_backend_result(result).is_ok());
+            assert!(sim.fatal_comb_capture_error(&events).is_some());
 
             // These are the raw outcomes another parallel lane can report while
             // the fatal assertion's record is present in the shared buffer.
             for error in [
                 RuntimeErrorCode::InternalError,
                 RuntimeErrorCode::DetectedTrueLoop,
+                RuntimeErrorCode::DetectedTrueLoopCode(1),
                 RuntimeErrorCode::DetectedTrueLoopCode(2000),
                 RuntimeErrorCode::Runtime {
                     message: "fatal".to_string(),
@@ -1869,24 +1882,90 @@ mod host {
                 },
             ] {
                 let expected = sim.decorate_runtime_error(error.clone());
-                assert_eq!(
-                    sim.check_comb_backend_result(Err(error), &events),
-                    Err(expected)
+                assert_eq!(sim.check_comb_backend_result(Err(error)), Err(expected));
+            }
+            // A fatal status remains identifiable after losing its record.
+            assert!(
+                sim.check_comb_backend_result(Err(RuntimeErrorCode::DetectedTrueLoopCode(
+                    celox_runtime::comb_fatal_code(1)
+                )),)
+                    .is_ok()
+            );
+            // A display site, missing site, or internal failure is not fatal.
+            for code in [
+                celox_runtime::comb_fatal_code(0),
+                celox_runtime::comb_fatal_code(99),
+                i64::MIN,
+            ] {
+                assert!(
+                    sim.check_comb_backend_result(Err(RuntimeErrorCode::DetectedTrueLoopCode(
+                        code
+                    )),)
+                        .is_err()
                 );
             }
-            // A matching code alone is insufficient without a newly emitted
-            // fatal record, and a display site is never a fatal error.
-            assert!(
-                sim.check_comb_backend_result(Err(RuntimeErrorCode::DetectedTrueLoopCode(1)), &[],)
-                    .is_err()
+        }
+
+        #[test]
+        fn comb_fatal_status_survives_overwritten_event_records() {
+            use celox_state_layout::{
+                RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+                RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET,
+            };
+            let mut sim = Simulator::builder(
+                r#"module Top {
+                    always_comb {
+                        $display("before");
+                        $assert(1'd0, "fatal");
+                    }
+                }"#,
+                "Top",
+            )
+            .build_interpreter()
+            .unwrap();
+            let (result, _) = sim.eval_comb_capturing_events();
+            let buffer = sim.backend.runtime_event_buffer().unwrap();
+            let layout = sim.backend.layout();
+            let start = sim.runtime_event_write_seq();
+            // Model the other lanes that finish publishing display records
+            // after the fatal lane has returned. The simulator is idle here.
+            for seq in start..start + layout.runtime_event_capacity as u64 {
+                let slot = seq as usize & (layout.runtime_event_capacity - 1);
+                let base = RUNTIME_EVENT_HEADER_SIZE + slot * layout.runtime_event_slot_size;
+                unsafe {
+                    let ptr = buffer.as_mut_ptr();
+                    ptr.add(base + RUNTIME_EVENT_SLOT_SITE_OFFSET)
+                        .cast::<u64>()
+                        .write(0);
+                    ptr.add(base + RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET)
+                        .cast::<u64>()
+                        .write(0);
+                    (*ptr
+                        .add(base + RUNTIME_EVENT_SLOT_SEQ_OFFSET)
+                        .cast::<AtomicU64>())
+                    .store(seq, Ordering::Release);
+                    (*ptr.cast::<AtomicU64>()).store(seq + 1, Ordering::Release);
+                }
+            }
+            let events = sim.peek_backend_runtime_events_from(0);
+            assert!(matches!(
+                events.first(),
+                Some(RawRuntimeEvent::Missed { count: 2 })
+            ));
+            assert!(sim.fatal_comb_capture_error(&events).is_none());
+            assert!(sim.check_comb_backend_result(result.clone()).is_ok());
+            assert!(matches!(sim.decorate_runtime_error(result.unwrap_err()),
+                RuntimeErrorCode::Runtime { message, .. } if message.contains("overwritten")));
+            let drained = sim.drain_runtime_events();
+            assert!(matches!(
+                drained.first(),
+                Some(RuntimeEvent::Missed { count: 2 })
+            ));
+            assert_eq!(
+                drained.len(),
+                1 + sim.backend.layout().runtime_event_capacity
             );
-            assert!(
-                sim.check_comb_backend_result(
-                    Err(RuntimeErrorCode::DetectedTrueLoopCode(0)),
-                    &events,
-                )
-                .is_err()
-            );
+            assert!(sim.drain_runtime_events().is_empty());
         }
     }
 }

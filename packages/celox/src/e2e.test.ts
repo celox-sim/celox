@@ -548,6 +548,25 @@ describe("E2E: Simulator.fromSource (event-based)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: Simulation.fromSource (time-based)", () => {
+	test("lazy evaluation reports a fatal assertion after two display sites", () => {
+		const sim = Simulation.fromSource<{ a: bigint; readonly y: bigint }>(
+			`module Top (a: input logic<8>, y: output logic<8>) {
+    always_comb {
+        y = a;
+        $display("first");
+        $display("second");
+        $assert(a != 8'd1, "site two fatal");
+    }
+}`,
+			"Top",
+		);
+		try {
+			sim.dut.a = 1n;
+			expect(() => sim.dut.y).toThrow("site two fatal");
+		} finally {
+			sim.dispose();
+		}
+	});
 	test("counter with timed clock: step-by-step", () => {
 		interface CounterPorts {
 			rst: bigint;
