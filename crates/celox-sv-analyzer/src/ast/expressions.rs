@@ -592,6 +592,16 @@ fn expr_from_system_function_call(
         )
         .map(|count| Expr::Literal(count.to_string()))
         .ok_or_else(operand_error),
+        "$left" | "$right" | "$low" | "$high" | "$increment" | "$dimensions" => {
+            dimensions::array_query_call(
+                call,
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+                Some(packed_dimensions),
+            )
+            .ok_or_else(operand_error)
+        }
         // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
         "$bits" | "$size" => dimensions::size_system_function_call_type(
             call,

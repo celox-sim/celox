@@ -2722,6 +2722,11 @@ pub(super) fn lower_instruction(
                 )
             {
                 let l_m = ctx.get_mask(*lhs, block);
+                let l_m = if matches!(op, BinaryOp::Sar) {
+                    sign_extend_scalar(ctx, block, l_m, ctx.sir_width(lhs))
+                } else {
+                    l_m
+                };
                 let r_m = ctx.get_mask(*rhs, block);
                 let res_m =
                     lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);

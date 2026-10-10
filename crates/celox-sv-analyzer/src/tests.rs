@@ -2567,33 +2567,40 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
 }
 
 #[test]
-fn rejects_package_variables_and_nets() {
-    // A package variable is one object shared by every module, but inlining
-    // would give each module its own copy.
-    for (code, construct) in [
-        (
-            "package p; logic [7:0] shared; endpackage",
-            "package variable or net `p::shared`",
-        ),
-        (
-            "package p; var int count = 0; endpackage",
-            "package variable or net `p::count`",
-        ),
-        (
-            "package p; wire w; endpackage",
-            "package variable or net `p::w`",
-        ),
-    ] {
-        let error = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap_err();
-        assert_eq!(error, AnalyzerError::Unsupported(construct.to_string()));
-        assert_eq!(error.tracking_issue(), 1146);
-    }
-    // Constants, and the variables of package functions, are not shared state.
-    let code = "package p; const int K = 3; localparam int W = 4;\n\
-                function automatic int f(int x); int t; t = x + K; return t; endfunction\n\
-                endpackage";
+fn analyzes_package_variables_into_a_state_module() {
+    // A package variable is one object: the package's state module holds it,
+    // and a module's signal for it names that variable.
+    let code = "package p; logic [7:0] shared = 8'd3; const int K = 3; endpackage\n\
+                module Top(output logic [7:0] y); import p::*; assign y = shared + p::shared; endmodule";
     let packages = analyze_packages(&[(code, Path::new("state.sv"))]).unwrap();
-    assert_eq!(packages.names().collect::<Vec<_>>(), ["p"]);
+    let states = packages.state_modules().collect::<Vec<_>>();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].name(), "p");
+    assert!(
+        states[0]
+            .signals()
+            .iter()
+            .any(|signal| signal.name() == "shared")
+    );
+    let ir = analyze_source(code, Path::new("state.sv")).unwrap();
+    let mut bound = ir.modules()[0]
+        .signals()
+        .iter()
+        .filter_map(|signal| Some((signal.name(), signal.package_variable()?)))
+        .collect::<Vec<_>>();
+    bound.sort();
+    assert_eq!(
+        bound,
+        [("p::shared", ("p", "shared")), ("shared", ("p", "shared"))]
+    );
+    // Package nets are not supported yet.
+    let error =
+        analyze_packages(&[("package p; wire w; endpackage", Path::new("net.sv"))]).unwrap_err();
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported("package net `p::w`".to_string())
+    );
+    assert_eq!(error.tracking_issue(), 1146);
 }
 
 #[test]
