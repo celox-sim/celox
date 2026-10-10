@@ -347,29 +347,317 @@ fn unknown_packages_and_items_are_errors() {
     assert!(detail.contains("unknown package `q`"), "{detail}");
 }
 
-/// A package variable is one object shared by every module. Until it can be
-/// shared, it is rejected (#1146).
+/// A package variable is one object shared by every module (IEEE 1800-2023
+/// 26.2): what one module writes, the others read.
 #[test]
-fn rejects_variables_shared_through_a_package() {
-    let source = r#"
-        package p; logic [7:0] shared; endpackage
-        module W(input logic [7:0] a); assign p::shared = a; endmodule
-        module Top(output logic [7:0] y);
-            W w(.a(8'd9));
-            assign y = p::shared;
-        endmodule
-    "#;
-    let err = Simulator::from_sv_sources(vec![(source, std::path::Path::new("p.sv"))], "Top")
-        .build()
-        .expect_err("a package variable must be rejected");
-    match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            issue: 1146,
-            detail,
-            ..
-        }) => {
-            assert!(detail.contains("`p::shared`"), "{detail}")
-        }
-        other => panic!("expected the package variable to be unsupported, got: {other:?}"),
+fn modules_share_package_variables() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared; endpackage
+             module W(input logic [7:0] a); import p::*; always_comb shared = a + 8'd1; endmodule
+             module R(output logic [7:0] b); assign b = p::shared; endmodule
+             module Top(output logic [7:0] y); import p::shared; W w(.a(8'd9)); R r(.b(y)); endmodule"
+        ),
+        10
+    );
+}
+
+#[test]
+fn package_variables_hold_state_across_clocks() {
+    let source = "package p; logic [7:0] count = 8'd5; endpackage
+        module Counter(input logic clk); always_ff @(posedge clk) p::count <= p::count + 8'd1; endmodule
+        module Pass(input logic [7:0] a, output logic [7:0] b); assign b = a; endmodule
+        module Top(input logic clk, output logic [7:0] y, output logic [7:0] z);
+          Counter c(.clk(clk));
+          assign y = p::count;
+          Pass q(.a(p::count), .b(z));
+        endmodule";
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("count.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let clk = simulator.event("clk");
+    for _ in 0..3 {
+        simulator.tick(clk).unwrap();
     }
+    let (y, z, count) = (
+        simulator.signal("y"),
+        simulator.signal("z"),
+        simulator.signal("p::count"),
+    );
+    assert_eq!(simulator.get(y), 8u8.into());
+    assert_eq!(simulator.get(z), 8u8.into());
+    assert_eq!(simulator.get(count), 8u8.into());
+}
+
+#[test]
+fn package_variables_take_their_initializers() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared = 8'd42; endpackage
+             module Top(output logic [7:0] y); assign y = p::shared; endmodule"
+        ),
+        42
+    );
+}
+
+#[test]
+fn rejects_package_variables_with_several_drivers() {
+    // Two instances of one module are two drivers.
+    let error = Simulator::from_sv_sources(
+        vec![(
+            "package p; logic [7:0] shared; endpackage
+             module W(input logic [7:0] a); assign p::shared = a; endmodule
+             module Top(output logic [7:0] y);
+               W w1(.a(8'd1)); W w2(.a(8'd2));
+               assign y = p::shared;
+             endmodule",
+            std::path::Path::new("drivers.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("two drivers of a package variable");
+    match error.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { detail, .. }) => assert!(
+            detail.contains("multiple drivers of package variable `p::shared`"),
+            "{detail}"
+        ),
+        other => panic!("expected multiple drivers, got {other:?}"),
+    }
+}
+
+#[test]
+fn package_variables_are_shared_with_veryl_designs() {
+    let sv = "package p; logic [7:0] shared; endpackage
+        module W(input logic [7:0] a); assign p::shared = a; endmodule
+        module R(output logic [7:0] b); assign b = p::shared; endmodule";
+    let veryl = r#"
+module Top (
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w: $sv::W (a);
+    inst r: $sv::R (b: y);
+}
+"#;
+    let mut simulator = Simulator::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("shared.sv"))])
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let y = simulator.signal("y");
+    assert_eq!(simulator.get(y), 7u8.into());
+}
+
+#[test]
+fn package_variables_cannot_be_clocks_yet() {
+    let error = Simulator::from_sv_sources(
+        vec![(
+            "package p; logic clk; endpackage
+             module Top(input logic c, output logic [7:0] y);
+               assign p::clk = c;
+               always_ff @(posedge p::clk) y <= y + 8'd1;
+             endmodule",
+            std::path::Path::new("clock.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("a package variable used as a clock");
+    assert!(
+        error
+            .to_string()
+            .contains("package variable `p::clk` used as a clock or reset"),
+        "{error}"
+    );
+}
+
+#[test]
+fn package_variables_take_typedefs_slices_and_several_assignments() {
+    // One process may assign a package variable several times; modules may
+    // drive disjoint slices of one; and its type may be a typedef.
+    assert_eq!(
+        output(
+            "package p; typedef logic [7:0] word_t; word_t shared; endpackage
+             module Low(input logic a);
+               always_comb begin p::shared[3:0] = 4'd1; if (a) p::shared[3:0] = 4'd2; end
+             endmodule
+             module High; assign p::shared[7:4] = 4'd3; endmodule
+             module Top(output logic [7:0] y);
+               Low l(.a(1'b1)); High h();
+               assign y = p::shared;
+             endmodule"
+        ),
+        0x32
+    );
+}
+
+#[test]
+fn escaped_package_variables_are_found_by_name() {
+    let source = "package p; logic [7:0] \\v::w  = 8'd5; endpackage
+        module Top(output logic [7:0] y); assign y = p::\\v::w ; endmodule";
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("escaped.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    // The escaped name keeps its backslash.
+    let variable = simulator.signal("p::\\v::w");
+    assert_eq!(simulator.get(variable), 5u8.into());
+}
+
+#[test]
+fn veryl_instances_of_one_writer_are_several_drivers() {
+    let sv = "package p; logic [7:0] shared; endpackage
+        module W(input logic clk, input logic [7:0] a); always_ff @(posedge clk) p::shared <= a; endmodule";
+    let veryl = r#"
+module Top (
+    clk: input clock,
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w1: $sv::W (clk, a);
+    inst w2: $sv::W (clk, a);
+    assign y = a;
+}
+"#;
+    let error = Simulator::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("writers.sv"))])
+        .build()
+        .expect_err("two instances writing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn initial_blocks_write_package_variables_after_their_initializers() {
+    let source = "package p; logic [7:0] shared = 8'd1; logic [7:0] other; endpackage
+        module Top(output logic [7:0] y, output logic [7:0] z);
+          initial begin p::shared = 8'd42; p::other = 8'd7; end
+          assign y = p::shared;
+          assign z = p::other;
+        endmodule";
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("initial.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let (y, z) = (simulator.signal("y"), simulator.signal("z"));
+    assert_eq!(simulator.get(y), 42u8.into());
+    assert_eq!(simulator.get(z), 7u8.into());
+    // Diagnostics name the package variable as written.
+    let address = simulator.program().get_addr(&[], &["p::shared"]).unwrap();
+    assert_eq!(simulator.program().get_path(&address), "p::shared");
+}
+
+#[test]
+fn package_structure_members_are_written_through_the_package_scope() {
+    assert_eq!(
+        output(
+            "package p;
+               typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+               pair_t shared;
+             endpackage
+             module Top(output logic [7:0] y);
+               always_comb begin p::shared.hi = 4'd1; p::shared.lo = 4'd2; end
+               assign y = p::shared;
+             endmodule"
+        ),
+        0x12
+    );
+}
+
+#[test]
+fn rejects_unsupported_package_state() {
+    for (source, expected) in [
+        (
+            "package p; nettype logic nt; nt shared; endpackage
+             module Top(output logic [7:0] y); assign y = 0; endmodule",
+            "package net `p::shared`",
+        ),
+        (
+            "package p; logic [7:0] a = 8'd1; endpackage
+             package q; logic [7:0] b = p::a; endpackage
+             module Top(output logic [7:0] y); assign y = q::b; endmodule",
+            "package variable initializer that is not constant in package `q`",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("state.sv"))], "Top")
+                .build()
+                .expect_err(expected);
+        assert!(format!("{error:?}").contains(expected), "{error:?}");
+    }
+}
+
+#[test]
+fn veryl_instances_of_one_initializer_are_several_drivers() {
+    let sv = "package p; logic [7:0] shared; endpackage
+        module W(input logic [7:0] a); initial p::shared = 8'd1; endmodule";
+    let veryl = r#"
+module Top (
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst w1: $sv::W (a);
+    inst w2: $sv::W (a);
+    assign y = a;
+}
+"#;
+    let error = Simulator::builder(veryl, "Top")
+        .with_sv_sources(vec![(sv, std::path::Path::new("initial.sv"))])
+        .build()
+        .expect_err("two instances initializing one package variable");
+    assert!(
+        format!("{error:?}").contains("multiple drivers of package variable `p::shared`"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn package_writers_may_initialize_disjoint_slices() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared; endpackage
+             module Low; initial p::shared[3:0] = 4'd1; endmodule
+             module High; initial p::shared[7:4] = 4'd2; endmodule
+             module Top(output logic [7:0] y); Low l(); High h(); assign y = p::shared; endmodule"
+        ),
+        0x21
+    );
+}
+
+#[test]
+fn a_self_qualified_package_variable_keeps_one_driver() {
+    // The package names its own variable, so its state module binds an alias
+    // of it; its initializer is still not a driver.
+    assert_eq!(
+        output(
+            "package p;
+               logic [7:0] shared = 8'd1;
+               function automatic logic [7:0] get(); return p::shared; endfunction
+             endpackage
+             module Top(output logic [7:0] y);
+               assign p::shared = 8'd9;
+               assign y = p::get();
+             endmodule"
+        ),
+        9
+    );
+}
+
+#[test]
+fn instance_paths_ending_in_scope_separators_keep_their_dot() {
+    let source = "module C(output logic [7:0] y); assign y = 8'd4; endmodule
+        module Top(output logic [7:0] y); C \\u:: (.y(y)); endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("escaped.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let program = simulator.program();
+    let address = program.get_addr(&[("\\u::", 0)], &["y"]).unwrap();
+    assert_eq!(program.get_path(&address), "\\u::.y");
 }

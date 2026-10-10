@@ -601,6 +601,7 @@ impl Module {
         // The array parameters of the packages the module uses are constant
         // signals of the module, like its own.
         signals.extend(imported.signals.iter().cloned());
+        signals.extend(imported.state_signals.iter().cloned());
         for r#type in ports
             .iter()
             .map(Port::r#type)
@@ -922,6 +923,7 @@ impl Module {
             // A package's signals are its array parameters and constant
             // variables, initialized by its initial processes.
             signals: signals.clone(),
+            state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
         });
@@ -1169,6 +1171,8 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    /// The package variable the signal denotes, as `(package, variable)`.
+    package_variable: Option<(String, String)>,
 }
 
 impl Signal {
@@ -1177,6 +1181,7 @@ impl Signal {
             name,
             r#type,
             is_net: false,
+            package_variable: None,
         }
     }
 
@@ -1185,7 +1190,16 @@ impl Signal {
             name,
             r#type,
             is_net: true,
+            package_variable: None,
         }
+    }
+
+    /// The package variable (IEEE 1800-2023 26.2) the signal denotes, as
+    /// `(package, variable)`: every module that uses it shares that object.
+    pub fn package_variable(&self) -> Option<(&str, &str)> {
+        self.package_variable
+            .as_ref()
+            .map(|(package, variable)| (package.as_str(), variable.as_str()))
     }
 
     pub fn name(&self) -> &str {

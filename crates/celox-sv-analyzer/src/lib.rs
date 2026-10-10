@@ -39,7 +39,7 @@ pub enum AnalyzerError {
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
     /// A memory file read by `$readmemh` or `$readmemb` is missing or invalid.
-    #[error("Invalid $readmemh input: {0}")]
+    #[error("Invalid memory file input: {0}")]
     MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
@@ -145,7 +145,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
     ("mixed reset-edge polarities for one signal", 471),
-    ("package variable or net", 1146),
+    ("package net", 1146),
 ];
 
 impl AnalyzerError {

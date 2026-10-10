@@ -252,37 +252,31 @@ impl<'a> ProcModule<'a> {
         let finish = finish.unwrap_or(high);
         if start < low || start > high || finish < low || finish > high {
             return Err(sv::AnalyzerError::MemoryFile(format!(
-                "address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
+                "{name}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
             )));
         }
-        let (Ok(first_index), Ok(end)) = (
-            usize::try_from(start),
-            usize::try_from(start.max(finish) + 1),
-        ) else {
-            return Err(unsupported(format!(
-                "`{name}` destination with negative indices"
-            )));
-        };
         let content = std::fs::read_to_string(unescape(filename)).map_err(|error| {
-            sv::AnalyzerError::MemoryFile(format!("failed to read {filename}: {error}"))
+            sv::AnalyzerError::MemoryFile(format!("{name}: failed to read {filename}: {error}"))
         })?;
-        // Words load from the start address; address directives are offsets
-        // from it.
-        let writes = celox_frontend_core::memory_file::parse_memory_write_runs(
+        let parsed = celox_frontend_core::memory_file::parse_memory_range(
             &content,
             radix,
             element_width,
-            first_index,
-            end,
+            start,
+            finish,
         )
-        .map_err(|error| sv::AnalyzerError::MemoryFile(error.message))?;
+        .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
+        if let Some(warning) = parsed.warning {
+            tracing::warn!(task = name, file = filename, "{warning}");
+        }
+        let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
         for run in writes.runs {
             let value = BigUint::from_bytes_le(&run.value_bytes);
             let mask = BigUint::from_bytes_le(&run.mask_bytes);
             for k in 0..run.bit_width / element_width {
-                let index = (run.bit_offset / element_width + k) as i128;
+                let index = start.min(finish) + (run.bit_offset / element_width + k) as i128;
                 let position = usize::try_from(index.abs_diff(left)).unwrap_or(usize::MAX);
                 let shift = k * element_width;
                 let mut word_value = (&value >> shift) & &word_mask;
@@ -636,7 +630,7 @@ pub(super) enum SystemTaskKind {
     /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
     /// variants (`d` otherwise).
     Print(RuntimeEventKind, char),
-    /// `$finish` and `$stop`.
+    /// `$finish`.
     Finish,
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
     Message,
@@ -652,7 +646,7 @@ pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
         "$write" | "$writeb" | "$writeh" | "$writeo" => {
             SystemTaskKind::Print(RuntimeEventKind::Write, print_radix(name))
         }
-        "$finish" | "$stop" => SystemTaskKind::Finish,
+        "$finish" => SystemTaskKind::Finish,
         "$error" | "$warning" | "$info" => SystemTaskKind::Message,
         "$fatal" => SystemTaskKind::Fatal,
         _ => return None,

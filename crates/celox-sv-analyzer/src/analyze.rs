@@ -89,6 +89,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     ir::Type::from_ast(signal.r#type().clone(), &constants),
                     signal.is_net(),
                 )
+                .with_package_variable(signal.package_variable())
             })
             .collect();
         let instances = module

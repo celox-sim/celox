@@ -97,44 +97,24 @@ pub fn expression_signed(expr: &Expression) -> bool {
 pub fn factor_signed(factor: &Factor) -> bool {
     match factor {
         Factor::SystemFunctionCall(call) => match call.kind {
-            // IEEE 1800-2023 20.6.2 and 20.7: $bits/$size return signed integers.
-            // Veryl's AIR currently marks these results unsigned.
-            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => true,
             SystemFunctionKind::Signed(_) => true,
             SystemFunctionKind::Unsigned(_) => false,
             _ => call.comptime.r#type.signed,
         },
-        // Constant folding resets expr_context and can leave the copied type
-        // describing the pre-selection base. The evaluated Value is the only
-        // remaining unsigned-select fact in that AIR shape. Cases where
-        // folding also erases a type-cast boundary are an upstream AIR loss,
-        // This compensates for analyzer metadata that does not retain the
-        // operation-specific signedness required by simulator lowering.
-        Factor::Value(comptime) => comptime
-            .get_value()
-            .map(|value| value.signed())
-            .unwrap_or(comptime.expr_context.signed),
+        Factor::Value(comptime) => comptime.r#type.signed,
         // VarSelect is a packed bit/part selection. Its value is unsigned;
         // VarIndex has already been split out and does not change signedness.
         // The declaration type retains intrinsic signedness even when the
         // analyzer propagates an unsigned sibling into expr_context.
+        // A packed struct member is a select of its containing variable whose
+        // `member_signed` keeps the member's sign; an explicit bit/part-select
+        // leaves it unset.
         Factor::Variable(_, _, select, comptime) => {
             if select.is_empty() {
-                return comptime.r#type.signed;
+                comptime.r#type.signed
+            } else {
+                comptime.member_signed.unwrap_or(false)
             }
-            // Veryl 0.21 rebases a packed member to a select of its containing
-            // struct, overwriting the member type. The member path still
-            // retains that type. An explicit bit/part-select ends at `]`,
-            // whereas a whole member access ends at the member identifier.
-            // This distinction also preserves unsigned full-width selects.
-            comptime.part_select.as_ref().is_some_and(|path| {
-                path.path.0.last() == Some(&comptime.token.end.text)
-                    && path.part_select.last().is_some_and(|member| {
-                        let mut ty = member.r#type.clone();
-                        ty.flatten_struct_union_enum();
-                        ty.signed
-                    })
-            })
         }
         Factor::HierVariable(reference) => {
             reference.select.is_empty() && reference.comptime.r#type.signed

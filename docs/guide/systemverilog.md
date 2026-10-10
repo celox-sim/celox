@@ -57,8 +57,8 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
-| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -211,10 +211,14 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
-  Package variables and nets are rejected until they can be shared between
-  modules ([#1146](https://github.com/celox-sim/celox/issues/1146)); `const`
-  variables are accepted. Package `export` declarations and compilation-unit (`$unit`) declarations
-  are not supported.
+  A package variable is one object shared by every module that uses it,
+  including SystemVerilog modules instantiated from Veryl, and keeps its
+  initializer. `sim.signal("p::v")` names it. Several drivers of one package
+  variable are rejected, counting every instance of a module that writes it.
+  A package variable cannot be a clock or reset yet, and its initializer must
+  be constant. Package nets,
+  `export` declarations and compilation-unit (`$unit`) declarations are not
+  supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An
@@ -232,11 +236,19 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **System functions called as statements**, such as `$countones(f(a));`, are
   checked and evaluated like the same call in an expression, and their value
   is discarded. `$bits` and `$size` do not evaluate their operand.
+- **Simulation suspension** (`$stop`) is rejected explicitly. The host API does
+  not provide suspended-process continuation; `$finish` remains supported.
+- **Immediate cover** executes its pass statement when the condition is true.
+  Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
+  is rejected because its scheduling is not modeled.
 - **Constant functions** ignore the display and severity tasks they call.
 - **`$readmemh` / `$readmemb`** read their file when the design is compiled. A
   missing or malformed file is a `MemoryFile` error. In `always_ff` the file's
   words are written on every activation; in `initial` they are part of the
-  initial state.
+  initial state. Explicit ranges load in either direction, and `@` file addresses
+  are absolute array indices. An address directive outside the requested range
+  is an error. Without directives, a word-count mismatch emits a warning:
+  excess words are ignored, and missing words leave memory unchanged.
 - **Constant parameters of aggregate type** (unpacked arrays, packed structs
   given by a pattern) are variables that hold their value from the start of
   the simulation; they cannot be used where an elaboration-time constant is

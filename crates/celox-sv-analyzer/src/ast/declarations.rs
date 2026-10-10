@@ -282,7 +282,7 @@ fn parameters_from_parameter_port_list(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment,
+    environment: &mut parameters::ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
     match list {
         sv_parser::ParameterPortList::Assignment(list) => {
@@ -333,7 +333,7 @@ fn parameters_from_parameter_port_declaration(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment,
+    environment: &mut parameters::ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
     let is_local = matches!(
         declaration,
@@ -374,6 +374,20 @@ pub(super) fn signals_from_module_node(
             )) => {
                 signals.extend(signals_from_data_declaration(
                     data,
+                    syntax_tree,
+                    type_aliases,
+                    &item.env,
+                    None,
+                )?);
+                continue;
+            }
+            // `word_t v;` with a typedef `word_t` parses as a net declaration
+            // of a net type; real package nets are rejected with the package.
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(
+                net,
+            )) => {
+                signals.extend(signals_from_net_declaration(
+                    net,
                     syntax_tree,
                     type_aliases,
                     &item.env,

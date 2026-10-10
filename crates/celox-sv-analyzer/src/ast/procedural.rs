@@ -1322,33 +1322,34 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let sv_parser::ProceduralAssertionStatement::Immediate(assertion) = assertion else {
             return Err(unsupported("concurrent assertion"));
         };
-        let (keyword, expr, action, is_cover) = match &**assertion {
+        let (keyword, expr, action) = match &**assertion {
             sv_parser::ImmediateAssertionStatement::Simple(assertion) => match &**assertion {
                 sv_parser::SimpleImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.1.nodes.1, None, true)
+                    return Ok(vec![Stmt::If {
+                        condition: procedural_truth_condition(self.expr(&stmt.nodes.1.nodes.1)?),
+                        then_body: self.statement_or_null(&stmt.nodes.2)?,
+                        else_body: Vec::new(),
+                    }]);
                 }
             },
             sv_parser::ImmediateAssertionStatement::Deferred(assertion) => match &**assertion {
                 sv_parser::DeferredImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
                 sv_parser::DeferredImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
-                sv_parser::DeferredImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.2.nodes.1, None, true)
+                sv_parser::DeferredImmediateAssertionStatement::Cover(_) => {
+                    return Err(unsupported("deferred immediate cover"));
                 }
             },
         };
-        if is_cover {
-            return Ok(Vec::new());
-        }
         let condition = procedural_truth_condition(self.expr(expr)?);
         let (pass, fail) = match action {
             Some(sv_parser::ActionBlock::StatementOrNull(stmt)) => {
@@ -1736,12 +1737,12 @@ pub(super) fn subroutines_from_module_node_with(
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
     let default_automatic = module_default_automatic(node.clone());
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => {
@@ -1755,6 +1756,7 @@ pub(super) fn subroutines_from_module_node_with(
             let Some(syntax) = syntax else {
                 continue;
             };
+            let (item_dimensions, literals) = views.get(item);
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
@@ -1782,7 +1784,7 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 let mut builder = BodyBuilder::new(
                     tree,
-                    &item_dimensions,
+                    item_dimensions,
                     state,
                     system_functions::Body::Subroutine,
                 );
@@ -1834,8 +1836,8 @@ pub(super) fn subroutines_from_module_node_with(
                     body,
                 };
                 for stmt in &mut subroutine.body {
-                    qualify_stmt(&item, stmt);
-                    substitute_stmt_constants(stmt, &item.env, &literals);
+                    qualify_stmt(item, stmt);
+                    substitute_stmt_constants(stmt, &item.env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {
@@ -1843,7 +1845,7 @@ pub(super) fn subroutines_from_module_node_with(
                         *default = substitute_expr_constants_with_parameter_literals(
                             default.clone(),
                             &item.env,
-                            &literals,
+                            literals,
                         );
                     }
                 }
@@ -1920,16 +1922,20 @@ pub(super) fn initial_processes_from_module_node(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
             item.node.declaration()
             && let sv_parser::DataDeclaration::Variable(variable) = &**data
         {
+            if !variable.nodes.4.nodes.0.contents().into_iter().any(|assignment| matches!(assignment, sv_parser::VariableDeclAssignment::Variable(assignment) if assignment.nodes.2.is_some())) {
+                continue;
+            }
+            let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
             for assignment in variable.nodes.4.nodes.0.contents() {
                 let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
@@ -1940,17 +1946,17 @@ pub(super) fn initial_processes_from_module_node(
                 };
                 let name = identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), tree)
                     .ok_or_else(|| unsupported("variable declaration initializer"))?;
-                if let Some(target) = selected_unpacked_shape(&name, 0, &item_dimensions) {
+                if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     check_unpacked_array_assignment(
                         expr,
                         &target,
                         || format!("initializer of `{name}`"),
                         tree,
-                        &item_dimensions,
+                        item_dimensions,
                     )?;
                 }
                 let lhs = LValue::Ident(name);
-                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, &item_dimensions)?;
+                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, item_dimensions)?;
                 body.push(Stmt::Assign {
                     lhs,
                     rhs,
@@ -1958,8 +1964,8 @@ pub(super) fn initial_processes_from_module_node(
                 });
             }
             for stmt in &mut body {
-                substitute_stmt_constants(stmt, &item.env, &literals);
-                qualify_stmt(&item, stmt);
+                substitute_stmt_constants(stmt, &item.env, literals);
+                qualify_stmt(item, stmt);
                 substitute_stmt_constants(stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
@@ -1975,11 +1981,12 @@ pub(super) fn initial_processes_from_module_node(
         else {
             continue;
         };
+        let (item_dimensions, literals) = views.get(item);
         let mut body = match &module_item.nodes.1 {
             sv_parser::ModuleCommonItem::InitialConstruct(initial) => {
                 let mut builder = BodyBuilder::new(
                     tree,
-                    &item_dimensions,
+                    item_dimensions,
                     state,
                     system_functions::Body::Initial,
                 );
@@ -1990,12 +1997,8 @@ pub(super) fn initial_processes_from_module_node(
             sv_parser::ModuleCommonItem::AlwaysConstruct(always)
                 if always_kind(always, tree) == AlwaysKind::Process =>
             {
-                let mut builder = BodyBuilder::new(
-                    tree,
-                    &item_dimensions,
-                    state,
-                    system_functions::Body::Always,
-                );
+                let mut builder =
+                    BodyBuilder::new(tree, item_dimensions, state, system_functions::Body::Always);
                 vec![Stmt::Loop {
                     kind: LoopKind::Forever,
                     init: Vec::new(),
@@ -2007,8 +2010,8 @@ pub(super) fn initial_processes_from_module_node(
             _ => continue,
         };
         for stmt in &mut body {
-            substitute_stmt_constants(stmt, &item.env, &literals);
-            qualify_stmt(&item, stmt);
+            substitute_stmt_constants(stmt, &item.env, literals);
+            qualify_stmt(item, stmt);
             substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
