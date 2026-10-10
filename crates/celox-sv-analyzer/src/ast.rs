@@ -96,8 +96,9 @@ use dimensions::{
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
     parameter_signed_element_marker, parameter_signed_marker, parameter_type_from_const_env,
     parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
-    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
-    variable_size_function_width, variable_size_marker, variable_unpacked_dimensions_marker,
+    unpacked_dimension_widths, variable_bits_marker, variable_dimensions_marker,
+    variable_signed_marker, variable_size_function_width, variable_size_marker,
+    variable_unpacked_dimensions_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,

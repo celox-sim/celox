@@ -1,6 +1,13 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
+    }
+    fn unpacked_dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_package_array_constants";
+    }
+
     fn unpacked_dimensions_counts_declared_arrays(sim) {
         @case "system_functions::unpacked_dimensions_counts_declared_arrays";
     }
@@ -676,5 +683,31 @@ fn unpacked_dimensions_rejects_undefined_operands() {
         "module Top(input logic a, output logic y); always_comb begin $unpacked_dimensions(missing); y = a; end endmodule",
     ] {
         build_error(source);
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_excess_indices() {
+    for operand in ["a[0][3][0]", "a[0][3][0:0]", "a[0][3][0 +: 1]"] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions({operand});"),
+            format!("localparam N = $unpacked_dimensions({operand}); assign y = 0;"),
+            format!("always_comb begin $unpacked_dimensions({operand}); y = 0; end"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); logic [7:0] a [0:1]; {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $unpacked_dimensions(logic)'(1'b1);",
+        "localparam P = $unpacked_dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $unpacked_dimensions(logic); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
     }
 }

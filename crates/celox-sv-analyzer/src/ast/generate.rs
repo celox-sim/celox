@@ -801,6 +801,7 @@ impl<'a> Elaborator<'a, '_> {
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
                     variable_unpacked_dimensions_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -904,6 +905,7 @@ impl<'a> Elaborator<'a, '_> {
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
                     variable_unpacked_dimensions_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
