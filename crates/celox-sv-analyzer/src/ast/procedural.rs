@@ -1538,7 +1538,8 @@ fn is_automatic(lifetime: Option<&sv_parser::Lifetime>, default_automatic: bool)
     }
 }
 
-/// Whether a module header declares the `automatic` default lifetime.
+/// Whether a module header, or a package, declares the `automatic` default
+/// lifetime.
 fn module_default_automatic(node: RefNode<'_>) -> bool {
     node.into_iter().any(|child| match child {
         RefNode::ModuleAnsiHeader(header) => {
@@ -1546,6 +1547,9 @@ fn module_default_automatic(node: RefNode<'_>) -> bool {
         }
         RefNode::ModuleNonansiHeader(header) => {
             matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        RefNode::PackageDeclaration(package) => {
+            matches!(package.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
         }
         _ => false,
     })
