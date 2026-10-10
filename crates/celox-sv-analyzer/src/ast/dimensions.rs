@@ -41,8 +41,7 @@ pub(super) fn size_system_function_call_type(
             };
             let r#type = match data_type {
                 sv_parser::DataType::Type(data_type) => {
-                    let name =
-                        identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?;
+                    let name = reference_name(RefNode::DataTypeType(data_type), syntax_tree)?;
                     type_aliases.get(&name).cloned()
                 }
                 _ => type_from_ref_node_with_env(
@@ -433,10 +432,7 @@ fn selected_expression_first_dimension_width(
             packed_dimensions,
         );
     }
-    let name = identifier_text(
-        RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-        syntax_tree,
-    )?;
+    let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)?;
     let dimensions = packed_dimensions.get(&name)?;
     let select = &hierarchical.nodes.2;
     if let Some(range) = &select.nodes.2 {

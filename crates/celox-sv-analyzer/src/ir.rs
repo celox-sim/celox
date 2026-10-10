@@ -43,6 +43,7 @@ pub struct Module {
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
+    imported_parameters: Vec<Parameter>,
 }
 
 impl Module {
@@ -75,7 +76,19 @@ impl Module {
             locals,
             subroutines,
             dpi_imports: Vec::new(),
+            imported_parameters: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_imported_parameters(mut self, parameters: Vec<Parameter>) -> Self {
+        self.imported_parameters = parameters;
+        self
+    }
+
+    /// The parameters of the packages the module uses (IEEE 1800-2023 26.3),
+    /// by qualified name `p::x` and by the names its imports bind.
+    pub fn imported_parameters(&self) -> &[Parameter] {
+        &self.imported_parameters
     }
 
     pub(crate) fn with_dpi_imports(mut self, dpi_imports: Vec<DpiImport>) -> Self {
@@ -1272,6 +1285,14 @@ pub struct DpiImport {
 }
 
 impl DpiImport {
+    /// This import under the SystemVerilog name `name`, keeping its C name.
+    pub(crate) fn renamed(&self, name: String) -> Self {
+        Self {
+            name,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn new(
         name: String,
         c_name: String,

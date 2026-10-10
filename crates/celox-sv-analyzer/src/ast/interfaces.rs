@@ -153,9 +153,10 @@ impl<'a> File<'a> {
                     }
                 }
                 RefNode::WhiteSpace(white_space) => {
-                    if let Some(span) =
-                        super::packages::node_span(RefNode::WhiteSpace(white_space), &syntax_tree)
-                    {
+                    if let Some(span) = super::type_parameters::node_span(
+                        RefNode::WhiteSpace(white_space),
+                        &syntax_tree,
+                    ) {
                         blanks.push(span);
                     }
                 }
@@ -185,7 +186,7 @@ impl<'a> File<'a> {
     /// The span of the tokens of `node`, without the white space and comments
     /// that the parser attaches to its last token.
     fn node_span(&self, node: RefNode<'_>) -> Option<Span> {
-        let (start, end) = super::packages::node_span(node, &self.syntax_tree)?;
+        let (start, end) = super::type_parameters::node_span(node, &self.syntax_tree)?;
         let index = self
             .tokens
             .partition_point(|&(_, token_end)| token_end <= end);

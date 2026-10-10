@@ -20,6 +20,12 @@ pub(super) struct PackedMember {
 }
 
 impl PackedMember {
+    /// This member with its type replaced by `map` of it.
+    pub(in crate::ast) fn with_type(mut self, map: impl FnOnce(Type) -> Type) -> Self {
+        self.r#type = map(self.r#type);
+        self
+    }
+
     pub(in crate::ast) fn name(&self) -> &str {
         &self.name
     }
