@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn error_returns_preserve_the_full_signed_status() {
+    for code in [
+        1,
+        2000,
+        -1,
+        -3,
+        -4294967296,
+        i64::MIN,
+        i64::from(u32::MAX) + 1,
+    ] {
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::ReturnError { code });
+        func.blocks.push(entry);
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        assert_eq!(unsafe { jit.call(&mut [0u8; 8]) }, code);
+    }
+}
+
+#[test]
 fn traced_disassembly_labels_exact_basic_block_offsets() {
     let text =
         disassemble_with_block_offsets(&[0x90, 0xc3], 0x1000, &[(BlockId(9), 1), (BlockId(3), 0)]);

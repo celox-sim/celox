@@ -259,11 +259,11 @@ arguments: the actual is copied in on entry and updated on return. The comb
 fixture checks aliased input sampling before that copyout.
 
 The two positive cases run on Celox's native, Cranelift, Wasm, and interpreter
-backends. The comb case also runs on the Veryl reference simulator. The clocked
-case still fails there after the first tick (`state=0`, expected `7`), so only
-that reference variant remains ignored. Celox's SV frontend still rejects
-function inout arguments. [Backend observations](verification/repros/inout_backends.json)
-record these remaining exclusions separately from the resolved analyzer panic.
+backends, and on the Veryl reference simulator, which passes both on Veryl
+0.22.0; the clocked case's earlier failure there (`state=0`, expected `7`) no
+longer reproduces. Celox's SV frontend still rejects function inout arguments.
+[Backend observations](verification/repros/inout_backends.json) record the
+earlier observations separately from the resolved analyzer panic.
 
 ### verilator-inout-dfg-crash
 

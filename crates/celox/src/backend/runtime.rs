@@ -842,7 +842,9 @@ impl JitBackend {
             None => kernel.schedule.run_sequential(&runner),
         };
         result.map_err(|failure| match failure.code {
-            code if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+                SimulatorErrorCode::DetectedTrueLoopCode(code)
+            }
             _ => SimulatorErrorCode::InternalError,
         })
     }

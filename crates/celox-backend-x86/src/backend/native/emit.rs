@@ -1262,7 +1262,13 @@ fn emit_planned(
                         asm.dec(rax)?;
                         asm.movq(xmm15, rax)?;
                     }
-                    asm.mov(eax, *code as u32)?;
+                    if let Ok(code) = u32::try_from(*code) {
+                        asm.mov(eax, code)?;
+                    } else {
+                        // Fatal captures use negative statuses; preserve the
+                        // complete i64 return value instead of zero-extending.
+                        asm.mov(rax, *code as u64)?;
+                    }
                     asm.jmp(epilogue_label)?;
                 }
                 MInst::Jump { target } => {

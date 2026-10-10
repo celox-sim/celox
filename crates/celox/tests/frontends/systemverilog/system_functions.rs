@@ -1,6 +1,31 @@
 use super::*;
 
 sv_backends! {
+    fn drain_runtime_events_returns_always_comb_fatal(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic fail, output logic y);
+                    always_comb begin
+                        y = fail;
+                        $display("before");
+                        if (fail) $fatal(1, "boom %0d", fail);
+                        $display("after");
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("fatal.sv"))], "Top");
+
+        let fail = sim.signal("fail");
+        sim.drain_runtime_events();
+        sim.set(fail, 1u8);
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "before".to_string() },
+            celox::RuntimeEvent::AssertFatal { message: "boom 1".to_string() },
+        ]);
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
     fn display_arguments_are_sized_as_ieee_specifies(sim) {
         @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
     }
