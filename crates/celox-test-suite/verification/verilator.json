@@ -8012,6 +8012,17 @@
       "tags": []
     },
     {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_static_nested_loop_local_bindings_are_distinct",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
       "category": "Functions",
       "detail": "",
       "expectation": "Simulation",
@@ -9376,6 +9387,7 @@
   "exclude_stronger_than_sv": false,
   "include_ignored": false,
   "schema_version": 3,
+  "suite": "veryl",
   "suite_version": "0.10.1",
   "tool": "verilator",
   "version": "Verilator 5.052 2026-09-05 rev v5.052"

@@ -253,9 +253,7 @@ fn check(
                 Declaration::Final(x) => checker.statements(&x.statements),
                 Declaration::Inst(x) => {
                     for input in &x.inputs {
-                        for expression in &input.exprs {
-                            checker.expression(expression);
-                        }
+                        checker.expression(&input.expr);
                     }
                     for output in &x.outputs {
                         checker.destinations(&output.dst);
@@ -369,7 +367,7 @@ impl Checker<'_, '_> {
     }
 
     fn select(&mut self, index: &VarIndex, select: &VarSelect) {
-        for expression in index.0.iter().chain(&select.0) {
+        for expression in index.expressions().chain(&select.0) {
             self.expression(expression);
         }
         if let Some((_, expression)) = &select.1 {

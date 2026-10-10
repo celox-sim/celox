@@ -132,6 +132,20 @@ impl SLTToSIRLowerer {
                         crate::SLTIndexKind::Packed => entry.stride < *element_width,
                     })
             });
+            // A run of whole elements from a runtime first element.
+            let element_run = element_width.filter(|element_width| {
+                element_access.is_none()
+                    && access.lsb == 0
+                    && width > *element_width
+                    && width.is_multiple_of(*element_width)
+                    && index.iter().all(|entry| {
+                        entry.kind
+                            == crate::SLTIndexKind::Unpacked {
+                                element_width: *element_width,
+                            }
+                            && entry.stride % *element_width == 0
+                    })
+            });
             let mut element_dynamic = None;
             let mut packed_dynamic = None;
             let mut logical_dynamic = None;
@@ -139,7 +153,9 @@ impl SLTToSIRLowerer {
                 let mut idx_val =
                     self.lower_inner(builder, idx_entry.node, arena, cache, env, env.is_none());
 
-                let (stride, accumulator) = if let Some(element_width) = element_access {
+                let (stride, accumulator) = if let Some(element_width) = element_run {
+                    (idx_entry.stride / element_width, &mut element_dynamic)
+                } else if let Some(element_width) = element_access {
                     match idx_entry.kind {
                         crate::SLTIndexKind::Unpacked { .. } => {
                             (idx_entry.stride / element_width, &mut element_dynamic)
@@ -174,7 +190,12 @@ impl SLTToSIRLowerer {
                 }
             }
 
-            let offset = if let Some(element_width) = element_access {
+            let offset = if let Some(element_width) = element_run {
+                SIROffset::ElementRun {
+                    index: element_dynamic.expect("an element run has an unpacked index"),
+                    element_width,
+                }
+            } else if let Some(element_width) = element_access {
                 if let Some(element_index) = element_dynamic {
                     SIROffset::Element {
                         index: element_index,

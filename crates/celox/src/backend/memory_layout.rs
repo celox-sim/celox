@@ -133,7 +133,9 @@ fn supports_strided_access(
                         .is_some_and(|end| end <= layout.element_width * layout.element_count))
                     || (bulk_transfer && bounded_transfer))
         }
-        SIROffset::Dynamic(_) => false,
+        // A run of elements from a runtime index crosses element boundaries
+        // that an element-strided layout pads apart, so it needs packed storage.
+        SIROffset::Dynamic(_) | SIROffset::ElementRun { .. } => false,
     }
 }
 
