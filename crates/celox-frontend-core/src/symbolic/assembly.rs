@@ -1125,6 +1125,7 @@ pub fn schedule_symbolic_rtl(
             rtl_writes,
             comb_writes: Default::default(),
             processes: process_slots,
+            testbench_kernels: None,
         },
     };
 

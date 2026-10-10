@@ -728,11 +728,13 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
     let mut rtl_writes = crate::HashSet::default();
     // The kernels of a Veryl testbench drive signals as the testbench, not
     // as RTL; the processes of an SV design are RTL.
-    let processes = if program.runtime.testbench.is_some() {
-        &[][..]
-    } else {
-        &program.sir.processes[..]
-    };
+    let design_processes = program
+        .runtime
+        .runtime_schema
+        .testbench_kernels
+        .unwrap_or(program.sir.processes.len())
+        .min(program.sir.processes.len());
+    let processes = &program.sir.processes[..design_processes];
     for unit in program
         .sir
         .eval_comb

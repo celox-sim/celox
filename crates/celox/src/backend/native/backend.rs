@@ -392,6 +392,8 @@ pub(crate) struct NativeRuntimeSchema {
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
+    #[serde(default)]
+    pub(crate) testbench_kernels: Option<usize>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -500,6 +502,7 @@ impl NativeProgramImage {
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
+                testbench_kernels: self.runtime_schema.testbench_kernels,
             },
             testbench: self.testbench.clone(),
         }
@@ -2258,6 +2261,7 @@ fn compile_program(
                     .copied()
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
+                testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
             },
             layout: layout.clone(),
             native_memory_size,

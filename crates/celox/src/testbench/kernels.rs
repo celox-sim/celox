@@ -18,9 +18,11 @@ use celox_design::{HostRequest, HostValue};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 
-/// Whether the simulator's testbench runs as process kernels.
+/// Whether the simulator's testbench runs as process kernels: the schema
+/// marks them (a design's own processes alone do not make a kernel
+/// testbench).
 pub(crate) fn enabled<B: SimBackend>(sim: &Simulator<B>) -> bool {
-    !sim.program.runtime_schema.processes.is_empty()
+    sim.program.runtime_schema.testbench_kernels.is_some()
 }
 
 /// What a run of the kernels observed.
@@ -128,18 +130,29 @@ fn run<B: SimBackend>(
     apply_component_writes(sim, initial_writes);
     sim.testbench_random = Some(RandomTable::new(seed));
     // A run starts every process at its beginning, whatever an earlier run
-    // of the same simulator left in the control slots.
+    // of the same simulator left in the control slots, and every process
+    // clock low, as the bytecode testbench does: the first `clk.next()`
+    // then counts a real rising edge.
     for slots in &sim.program.runtime_schema.processes.clone() {
         for slot in slots.iter() {
             let signal = sim.backend.resolve_signal(slot);
             sim.backend.set_wide(signal, BigUint::ZERO);
         }
+        for clock in &slots.clocks {
+            let signal = sim.backend.resolve_signal(&clock.signal);
+            sim.backend.set_wide(signal, BigUint::ZERO);
+            sim.dirty = true;
+        }
     }
+    sim.testbench_events.clear();
 
     // The scheduler samples the clocks it detects edges on from settled
     // state.
     if sim.dirty {
         if let Err(error) = sim.eval_comb_checked() {
+            // The components were installed above; take them down again.
+            let _ = sim.components.finish(0);
+            sim.testbench_random = None;
             return failed(error.to_string());
         }
         sim.dirty = false;
@@ -189,12 +202,15 @@ fn run<B: SimBackend>(
         }
     }
     sim.testbench_random = None;
+    // A completion a component requested is read before the teardown
+    // clears the components.
+    let component_finished = sim.components.finish_requested();
     if let Err(message) = sim.components.finish(state.time())
         && error.is_none()
     {
         error = Some(message);
     }
-    let finished = finish_observed || state.is_finished() || sim.components.finish_requested();
+    let finished = finish_observed || state.is_finished() || component_finished;
     KernelRun {
         assertions,
         error,
@@ -225,7 +241,10 @@ fn drain<B: SimBackend>(
         fatal: None,
         finished: false,
     };
-    for (site, event) in sim.collect_sited_runtime_events(ctx) {
+    // The events the kernels' yields let the executor spill, then the ring.
+    let mut events = std::mem::take(&mut sim.testbench_events);
+    events.extend(sim.collect_sited_runtime_events(ctx));
+    for (site, event) in events {
         let location = site.and_then(|site| {
             sim.program
                 .runtime_schema

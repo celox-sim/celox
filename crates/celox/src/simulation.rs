@@ -92,10 +92,22 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.apply_ff_at_checked(event)
     }
 
-    fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
-        self.backend
+    fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+        let result = self
+            .backend
             .run_process(index)
-            .map_err(|e| self.decorate_runtime_error(e))
+            .map_err(|e| self.decorate_runtime_error(e));
+        // A kernel testbench's kernels yield before the runtime event ring
+        // could wrap; the events so far leave the ring here.
+        if self.testbench_random.is_some() {
+            let ctx = crate::simulator::RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            };
+            let events = self.collect_sited_runtime_events(ctx);
+            self.testbench_events.extend(events);
+        }
+        result
     }
 
     fn tick_many(&mut self, event: B::Event, count: u64) -> (u64, Result<(), RuntimeErrorCode>) {

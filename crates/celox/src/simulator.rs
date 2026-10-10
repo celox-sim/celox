@@ -103,6 +103,10 @@ mod host {
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         /// The random number generators of a running kernel testbench.
         pub(crate) testbench_random: Option<crate::testbench::RandomTable>,
+        /// Runtime events of a running kernel testbench the executor took
+        /// out of the ring when a kernel yielded, until the runner drains
+        /// them.
+        pub(crate) testbench_events: Vec<(Option<usize>, RuntimeEvent)>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
@@ -657,6 +661,7 @@ mod host {
                 components: Default::default(),
                 component_simulation: None,
                 testbench_random: None,
+                testbench_events: Vec::new(),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),

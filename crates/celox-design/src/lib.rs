@@ -576,6 +576,9 @@ pub struct RuntimeSchema<A> {
     pub comb_writes: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    /// Index of the first kernel in `processes` that runs a Veryl testbench;
+    /// it and the kernels after it are the testbench's, not the design's.
+    pub testbench_kernels: Option<usize>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -589,6 +592,7 @@ impl<A> Default for RuntimeSchema<A> {
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
             processes: Vec::new(),
+            testbench_kernels: None,
         }
     }
 }

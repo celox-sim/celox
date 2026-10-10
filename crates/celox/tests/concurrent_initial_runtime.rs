@@ -638,3 +638,86 @@ fn finish_from_design_logic_completes_the_run() {
     check(Simulator::builder(code, "Top").build_interpreter().unwrap());
     check(Simulator::builder(code, "Top").build_cranelift().unwrap());
 }
+
+/// A run starts its process clocks low, as the bytecode testbench did: a
+/// clock the host drove high still counts a real first edge.
+#[test]
+fn a_run_starts_its_process_clocks_low() {
+    let code = r#"
+    module Counter(clk: input clock, count: output logic<8>) {
+        always_ff(clk) { count += 1; }
+    }
+    #[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var count: logic<8>;
+        inst dut: Counter(clk, count);
+        initial { clk.next(1); $finish(); }
+    }"#;
+    let mut sim = Simulator::builder(code, "Top").build_cranelift().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    let clk = sim.signal("clk");
+    sim.set_wide(clk, 1u8.into());
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+    assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+}
+
+/// More runtime events than the ring holds, in one uninterrupted block:
+/// the kernel yields to the host before the ring wraps.
+#[test]
+fn many_events_in_one_run_are_not_missed() {
+    let code = r#"#[test(Top)] module Top {
+        var x: logic<8>;
+        initial {
+            x = 1;
+            for i in 0..3000 { $assert(x == 1, "x=%d", x); }
+            for i in 0..1500 { $display("line %d", i); }
+            $finish();
+        }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+/// A fatal assertion with a formatted message fails with that message
+/// alone.
+#[test]
+fn a_fatal_assertion_reports_its_rendered_message_once() {
+    let code = r#"#[test(Top)] module Top {
+        var x: logic<8>;
+        initial { x = 5; $assert(x == 6, "x=%d", x); $finish(); }
+    }"#;
+    let mut sim = Simulator::builder(code, "Top").build_cranelift().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &tb),
+        TestResult::Fail("x=5".to_string())
+    );
+}
+
+/// `clk.next(0)` continues at once: no other block runs in between.
+#[test]
+fn zero_count_clock_waits_do_not_interleave_other_processes() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var x: u8;
+        var seen: u8;
+        initial { x = 8'd1; clk.next(0); x = 8'd2; }
+        initial { seen = x; $assert(seen == 8'd2, "seen=%d", seen); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+/// A block that ends right after a store settles, so the next block reads
+/// the logic derived from it.
+#[test]
+fn a_block_ending_after_a_store_settles_for_the_next_block() {
+    let code = r#"#[test(Top)] module Top {
+        var source: logic<8>;
+        let derived: logic<8> = source + 8'd1;
+        initial { source = 8'd41; }
+        initial { $assert(derived == 8'd42, "derived=%d", derived); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}

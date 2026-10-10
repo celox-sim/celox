@@ -35,7 +35,9 @@ pub trait SimulationExecutor {
         &mut self,
         event: <Self::Backend as SimBackend>::Event,
     ) -> Result<(), SimulatorErrorCode>;
-    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+    /// Run process kernel `index` at simulation time `time` until it
+    /// suspends or ends.
+    fn run_process(&mut self, index: usize, _time: u64) -> Result<(), SimulatorErrorCode> {
         self.backend_mut().run_process(index)
     }
 
@@ -300,6 +302,10 @@ pub struct SimulationState<B: SimBackend> {
     tick_budget: Option<u64>,
     /// A process requested the end of the simulation.
     finished: bool,
+    /// A wait ended with a release this round: the combinational logic is
+    /// settled before the processes run, so the released process reads
+    /// what its release implies.
+    settle_before_processes: bool,
 }
 
 /// The edges of a transition between sampled values `(nonzero, unknown)`,
@@ -424,6 +430,7 @@ impl<B: SimBackend> SimulationState<B> {
             ticks: 0,
             tick_budget: None,
             finished: false,
+            settle_before_processes: false,
         }
     }
 
@@ -820,6 +827,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             self.process_wakeups.pop();
             if let Some(release) = self.pending_releases.remove(&process) {
+                self.settle_before_processes = true;
                 let release = self.processes[process].releases[release].clone();
                 match release.event {
                     Some(event) => events.push(SimEvent {
@@ -871,7 +879,7 @@ impl<B: SimBackend> SimulationState<B> {
             for process in pass.drain(..) {
                 // A settle resumes the same process at once.
                 loop {
-                    executor.run_process(process)?;
+                    executor.run_process(process, current_time)?;
                     let refs = &self.processes[process];
                     let status: u8 = executor.backend().get_as(refs.status);
                     match ProcessStatus::from_code(status) {
@@ -927,13 +935,18 @@ impl<B: SimBackend> SimulationState<B> {
                             if count == 0 {
                                 // Nothing to wait for: the process continues in
                                 // the next pass, after its release.
+                                // Nothing to wait for: the release is made and
+                                // the process continues at once, as a zero
+                                // count documents.
                                 if let Some(release) = release {
                                     let release = refs.releases[release].clone();
                                     executor
                                         .backend_mut()
                                         .set_wide(release.signal, release.value.into());
+                                    executor.eval_comb()?;
                                 }
-                                again.push(process);
+                                any_ran = true;
+                                continue;
                             } else {
                                 let id = clock.event.id();
                                 let tick_clock =
@@ -1056,6 +1069,9 @@ impl<B: SimBackend> SimulationState<B> {
         let num_events = executor.backend().num_events();
         for event in &events_to_process {
             executor.backend_mut().set(event.signal, event.next_val);
+        }
+        if std::mem::take(&mut self.settle_before_processes) {
+            executor.eval_comb()?;
         }
 
         // Processes run after this time's scheduled values are applied and

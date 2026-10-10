@@ -334,7 +334,59 @@ fn scratch_needs(ir: &Module, statements: &[Statement]) -> Result<Vec<ScratchNee
     let mut needs = Vec::new();
     let mut active = HashSet::default();
     collect_scratch_needs(ir, statements, &mut active, &mut needs)?;
+    // Taken first, before any statement (see `lower_block`).
+    if contains_runtime_event(ir, statements, &mut HashSet::default()) {
+        needs.insert(
+            0,
+            ScratchNeed {
+                purpose: "event_yield",
+                width: EVENT_YIELD_WIDTH,
+            },
+        );
+    }
     Ok(needs)
+}
+
+/// Whether `statements`, or a function they call, emit a runtime event
+/// (`$display`, `$write`, `$assert`).
+fn contains_runtime_event(
+    ir: &Module,
+    statements: &[Statement],
+    active: &mut HashSet<VarId>,
+) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::If(stmt) => {
+            contains_runtime_event(ir, &stmt.true_side, active)
+                || contains_runtime_event(ir, &stmt.false_side, active)
+        }
+        Statement::IfReset(stmt) => {
+            contains_runtime_event(ir, &stmt.true_side, active)
+                || contains_runtime_event(ir, &stmt.false_side, active)
+        }
+        Statement::Case(stmt) => {
+            stmt.arms
+                .iter()
+                .any(|arm| contains_runtime_event(ir, &arm.body, active))
+                || contains_runtime_event(ir, &stmt.default, active)
+        }
+        Statement::For(stmt) => contains_runtime_event(ir, &stmt.body, active),
+        Statement::FunctionCall(call) => {
+            active.insert(call.id)
+                && function_body(&ir.functions, call)
+                    .is_some_and(|body| contains_runtime_event(ir, &body.statements, active))
+        }
+        Statement::SystemFunctionCall(call) => matches!(
+            call.kind,
+            SystemFunctionKind::Display(_)
+                | SystemFunctionKind::Write(_)
+                | SystemFunctionKind::Assert { .. }
+        ),
+        Statement::TbMethodCall(_)
+        | Statement::Assign(_)
+        | Statement::Break
+        | Statement::Unsupported(_)
+        | Statement::Null => false,
+    })
 }
 
 fn collect_scratch_needs(
@@ -500,7 +552,17 @@ struct BlockLowering<'a> {
     /// was last settled, so a statement that reads design state settles
     /// it first.
     dirty: bool,
+    /// Scratch counting the runtime events emitted since the kernel last
+    /// gave the host a chance to drain them (see
+    /// [`BlockLowering::yield_for_runtime_event`]).
+    event_yield: Option<SourceVarId>,
 }
+
+/// Bits of the runtime-event yield counter.
+const EVENT_YIELD_WIDTH: usize = 16;
+/// Runtime events a kernel emits between two yields to the host: well
+/// within the runtime event ring, so none is lost before the host drains.
+const EVENT_YIELD_EVERY: u64 = 256;
 
 #[allow(clippy::too_many_arguments)]
 fn lower_block(
@@ -588,9 +650,17 @@ fn lower_block(
         targets: Vec::new(),
         sources: Vec::new(),
         dirty: false,
+        event_yield: None,
     };
+    if contains_runtime_event(ir, statements, &mut HashSet::default()) {
+        lowering.event_yield = Some(lowering.take_scratch("event_yield")?.1);
+    }
     lowering.declare_clocks(statements);
-    lowering.lower_statements(statements)?;
+    // A block that ends right after a store settles, so a process that runs
+    // next reads the logic derived from it.
+    if let Flow::Continue = lowering.lower_statements(statements)? {
+        lowering.settle_if_dirty()?;
+    }
     let BlockLowering {
         parser,
         kernel,
@@ -688,6 +758,11 @@ fn lower_block(
     if let Some(error) = failure {
         return Err(error);
     }
+    // The first testbench kernel marks where the design's own processes end.
+    scheduled
+        .runtime_schema
+        .testbench_kernels
+        .get_or_insert(scheduled.runtime_schema.processes.len());
     scheduled.sir.processes.push(unit);
     scheduled.runtime_schema.processes.push(slots);
     Ok(())
@@ -1876,7 +1951,11 @@ impl<'a> BlockLowering<'a> {
                 self.dirty = true;
                 self.system_task(&local)
             }
-            SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) => self.system_task(call),
+            SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) => {
+                let flow = self.system_task(call)?;
+                self.yield_for_runtime_event()?;
+                Ok(flow)
+            }
             SystemFunctionKind::Bits(_)
             | SystemFunctionKind::Size(..)
             | SystemFunctionKind::Clog2(_)
@@ -1967,7 +2046,54 @@ impl<'a> BlockLowering<'a> {
             }
         }
         self.kernel.builder().switch_to_block(join);
+        self.yield_for_runtime_event()?;
         Ok(Flow::Continue)
+    }
+
+    /// Count a runtime event the kernel just emitted; every
+    /// [`EVENT_YIELD_EVERY`] events the kernel settles, which returns to the
+    /// host, so the runtime event ring never wraps within one kernel run.
+    fn yield_for_runtime_event(&mut self) -> Result<(), ParserError> {
+        let Some(slot) = self.event_yield else {
+            return Ok(());
+        };
+        let count = self.load_scratch(slot, EVENT_YIELD_WIDTH, false);
+        let one = self.constant(1, EVENT_YIELD_WIDTH);
+        let limit = self.constant(EVENT_YIELD_EVERY, EVENT_YIELD_WIDTH);
+        let zero = self.constant(0, EVENT_YIELD_WIDTH);
+        let builder = self.kernel.builder();
+        let next = builder.alloc_bit(EVENT_YIELD_WIDTH, false);
+        builder.emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+        let due = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(due, next, BinaryOp::GeU, limit));
+        let yield_block = builder.new_block();
+        let keep_block = builder.new_block();
+        let after = builder.new_block();
+        builder.seal_block(SIRTerminator::Branch {
+            cond: due,
+            true_block: (yield_block, Vec::new()),
+            false_block: (keep_block, Vec::new()),
+        });
+        builder.switch_to_block(keep_block);
+        self.store_scratch(slot, EVENT_YIELD_WIDTH, next);
+        self.kernel
+            .builder()
+            .seal_block(SIRTerminator::Jump(after, Vec::new()));
+        self.kernel.builder().switch_to_block(yield_block);
+        self.store_scratch(slot, EVENT_YIELD_WIDTH, zero);
+        let dirty = self.dirty;
+        self.kernel
+            .settle()
+            .map_err(|error| self.error("testbench process lowering", error.to_string(), None))?;
+        self.kernel
+            .builder()
+            .seal_block(SIRTerminator::Jump(after, Vec::new()));
+        self.kernel.builder().switch_to_block(after);
+        // Registers do not survive the yield path; the dirty state is the
+        // one before it, as the other path kept it.
+        self.parser.clear_register_cache();
+        self.dirty = dirty;
+        Ok(())
     }
 
     /// Inline a function call statement: bind its inputs, run its body, and
