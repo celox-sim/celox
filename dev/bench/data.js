@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791608350461,
+  "lastUpdate": 1791610972028,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -365173,6 +365173,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 4074570.806451
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "dd4fa23405dfbd046ac7da95b52ce441c67227aa",
+          "message": "fix(deps): update rust crate syn to v3 (#1042)",
+          "timestamp": "2026-10-09T07:13:14Z",
+          "url": "https://github.com/celox-sim/celox/commit/dd4fa23405dfbd046ac7da95b52ce441c67227aa"
+        },
+        "date": 1791610972028,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_4hart_startup",
+            "unit": "ms",
+            "value": 92213.578701
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 4352359.971142
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_4hart_end_to_end",
+            "unit": "ms",
+            "value": 4444664.737492
           }
         ]
       }
