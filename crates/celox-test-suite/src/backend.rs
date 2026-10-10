@@ -84,6 +84,11 @@ pub trait Backend {
     fn run_testbench(&mut self) -> Result<()> {
         Err("this adapter does not support native testbench execution".into())
     }
+    /// Take the text the design printed with `$display` (each followed by a
+    /// newline) and `$write` since the previous call.
+    fn take_output(&mut self) -> Result<String> {
+        Err("this adapter does not capture design output".into())
+    }
 }
 
 /// Compiler callback used by every test. Capturing closures allow the caller to
@@ -189,6 +194,10 @@ impl Simulator {
 
     pub fn run_testbench(&mut self) -> Result<()> {
         self.backend.run_testbench()
+    }
+
+    pub fn take_output(&mut self) -> Result<String> {
+        self.backend.take_output()
     }
 
     pub fn tick(&mut self, event: Event) -> Result<()> {

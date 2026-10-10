@@ -5,6 +5,7 @@ import test from "node:test";
 const read = name => readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
 const heliodor = read("heliodor-bench");
 const bench = read("bench");
+const codspeed = read("codspeed");
 function job(workflow, name) {
   const blocks = workflow.split(/^  ([\w-]+):\n/m);
   const index = blocks.indexOf(name);
@@ -29,18 +30,38 @@ function runs(name, event, ref, inputs = {}, validation = event === "workflow_di
 }
 
 test("benchmarks run daily and manually; PRs only test the Heliodor tooling", () => {
-  for (const workflow of [heliodor, bench]) {
+  for (const workflow of [heliodor, bench, codspeed]) {
     const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
     assert.doesNotMatch(triggers, /^\s+push:|^\s+merge_group:/m);
     assert.match(triggers, /^\s+schedule:/m);
     assert.match(triggers, /^\s+workflow_dispatch:/m);
   }
+  assert.doesNotMatch(codspeed, /^  pull_request:/m);
   const paths = heliodor.match(/  pull_request:\n    paths:\n([\s\S]*?)  schedule:/)[1];
   assert.doesNotMatch(paths, /Cargo\.(lock|toml)|crates\/|ci-changes/);
   assert.match(job(heliodor, "converter-test"), /scripts\/benchmark-workflows\.test\.mjs/);
   assert.doesNotMatch(heliodor, /^  arm64-linux-boot:|^  arm64-changes:/m);
   for (const name of ["heliodor", "linux-suite-matrix", "heliodor-head", "arm64-linux-boot-full"]) {
     assert.equal(runs(name, "pull_request", "master"), false, name);
+  }
+});
+
+test("CodSpeed reports the current upload even after failure or cancellation", () => {
+  const benchmark = job(codspeed, "codspeed");
+  const report = job(codspeed, "report");
+  assert.match(benchmark, /run-id: \$\{\{ steps\.benchmarks\.outputs\.run-id \}\}/);
+  assert.match(benchmark, /id: benchmarks\n\s+uses: CodSpeedHQ\/action@v5/);
+  assert.match(report, /needs: codspeed/);
+  assert.match(report, /checks: read/);
+  assert.match(report, /issues: write/);
+  assert.match(report, /BENCHMARK_RESULT: \$\{\{ needs\.codspeed\.result \}\}/);
+  assert.match(report, /CODSPEED_RUN_ID: \$\{\{ needs\.codspeed\.outputs\.run-id \}\}/);
+  assert.match(report, /run: node scripts\/report-codspeed\.mjs/);
+  assert.doesNotMatch(codspeed, /continue-on-error:/);
+  assert.match(codspeed, /cancel-in-progress: false/);
+  const condition = new Function("github", "always", `return (${expression(report, "if")});`);
+  for (const branch of ["master", "develop", "feature"]) {
+    assert.equal(condition({ ref_name: branch }, () => true), branch !== "feature");
   }
 });
 

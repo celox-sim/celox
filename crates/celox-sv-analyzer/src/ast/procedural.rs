@@ -628,7 +628,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         match call {
             sv_parser::SubroutineCall::TfCall(call) => {
-                let name = identifier_text(
+                let name = reference_name(
                     RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                     self.tree,
                 )
@@ -1752,20 +1752,11 @@ pub(super) fn initial_processes_from_module_node(
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
-        let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(module_item)) = item.node
-        else {
-            continue;
-        };
         if item.is_parameter_declaration() {
             continue;
         }
-        if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
-            &module_item.nodes.1
-            && let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-                declaration,
-            ) = &**declaration
-            && let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) =
-                &**declaration
+        if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
+            item.node.declaration()
             && let sv_parser::DataDeclaration::Variable(variable) = &**data
         {
             if !variable.nodes.4.nodes.0.contents().into_iter().any(|assignment| matches!(assignment, sv_parser::VariableDeclAssignment::Variable(assignment) if assignment.nodes.2.is_some())) {
@@ -1813,6 +1804,10 @@ pub(super) fn initial_processes_from_module_node(
             }
             continue;
         }
+        let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(module_item)) = item.node
+        else {
+            continue;
+        };
         let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
             continue;
         };

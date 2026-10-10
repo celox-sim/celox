@@ -2,7 +2,7 @@
 
 use super::*;
 
-const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
+pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
 
 pub(super) fn simplify_constant_mux_conditions(
     expr: Expr,
