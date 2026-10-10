@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const identifier = /^[A-Za-z0-9_-]+$/;
 const read = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 // Schema 4 splits retained evidence by test group. Consumers keep using the
@@ -13,8 +12,6 @@ export function readVerificationReport(path) {
   const report = read(path);
   if (report.schema_version !== 4) return report;
   assert.ok(!Object.hasOwn(report, "cases"), "split index contains cases");
-  const stem = basename(path, extname(path));
-  assert.ok(identifier.test(stem), "invalid report filename");
   assert.ok(
     Array.isArray(report.case_files) && report.case_files.length > 0,
     "split report has no case_files",
@@ -22,16 +19,16 @@ export function readVerificationReport(path) {
   const cases = [];
   const names = new Set();
   let previous = "";
+  let directory;
   for (const file of report.case_files) {
     assert.ok(typeof file === "string", "case file must be a string");
     assert.ok(file > previous, "case_files must be sorted and unique");
     previous = file;
-    assert.ok(
-      file.startsWith(`${stem}/`) && file.endsWith(".json"),
-      `invalid case file: ${file}`,
-    );
-    const group = file.slice(stem.length + 1, -5);
-    assert.ok(identifier.test(group), `invalid case file: ${file}`);
+    const match = /^([A-Za-z0-9_-]+|\.report-[a-fA-F0-9]{64})\/([A-Za-z0-9_-]+)\.json$/.exec(file);
+    assert.ok(match, `invalid case file: ${file}`);
+    const [, namespace, group] = match;
+    assert.ok(directory === undefined || directory === namespace, "case files must share one directory");
+    directory = namespace;
     const shard = read(join(dirname(path), file));
     assert.ok(
       Array.isArray(shard.cases) && shard.cases.length > 0,

@@ -348,7 +348,12 @@ copy omits timestamps, fingerprints, reuse markers and aggregate counts.
 case results live next to it in `<path-stem>/<group>.json`. For example,
 `--report verification/icarus.json` writes `verification/icarus/counter.json`
 for the `counter` test group. Groups match the `.vtest` definitions, so updating
-one group leaves other groups untouched. The index lists the exact selection;
+one group leaves other groups untouched. Report filenames remain unrestricted:
+names without `.json` or with characters outside ASCII letters, digits, `_`,
+and `-` in their stem use a sibling `.report-<filename-hash>/` directory instead.
+This keeps extensionless indexes separate from their group files. Readers use
+the relative paths in `case_files`, so renaming the index leaves it readable.
+The index lists the exact selection;
 a filtered update replaces that selection and removes previously referenced
 group files that are no longer selected. Missing files, duplicate cases, and
 cases stored under the wrong group are errors. Historical baseline and focused

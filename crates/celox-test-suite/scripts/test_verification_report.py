@@ -7,6 +7,26 @@ from verification_report import read_report
 
 
 class VerificationReportTest(unittest.TestCase):
+    def test_index_filenames_and_hashed_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            row = {"name": "counter::increment", "status": "passed", "detail": ""}
+            report = {"schema_version": 3, "cases": [row]}
+            for namespace in ["icarus", ".report-" + "a" * 64]:
+                (directory / namespace).mkdir()
+                (directory / namespace / "counter.json").write_text(json.dumps({"cases": [row]}))
+                index = {"schema_version": 4, "case_files": [f"{namespace}/counter.json"]}
+                for filename in ["nightly.icarus.json", "nightly report.json", "検証.json", "extensionless"]:
+                    path = directory / filename
+                    path.write_text(json.dumps(index))
+                    self.assertEqual(read_report(path), report)
+            (directory / "icarus/operators.json").write_text(json.dumps({"cases": [{"name": "operators::negative"}]}))
+            for files in [[".report-bad/counter.json"], [".report-../counter.json"],
+                          [f".report-{'a' * 64}/counter.json", "icarus/operators.json"]]:
+                path.write_text(json.dumps({"schema_version": 4, "case_files": files}))
+                with self.assertRaises(ValueError):
+                    read_report(path)
+
     def test_split_and_legacy_reports_preserve_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "icarus.json"

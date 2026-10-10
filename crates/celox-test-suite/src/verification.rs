@@ -28,8 +28,8 @@ struct Args {
     /// Build artifacts and complete per-case logs.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Retain a portable index here and results in <path-stem>/<group>.json,
-    /// without run-specific metadata (counts, fingerprints, timestamps).
+    /// Retain a portable index here and group files next to it, without
+    /// run-specific metadata (counts, fingerprints, timestamps).
     #[arg(long)]
     report: Option<PathBuf>,
     /// Execute known discrepancies and toolchain limitations too.

@@ -11,22 +11,21 @@ def read_report(path):
         return report
     if "cases" in report:
         raise ValueError("split index contains cases")
-    identifier = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
-    if not identifier.fullmatch(path.stem):
-        raise ValueError("invalid report filename")
     files = report.get("case_files")
     if (not isinstance(files, list) or not files
             or not all(isinstance(file, str) for file in files)
             or files != sorted(set(files))):
         raise ValueError("case_files must be nonempty, sorted and unique")
     cases, names = [], set()
+    directory = None
     for file in files:
-        prefix = f"{path.stem}/"
-        if not file.startswith(prefix) or not file.endswith(".json"):
+        match = re.fullmatch(r"([A-Za-z0-9_-]+|\.report-[a-fA-F0-9]{64})/([A-Za-z0-9_-]+)\.json", file)
+        if not match:
             raise ValueError(f"invalid case file: {file}")
-        group = file[len(prefix):-5]
-        if not identifier.fullmatch(group):
-            raise ValueError(f"invalid case file: {file}")
+        namespace, group = match.groups()
+        if directory is not None and directory != namespace:
+            raise ValueError("case files must share one directory")
+        directory = namespace
         shard = json.loads((path.parent / file).read_text())
         rows = shard.get("cases")
         if not isinstance(rows, list) or not rows:

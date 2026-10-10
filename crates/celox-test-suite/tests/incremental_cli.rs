@@ -54,7 +54,7 @@ exit 1
     let cache = directory.join("cache");
     let mode = directory.join("mode");
     let invocations = directory.join("invocations");
-    let execute = |flags: &[&str], expected_success: bool| {
+    let execute_with_report = |flags: &[&str], expected_success: bool, path: &Path| {
         let mut command = Command::new(binary);
         command
             .args([
@@ -69,7 +69,7 @@ exit 1
             .arg("--cache")
             .arg(&cache)
             .arg("--report")
-            .arg(&report_path)
+            .arg(path)
             .args(flags)
             .env("PATH", &directory)
             .env("CELOX_INCREMENTAL_MODE", &mode)
@@ -82,6 +82,9 @@ exit 1
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
+    };
+    let execute = |flags: &[&str], expected_success: bool| {
+        execute_with_report(flags, expected_success, &report_path);
     };
     // The local baseline keeps run metadata; --report retains only results.
     let results_path = directory.join("output").join("results.json");
@@ -179,6 +182,20 @@ exit 1
     execute(&["--fresh"], true);
     assert_eq!(calls(), 6, "explicit fresh mode must always run afresh");
     assert_eq!(report()["run_counts"], json!({"fresh": 1, "reused": 0}));
+    for filename in [
+        "nightly.icarus.json",
+        "nightly report.json",
+        "検証.json",
+        "extensionless",
+    ] {
+        let path = directory.join(filename);
+        execute_with_report(&[], true, &path);
+        assert!(path.is_file(), "--report must accept {filename}");
+        assert_eq!(
+            celox_test_suite::verification::read_report(&path).unwrap(),
+            retained()
+        );
+    }
     fs::write(&results_path, "corrupted report").unwrap();
     execute(&[], false);
     assert_eq!(calls(), 6, "corrupt baseline must fail before compilation");

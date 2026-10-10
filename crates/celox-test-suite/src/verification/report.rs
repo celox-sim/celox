@@ -12,18 +12,37 @@ fn identifier(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn stem(path: &Path) -> Result<&str> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| identifier(stem))
-        .ok_or_else(|| format!("invalid report filename: {}", path.display()).into())
+fn directory(path: &Path) -> Result<String> {
+    // Preserve the readable layout of the checked-in *.json reports. Other
+    // filenames need an independent, bounded directory name, including names
+    // without an extension (whose stem would collide with the index itself).
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+        && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        && identifier(stem)
+    {
+        return Ok(stem.to_owned());
+    }
+    let name = path.file_name().ok_or("report path has no filename")?;
+    Ok(format!(
+        ".report-{}",
+        super::fingerprint(&[name.as_encoded_bytes()])
+    ))
 }
 
-fn group_file<'a>(file: &'a str, stem: &str) -> Result<&'a str> {
-    file.strip_prefix(&format!("{stem}/"))
-        .and_then(|file| file.strip_suffix(".json"))
-        .filter(|group| identifier(group))
-        .ok_or_else(|| format!("invalid case file: {file}").into())
+fn group_file(file: &str) -> Result<(&str, &str)> {
+    if let Some((directory, group)) = file.split_once('/')
+        && (identifier(directory)
+            || directory.strip_prefix(".report-").is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
+        && let Some(group) = group.strip_suffix(".json")
+        && identifier(group)
+    {
+        return Ok((directory, group));
+    }
+    Err(format!("invalid case file: {file}").into())
 }
 
 fn read_json(path: &Path) -> Result<Value> {
@@ -57,11 +76,15 @@ pub fn read_report(path: &Path) -> Result<Value> {
         return Err("split report index must not contain cases".into());
     }
     let parent = path.parent().unwrap_or(Path::new("."));
-    let stem = stem(path)?;
+    let mut directory = None;
     let mut rows = Vec::new();
     let mut names = BTreeSet::new();
     for file in files(&report)? {
-        let group = group_file(file, stem)?;
+        let (namespace, group) = group_file(file)?;
+        if directory.is_some_and(|directory| directory != namespace) {
+            return Err("case files must share one directory".into());
+        }
+        directory = Some(namespace);
         let shard = read_json(&parent.join(file))?;
         let cases = shard["cases"]
             .as_array()
@@ -96,7 +119,7 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 
 pub(super) fn write_report(path: &Path, report: &Value) -> Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
-    let stem = stem(path)?;
+    let directory = directory(path)?;
     let mut groups: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
     let mut names = BTreeSet::new();
     for row in report["cases"].as_array().ok_or("report has no cases")? {
@@ -122,11 +145,11 @@ pub(super) fn write_report(path: &Path, report: &Value) -> Result<()> {
     } else {
         Vec::new()
     };
-    std::fs::create_dir_all(parent.join(stem))?;
+    std::fs::create_dir_all(parent.join(&directory))?;
     let mut case_files = Vec::new();
     for (group, mut rows) in groups {
         rows.sort_by_key(|row| row["name"].as_str().unwrap());
-        let file = format!("{stem}/{group}.json");
+        let file = format!("{directory}/{group}.json");
         write_json(&parent.join(&file), &json!({"cases": rows}))?;
         case_files.push(file);
     }
@@ -146,6 +169,54 @@ pub(super) fn write_report(path: &Path, report: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_filenames_do_not_restrict_or_collide_with_group_directories() {
+        let directory =
+            std::env::temp_dir().join(format!("celox-report-filenames-{}", std::process::id()));
+        let report = json!({"schema_version": 3, "cases": [{"name": "counter::increment"}]});
+        let mut namespaces = BTreeSet::new();
+        for filename in [
+            "nightly.icarus.json",
+            "nightly report.json",
+            "検証.json",
+            "report",
+            "report.txt",
+            ".json",
+        ] {
+            let path = directory.join(filename);
+            write_report(&path, &report).unwrap();
+            assert!(path.is_file());
+            assert_eq!(read_report(&path).unwrap(), report);
+            let index = read_json(&path).unwrap();
+            let file = index["case_files"][0].as_str().unwrap();
+            let (namespace, _) = group_file(file).unwrap();
+            assert!(namespaces.insert(namespace.to_owned()));
+            assert!(directory.join(namespace).is_dir());
+            write_report(&path, &report).unwrap();
+            assert_eq!(read_report(&path).unwrap(), report);
+            // The index uses self-contained relative references.
+            let renamed = directory.join(format!("renamed {filename}"));
+            std::fs::rename(path, &renamed).unwrap();
+            assert_eq!(read_report(&renamed).unwrap(), report);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_filename_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let directory = std::env::temp_dir().join(format!(
+            "celox-report-filename-bytes-{}",
+            std::process::id()
+        ));
+        let path = directory.join(std::ffi::OsString::from_vec(b"report-\xff.json".to_vec()));
+        let report = json!({"schema_version": 3, "cases": [{"name": "counter::increment"}]});
+        write_report(&path, &report).unwrap();
+        assert_eq!(read_report(&path).unwrap(), report);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn split_reports_preserve_results_and_replace_filtered_selections() {
