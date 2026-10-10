@@ -93,9 +93,12 @@ impl ScopeImports {
                                         _ => None,
                                     })
                             {
+                                // The first export of a name is the one a
+                                // later reference sees.
                                 imports
                                     .export_offsets
-                                    .insert((package.clone(), name.clone()), offset);
+                                    .entry((package.clone(), name.clone()))
+                                    .or_insert(offset);
                             }
                             imports.exports.push(export);
                         }
@@ -390,6 +393,8 @@ fn nested_declarations(
                 RefNode::FunctionDeclaration(_)
                     | RefNode::TaskDeclaration(_)
                     | RefNode::SeqBlock(_)
+                    // A `for` loop variable is declared for the loop only.
+                    | RefNode::LoopStatementFor(_)
             )
         })
         .map(|child| (range(child.clone()), child))
@@ -494,15 +499,14 @@ pub(super) fn resolve_imports(
     };
     let mut own_names = None;
     let mut exported_references = Vec::new();
+    let mut own_exported: Vec<String> = Vec::new();
     for (package_name, name) in &imports.qualified {
         if own.as_ref() == Some(package_name) {
             // The package names one of its own items.
             let own_names = own_names.get_or_insert_with(|| scope_names(node.clone(), tree));
-            if !own_names.contains(name) {
-                return Err(AnalyzerError::UnknownPackageItem {
-                    package: package_name.clone(),
-                    name: name.clone(),
-                });
+            // A name the package exports is known once its imports are.
+            if !own_names.contains(name) && !own_exported.contains(name) {
+                own_exported.push(name.clone());
             }
             continue;
         }
@@ -529,6 +533,12 @@ pub(super) fn resolve_imports(
         packages.closure(package, &mut used);
     }
     if used.is_empty() {
+        if let (Some(own), Some(name)) = (&own, own_exported.first()) {
+            return Err(AnalyzerError::UnknownPackageItem {
+                package: own.clone(),
+                name: name.clone(),
+            });
+        }
         return Ok(ResolvedImports {
             symbols,
             exports: HashMap::default(),
@@ -724,6 +734,18 @@ pub(super) fn resolve_imports(
             if exported {
                 exports.insert(binding.name.clone(), binding.target.clone());
             }
+        }
+    }
+    // `q::x` in `q` names the declaration `q` exports as `x`.
+    if let Some(own) = &own {
+        for name in &own_exported {
+            let target = exports
+                .get(name)
+                .ok_or_else(|| AnalyzerError::UnknownPackageItem {
+                    package: own.clone(),
+                    name: name.clone(),
+                })?;
+            symbols.alias(&format!("{own}::{name}"), target);
         }
     }
     for binding in &bindings {

@@ -848,3 +848,49 @@ fn exports_follow_lexical_order_and_explicit_imports() {
     );
     assert!(detail.contains("no item `X`"), "{detail}");
 }
+
+/// Review cases: the first of repeated exports, `for` loop scopes, and a
+/// package naming its own export.
+#[test]
+fn exports_loops_and_self_qualified_exports() {
+    let p = "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{p}
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; export p::X;
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        )),
+        3
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::*;
+               function automatic int f();
+                 int s = 0;
+                 for (int X = 0; X < 2; X++) s += X;
+                 return s + X;
+               endfunction
+               localparam int Y = f();
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::X; export p::X; localparam int Y = r::X + 1; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package r; import p::X; localparam int Y = r::X + 1; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
