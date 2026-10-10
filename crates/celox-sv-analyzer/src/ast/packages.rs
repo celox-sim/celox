@@ -18,8 +18,12 @@ pub struct Packages {
 
 #[derive(Debug)]
 pub(super) struct Package {
+    name: String,
     /// The names the package declares.
     own: HashSet<String>,
+    /// The imported names the package exports, and the qualified names of
+    /// the declarations they denote (IEEE 1800-2023 26.6).
+    exports: HashMap<String, String>,
     /// The packages it imports or refers to.
     dependencies: Vec<String>,
     /// Its symbols and those of its dependencies, by qualified name.
@@ -33,6 +37,16 @@ impl Package {
     /// Whether the package declares `name`.
     pub fn declares(&self, name: &str) -> bool {
         self.own.contains(name)
+    }
+
+    /// The qualified name of the declaration an import of `name` from the
+    /// package denotes: one the package declares or exports.
+    pub fn provides(&self, name: &str) -> Option<String> {
+        if self.declares(name) {
+            Some(format!("{}::{name}", self.name))
+        } else {
+            self.exports.get(name).cloned()
+        }
     }
 }
 
@@ -263,7 +277,10 @@ fn analyze_package_scope(
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
-    let mut imported = imports::imported_symbols(node.clone(), tree, packages)?;
+    let imports::ResolvedImports {
+        symbols: mut imported,
+        exports,
+    } = imports::resolve_imports(node.clone(), tree, packages)?;
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }
@@ -348,7 +365,9 @@ fn analyze_package_scope(
     names.extend(aliases);
     let symbols = symbols.renamed(&names);
     Ok(Package {
+        name: name.to_string(),
         own,
+        exports,
         dependencies: Vec::new(),
         symbols,
         state_module,
