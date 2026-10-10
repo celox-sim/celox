@@ -1,0 +1,433 @@
+(group partial_word_shift (category operators))
+
+; Explicit sign/full masks keep generated testbench arithmetic close to the circuit width.
+; IEEE 1800-2023 11.4.10: signed >>> repeats the logical sign bit, including X/Z.
+
+(case sign_z_65
+  (four_state)
+  (source "test.veryl" #"
+module Top (a: input signed logic<65>, n: input u32, y: output signed logic<65>) {
+    assign y = a >>> n;
+}
+"#)
+  (top Top)
+  (modify (set a (fourstate 0x5 0x10000000000000000)) (set n 1))
+  (assert_eq y (fourstate 0x2 0x18000000000000000)))
+
+(case sign_x_65
+  (four_state)
+  (source "test.veryl" #"
+module Top (a: input signed logic<65>, n: input u32, y: output signed logic<65>) {
+    assign y = a >>> n;
+}
+"#)
+  (top Top)
+  (modify (set a (fourstate 0x10000000000000005 0x10000000000000000)) (set n 1))
+  (assert_eq y (fourstate 0x18000000000000002 0x18000000000000000)))
+
+(case two_state_matrix
+  (source "test.veryl" #"
+module Top (
+    n: input u32,
+    a63: input signed logic<63>,
+    y63: output signed logic<63>,
+    c63_1: output signed logic<63>,
+    c63_64: output signed logic<63>,
+    c63_63: output signed logic<63>,
+    c63_4294967295: output signed logic<63>,
+    a64: input signed logic<64>,
+    y64: output signed logic<64>,
+    c64_1: output signed logic<64>,
+    c64_64: output signed logic<64>,
+    c64_4294967295: output signed logic<64>,
+    a65: input signed logic<65>,
+    y65: output signed logic<65>,
+    c65_1: output signed logic<65>,
+    c65_64: output signed logic<65>,
+    c65_65: output signed logic<65>,
+    c65_4294967295: output signed logic<65>,
+    a95: input signed logic<95>,
+    y95: output signed logic<95>,
+    c95_1: output signed logic<95>,
+    c95_64: output signed logic<95>,
+    c95_95: output signed logic<95>,
+    c95_4294967295: output signed logic<95>,
+    a127: input signed logic<127>,
+    y127: output signed logic<127>,
+    c127_1: output signed logic<127>,
+    c127_64: output signed logic<127>,
+    c127_127: output signed logic<127>,
+    c127_4294967295: output signed logic<127>,
+    a128: input signed logic<128>,
+    y128: output signed logic<128>,
+    c128_1: output signed logic<128>,
+    c128_64: output signed logic<128>,
+    c128_128: output signed logic<128>,
+    c128_4294967295: output signed logic<128>,
+    a129: input signed logic<129>,
+    y129: output signed logic<129>,
+    c129_1: output signed logic<129>,
+    c129_64: output signed logic<129>,
+    c129_129: output signed logic<129>,
+    c129_4294967295: output signed logic<129>,
+    a193: input signed logic<193>,
+    y193: output signed logic<193>,
+    c193_1: output signed logic<193>,
+    c193_64: output signed logic<193>,
+    c193_193: output signed logic<193>,
+    c193_4294967295: output signed logic<193>,
+    a257: input signed logic<257>,
+    y257: output signed logic<257>,
+    c257_1: output signed logic<257>,
+    c257_64: output signed logic<257>,
+    c257_257: output signed logic<257>,
+    c257_4294967295: output signed logic<257>
+) {
+    assign y63 = a63 >>> n;
+    assign c63_1 = a63 >>> 32'd1;
+    assign c63_64 = a63 >>> 32'd64;
+    assign c63_63 = a63 >>> 32'd63;
+    assign c63_4294967295 = a63 >>> 32'd4294967295;
+    assign y64 = a64 >>> n;
+    assign c64_1 = a64 >>> 32'd1;
+    assign c64_64 = a64 >>> 32'd64;
+    assign c64_4294967295 = a64 >>> 32'd4294967295;
+    assign y65 = a65 >>> n;
+    assign c65_1 = a65 >>> 32'd1;
+    assign c65_64 = a65 >>> 32'd64;
+    assign c65_65 = a65 >>> 32'd65;
+    assign c65_4294967295 = a65 >>> 32'd4294967295;
+    assign y95 = a95 >>> n;
+    assign c95_1 = a95 >>> 32'd1;
+    assign c95_64 = a95 >>> 32'd64;
+    assign c95_95 = a95 >>> 32'd95;
+    assign c95_4294967295 = a95 >>> 32'd4294967295;
+    assign y127 = a127 >>> n;
+    assign c127_1 = a127 >>> 32'd1;
+    assign c127_64 = a127 >>> 32'd64;
+    assign c127_127 = a127 >>> 32'd127;
+    assign c127_4294967295 = a127 >>> 32'd4294967295;
+    assign y128 = a128 >>> n;
+    assign c128_1 = a128 >>> 32'd1;
+    assign c128_64 = a128 >>> 32'd64;
+    assign c128_128 = a128 >>> 32'd128;
+    assign c128_4294967295 = a128 >>> 32'd4294967295;
+    assign y129 = a129 >>> n;
+    assign c129_1 = a129 >>> 32'd1;
+    assign c129_64 = a129 >>> 32'd64;
+    assign c129_129 = a129 >>> 32'd129;
+    assign c129_4294967295 = a129 >>> 32'd4294967295;
+    assign y193 = a193 >>> n;
+    assign c193_1 = a193 >>> 32'd1;
+    assign c193_64 = a193 >>> 32'd64;
+    assign c193_193 = a193 >>> 32'd193;
+    assign c193_4294967295 = a193 >>> 32'd4294967295;
+    assign y257 = a257 >>> n;
+    assign c257_1 = a257 >>> 32'd1;
+    assign c257_64 = a257 >>> 32'd64;
+    assign c257_257 = a257 >>> 32'd257;
+    assign c257_4294967295 = a257 >>> 32'd4294967295;
+}
+"#)
+  (top Top)
+  ; 193 and 257 bits also exercise Cranelift's memory-backed shift path.
+  (expand (width sign full)
+    ((63 0x4000000000000000 0x7fffffffffffffff)
+     (64 0x8000000000000000 0xffffffffffffffff)
+     (65 0x10000000000000000 0x1ffffffffffffffff)
+     (95 0x400000000000000000000000 0x7fffffffffffffffffffffff)
+     (127 0x40000000000000000000000000000000 0x7fffffffffffffffffffffffffffffff)
+     (128 0x80000000000000000000000000000000 0xffffffffffffffffffffffffffffffff)
+     (129 0x100000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffff)
+     (193 0x1000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffff)
+     (257 0x10000000000000000000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))
+    (let width {width})
+    (let sign {sign})
+    (let full {full})
+    (for (sign_value sign_mask) (list (0 0) (1 0))
+      (for low_mask (list 0)
+        (let payload 5)
+        (let mask low_mask)
+        (let payload_fill 0)
+        (let mask_fill 0)
+        (if sign_value (do (set! payload (| payload sign)) (set! payload_fill full)))
+        (if sign_mask (do (set! mask (| mask sign)) (set! mask_fill full)))
+        (set a{width} (fourstate payload mask))
+        (for shift (list 0 1 2 31 62 63 64 65 126 127 128 129 (- width 1) width (+ width 1) 0xffffffff)
+          ; Clamp only the oracle; the circuit receives the original large count.
+          (let count (min shift width))
+          (let fill (^ full (>> full count)))
+          (modify (set n shift))
+          (assert_eq y{width}
+            (fourstate (| (>> payload count) (& payload_fill fill))
+                       (| (>> mask count) (& mask_fill fill)))
+            "runtime SAR width={width}"))
+        (expand constant (1 64 {width} 4294967295)
+          (let count (min {constant} width))
+          (let fill (^ full (>> full count)))
+          (assert_eq c{width}_{constant}
+            (fourstate (| (>> payload count) (& payload_fill fill))
+                       (| (>> mask count) (& mask_fill fill)))
+            "constant SAR width={width}, count={constant}")))))
+)
+
+(case four_state_matrix
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    n: input u32,
+    a63: input signed logic<63>,
+    y63: output signed logic<63>,
+    c63_1: output signed logic<63>,
+    c63_64: output signed logic<63>,
+    c63_63: output signed logic<63>,
+    c63_4294967295: output signed logic<63>,
+    a64: input signed logic<64>,
+    y64: output signed logic<64>,
+    c64_1: output signed logic<64>,
+    c64_64: output signed logic<64>,
+    c64_4294967295: output signed logic<64>,
+    a65: input signed logic<65>,
+    y65: output signed logic<65>,
+    c65_1: output signed logic<65>,
+    c65_64: output signed logic<65>,
+    c65_65: output signed logic<65>,
+    c65_4294967295: output signed logic<65>,
+    a95: input signed logic<95>,
+    y95: output signed logic<95>,
+    c95_1: output signed logic<95>,
+    c95_64: output signed logic<95>,
+    c95_95: output signed logic<95>,
+    c95_4294967295: output signed logic<95>,
+    a127: input signed logic<127>,
+    y127: output signed logic<127>,
+    c127_1: output signed logic<127>,
+    c127_64: output signed logic<127>,
+    c127_127: output signed logic<127>,
+    c127_4294967295: output signed logic<127>,
+    a128: input signed logic<128>,
+    y128: output signed logic<128>,
+    c128_1: output signed logic<128>,
+    c128_64: output signed logic<128>,
+    c128_128: output signed logic<128>,
+    c128_4294967295: output signed logic<128>,
+    a129: input signed logic<129>,
+    y129: output signed logic<129>,
+    c129_1: output signed logic<129>,
+    c129_64: output signed logic<129>,
+    c129_129: output signed logic<129>,
+    c129_4294967295: output signed logic<129>,
+    a193: input signed logic<193>,
+    y193: output signed logic<193>,
+    c193_1: output signed logic<193>,
+    c193_64: output signed logic<193>,
+    c193_193: output signed logic<193>,
+    c193_4294967295: output signed logic<193>,
+    a257: input signed logic<257>,
+    y257: output signed logic<257>,
+    c257_1: output signed logic<257>,
+    c257_64: output signed logic<257>,
+    c257_257: output signed logic<257>,
+    c257_4294967295: output signed logic<257>
+) {
+    assign y63 = a63 >>> n;
+    assign c63_1 = a63 >>> 32'd1;
+    assign c63_64 = a63 >>> 32'd64;
+    assign c63_63 = a63 >>> 32'd63;
+    assign c63_4294967295 = a63 >>> 32'd4294967295;
+    assign y64 = a64 >>> n;
+    assign c64_1 = a64 >>> 32'd1;
+    assign c64_64 = a64 >>> 32'd64;
+    assign c64_4294967295 = a64 >>> 32'd4294967295;
+    assign y65 = a65 >>> n;
+    assign c65_1 = a65 >>> 32'd1;
+    assign c65_64 = a65 >>> 32'd64;
+    assign c65_65 = a65 >>> 32'd65;
+    assign c65_4294967295 = a65 >>> 32'd4294967295;
+    assign y95 = a95 >>> n;
+    assign c95_1 = a95 >>> 32'd1;
+    assign c95_64 = a95 >>> 32'd64;
+    assign c95_95 = a95 >>> 32'd95;
+    assign c95_4294967295 = a95 >>> 32'd4294967295;
+    assign y127 = a127 >>> n;
+    assign c127_1 = a127 >>> 32'd1;
+    assign c127_64 = a127 >>> 32'd64;
+    assign c127_127 = a127 >>> 32'd127;
+    assign c127_4294967295 = a127 >>> 32'd4294967295;
+    assign y128 = a128 >>> n;
+    assign c128_1 = a128 >>> 32'd1;
+    assign c128_64 = a128 >>> 32'd64;
+    assign c128_128 = a128 >>> 32'd128;
+    assign c128_4294967295 = a128 >>> 32'd4294967295;
+    assign y129 = a129 >>> n;
+    assign c129_1 = a129 >>> 32'd1;
+    assign c129_64 = a129 >>> 32'd64;
+    assign c129_129 = a129 >>> 32'd129;
+    assign c129_4294967295 = a129 >>> 32'd4294967295;
+    assign y193 = a193 >>> n;
+    assign c193_1 = a193 >>> 32'd1;
+    assign c193_64 = a193 >>> 32'd64;
+    assign c193_193 = a193 >>> 32'd193;
+    assign c193_4294967295 = a193 >>> 32'd4294967295;
+    assign y257 = a257 >>> n;
+    assign c257_1 = a257 >>> 32'd1;
+    assign c257_64 = a257 >>> 32'd64;
+    assign c257_257 = a257 >>> 32'd257;
+    assign c257_4294967295 = a257 >>> 32'd4294967295;
+}
+"#)
+  (top Top)
+  ; 193 and 257 bits also exercise Cranelift's memory-backed shift path.
+  (expand (width sign full)
+    ((63 0x4000000000000000 0x7fffffffffffffff)
+     (64 0x8000000000000000 0xffffffffffffffff)
+     (65 0x10000000000000000 0x1ffffffffffffffff)
+     (95 0x400000000000000000000000 0x7fffffffffffffffffffffff)
+     (127 0x40000000000000000000000000000000 0x7fffffffffffffffffffffffffffffff)
+     (128 0x80000000000000000000000000000000 0xffffffffffffffffffffffffffffffff)
+     (129 0x100000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffff)
+     (193 0x1000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffff)
+     (257 0x10000000000000000000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))
+    (let width {width})
+    (let sign {sign})
+    (let full {full})
+    (for (sign_value sign_mask) (list (0 0) (1 0) (0 1) (1 1))
+      (for low_mask (list 0 40)
+        (let payload 5)
+        (let mask low_mask)
+        (let payload_fill 0)
+        (let mask_fill 0)
+        (if sign_value (do (set! payload (| payload sign)) (set! payload_fill full)))
+        (if sign_mask (do (set! mask (| mask sign)) (set! mask_fill full)))
+        (set a{width} (fourstate payload mask))
+        (for shift (list 0 1 2 31 62 63 64 65 126 127 128 129 (- width 1) width (+ width 1) 0xffffffff)
+          ; Clamp only the oracle; the circuit receives the original large count.
+          (let count (min shift width))
+          (let fill (^ full (>> full count)))
+          (modify (set n shift))
+          (assert_eq y{width}
+            (fourstate (| (>> payload count) (& payload_fill fill))
+                       (| (>> mask count) (& mask_fill fill)))
+            "runtime SAR width={width}"))
+        (expand constant (1 64 {width} 4294967295)
+          (let count (min {constant} width))
+          (let fill (^ full (>> full count)))
+          (assert_eq c{width}_{constant}
+            (fourstate (| (>> payload count) (& payload_fill fill))
+                       (| (>> mask count) (& mask_fill fill)))
+            "constant SAR width={width}, count={constant}")))))
+)
+
+(case sar_padding_does_not_escape
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    a65: input signed logic<65>,
+    a193: input signed logic<193>,
+    n: input u32,
+    y65: output logic<129>,
+    y193: output logic<257>,
+) {
+    var shifted65: signed logic<65>;
+    var shifted193: signed logic<193>;
+    assign shifted65 = a65 >>> n;
+    assign shifted193 = a193 >>> n;
+    assign y65 = {64'b0, shifted65};
+    assign y193 = {64'b0, shifted193};
+}
+"#)
+  (top Top)
+  ; Storage padding is temporary sign fill, never part of a wider consumer.
+  (expand (width sign full)
+    ((65 0x10000000000000000 0x1ffffffffffffffff)
+     (193 0x1000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffff))
+    (let sign {sign})
+    (let full {full})
+    (for (sign_value sign_mask) (list (0 0) (1 0) (0 1) (1 1))
+      (let payload 5)
+      (let mask 0)
+      (let payload_fill 0)
+      (let mask_fill 0)
+      (if sign_value (do (set! payload (| payload sign)) (set! payload_fill full)))
+      (if sign_mask (do (set! mask (| mask sign)) (set! mask_fill full)))
+      (set a{width} (fourstate payload mask))
+      (for shift (list 0 1 63 64 {width} 0xffffffff)
+        (let count (min shift {width}))
+        (let fill (^ full (>> full count)))
+        (modify (set n shift))
+        (assert_eq y{width}
+          (fourstate (| (>> payload count) (& payload_fill fill))
+                     (| (>> mask count) (& mask_fill fill)))
+          "SAR padding width={width}")))))
+
+; Preserve the full constant/runtime case above, including external-tool failures.
+; This separate case lets two-state adapters verify every run-time width/count.
+(case two_state_runtime_matrix
+  (source "test.veryl" #"
+module Top (
+    n: input u32,
+    a63: input signed logic<63>,
+    y63: output signed logic<63>,
+    a64: input signed logic<64>,
+    y64: output signed logic<64>,
+    a65: input signed logic<65>,
+    y65: output signed logic<65>,
+    a95: input signed logic<95>,
+    y95: output signed logic<95>,
+    a127: input signed logic<127>,
+    y127: output signed logic<127>,
+    a128: input signed logic<128>,
+    y128: output signed logic<128>,
+    a129: input signed logic<129>,
+    y129: output signed logic<129>,
+    a193: input signed logic<193>,
+    y193: output signed logic<193>,
+    a257: input signed logic<257>,
+    y257: output signed logic<257>
+) {
+    assign y63 = a63 >>> n;
+    assign y64 = a64 >>> n;
+    assign y65 = a65 >>> n;
+    assign y95 = a95 >>> n;
+    assign y127 = a127 >>> n;
+    assign y128 = a128 >>> n;
+    assign y129 = a129 >>> n;
+    assign y193 = a193 >>> n;
+    assign y257 = a257 >>> n;
+}
+"#)
+  (top Top)
+  ; 193 and 257 bits also exercise Cranelift's memory-backed shift path.
+  (expand (width sign full)
+    ((63 0x4000000000000000 0x7fffffffffffffff)
+     (64 0x8000000000000000 0xffffffffffffffff)
+     (65 0x10000000000000000 0x1ffffffffffffffff)
+     (95 0x400000000000000000000000 0x7fffffffffffffffffffffff)
+     (127 0x40000000000000000000000000000000 0x7fffffffffffffffffffffffffffffff)
+     (128 0x80000000000000000000000000000000 0xffffffffffffffffffffffffffffffff)
+     (129 0x100000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffff)
+     (193 0x1000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffff)
+     (257 0x10000000000000000000000000000000000000000000000000000000000000000 0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))
+    (let width {width})
+    (let sign {sign})
+    (let full {full})
+    (for (sign_value sign_mask) (list (0 0) (1 0))
+      (for low_mask (list 0)
+        (let payload 5)
+        (let mask low_mask)
+        (let payload_fill 0)
+        (let mask_fill 0)
+        (if sign_value (do (set! payload (| payload sign)) (set! payload_fill full)))
+        (if sign_mask (do (set! mask (| mask sign)) (set! mask_fill full)))
+        (set a{width} (fourstate payload mask))
+        (for shift (list 0 1 2 31 62 63 64 65 126 127 128 129 (- width 1) width (+ width 1) 0xffffffff)
+          ; Clamp only the oracle; the circuit receives the original large count.
+          (let count (min shift width))
+          (let fill (^ full (>> full count)))
+          (modify (set n shift))
+          (assert_eq y{width}
+            (fourstate (| (>> payload count) (& payload_fill fill))
+                       (| (>> mask count) (& mask_fill fill)))
+            "runtime SAR width={width}"))
+      )))
+)
