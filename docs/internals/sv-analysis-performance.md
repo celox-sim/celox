@@ -683,6 +683,76 @@ remains expensive. Numeric and ranged modes also pass at 32/128/512 with IR
 value/width assertions. This step reduces repeated resolution rather than removing
 the remaining preliminary declaration walks or establishing universal linearity.
 
+## Borrowed constant-function environments
+
+A constant-function call previously copied every visible numeric binding and
+rebuilt the complete parameter type table. Calls now borrow the caller's
+value environment and own only their formal arguments, local variables,
+return variable, and typed temporaries. Width and signedness markers are
+queried for referenced names. Nested calls borrow the preceding frame, retaining
+its value precedence without copying its contents. Public evaluator signatures
+still accept the existing maps.
+
+The literal evaluator now checks whether it supports a function before calling
+it. Previously it executed user functions with an empty environment, discarded
+the result because their literal return types were unsupported, and then retried
+through numeric evaluation. In a recursive expression that repeated work could
+multiply at each level. An internal regression verifies that a 12-level recursion
+executes 13 calls and that exceeding the depth limit executes only 64 calls.
+Unsupported literal evaluation executes no user calls. Existing width, signedness,
+local shadowing, selected assignments, symbolic argument widths, unresolved values,
+and depth restoration are checked against the former copied frame initialization.
+
+A counted environment verifies identical lookup counts with 16, 256, and 4,096
+unrelated bindings, including nested calls. A paired manual probe compares the
+former initialization with the borrowed frame in one optimized process. Each row
+executes as many leaf calls as unrelated parameters, reads the same signed global,
+and checks every result. Seven repetitions alternate the two orders; times are
+medians and have no pass/fail threshold:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_borrowed_and_copied_function_environments -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Copied frame (ms) | Borrowed frame (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.292 | 0.029 |
+| 128 | 128 | 3.273 | 0.082 |
+| 512 | 512 | 53.946 | 0.305 |
+| 2,048 | 2,048 | 2,241.757 | 1.944 |
+
+This isolates frame initialization and evaluation; parsing, declaration discovery,
+and backend compilation are excluded. With a fixed body and bounded call depth,
+frame setup no longer performs work proportional to unrelated bindings.
+
+The standalone probe also supports a chain of `next_value(P_previous)` parameter
+initializers and checks the final IR value:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+Separate three-sample medians comparing `21eb07cf3` with this change were:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 4.382 / 4.926 | 26.663 / 16.563 | 0.152 / 0.084 |
+| 128 | 21.416 / 16.421 | 232.298 / 121.052 | 0.887 / 0.372 |
+| 512 | 56.719 / 51.676 | 2,652.147 / 1,170.084 | 5.608 / 0.957 |
+
+These samples show lower costs for this workload, with shared-machine timing
+variation. Whole AST lowering still scales nonlinearly: other collectors repeatedly
+resolve parameter prefixes. Removing per-call copies and speculative recursive
+execution does not eliminate those repeated bindings or establish universal
+linear scaling. Borrowed value lookup traverses enclosing frames, bounded by the
+existing depth limit; expressions, locals, temporaries, and loop iterations still
+contribute to evaluation cost. The debug AST probe at 256 parameters also
+exceeds a default Rust test thread's stack on the baseline commit; its regression
+uses an 8 MiB thread stack. The optimized standalone probe passes at 512. This
+change does not remove the existing stack use in recursive parameter substitution.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
