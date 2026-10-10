@@ -1727,6 +1727,12 @@ pub(super) fn subroutines_from_module_node_with(
                     &statics,
                     builder.state.subroutine_directions,
                 )?;
+                if !builder.automatic {
+                    lifetimes::check_static_result(
+                        &subroutine,
+                        builder.state.subroutine_directions,
+                    )?;
+                }
                 Ok(subroutine)
             })();
             let subroutine = match (lowered, rejected.as_deref_mut()) {

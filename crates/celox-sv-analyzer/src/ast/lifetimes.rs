@@ -56,7 +56,13 @@ fn keep_in<T>(
     while index < stmts.len() {
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
-            && entry(name, init.as_ref(), &stmts[index + 1..], directions)? == Entry::Observed
+            && entry(
+                name,
+                init.as_ref(),
+                &stmts[index + 1..],
+                directions,
+                &HashMap::default(),
+            )? == Entry::Observed
         {
             let Stmt::Local { name, init } = stmts.remove(index) else {
                 unreachable!("the statement is a local declaration");
@@ -111,6 +117,7 @@ pub(super) fn check_subroutine_statics(
     if statics.is_empty() {
         return Ok(());
     }
+    let widths = argument_widths(subroutine);
     let mut result = Ok(());
     let mut check = |stmts: &[Stmt]| {
         for (index, stmt) in stmts.iter().enumerate() {
@@ -118,18 +125,22 @@ pub(super) fn check_subroutine_statics(
                 && statics.contains(name)
                 && result.is_ok()
             {
-                result =
-                    entry(name, init.as_ref(), &stmts[index + 1..], directions).and_then(|entry| {
-                        match entry {
-                            Entry::Unobserved => Ok(()),
-                            Entry::Observed => Err(AnalyzerError::Unsupported(format!(
-                                "static variable `{}` of subroutine `{}` that keeps its value \
+                result = entry(
+                    name,
+                    init.as_ref(),
+                    &stmts[index + 1..],
+                    directions,
+                    &widths,
+                )
+                .and_then(|entry| match entry {
+                    Entry::Unobserved => Ok(()),
+                    Entry::Observed => Err(AnalyzerError::Unsupported(format!(
+                        "static variable `{}` of subroutine `{}` that keeps its value \
                              between calls (declare it `automatic`)",
-                                source_name(name),
-                                subroutine.name
-                            ))),
-                        }
-                    });
+                        source_name(name),
+                        subroutine.name
+                    ))),
+                });
             }
         }
     };
@@ -165,6 +176,42 @@ pub(super) fn check_subroutine_statics(
     result
 }
 
+/// Reject a static function whose result keeps its value between calls: in
+/// a static function the variable named after it is static too, so a call
+/// that does not assign it returns the result of an earlier call.
+pub(super) fn check_static_result(
+    subroutine: &Subroutine,
+    directions: &Directions,
+) -> Result<(), AnalyzerError> {
+    let Some(result) = &subroutine.return_var else {
+        return Ok(());
+    };
+    let widths = argument_widths(subroutine);
+    let flow = Flow {
+        name: result,
+        directions,
+        widths: &widths,
+    };
+    // `return value;` assigns the result as it leaves.
+    match flow.block(&subroutine.body, false) {
+        Ok(exits) if exits.next != Some(false) => Ok(()),
+        _ => Err(AnalyzerError::Unsupported(format!(
+            "static function `{}` whose result keeps its value between calls (assign it on \
+             every path, or declare the function `automatic`)",
+            subroutine.name
+        ))),
+    }
+}
+
+/// The widths of the arguments of `subroutine`.
+fn argument_widths(subroutine: &Subroutine) -> HashMap<String, usize> {
+    subroutine
+        .params
+        .iter()
+        .filter_map(|param| Some((param.name.clone(), param.r#type.resolved_width()?)))
+        .collect()
+}
+
 /// The name a unique local name `x@N` was declared with.
 fn source_name(name: &str) -> &str {
     name.rsplit_once('@').map_or(name, |(source, _)| source)
@@ -177,6 +224,7 @@ fn entry(
     init: Option<&Expr>,
     after: &[Stmt],
     directions: &Directions,
+    widths: &HashMap<String, usize>,
 ) -> Result<Entry, AnalyzerError> {
     // A static initializer runs once, before simulation starts; one that is
     // not constant could only run on every entry instead.
@@ -187,7 +235,11 @@ fn entry(
             source_name(name)
         )));
     }
-    let flow = Flow { name, directions };
+    let flow = Flow {
+        name,
+        directions,
+        widths,
+    };
     let observed = flow.block(after, false).is_err();
     Ok(match init {
         // Initialized once or on every entry, a local that is never written
@@ -206,6 +258,9 @@ struct Observed;
 struct Flow<'n> {
     name: &'n str,
     directions: &'n Directions,
+    /// The widths of the variables a `case` may select on, to tell when its
+    /// items cover every value.
+    widths: &'n HashMap<String, usize>,
 }
 
 /// Whether the local is written on every path that leaves some statements
@@ -324,9 +379,10 @@ impl Flow<'_> {
                 nonblocking,
             } => {
                 self.read(rhs, written)?;
+                // Every part is selected before any is written.
                 let mut now = written;
                 for part in parts {
-                    now = self.write(part, *nonblocking, now)?;
+                    now |= self.write(part, *nonblocking, written)?;
                 }
                 Ok(Exits::next(now))
             }
@@ -341,14 +397,17 @@ impl Flow<'_> {
                     .merge(self.block(else_body, written)?))
             }
             Stmt::Case {
+                kind,
                 selector,
                 items,
                 default,
-                ..
             } => {
                 self.read(selector, written)?;
                 let mut exits = match default {
                     Some(default) => self.block(default, written)?,
+                    // Items that cover every value of the selector leave no
+                    // path past them.
+                    None if self.covers_every_value(*kind, selector, items) => Exits::default(),
                     None => Exits::next(written),
                 };
                 for item in items {
@@ -457,6 +516,41 @@ impl Flow<'_> {
         }
     }
 
+    /// Whether the labels of a `case` on `selector` are distinct known
+    /// values that cover every value of its width.
+    fn covers_every_value(
+        &self,
+        kind: crate::procedural::CaseKind,
+        selector: &Expr,
+        items: &[crate::procedural::CaseItemBase<Expr, LValue>],
+    ) -> bool {
+        let Expr::Ident(selector) = selector else {
+            return false;
+        };
+        let Some(&width) = self.widths.get(selector) else {
+            return false;
+        };
+        if kind != crate::procedural::CaseKind::Exact || width > 16 {
+            return false;
+        }
+        let mut values = HashSet::default();
+        for label in items.iter().flat_map(|item| &item.labels) {
+            let crate::procedural::CaseLabel::Value(Expr::Literal(text)) = label else {
+                return false;
+            };
+            let Some(literal) = crate::typecheck::parse_integral_literal(text) else {
+                return false;
+            };
+            if literal.mask != num_bigint::BigUint::default() {
+                return false;
+            }
+            if literal.value < (num_bigint::BigUint::from(1u8) << width) {
+                values.insert(literal.value);
+            }
+        }
+        values.len() == 1 << width
+    }
+
     /// Whether any statement of `stmts` writes the local.
     fn writes(&self, stmts: &[Stmt]) -> bool {
         let mut writes = false;
@@ -466,9 +560,18 @@ impl Flow<'_> {
                 Stmt::AssignConcat { parts, .. } => {
                     writes |= parts.iter().any(|part| part.name() == self.name)
                 }
-                // A task may write an argument.
-                Stmt::Call { args, .. } => {
-                    writes |= args.iter().flatten().any(|arg| expr_reads(arg, self.name))
+                // A task may write an output or inout argument; one of a
+                // subroutine whose directions are unknown may be either.
+                Stmt::Call { name, args } => {
+                    let directions = self.directions.get(name);
+                    writes |= args.iter().enumerate().any(|(index, arg)| {
+                        arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
+                            && directions
+                                .and_then(|directions| directions.get(index))
+                                .is_none_or(|direction| {
+                                    *direction != crate::procedural::ParamDirection::Input
+                                })
+                    })
                 }
                 _ => {}
             });

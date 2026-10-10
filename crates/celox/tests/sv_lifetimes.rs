@@ -253,3 +253,68 @@ fn interfaces_keep_their_default_lifetime() {
     );
     assert!(detail.contains("default lifetime"), "{detail}");
 }
+
+/// Review cases: static function results, initializer order, and the
+/// selectors of concatenated targets.
+#[test]
+fn static_function_results_keep_their_value() {
+    let detail = error(
+        "module Top(input logic set, output logic [7:0] y);
+           function logic [7:0] f(input logic s); if (s) f = 8'd7; endfunction
+           assign y = f(set);
+         endmodule",
+    );
+    assert!(detail.contains("whose result keeps its value"), "{detail}");
+    assert_eq!(
+        output(
+            "module Top(output logic [7:0] y);
+               function logic [7:0] f(input logic s); if (s) f = 8'd7; else f = 8'd1; endfunction
+               assign y = f(1'b1) + f(1'b0);
+             endmodule"
+        ),
+        8
+    );
+    // A case whose items cover every value of its selector assigns the
+    // result on every path.
+    assert_eq!(
+        output(
+            "module Top(output logic [7:0] y);
+               function logic [3:0] dec(input logic [1:0] a);
+                 case (a) 2'd0: dec = 4'd1; 2'd1: dec = 4'd2; 2'd2: dec = 4'd4; 2'd3: dec = 4'd8; endcase
+               endfunction
+               assign y = dec(2'd2);
+             endmodule"
+        ),
+        4
+    );
+}
+
+#[test]
+fn static_initializers_run_before_initial_blocks() {
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               initial begin static int c = 3; y = c; c++; end
+             endmodule"
+        ),
+        3
+    );
+}
+
+#[test]
+fn concatenated_targets_select_with_the_entry_value() {
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output logic [7:0] y);
+               logic [7:0] bits = 0;
+               always_ff @(posedge clk) begin
+                 static int i = 0;
+                 {i, bits[i]} = {32'd1, 1'b1};
+                 y <= bits;
+               end
+             endmodule",
+            2
+        ),
+        [1, 3]
+    );
+}

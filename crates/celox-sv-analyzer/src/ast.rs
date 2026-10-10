@@ -879,11 +879,19 @@ impl Module {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
         }
         if !static_initializers.is_empty() {
-            initial_processes.push(InitialProcess {
-                condition: None,
-                body: static_initializers,
-                initializer: true,
-            });
+            // Declaration initializers run before the other initial blocks.
+            let first_block = initial_processes
+                .iter()
+                .position(|process| !process.initializer)
+                .unwrap_or(initial_processes.len());
+            initial_processes.insert(
+                first_block,
+                InitialProcess {
+                    condition: None,
+                    body: static_initializers,
+                    initializer: true,
+                },
+            );
         }
         let procedurally_written = procedural::written_names(
             comb_processes
