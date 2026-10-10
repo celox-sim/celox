@@ -56,7 +56,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -294,3 +294,12 @@ The cases that remain excluded fall into these groups:
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
   hierarchical assignments) are not emitted as simulatable SystemVerilog
   modules.
+
+`$timeunit` and `$timeprecision` return a signed 32-bit exponent in seconds
+(IEEE 1800-2023 20.4.1). They resolve the current time scope, `$unit`, `$root`,
+and scalar module instance paths across source files. `timeunit`,
+`timeprecision`, preceding `timescale` directives, and `resetall` follow the
+precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
+precision includes all declared precisions and directive precisions, even in
+uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
+require elaborated hierarchy lookup and are currently rejected.

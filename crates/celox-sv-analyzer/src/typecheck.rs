@@ -53,8 +53,11 @@ impl std::fmt::Display for UnpackedArrayType {
     }
 }
 
-/// Width and signedness of the supported bit vector system functions (20.9).
+/// Width and signedness of supported numeric system functions (20.4, 20.8, 20.9).
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
+    if matches!(name, "$timeunit" | "$timeprecision") {
+        return (arity <= 1).then_some((32, true));
+    }
     if name == "$countbits" {
         return (arity >= 2).then_some((32, true));
     }
@@ -1227,6 +1230,12 @@ fn shift_amount(value: i128) -> Option<u32> {
 }
 
 fn literal_as_i128(value: &str) -> Option<i128> {
+    // Constant substitution represents negative integers as decimal strings.
+    // They are internal literals, rather than source tokens: the SV parser
+    // represents a source minus sign as a unary expression.
+    if value.starts_with('-') {
+        return value.parse().ok();
+    }
     let explicitly_signed = value
         .split_once('\'')
         .is_some_and(|(_, based)| matches!(based.trim_start().chars().next(), Some('s' | 'S')));

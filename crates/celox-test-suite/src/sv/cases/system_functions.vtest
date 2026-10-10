@@ -1011,3 +1011,138 @@ a=0a  10
   (assert_eq local_parameter 1)
   (assert_eq for_index 1)
   (assert_eq foreach_index 1))
+
+(case timescale_queries_resolve_declarations_and_return_types
+  (source "timescales.sv" #"
+    module Top(input logic a, output logic ok, output logic [63:0] wide,
+               output logic [3:0] narrow, output int scaled);
+      timeunit 100ps / 10fs;
+      timeprecision 10fs;
+      timeunit 100ps;
+      function automatic int unit_value(); return $timeunit(); endfunction
+      assign wide = $timeunit;
+      assign narrow = $timeprecision;
+      assign scaled = a ? $timeprecision() : unit_value();
+      assign ok = ($timeunit == -10) && ($timeprecision() == -14)
+        && ($bits($timeunit()) == 32) && ($timeunit() < 0)
+        && (($timeunit() >> 1) == 32'h7fff_fffb)
+        && (($timeunit() >>> 1) == -5);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq ok 1)
+  (assert_eq wide 18446744073709551606)
+  (assert_eq narrow 2)
+  (assert_eq scaled 4294967286)
+  (modify (set a 1))
+  (assert_eq scaled 4294967282))
+
+(case timescale_queries_resolve_directives_and_hierarchy
+  (source "timescales.sv" #"
+    `timescale 10ns / 100ps
+    module Leaf(output int u, p);
+      assign u = $timeunit;
+      assign p = $timeprecision();
+    endmodule
+    `timescale 1us / 1ns
+    module Child(output int u, p);
+      Leaf leaf();
+      assign u = $timeunit();
+      assign p = $timeprecision;
+    endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign ok = ($timeunit == -3) && ($timeprecision == -6)
+        && ($timeunit(child) == -6) && ($timeprecision(child) == -9)
+        && ($timeunit(child.leaf) == -8) && ($timeprecision(child.leaf) == -10)
+;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_distinguish_unit_and_global_precision
+  (source "timescales.sv" #"
+    timeunit 100ps / 10fs;
+    `timescale 10ns / 100ps
+    module Child(); endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign ok = ($timeunit($unit) == -10) && ($timeprecision($unit) == -14)
+        && ($timeunit($root) == -15) && ($timeprecision($root) == -15)
+        && ($timeunit() == -3) && ($timeprecision(child) == -10);
+    endmodule
+    `timescale 1ns / 1fs
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_follow_partial_declarations_and_resetall
+  (source "timescales.sv" #"
+    timeunit 1ns / 1ps;
+    `timescale 100ns / 10ps
+    module A(); timeunit 10ns; endmodule
+    module B(); timeprecision 1ps; endmodule
+    module Top(output wire ok);
+      A a(); B b(); C c();
+      assign ok = ($timeunit(a) == -8) && ($timeprecision(a) == -11)
+        && ($timeunit(b) == -7) && ($timeprecision(b) == -12)
+        && ($timeunit(c) == -9) && ($timeprecision(c) == -12)
+        && ($timeunit == -7) && ($timeprecision == -11);
+    endmodule
+    `resetall
+    module C(); endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_preserve_procedural_and_package_scopes
+  (source "timescales.sv" #"
+    timeunit 1ns / 1ps;
+    package P;
+      timeunit 10us / 100ns;
+      function automatic int precision_value(); return $timeprecision(); endfunction
+    endpackage
+    module Top(input logic clk, output logic ok, output int initialized, registered, package_precision);
+      timeunit 1ms / 1us;
+      function automatic int own_unit(); return $timeunit; endfunction
+      initial begin
+        initialized = $timeunit();
+        $timeprecision;
+      end
+      always_comb begin : block_scope
+        $timeunit();
+        ok = (own_unit() == -3) && (P::precision_value() == -7);
+      end
+      assign package_precision = P::precision_value();
+      always_ff @(posedge clk) registered <= $timeprecision;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1)
+  (assert_eq package_precision 4294967289)
+  (assert_eq initialized 4294967293)
+  (tick clk)
+  (assert_eq registered 4294967290))
+
+(case timescale_queries_are_constant_in_unqualified_calls
+  (source "timescales.sv" #"
+    module Top(output logic ok);
+      timeunit 1ns / 100ps;
+      localparam int U = $timeunit();
+      localparam int P = $timeprecision;
+      logic [-U-1:0] v;
+      assign v = '1;
+      assign ok = (U == -9) && (P == -10) && ($bits(v) == 9) && (v == 9'h1ff);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))

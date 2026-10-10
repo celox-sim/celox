@@ -21,6 +21,7 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
+    pub(super) timescales: Arc<timescales::Timescales>,
     packages: HashMap<String, Arc<Package>>,
     /// The compilation unit of each source file that declares items outside
     /// its modules and packages.
@@ -153,7 +154,10 @@ impl Packages {
     /// Analyze the packages declared in the source files `trees`, each after
     /// the packages it depends on, and then their compilation units.
     pub fn analyze(trees: &[(&SyntaxTree, &Path)]) -> Result<Self, AnalyzerError> {
+        let timescales = Arc::new(timescales::Timescales::collect(trees)?);
+        let _timescales = timescales::install(timescales.clone());
         let mut packages = Self::analyze_packages(trees)?;
+        packages.timescales = timescales;
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (unit_declaration(tree), *tree, *path))

@@ -583,6 +583,9 @@ fn expr_from_system_function_call(
     )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
+        "$timeunit" | "$timeprecision" => timescales::query(call, syntax_tree).map(|value| {
+            Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))
+        }),
         "$dimensions" => dimensions::dimensions_system_function_call_value(
             call,
             syntax_tree,

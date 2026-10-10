@@ -51,7 +51,7 @@ let mut sim = Simulator::from_sv_sources(
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -161,3 +161,12 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 - テストベンチ用のモジュール（クロックや `$finish` のスケジューリングを伴う `initial`
   ブロック、階層代入）と interface は、シミュレーション可能な SystemVerilog モジュールとして
   出力されません。
+
+`$timeunit` と `$timeprecision` は秒を基準とする指数を32ビットの符号付き整数で
+返します（IEEE 1800-2023 20.4.1）。現在の時間スコープ、`$unit`、`$root`、
+別ファイルを含むスカラーのモジュールインスタンス階層を解決します。
+`timeunit`、`timeprecision`、先行する `timescale`、`resetall` の優先順位は
+3.14.2.3に従い、デフォルトは1 ns / 1 psです。グローバル精度には、
+インスタンス化されていない定義も含め、すべての精度宣言とディレクティブの精度を
+使用します（3.14.3）。インスタンス配列の選択とgenerate階層は、展開後の階層検索が
+必要なため、現在は未対応として診断します。

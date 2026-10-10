@@ -1,6 +1,38 @@
 use super::*;
 
 sv_backends! {
+    fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
+        @setup {
+            let source = r#"
+                timeunit 10ns / 1ps;
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    Child child();
+                    assign ok = ($timeunit() == -9) && ($timeprecision() == -12)
+                        && ($timeunit(child) == -6) && ($timeprecision(child) == -7)
+                        && ($timeunit(Top.child) == -6) && ($timeprecision($root.Top.child) == -7)
+                        && ($timeunit($unit) == -8) && ($timeprecision($root) == -15);
+                endmodule
+            "#;
+            let child = "module Child(); timeunit 1us / 100ns; endmodule";
+            let unused = "module Unused(); timeunit 1fs / 1fs; endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![
+            (source, Path::new("top.sv")),
+            (child, Path::new("child.sv")),
+            (unused, Path::new("unused.sv")),
+        ], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
+    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
+    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
+    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
+    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
+    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
+
     fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
     fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
     fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
