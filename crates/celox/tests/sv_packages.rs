@@ -3,6 +3,9 @@
 
 use celox::{ParserError, Simulator, SimulatorErrorKind};
 
+#[path = "test_utils/veryl_sv.rs"]
+mod veryl_sv;
+
 fn output(source: &str) -> u64 {
     outputs(source, &["y"])[0]
 }
@@ -907,4 +910,146 @@ fn wildcard_imports_bind_declaration_types_and_assignment_targets() {
         ),
         13
     );
+}
+
+/// An import in a generate block makes names visible in that block, ahead of
+/// the module's declarations and imports (IEEE 1800-2023 26.3).
+#[test]
+fn generate_block_imports_are_scoped_to_their_block() {
+    let pk = "package p; localparam int X = 3; endpackage
+              package q; localparam int X = 5; endpackage";
+    let cases = [
+        ("if (1) begin : g import p::*; assign y = X; end", 3),
+        // The block's wildcard import comes before the module's.
+        (
+            "import q::*; if (1) begin : g import p::*; assign y = X; end",
+            3,
+        ),
+        // Each block imports its own declaration.
+        (
+            "logic [7:0] a, b;
+             if (1) begin : g import p::*; assign a = X; end
+             if (1) begin : h import q::*; assign b = X; end
+             assign y = a * 10 + b;",
+            35,
+        ),
+        // The block's import comes before a declaration of the module.
+        (
+            "localparam int X = 9; logic [7:0] a;
+             if (1) begin : g import p::*; assign a = X; end
+             assign y = a * 10 + X;",
+            39,
+        ),
+        // In widths and generate conditions of the block.
+        (
+            "import q::*; logic [7:0] b;
+             if (1) begin : g import p::*; logic [X-1:0] v;
+               if (X == 3) begin : h assign v = '1; end
+               assign b = v; end
+             assign y = b * 10 + X;",
+            75,
+        ),
+        // A declaration of a block inside it comes first.
+        (
+            "if (1) begin : g import p::*; if (1) begin : h localparam int X = 7; assign y = X; end end",
+            7,
+        ),
+        (
+            "for (genvar i = 0; i < 1; i++) begin : g import p::*; assign y = X + i; end",
+            3,
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(
+            output(&format!(
+                "{pk}
+                 module Top(output logic [7:0] y); {body} endmodule"
+            )),
+            expected,
+            "{body}"
+        );
+    }
+    // Subroutines and package variables of the block's package.
+    assert_eq!(
+        output(
+            "package p; logic [7:0] s;
+               function automatic logic [7:0] inc(logic [7:0] v); return v + 1; endfunction
+             endpackage
+             package q; function automatic logic [7:0] inc(logic [7:0] v); return v + 2; endfunction
+             endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; always_comb s = inc(8'd4); assign a = s; end
+               assign y = a * 10 + inc(8'd0);
+             endmodule"
+        ),
+        52
+    );
+    assert_eq!(
+        output(
+            "package p; typedef logic [3:0] nib_t; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; nib_t n; assign n = 4'hf; assign y = n; end
+             endmodule"
+        ),
+        15
+    );
+}
+
+#[test]
+fn generate_block_imports_are_not_visible_outside_their_block() {
+    let result = Simulator::from_sv_sources(
+        vec![(
+            "package p; localparam int X = 3; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; end
+               assign y = X;
+             endmodule",
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(result.is_err(), "`X` is imported only in block `g`");
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         module Top(output logic [7:0] y);
+           if (1) begin : g import p::X; localparam int X = 1; assign y = X; end
+         endmodule",
+    );
+    assert!(detail.contains("the generate block declares"), "{detail}");
+}
+
+/// Veryl emits an import of a generate block inside the block.
+#[test]
+fn veryl_generate_block_imports_resolve_in_both_frontends() {
+    let code = r#"
+package PkgA {
+    const X: u32 = 3;
+}
+package PkgB {
+    const X: u32 = 5;
+}
+module Top (
+    y: output logic<8>,
+) {
+    import PkgB::*;
+    var a: logic<8>;
+    if 1 :g {
+        import PkgA::*;
+        assign a = X;
+    }
+    assign y = a * 10 + X;
+}
+"#;
+    let emitted = veryl_sv::emit_veryl_sources(&[(code, std::path::Path::new("top.veryl"))]);
+    let mut sv = Simulator::from_sv_sources(emitted.as_sv_sources(), "Top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let y = sv.signal("y");
+    assert_eq!(u64::try_from(sv.get(y)).unwrap(), 35);
+    let mut veryl = Simulator::builder(code, "Top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let y = veryl.signal("y");
+    assert_eq!(u64::try_from(veryl.get(y)).unwrap(), 35);
 }
