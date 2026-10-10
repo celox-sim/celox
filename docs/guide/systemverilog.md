@@ -206,10 +206,14 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
-  Package variables and nets are rejected until they can be shared between
-  modules ([#1146](https://github.com/celox-sim/celox/issues/1146)); `const`
-  variables are accepted. Package `export` declarations and compilation-unit (`$unit`) declarations
-  are not supported.
+  A package variable is one object shared by every module that uses it,
+  including SystemVerilog modules instantiated from Veryl, and keeps its
+  initializer. `sim.signal("p::v")` names it. Several drivers of one package
+  variable are rejected, counting every instance of a module that writes it
+  (in a Veryl design, each SystemVerilog module Veryl instantiates counts
+  once). A package variable cannot be a clock or reset yet, and package nets,
+  `export` declarations and compilation-unit (`$unit`) declarations are not
+  supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An

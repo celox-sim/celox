@@ -21,7 +21,7 @@ pub(super) fn net_lvalue_from_node(
                     packed_dimensions,
                 );
             }
-            let name = identifier_text(
+            let name = reference_name(
                 RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0),
                 syntax_tree,
             )
@@ -57,11 +57,9 @@ pub(super) fn variable_lvalue_from_node(
                     packed_dimensions,
                 );
             }
-            let name = identifier_text(
-                RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
-                syntax_tree,
-            )
-            .ok_or_else(|| unsupported("variable assignment target name"))?;
+            // `p::v = ...` assigns the package variable.
+            let name = reference_name(RefNode::VariableLvalueIdentifier(identifier), syntax_tree)
+                .ok_or_else(|| unsupported("variable assignment target name"))?;
             lvalue_from_select(
                 name,
                 &identifier.nodes.2,
