@@ -1,7 +1,6 @@
 (group signed_divrem (category operators))
 
 (case signed_divrem_i8
-  ; Veryl 0.20.3 ignores the explicit unsigned cast in division.
   (source "test.veryl" #"
 module Top (
     a: input i8,

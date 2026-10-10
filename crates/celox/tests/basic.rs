@@ -220,11 +220,15 @@ module Top (
     }
 
     fn test_comb_function_call_expression_output_is_guarded_by_ternary(sim) {
+        // Veryl 0.22.0's simulator runs the call in the untaken `?:` arm and writes its output
+        // back.
         @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_is_guarded_by_ternary";
     }
 
     fn test_comb_function_call_expression_output_respects_short_circuit(sim) {
+        // Veryl 0.22.0's simulator runs the short-circuited operand of `&&` / `||` and writes
+        // its output back.
         @ignore_on(veryl);
         @case "basic::test_comb_function_call_expression_output_respects_short_circuit";
     }
@@ -242,6 +246,8 @@ module Top (
     }
 
     fn test_comb_nested_function_output_call_in_function_condition(sim) {
+        // Veryl 0.22.0's simulator drops the output writeback of a call whose return value is
+        // used inside a function body (0 instead of 0xb).
         @ignore_on(veryl);
         @case "basic::test_comb_nested_function_output_call_in_function_condition";
     }
