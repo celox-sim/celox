@@ -44,6 +44,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     local_constants: HashMap<String, String>,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
+    /// Whether the body is a static subroutine's: its locals without a
+    /// lifetime keyword are static (IEEE 1800-2023 6.21).
+    static_subroutine: bool,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -109,6 +112,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             type_aliases,
             local_constants: HashMap::default(),
             body,
+            static_subroutine: false,
         }
     }
 
@@ -711,8 +715,26 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
                 None => None,
             };
+            // A local of a static subroutine is static unless declared
+            // `automatic`; an initializer then needs an explicit lifetime
+            // keyword (IEEE 1800-2023 6.21).
+            let r#static = match variable.nodes.2 {
+                Some(sv_parser::Lifetime::Static(_)) => true,
+                Some(sv_parser::Lifetime::Automatic(_)) => false,
+                None => self.static_subroutine,
+            };
+            if r#static && init.is_some() && variable.nodes.2.is_none() {
+                return Err(unsupported(format!(
+                    "local `{}` with an initializer in a static subroutine without an explicit `static` or `automatic` lifetime",
+                    signal.name()
+                )));
+            }
             let name = self.declare(signal.name(), signal.r#type().clone());
-            stmts.push(Stmt::Local { name, init });
+            stmts.push(Stmt::Local {
+                name,
+                init,
+                r#static,
+            });
         }
         Ok(stmts)
     }
@@ -1189,6 +1211,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         init.push(Stmt::Local {
                             name,
                             init: Some(value_expr),
+                            r#static: false,
                         });
                     }
                 }
@@ -1291,6 +1314,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 init: vec![Stmt::Local {
                     name: name.clone(),
                     init: Some(Expr::Literal(left.to_string())),
+                    r#static: false,
                 }],
                 condition: Some(Expr::Binary {
                     left: Box::new(index.clone()),
@@ -1788,6 +1812,7 @@ pub(super) fn subroutines_from_module_node_with(
                     state,
                     system_functions::Body::Subroutine,
                 );
+                builder.static_subroutine = !syntax.automatic;
                 builder.push_scope();
                 let mut lowered_params = Vec::new();
                 for (source, direction, r#type, default) in params {
@@ -1995,7 +2020,7 @@ pub(super) fn initial_processes_from_module_node(
             // An `always` with timing controls restarts its statement
             // whenever it ends (IEEE 1800-2023 9.2.2).
             sv_parser::ModuleCommonItem::AlwaysConstruct(always)
-                if always_kind(always, tree) == AlwaysKind::Process =>
+                if always_kind(always) == AlwaysKind::Process =>
             {
                 let mut builder =
                     BodyBuilder::new(tree, item_dimensions, state, system_functions::Body::Always);

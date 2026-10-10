@@ -1556,11 +1556,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(parts, rhs)?;
                 Ok(true)
             }
-            sv::ir::Stmt::Local { name, init } => {
+            sv::ir::Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                if *r#static {
+                    if let Some(init) = init {
+                        self.m.static_initial(id, init)?;
+                    }
+                    return Ok(true);
+                }
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
                     None => self.init_default(id)?,
@@ -1734,6 +1744,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         // the counters also see the events a kernel's later store hides.
         let mut counted = Vec::new();
         for item in items {
+            if let Some(callee) = impure_callee(self.m, &item.expr) {
+                return Err(unsupported(format!(
+                    "event expression calling `{callee}`, which has an effect besides its result"
+                )));
+            }
             let value = self.eval(&item.expr, None)?;
             let (width, four_state) = match *self.b.register(&value) {
                 RegisterType::Logic { width } => (width, true),
@@ -2550,9 +2565,16 @@ impl Ff<'_, '_> {
             }
             names.extend(subroutine.params.iter().map(|param| param.name.clone()));
             names.extend(subroutine.return_var.clone());
+            // A `static` local is shared by the activations even of an
+            // automatic subroutine (IEEE 1800-2023 6.21).
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
-                    if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    if let sv::ir::Stmt::Local {
+                        name,
+                        r#static: false,
+                        ..
+                    } = stmt
+                    {
                         names.push(name.clone());
                     }
                 });
@@ -2608,7 +2630,37 @@ impl Ff<'_, '_> {
 /// before the process suspends) still wakes a waiter, as IEEE 1800-2023
 /// 9.4.2 asks. An expression that calls a function reads what the function
 /// reads, directly or through its callees.
-pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]]) {
+///
+/// The counters of a package variable are the package's, shared by every
+/// module denoting the variable (`package_aliases` are the module's
+/// variables denoting one): a kernel of any module records the events of
+/// its stores there, and a waiter of any module reads them. Such a
+/// variable is watched by itself; an event expression that reads it as
+/// part of a larger expression could not be watched across modules and is
+/// rejected.
+pub fn declare_event_counters(
+    pm: &mut ProcModule<'_>,
+    bodies: &[&[sv::ir::Stmt]],
+    package_aliases: &[SourceVarId],
+) -> Result<(), sv::AnalyzerError> {
+    let mut shared = HashSet::default();
+    for &id in package_aliases {
+        let name = pm.var(id).path[0].clone();
+        let counter = |purpose: &str| format!("{name}@{purpose}");
+        let index = pm.event_watchers.len();
+        pm.watchers_by_var.entry(id).or_default().push(index);
+        pm.event_watchers.push(EventWatcher {
+            expr: sv::ir::Expr::Ident(name.clone()),
+            dependencies: vec![id],
+            state: EventCounters {
+                previous: None,
+                changes: counter("changes"),
+                rises: counter("rises"),
+                falls: counter("falls"),
+            },
+        });
+        shared.insert(id);
+    }
     let mut exprs: Vec<sv::ir::Expr> = Vec::new();
     let mut visited = HashSet::default();
     let mut pending: Vec<&[sv::ir::Stmt]> = bodies.to_vec();
@@ -2639,11 +2691,16 @@ pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]
         subroutine_reads(pm, &expr, &mut names);
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
-        let dependencies: Vec<SourceVarId> = names
-            .iter()
-            .filter_map(|name| pm.id(name))
-            .filter(|id| pm.var(*id).array_dims.is_empty())
-            .collect();
+        let dependencies: Vec<SourceVarId> = names.iter().filter_map(|name| pm.id(name)).collect();
+        if let Some(package) = dependencies.iter().find(|id| shared.contains(id)) {
+            if matches!(expr, sv::ir::Expr::Ident(_)) {
+                continue;
+            }
+            return Err(unsupported(format!(
+                "event expression reading package variable `{}` that is not the variable itself",
+                pm.var(*package).path[0]
+            )));
+        }
         if dependencies.is_empty() {
             continue;
         }
@@ -2661,6 +2718,7 @@ pub fn declare_event_counters(pm: &mut ProcModule<'_>, bodies: &[&[sv::ir::Stmt]
             state,
         });
     }
+    Ok(())
 }
 
 /// Add to `names` the variables the subroutines `expr` calls read, directly
@@ -2696,6 +2754,75 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
         }
     }
     names.extend(reads.into_iter().filter(|name| !own.contains(name)));
+}
+
+/// A subroutine `expr` calls, directly or through another one, whose
+/// evaluation has an effect besides its result: a task, a function with
+/// `output` or `inout` arguments, one that assigns a variable other than its
+/// own formals and locals or runs a system task, or a DPI-C import that is
+/// not `pure`. An event expression is evaluated whenever an operand may have
+/// changed (IEEE 1800-2023 9.4.2), so such an effect would happen more often
+/// than the source shows.
+fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut visited = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(import) = pm.dpi_imports.get(&name) {
+            if !import.is_pure() {
+                return Some(name);
+            }
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        if subroutine.is_task
+            || subroutine
+                .params
+                .iter()
+                .any(|param| param.direction != sv::ir::ParamDirection::Input)
+        {
+            return Some(name);
+        }
+        let mut own: HashSet<String> = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .chain(subroutine.return_var.clone())
+            .collect();
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    own.insert(name.clone());
+                }
+            });
+        }
+        let mut impure = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => impure |= !own.contains(lhs.name()),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        impure |= parts.iter().any(|part| !own.contains(part.name()))
+                    }
+                    sv::ir::Stmt::SystemTask { .. } => impure = true,
+                    _ => {}
+                }
+                let mut callees = Vec::new();
+                stmt_calls(stmt, &mut callees);
+                pending.extend(callees.into_iter().map(|(name, _)| name));
+            });
+        }
+        if impure {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// The subroutines `stmts` call as statements.

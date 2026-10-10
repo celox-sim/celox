@@ -521,6 +521,7 @@ impl<B: SimBackend> Simulation<B> {
     /// instead: the call then returns the current time without advancing,
     /// so what the process did is observable at its own time.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.settle_host_writes()?;
         if self.state.poll_waiting(&mut self.simulator)? {
             return Ok(Some(self.state.time()));
         }
@@ -537,9 +538,19 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
+    /// Settle the combinational logic a host write left dirty, so a process
+    /// waiting for a derived value sees it.
+    fn settle_host_writes(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.simulator.dirty {
+            self.simulator.eval_comb()?;
+        }
+        Ok(())
+    }
+
     /// Advance time and run until `end_time` (inclusive). As for
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        self.settle_host_writes()?;
         self.state
             .poll_waiting_until(&mut self.simulator, end_time)?;
         while let Some(next_time) = self.state.next_event_time() {
@@ -1032,6 +1043,40 @@ mod wait_tests {
         assert_eq!(sim.state.settle_at(&mut sim.simulator, 9).unwrap(), Some(9));
         assert_eq!(sim.get(y), 3u8.into());
         assert_eq!(sim.time(), 9);
+    }
+
+    /// A process waiting for a value combinational logic derives from a
+    /// host write sees the settled value.
+    #[test]
+    fn host_writes_settle_before_the_waiters_are_polled() {
+        const SOURCE: &str = r#"
+            module Top(input logic a, input logic b, output logic [7:0] y);
+                logic both;
+                assign both = a & b;
+                initial begin
+                    y = 8'd0;
+                    wait (both);
+                    y = 8'd1;
+                    @(negedge both);
+                    y = 8'd2;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("comb.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        let (a, b, y) = (sim.signal("a"), sim.signal("b"), sim.signal("y"));
+        assert_eq!(sim.step().unwrap(), Some(0));
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        assert_eq!(sim.step().unwrap(), None);
+        assert_eq!(sim.get(y), 0u8.into());
+        sim.modify(|io| io.set(b, 1u8)).unwrap();
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert_eq!(sim.get(y), 1u8.into());
+        sim.modify(|io| io.set(a, 0u8)).unwrap();
+        sim.run_until(5).unwrap();
+        assert_eq!(sim.get(y), 2u8.into());
     }
 
     /// A process a host write wakes runs in a `step` of its own, at the

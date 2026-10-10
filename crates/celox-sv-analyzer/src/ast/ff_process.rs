@@ -106,7 +106,7 @@ fn ff_process_from_always_construct(
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
-    if always_kind(always, syntax_tree) != AlwaysKind::Ff {
+    if always_kind(always) != AlwaysKind::Ff {
         return Ok(None);
     }
     let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
