@@ -225,6 +225,18 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   interface it is connected to, as `M$I`.
 - **Block-local variables** of an `always_comb` become signals of the module; a
   name that clashes with another signal is rejected.
+- **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
+  procedural block, function or task is static unless it, its subroutine or
+  its module (`module automatic`) is declared `automatic`. A static local of a
+  block keeps its value from one execution of the block to the next, and its
+  initializer runs once at time zero: in `always_ff`, `int count; count++;`
+  counts. An automatic local is initialized on every entry. A static local
+  whose value on entry is never read, because every path writes it before
+  reading it, behaves the same either way. Because a static local keeps its
+  value, a local of `always_comb` that only some paths write is a latch, and
+  is rejected like any other latch. A static local of a function or task
+  that keeps its value between calls is not supported; declare it
+  `automatic`.
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.

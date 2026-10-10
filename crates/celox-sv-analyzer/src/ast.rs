@@ -41,6 +41,7 @@ mod imports;
 mod inlining;
 mod instances;
 pub mod interfaces;
+mod lifetimes;
 pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
@@ -786,6 +787,8 @@ impl Module {
             locals: &mut locals,
             counter: &mut local_counter,
             subroutine_params: &subroutine_params,
+            automatic: lifetimes::automatic_by_default(&node),
+            statics: Vec::new(),
         };
         let mut subroutines = procedural::subroutines_from_module_node(
             node.clone(),
@@ -833,6 +836,32 @@ impl Module {
             &parameter_values,
             &mut body_state,
         )?);
+        // Static locals of the processes that keep their value are variables
+        // of the module, initialized once with the declaration initializers.
+        let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
+        let (kept, static_initializers) = lifetimes::keep_static_locals(
+            &statics,
+            comb_processes
+                .iter_mut()
+                .map(|process| &mut process.body)
+                .chain(ff_processes.iter_mut().map(|process| &mut process.body))
+                .chain(
+                    initial_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                ),
+        )?;
+        locals.retain(|local| !kept.contains(&local.name));
+        for name in kept {
+            signals.push(Signal::new(name.clone(), statics[&name].clone()));
+        }
+        if !static_initializers.is_empty() {
+            initial_processes.push(InitialProcess {
+                condition: None,
+                body: static_initializers,
+                initializer: true,
+            });
+        }
         let procedurally_written = procedural::written_names(
             comb_processes
                 .iter()

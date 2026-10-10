@@ -393,13 +393,6 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 ));
             }
             RefNode::FunctionDeclaration(function)
-                if function_has_static_local_state(function) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "static function-local state".to_string(),
-                ));
-            }
-            RefNode::FunctionDeclaration(function)
                 if RefNode::FunctionDeclaration(function)
                     .into_iter()
                     .any(non_input_function_port) =>
@@ -533,35 +526,6 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
             matches!(&**direction, sv_parser::PortDirection::Ref(_))
         }
         Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
-    }
-}
-
-fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) -> bool {
-    let function_is_static = !matches!(function.nodes.1, Some(sv_parser::Lifetime::Automatic(_)));
-    let local_is_static = |item: &sv_parser::BlockItemDeclaration| {
-        let sv_parser::BlockItemDeclaration::Data(item) = item else {
-            return false;
-        };
-        let sv_parser::DataDeclaration::Variable(variable) = &item.nodes.1 else {
-            return false;
-        };
-        match &variable.nodes.2 {
-            Some(sv_parser::Lifetime::Automatic(_)) => false,
-            Some(sv_parser::Lifetime::Static(_)) => true,
-            None => function_is_static,
-        }
-    };
-    match &function.nodes.2 {
-        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-            body.nodes.5.iter().any(local_is_static)
-        }
-        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
-            matches!(
-                item,
-                sv_parser::TfItemDeclaration::BlockItemDeclaration(item)
-                    if local_is_static(item)
-            )
-        }),
     }
 }
 

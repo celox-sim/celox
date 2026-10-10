@@ -242,6 +242,8 @@ pub(super) fn module_constant_functions(
         locals: &mut locals,
         counter: &mut counter,
         subroutine_params: &subroutine_params,
+        automatic: lifetimes::automatic_by_default(&node),
+        statics: Vec::new(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_from_module_node_with(
