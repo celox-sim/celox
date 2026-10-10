@@ -282,7 +282,7 @@ fn parameters_from_parameter_port_list(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment,
+    environment: &mut parameters::ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
     match list {
         sv_parser::ParameterPortList::Assignment(list) => {
@@ -333,7 +333,7 @@ fn parameters_from_parameter_port_declaration(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment,
+    environment: &mut parameters::ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
     let is_local = matches!(
         declaration,
