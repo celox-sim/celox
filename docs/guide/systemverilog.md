@@ -238,7 +238,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   that keeps its value between calls is not supported, nor is a static local
   whose initializer is not constant; declare them `automatic`. The result of
   a static function is static too, so one with a path that does not assign
-  it (other than a `case` whose items cover every value of an argument) is
+  it (other than a `case` whose items cover every value of a two-state
+  argument) is
   rejected as well. An interface
   whose default lifetime (`interface automatic`) differs from that of the
   module it is used in is rejected.

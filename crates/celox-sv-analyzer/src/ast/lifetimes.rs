@@ -190,7 +190,7 @@ pub(super) fn check_static_result(
     let flow = Flow {
         name: result,
         directions,
-        widths: &widths,
+        two_state_widths: &widths,
     };
     // `return value;` assigns the result as it leaves.
     match flow.block(&subroutine.body, false) {
@@ -203,11 +203,12 @@ pub(super) fn check_static_result(
     }
 }
 
-/// The widths of the arguments of `subroutine`.
+/// The widths of the two-state arguments of `subroutine`.
 fn argument_widths(subroutine: &Subroutine) -> HashMap<String, usize> {
     subroutine
         .params
         .iter()
+        .filter(|param| param.r#type.kind() == crate::ir::TypeKind::Bit)
         .filter_map(|param| Some((param.name.clone(), param.r#type.resolved_width()?)))
         .collect()
 }
@@ -238,7 +239,7 @@ fn entry(
     let flow = Flow {
         name,
         directions,
-        widths,
+        two_state_widths: widths,
     };
     let observed = flow.block(after, false).is_err();
     Ok(match init {
@@ -258,9 +259,9 @@ struct Observed;
 struct Flow<'n> {
     name: &'n str,
     directions: &'n Directions,
-    /// The widths of the variables a `case` may select on, to tell when its
-    /// items cover every value.
-    widths: &'n HashMap<String, usize>,
+    /// The widths of the two-state variables a `case` may select on, to
+    /// tell when its items cover every value.
+    two_state_widths: &'n HashMap<String, usize>,
 }
 
 /// Whether the local is written on every path that leaves some statements
@@ -439,6 +440,20 @@ impl Flow<'_> {
                 if let crate::procedural::LoopKind::Repeat(count) = kind {
                     self.read(count, written)?;
                 }
+                // A `do`-`while` body, and that of a `repeat` with a positive
+                // constant count, runs at least once.
+                let runs_once = match kind {
+                    crate::procedural::LoopKind::DoWhile => true,
+                    crate::procedural::LoopKind::Repeat(Expr::Literal(count)) => {
+                        crate::typecheck::parse_integral_literal(count).is_some_and(|count| {
+                            count.mask == num_bigint::BigUint::default()
+                                && count.value > num_bigint::BigUint::default()
+                                && !(count.signed
+                                    && count.value.bit(count.width.saturating_sub(1) as u64))
+                        })
+                    }
+                    _ => false,
+                };
                 let do_while = matches!(kind, crate::procedural::LoopKind::DoWhile);
                 if !do_while && let Some(condition) = condition {
                     self.read(condition, written)?;
@@ -450,10 +465,9 @@ impl Flow<'_> {
                 if let Some(stepped) = stepped {
                     self.block(step, stepped)?;
                 }
-                if do_while {
-                    // The body runs at least once: the loop ends at its
-                    // condition or at a `break`.
-                    if let (Some(condition), Some(stepped)) = (condition, stepped) {
+                if runs_once {
+                    // The loop ends at its condition or at a `break`.
+                    if do_while && let (Some(condition), Some(stepped)) = (condition, stepped) {
                         self.read(condition, stepped)?;
                     }
                     Ok(Exits {
@@ -527,7 +541,8 @@ impl Flow<'_> {
         let Expr::Ident(selector) = selector else {
             return false;
         };
-        let Some(&width) = self.widths.get(selector) else {
+        // An X or Z bit of a four-state selector matches no item.
+        let Some(&width) = self.two_state_widths.get(selector) else {
             return false;
         };
         if kind != crate::procedural::CaseKind::Exact || width > 16 {
@@ -575,8 +590,123 @@ impl Flow<'_> {
                 }
                 _ => {}
             });
+            // A function called in an expression may write an output or
+            // inout argument too.
+            stmt.walk(&mut |stmt| {
+                for expr in stmt_exprs(stmt) {
+                    writes |= self.call_writes(expr);
+                }
+            });
         }
         writes
+    }
+
+    /// Whether a function called in `expr` writes the local through an
+    /// output or inout argument.
+    fn call_writes(&self, expr: &Expr) -> bool {
+        let mut writes = false;
+        visit_calls(expr, &mut |name, args| {
+            let directions = self.directions.get(name);
+            writes |= args.iter().enumerate().any(|(index, arg)| {
+                expr_reads(arg, self.name)
+                    && directions
+                        .and_then(|directions| directions.get(index))
+                        .is_some_and(|direction| {
+                            *direction != crate::procedural::ParamDirection::Input
+                        })
+            });
+        });
+        writes
+    }
+}
+
+/// The expressions of `stmt` itself, not of the statements it contains.
+fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
+    match stmt {
+        Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => vec![rhs],
+        Stmt::If { condition, .. } => vec![condition],
+        Stmt::Case {
+            selector, items, ..
+        } => {
+            let mut exprs = vec![selector];
+            for label in items.iter().flat_map(|item| &item.labels) {
+                match label {
+                    crate::procedural::CaseLabel::Value(value) => exprs.push(value),
+                    crate::procedural::CaseLabel::Range { low, high } => {
+                        exprs.push(low);
+                        exprs.push(high);
+                    }
+                }
+            }
+            exprs
+        }
+        Stmt::Loop {
+            kind, condition, ..
+        } => {
+            let mut exprs: Vec<&Expr> = condition.iter().collect();
+            if let crate::procedural::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs
+        }
+        Stmt::Return(value) => value.iter().collect(),
+        Stmt::Call { args, .. } => args.iter().flatten().collect(),
+        Stmt::Eval(expr) => vec![expr],
+        Stmt::SystemTask { args, .. } => args
+            .iter()
+            .filter_map(|arg| match arg {
+                crate::procedural::SystemTaskArg::Expr(expr) => Some(expr),
+                _ => None,
+            })
+            .collect(),
+        Stmt::Local { init, .. } => init.iter().collect(),
+        Stmt::Break | Stmt::Continue => Vec::new(),
+    }
+}
+
+/// Call `f` with the name and arguments of every call in `expr`.
+fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Expr])) {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call { name, args } => {
+            f(name, args);
+            for arg in args {
+                visit_calls(arg, f);
+            }
+        }
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            visit_calls(expr, f)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+            for part in parts {
+                visit_calls(part, f);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            visit_calls(left, f);
+            visit_calls(right, f);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_calls(condition, f);
+            visit_calls(then_expr, f);
+            visit_calls(else_expr, f);
+        }
+        Expr::Inside { expr, items } => {
+            visit_calls(expr, f);
+            for item in items {
+                match item {
+                    InsideItem::Value(value) => visit_calls(value, f),
+                    InsideItem::Range { low, high } => {
+                        visit_calls(low, f);
+                        visit_calls(high, f);
+                    }
+                }
+            }
+        }
     }
 }
 
