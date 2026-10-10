@@ -25,6 +25,19 @@ pub(super) struct ScopeImports {
     pub packages: Vec<String>,
     /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
     pub qualified: Vec<(String, String)>,
+    /// The package exports (IEEE 1800-2023 26.6).
+    pub exports: Vec<Export>,
+}
+
+/// A package export declaration item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Export {
+    /// `export *::*;`
+    All,
+    /// `export p::*;`
+    Wildcard(String),
+    /// `export p::x;`, as `(p, x)`.
+    Item(String, String),
 }
 
 impl ScopeImports {
@@ -39,8 +52,47 @@ impl ScopeImports {
         // package identifier.
         let mut scope: Option<String> = None;
         let mut skip = 0;
+        // The items of an export name what it exports, not imports.
+        let mut exported = HashSet::default();
+        for child in node.clone() {
+            let RefNode::PackageExportDeclaration(export) = child else {
+                continue;
+            };
+            match export {
+                sv_parser::PackageExportDeclaration::Asterisk(_) => {
+                    imports.exports.push(Export::All);
+                }
+                sv_parser::PackageExportDeclaration::Item(_) => {
+                    for item in RefNode::PackageExportDeclaration(export) {
+                        let RefNode::PackageImportItem(item) = item else {
+                            continue;
+                        };
+                        exported.insert(item as *const sv_parser::PackageImportItem);
+                        let export = match item {
+                            sv_parser::PackageImportItem::Identifier(item) => {
+                                identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
+                                    .zip(identifier_text(RefNode::Identifier(&item.nodes.2), tree))
+                                    .map(|(package, name)| Export::Item(package, name))
+                            }
+                            sv_parser::PackageImportItem::Asterisk(item) => {
+                                identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
+                                    .map(Export::Wildcard)
+                            }
+                        };
+                        if let Some(export) = export {
+                            if let Export::Item(package, _) | Export::Wildcard(package) = &export {
+                                note(&mut imports.packages, package.clone());
+                            }
+                            imports.exports.push(export);
+                        }
+                    }
+                }
+            }
+        }
         for child in node {
             match child {
+                RefNode::PackageImportItem(item)
+                    if exported.contains(&(item as *const sv_parser::PackageImportItem)) => {}
                 RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
                     if skip > 0 {
                         skip -= 1;
@@ -296,19 +348,50 @@ pub(super) fn imported_symbols(
     tree: &SyntaxTree,
     packages: &packages::Packages,
 ) -> Result<ScopeSymbols, AnalyzerError> {
+    Ok(resolve_imports(node, tree, packages)?.symbols)
+}
+
+/// The imports of a scope, resolved.
+pub(super) struct ResolvedImports {
+    /// The symbols the scope starts from (see [`imported_symbols`]).
+    pub symbols: ScopeSymbols,
+    /// The names a package exports, and the qualified names of the
+    /// declarations they denote (IEEE 1800-2023 26.6).
+    pub exports: HashMap<String, String>,
+}
+
+/// A name an import binds: the declaration it denotes, and the imported
+/// packages it is imported through.
+struct Binding {
+    name: String,
+    target: String,
+    through: Vec<String>,
+}
+
+pub(super) fn resolve_imports(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    packages: &packages::Packages,
+) -> Result<ResolvedImports, AnalyzerError> {
     let imports = ScopeImports::from_node(node.clone(), tree);
-    // A package scope may also be a class scope, but an import names a
-    // package.
-    if let Some(package) = imports
+    let package = |name: &String| {
+        packages
+            .get(name)
+            .ok_or_else(|| AnalyzerError::UnknownPackage { name: name.clone() })
+    };
+    // A package scope may also be a class scope, but an import or an export
+    // names a package.
+    for name in imports
         .explicit
         .iter()
         .map(|(package, _)| package)
         .chain(&imports.wildcard)
-        .find(|package| packages.get(package).is_none())
+        .chain(imports.exports.iter().filter_map(|export| match export {
+            Export::All => None,
+            Export::Wildcard(package) | Export::Item(package, _) => Some(package),
+        }))
     {
-        return Err(AnalyzerError::UnknownPackage {
-            name: package.clone(),
-        });
+        package(name)?;
     }
     // A package may name its own items through its scope.
     let own = match &node {
@@ -316,26 +399,23 @@ pub(super) fn imported_symbols(
         _ => None,
     };
     let mut own_names = None;
-    for (package, name) in &imports.qualified {
-        if own.as_ref() == Some(package) {
+    for (package_name, name) in &imports.qualified {
+        if own.as_ref() == Some(package_name) {
             // The package names one of its own items.
             let own_names = own_names.get_or_insert_with(|| scope_names(node.clone(), tree));
             if !own_names.contains(name) {
                 return Err(AnalyzerError::UnknownPackageItem {
-                    package: package.clone(),
+                    package: package_name.clone(),
                     name: name.clone(),
                 });
             }
             continue;
         }
-        let Some(package_symbols) = packages.get(package) else {
-            return Err(AnalyzerError::UnknownPackage {
-                name: package.clone(),
-            });
-        };
-        if !package_symbols.declares(name) {
+        // A qualified name names a declaration of the package; the names it
+        // exports are visible only through imports (IEEE 1800-2023 26.6).
+        if !package(package_name)?.declares(name) {
             return Err(AnalyzerError::UnknownPackageItem {
-                package: package.clone(),
+                package: package_name.clone(),
                 name: name.clone(),
             });
         }
@@ -346,7 +426,10 @@ pub(super) fn imported_symbols(
         packages.closure(package, &mut used);
     }
     if used.is_empty() {
-        return Ok(symbols);
+        return Ok(ResolvedImports {
+            symbols,
+            exports: HashMap::default(),
+        });
     }
     for package in &used {
         if let Some(package) = packages.get(package) {
@@ -354,73 +437,173 @@ pub(super) fn imported_symbols(
         }
     }
     let local = scope_names(node.clone(), tree);
-    let mut bindings: Vec<(String, String)> = Vec::new();
-    for (package, name) in &imports.explicit {
-        let package_symbols =
-            packages
-                .get(package)
-                .ok_or_else(|| AnalyzerError::UnknownPackage {
-                    name: package.clone(),
-                })?;
-        if !package_symbols.declares(name) {
-            return Err(AnalyzerError::UnknownPackageItem {
-                package: package.clone(),
+    // The declaration `package_name::name` denotes, for an import.
+    let provided = |package_name: &String, name: &String| -> Result<String, AnalyzerError> {
+        package(package_name)?
+            .provides(name)
+            .ok_or_else(|| AnalyzerError::UnknownPackageItem {
+                package: package_name.clone(),
                 name: name.clone(),
-            });
-        }
-        let target = format!("{package}::{name}");
-        // An explicit import of a name the scope declares, or imports from
-        // another package, is illegal (IEEE 1800-2023 26.3).
+            })
+    };
+    let mut bindings: Vec<Binding> = Vec::new();
+    // An explicit import of a name the scope declares, or imports from
+    // another declaration, is illegal (IEEE 1800-2023 26.3); importing one
+    // declaration through several packages is not (26.6).
+    let bind_explicitly = |bindings: &mut Vec<Binding>,
+                           package_name: &String,
+                           name: &String,
+                           form: &str|
+     -> Result<(), AnalyzerError> {
+        let target = provided(package_name, name)?;
         if local.contains(name) {
             return Err(AnalyzerError::ImportConflict {
                 name: name.clone(),
-                detail: format!("`import {target};` names an item the scope declares"),
+                detail: format!(
+                    "`{form} {package_name}::{name};` names an item the scope declares"
+                ),
             });
         }
-        if let Some((_, other)) = bindings.iter().find(|(bound, _)| bound == name) {
-            if *other != target {
+        if let Some(binding) = bindings.iter_mut().find(|binding| binding.name == *name) {
+            if binding.target != target {
                 return Err(AnalyzerError::ImportConflict {
                     name: name.clone(),
-                    detail: format!("explicitly imported from both `{other}` and `{target}`"),
+                    detail: format!(
+                        "explicitly imported as both `{}` and `{target}`",
+                        binding.target
+                    ),
                 });
             }
-            continue;
+            if !binding.through.contains(package_name) {
+                binding.through.push(package_name.clone());
+            }
+            return Ok(());
         }
-        bindings.push((name.clone(), target));
+        bindings.push(Binding {
+            name: name.clone(),
+            target,
+            through: vec![package_name.clone()],
+        });
+        Ok(())
+    };
+    for (package_name, name) in &imports.explicit {
+        bind_explicitly(&mut bindings, package_name, name, "import")?;
     }
-    if !imports.wildcard.is_empty() {
-        for name in unqualified_names(node, tree) {
-            if local.contains(&name) || bindings.iter().any(|(bound, _)| *bound == name) {
+    // The packages a wildcard import makes `name` a candidate through, and
+    // the one declaration they provide.
+    let candidates = |name: &String| -> Result<Option<(String, Vec<String>)>, AnalyzerError> {
+        let mut found: Option<(String, Vec<String>)> = None;
+        for package_name in &imports.wildcard {
+            let Some(target) = package(package_name)?.provides(name) else {
                 continue;
-            }
-            let mut candidates = Vec::new();
-            for package in &imports.wildcard {
-                let package_symbols =
-                    packages
-                        .get(package)
-                        .ok_or_else(|| AnalyzerError::UnknownPackage {
-                            name: package.clone(),
-                        })?;
-                if package_symbols.declares(&name) {
-                    candidates.push(package);
-                }
-            }
-            match candidates.as_slice() {
-                [] => {}
-                [package] => bindings.push((name.clone(), format!("{package}::{name}"))),
-                [first, second, ..] => {
+            };
+            match &mut found {
+                None => found = Some((target, vec![package_name.clone()])),
+                Some((known, through)) if *known == target => through.push(package_name.clone()),
+                Some((_, through)) => {
                     return Err(AnalyzerError::ImportConflict {
                         name: name.clone(),
                         detail: format!(
-                            "declared by both wildcard-imported packages `{first}` and `{second}`"
+                            "declared by both wildcard-imported packages `{}` and `{package_name}`",
+                            through[0]
                         ),
                     });
                 }
             }
         }
+        Ok(found)
+    };
+    if !imports.wildcard.is_empty() {
+        for name in unqualified_names(node, tree) {
+            if local.contains(&name) {
+                continue;
+            }
+            if let Some(binding) = bindings.iter_mut().find(|binding| binding.name == name) {
+                // A wildcard import of the explicitly imported declaration
+                // imports it through that package too.
+                for package_name in &imports.wildcard {
+                    if package(package_name)?.provides(&name).as_ref() == Some(&binding.target)
+                        && !binding.through.contains(package_name)
+                    {
+                        binding.through.push(package_name.clone());
+                    }
+                }
+                continue;
+            }
+            if let Some((target, through)) = candidates(&name)? {
+                bindings.push(Binding {
+                    name,
+                    target,
+                    through,
+                });
+            }
+        }
     }
-    for (name, target) in &bindings {
-        symbols.alias(name, target);
+    // `export p::x;` refers to `x`: it imports a candidate the scope does
+    // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6).
+    for export in &imports.exports {
+        let Export::Item(package_name, name) = export else {
+            continue;
+        };
+        if local.contains(name) {
+            return Err(AnalyzerError::ImportConflict {
+                name: name.clone(),
+                detail: format!(
+                    "`export {package_name}::{name};` names an item the package declares"
+                ),
+            });
+        }
+        let target = provided(package_name, name)?;
+        let imported_through = imports
+            .explicit
+            .iter()
+            .any(|(explicit, item)| explicit == package_name && item == name)
+            || imports.wildcard.contains(package_name);
+        if !imported_through {
+            return Err(AnalyzerError::ImportConflict {
+                name: name.clone(),
+                detail: format!(
+                    "`export {package_name}::{name};` exports a name the package does not \
+                     import from `{package_name}`"
+                ),
+            });
+        }
+        match bindings.iter_mut().find(|binding| binding.name == *name) {
+            Some(binding) if binding.target != target => {
+                return Err(AnalyzerError::ImportConflict {
+                    name: name.clone(),
+                    detail: format!(
+                        "`export {package_name}::{name};` exports `{target}`, but the package \
+                         imports `{}`",
+                        binding.target
+                    ),
+                });
+            }
+            Some(binding) => {
+                if !binding.through.contains(package_name) {
+                    binding.through.push(package_name.clone());
+                }
+            }
+            None => bind_explicitly(&mut bindings, package_name, name, "export")?,
+        }
     }
-    Ok(symbols)
+    let mut exports = HashMap::default();
+    for export in &imports.exports {
+        for binding in &bindings {
+            let exported = match export {
+                Export::All => true,
+                Export::Wildcard(package_name) => binding.through.contains(package_name),
+                Export::Item(package_name, name) => {
+                    binding.name == *name && binding.through.contains(package_name)
+                }
+            };
+            if exported {
+                exports.insert(binding.name.clone(), binding.target.clone());
+            }
+        }
+    }
+    for binding in &bindings {
+        symbols.alias(&binding.name, &binding.target);
+    }
+    Ok(ResolvedImports { symbols, exports })
 }

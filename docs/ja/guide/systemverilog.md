@@ -111,8 +111,11 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
   モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、定数でない package 変数の初期化子、
-  package の net、`export` 宣言、コンパイル単位（`$unit`）の宣言は未対応です
-  （[#1146](https://github.com/celox-sim/celox/issues/1146)）。
+  package の net、コンパイル単位（`$unit`）の宣言は未対応です
+  （[#1146](https://github.com/celox-sim/celox/issues/1146)）。`export` 宣言（26.6）は、import
+  した宣言をその package を import する側から見えるようにします。`export p::*;` が export するのは
+  package が `p` から実際に import した名前だけです。export を経由した import は元の宣言を指すため、
+  2 つの経路で同じ宣言を import しても曖昧になりません。修飾名 `q::x` が指すのは `q` 自身の宣言だけです。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の
