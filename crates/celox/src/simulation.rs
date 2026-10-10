@@ -833,4 +833,32 @@ mod wait_tests {
     fn four_state_waits_run_on_every_backend() {
         check_all_backends(true);
     }
+
+    /// A host write that `settle_at` settles wakes a waiting process; the
+    /// zero-delay continuations of that process run in the same call.
+    #[test]
+    fn settle_at_drains_the_rounds_of_its_time() {
+        const SOURCE: &str = r#"
+            module Top(output logic [7:0] y);
+                logic go = 1'b0;
+                initial begin
+                    y = 8'd0;
+                    wait (go);
+                    #0 y = 8'd1;
+                    #0 y = 8'd2;
+                end
+            endmodule
+        "#;
+        let simulator = Simulator::from_sv_sources(vec![(SOURCE, Path::new("settle.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+        let mut sim = Simulation::new(simulator);
+        assert_eq!(sim.step().unwrap(), Some(0));
+        let go = sim.signal("go");
+        let y = sim.signal("y");
+        assert_eq!(sim.get(y), 0u8.into());
+        sim.simulator.set_wide(go, 1u8.into());
+        sim.state.settle_at(&mut sim.simulator, 0).unwrap();
+        assert_eq!(sim.get(y), 2u8.into());
+    }
 }

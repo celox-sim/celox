@@ -1943,7 +1943,7 @@ pub(super) fn initial_processes_from_module_node(
             // An `always` with timing controls restarts its statement
             // whenever it ends (IEEE 1800-2023 9.2.2).
             sv_parser::ModuleCommonItem::AlwaysConstruct(always)
-                if always_kind(always) == AlwaysKind::Process =>
+                if always_kind(always, tree) == AlwaysKind::Process =>
             {
                 let mut builder = BodyBuilder::new(
                     tree,

@@ -44,6 +44,21 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
+    /// The event counters of the variables a process waits on, by variable.
+    pub event_counters: HashMap<SourceVarId, EventCounters>,
+}
+
+/// The hidden state that records the events of a variable some process
+/// waits on: its value before a kernel's store, and how often it changed,
+/// rose and fell. A waiter compares the counters with the ones it sampled,
+/// so an event a later store of the same kernel run hides is still seen.
+#[derive(Clone)]
+pub(super) struct EventCounters {
+    pub name: String,
+    pub previous: String,
+    pub changes: String,
+    pub rises: String,
+    pub falls: String,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -140,6 +155,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
+            event_counters: HashMap::default(),
         }
     }
 
@@ -296,6 +312,23 @@ impl<'a> ProcModule<'a> {
 
     pub fn id(&self, name: &str) -> Option<SourceVarId> {
         self.name_to_id.get(name).copied()
+    }
+
+    /// A hidden copy of variable `id` with its shape, for the activations
+    /// of one process. The copy has no name a body can refer to.
+    pub fn private_copy(&mut self, id: SourceVarId) -> SourceVarId {
+        let mut variable = self.variables[&id].clone();
+        variable.path = vec![format!(
+            "{}@p{}",
+            variable.path.join("."),
+            self.temp_counter
+        )];
+        self.temp_counter += 1;
+        variable.hidden = true;
+        let copy = next_var_id(&mut self.next_id);
+        self.variables.insert(copy, variable);
+        self.created.push(copy);
+        copy
     }
 
     pub fn var(&self, id: SourceVarId) -> &SvVariable {

@@ -610,3 +610,141 @@ fn rejects_timing_controls_outside_processes() {
         "{error}"
     );
 }
+
+/// IEEE 1800-2023 9.4.2: a waiter is woken by the first change, even when
+/// the writing process restores the value before it suspends.
+#[test]
+fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
+    let source = r#"
+        module Top(output logic [7:0] woken);
+            logic a = 1'b0;
+            logic b = 1'b0;
+            initial begin
+                woken = 8'd0;
+                #1 a = 1'b1;
+                a = 1'b0;
+                #1 b = 1'b1;
+                b = 1'b0;
+                b = 1'b1;
+                #1 $finish;
+            end
+            initial begin
+                @(a);
+                $display("a changed a=%0d", a);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(posedge a);
+                $display("a rose");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(negedge b);
+                $display("b fell b=%0d", b);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(a or b);
+                $display("a or b");
+                woken = woken + 8'd1;
+            end
+        endmodule
+    "#;
+    for (four_state, mut sim) in [
+        (false, simulation(source)),
+        (true, four_state_simulation(source)),
+    ] {
+        let woken = sim.signal("woken");
+        assert_eq!(
+            displays(&mut sim),
+            lines(&[
+                (1, "a changed a=0"),
+                (1, "a rose"),
+                (1, "a or b"),
+                (2, "b fell b=1"),
+            ]),
+            "four_state={four_state}"
+        );
+        assert_eq!(sim.get(woken), 4u8.into(), "four_state={four_state}");
+    }
+}
+
+/// Each process has its own activation of a task that suspends.
+#[test]
+fn concurrent_activations_of_a_timed_task_keep_their_arguments() {
+    let source = r#"
+        module Top(output logic [7:0] o0, output logic [7:0] o1, output logic [7:0] sum);
+            task automatic put(input logic [7:0] value, input int index);
+                logic [7:0] doubled;
+                doubled = value + value;
+                #1;
+                if (index == 0) o0 = doubled;
+                else o1 = doubled;
+                sum = sum + value;
+            endtask
+            initial begin
+                sum = 8'd0;
+                o0 = 8'd0;
+                o1 = 8'd0;
+            end
+            initial put(8'd1, 0);
+            initial put(8'd2, 1);
+            initial begin
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (o0, o1, sum) = (sim.signal("o0"), sim.signal("o1"), sim.signal("sum"));
+    sim.run_until(5).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(o0), 2u8.into());
+    assert_eq!(sim.get(o1), 4u8.into());
+    assert_eq!(sim.get(sum), 3u8.into());
+}
+
+/// An edge-sensitive `always` whose body reaches a timing control through a
+/// task is a process.
+#[test]
+fn edge_sensitive_always_calling_a_timed_task_runs_as_a_process() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            task automatic bump;
+                #1 y = y + 8'd1;
+            endtask
+            task automatic via;
+                bump();
+            endtask
+            initial y = 8'd0;
+            always @(posedge clk) via();
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    // Edges at 5 and 15 increment at 6 and 16.
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.run_until(6).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+}
+
+#[test]
+fn rejects_nonblocking_assignments_in_tasks_a_process_calls() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            task automatic later;
+                #1 q <= 8'd1;
+            endtask
+            initial later();
+        endmodule
+    "#;
+    assert!(
+        build_error(source).contains("nonblocking assignment in a process that runs with timing"),
+        "{}",
+        build_error(source)
+    );
+}

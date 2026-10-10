@@ -49,7 +49,10 @@ pub(super) enum AlwaysKind {
 /// `always` with timing controls (a leading delay, a level-sensitive event
 /// list, or timing controls inside an edge-sensitive body) is a process.
 /// `always_latch` and an `always` without timing control are not supported.
-pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
+pub(super) fn always_kind(
+    always: &sv_parser::AlwaysConstruct,
+    syntax_tree: &SyntaxTree,
+) -> AlwaysKind {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => AlwaysKind::Comb,
         sv_parser::AlwaysKeyword::AlwaysFf(_) => AlwaysKind::Ff,
@@ -58,7 +61,7 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
             let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
                 &always.nodes.1.nodes.2
             else {
-                return if has_timing_control(RefNode::Statement(&always.nodes.1)) {
+                return if has_timing_control(RefNode::Statement(&always.nodes.1), syntax_tree) {
                     AlwaysKind::Process
                 } else {
                     AlwaysKind::Unsupported
@@ -75,7 +78,10 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
                             .into_iter()
                             .any(|node| matches!(node, RefNode::EdgeIdentifier(_)));
                         if !edge_sensitive
-                            || has_timing_control(RefNode::StatementOrNull(&timing.nodes.1))
+                            || has_timing_control(
+                                RefNode::StatementOrNull(&timing.nodes.1),
+                                syntax_tree,
+                            )
                         {
                             AlwaysKind::Process
                         } else {
@@ -90,23 +96,105 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
     }
 }
 
-/// Whether a statement contains a delay, an event control or a `wait`.
-fn has_timing_control(node: RefNode<'_>) -> bool {
-    node.into_iter().any(|node| {
-        matches!(
-            node,
-            RefNode::ProceduralTimingControlStatement(_) | RefNode::WaitStatement(_)
-        )
+/// Whether a statement contains a delay, an event control or a `wait`,
+/// itself or in a task it calls (see [`install_timed_tasks`]).
+fn has_timing_control(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> bool {
+    TIMED_TASKS.with(|tasks| {
+        let tasks = tasks.borrow();
+        node.into_iter().any(|node| match node {
+            RefNode::ProceduralTimingControlStatement(_) | RefNode::WaitStatement(_) => true,
+            RefNode::TfCall(call) if !tasks.is_empty() => reference_name(
+                RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                syntax_tree,
+            )
+            .is_some_and(|name| tasks.contains(&name)),
+            _ => false,
+        })
     })
 }
 
+thread_local! {
+    /// The tasks of the module being analyzed whose bodies reach a timing
+    /// control, directly or through the tasks they call.
+    static TIMED_TASKS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::default());
+}
+
+/// Restores the timed tasks of the enclosing analysis when dropped.
+pub(super) struct TimedTasksGuard(HashSet<String>);
+
+impl Drop for TimedTasksGuard {
+    fn drop(&mut self) {
+        TIMED_TASKS.with(|tasks| std::mem::swap(&mut *tasks.borrow_mut(), &mut self.0));
+    }
+}
+
+/// Make the tasks of the module `node` that reach a timing control known to
+/// [`always_kind`] until the guard is dropped: an edge-sensitive `always`
+/// that calls one is a process.
+pub(super) fn install_timed_tasks(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> TimedTasksGuard {
+    // (name, has a timing control itself, the subroutines it calls)
+    let mut tasks: Vec<(String, bool, Vec<String>)> = Vec::new();
+    for child in node {
+        let RefNode::TaskDeclaration(declaration) = child else {
+            continue;
+        };
+        let declaration = RefNode::TaskDeclaration(declaration);
+        let Some(name) = declaration.clone().into_iter().find_map(|node| match node {
+            RefNode::TaskIdentifier(identifier) => {
+                identifier_text(RefNode::TaskIdentifier(identifier), syntax_tree)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let timed = declaration.clone().into_iter().any(|node| {
+            matches!(
+                node,
+                RefNode::ProceduralTimingControlStatement(_) | RefNode::WaitStatement(_)
+            )
+        });
+        let callees = declaration
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::TfCall(call) => reference_name(
+                    RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                    syntax_tree,
+                ),
+                _ => None,
+            })
+            .collect();
+        tasks.push((name, timed, callees));
+    }
+    let mut timed: HashSet<String> = tasks
+        .iter()
+        .filter(|(_, timed, _)| *timed)
+        .map(|(name, ..)| name.clone())
+        .collect();
+    loop {
+        let before = timed.len();
+        for (name, _, callees) in &tasks {
+            if !timed.contains(name) && callees.iter().any(|callee| timed.contains(callee)) {
+                timed.insert(name.clone());
+            }
+        }
+        if timed.len() == before {
+            break;
+        }
+    }
+    TimedTasksGuard(TIMED_TASKS.with(|tasks| std::mem::replace(&mut *tasks.borrow_mut(), timed)))
+}
+
 /// The statement an combinational `always` evaluates, without its event control.
-pub(super) fn always_comb_body(
-    always: &sv_parser::AlwaysConstruct,
-) -> Option<&sv_parser::Statement> {
+pub(super) fn always_comb_body<'a>(
+    always: &'a sv_parser::AlwaysConstruct,
+    syntax_tree: &SyntaxTree,
+) -> Option<&'a sv_parser::Statement> {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => Some(&always.nodes.1),
-        sv_parser::AlwaysKeyword::Always(_) if always_kind(always) == AlwaysKind::Comb => {
+        sv_parser::AlwaysKeyword::Always(_)
+            if always_kind(always, syntax_tree) == AlwaysKind::Comb =>
+        {
             let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
                 &always.nodes.1.nodes.2
             else {
@@ -272,13 +360,13 @@ pub(super) fn reject_silently_ignored_constructs(
                 return Err(AnalyzerError::Unsupported("enum port".to_string()));
             }
             RefNode::AlwaysConstruct(always) => {
-                if always_kind(always) == AlwaysKind::Unsupported {
+                if always_kind(always, syntax_tree) == AlwaysKind::Unsupported {
                     return Err(AnalyzerError::Unsupported(
                         "always and always_latch processes".to_string(),
                     ));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
-                if always_kind(always) == AlwaysKind::Comb
+                if always_kind(always, syntax_tree) == AlwaysKind::Comb
                     && body
                         .clone()
                         .into_iter()
@@ -288,7 +376,7 @@ pub(super) fn reject_silently_ignored_constructs(
                         "nonblocking assignment inside always_comb".to_string(),
                     ));
                 }
-                if always_kind(always) == AlwaysKind::Ff
+                if always_kind(always, syntax_tree) == AlwaysKind::Ff
                     && body.clone().into_iter().any(|node| {
                         matches!(
                             node,

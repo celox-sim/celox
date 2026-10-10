@@ -2021,6 +2021,18 @@ fn lower_initial_processes(
     pm.runtime_event_sites = std::mem::take(runtime_event_sites);
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
+    let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
+    for counter in ff::declare_event_counters(&mut pm, &bodies) {
+        let written_mask = (BigUint::from(1u8) << ff::EVENT_COUNTER_WIDTH) - BigUint::from(1u8);
+        values.push(InitialStateValue {
+            address: counter,
+            data: InitialStateData::Packed {
+                value: BigUint::default(),
+                mask: BigUint::default(),
+                written_mask,
+            },
+        });
+    }
     let processes = runtime
         .into_iter()
         .zip(slots)
