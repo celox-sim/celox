@@ -975,14 +975,41 @@ fn generate_block_imports_are_scoped_to_their_block() {
             "package p; logic [7:0] s;
                function automatic logic [7:0] inc(logic [7:0] v); return v + 1; endfunction
              endpackage
-             package q; function automatic logic [7:0] inc(logic [7:0] v); return v + 2; endfunction
-             endpackage
+             package q; localparam int s = 9; endpackage
              module Top(output logic [7:0] y); import q::*; logic [7:0] a;
                if (1) begin : g import p::*; always_comb s = inc(8'd4); assign a = s; end
-               assign y = a * 10 + inc(8'd0);
+               assign y = a * 10 + s;
              endmodule"
         ),
-        52
+        59
+    );
+    // A subroutine the block imports as another one than its module is not
+    // supported: calls look up formal names and shapes module-wide.
+    let detail = Simulator::from_sv_sources(
+        vec![(
+            "package p; function automatic int f(int a); return a + 1; endfunction endpackage
+             package q; function automatic int f(int b); return b + 2; endfunction endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; assign a = f(4); end
+               assign y = a + f(0);
+             endmodule",
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("a block-local subroutine binding is unsupported")
+    .to_string();
+    assert!(detail.contains("subroutine `f`"), "{detail}");
+    // A loop's genvar hides a wildcard import of its body.
+    assert_eq!(
+        output(
+            "package p; localparam int i = 7; endpackage
+             module Top(output logic [7:0] y);
+               for (genvar i = 0; i < 1; i++) begin : g import p::*; assign y = i; end
+             endmodule"
+        ),
+        0
     );
     assert_eq!(
         output(
