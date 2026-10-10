@@ -98,6 +98,28 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             .map_err(|e| self.decorate_runtime_error(e))
     }
 
+    fn tick_many(&mut self, event: B::Event, count: u64) -> (u64, Result<(), RuntimeErrorCode>) {
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        if !self.program.runtime_schema.comb_observers.is_empty() {
+            return (1, self.tick_deferred_comb(event));
+        }
+        // Every tick settles the combinational logic first, so a clean
+        // state needs no special case and the whole run stays in the
+        // backend's loop.
+        let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
+        self.dirty = true;
+        (
+            completed,
+            result.map_err(|error| self.decorate_runtime_error(error)),
+        )
+    }
+
+    fn fused_ticks_allowed(&self) -> bool {
+        !self.components.has_scheduled_components()
+    }
+
     fn stage_external_event(
         &mut self,
         event: B::Event,
@@ -248,6 +270,19 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .map(|slots| ProcessRefs {
             status: simulator.backend.resolve_signal(&slots.status),
             delay: simulator.backend.resolve_signal(&slots.delay),
+            clock: simulator.backend.resolve_signal(&slots.clock),
+            clocks: slots
+                .clocks
+                .iter()
+                .map(|clock| celox_runtime::ProcessClockRef {
+                    event: simulator
+                        .backend
+                        .resolve_event_opt(&clock.signal)
+                        .expect("a process clock is the clock of a sequential domain"),
+                    signal: simulator.backend.resolve_signal(&clock.signal),
+                    period: clock.period,
+                })
+                .collect(),
         })
         .collect();
 
@@ -451,12 +486,13 @@ impl<B: SimBackend> Simulation<B> {
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
         self.settle_host_writes()?;
-        self.state.poll_waiting(&mut self.simulator)?;
+        self.state
+            .poll_waiting_until(&mut self.simulator, end_time)?;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
             }
-            self.state.step(&mut self.simulator)?;
+            self.state.step_until(&mut self.simulator, end_time)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -480,6 +516,12 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the current simulation time.
     pub fn time(&self) -> u64 {
         self.state.time()
+    }
+
+    /// Rising edges of the clocks processes wait on that the simulation has
+    /// run so far.
+    pub fn ticks(&self) -> u64 {
+        self.state.ticks()
     }
 
     /// Periodic clocks registered with [`Self::add_clock`] (or loaded with a
@@ -1002,5 +1044,128 @@ mod wait_tests {
         assert_eq!(sim.step().unwrap(), Some(10));
         assert_eq!(sim.get(y), 2u8.into());
         assert_eq!(sim.step().unwrap(), None);
+    }
+}
+
+/// Clock waits of processes on every backend: fused where the backend
+/// loops in generated code, one tick per call elsewhere.
+#[cfg(all(test, feature = "host-runtime"))]
+mod clock_wait_tests {
+    use celox_frontend_sdk::{
+        BinaryOp, Constant, Edge, FrontendArtifact, ModuleBuilder, Statement, ValueType,
+    };
+
+    use super::Simulation;
+    use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+    /// A counter clocked by a process clock; one process waits 1000 edges
+    /// and records the count, another waits 400 and then 5 more.
+    fn design(four_state: bool) -> FrontendArtifact {
+        let bit = ValueType::new(1, false, four_state).unwrap();
+        let word = ValueType::new(16, false, four_state).unwrap();
+        let mut module = ModuleBuilder::new("ClockWaits").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let count = module.output("count", word).unwrap();
+        let late = module.output("late", word).unwrap();
+        let early = module.output("early", word).unwrap();
+        for signal in [count, late, early] {
+            module
+                .set_initial(signal, Constant::two_state(0u8, 16).unwrap())
+                .unwrap();
+        }
+        let count_expr = module.read(count).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 16).unwrap());
+        let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
+        let count_target = module.whole(count).unwrap();
+        module
+            .register(count_target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let constant = |module: &mut ModuleBuilder, value: u64| {
+            module.constant(Constant::two_state(value, 64).unwrap())
+        };
+        let thousand = constant(&mut module, 1000);
+        let late_target = module.whole(late).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: thousand,
+                },
+                Statement::Assign {
+                    target: late_target,
+                    value: count_expr,
+                },
+                Statement::Finish,
+            ])
+            .unwrap();
+        let four_hundred = constant(&mut module, 400);
+        let five = constant(&mut module, 5);
+        let early_target = module.whole(early).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: four_hundred,
+                },
+                Statement::Assign {
+                    target: early_target,
+                    value: count_expr,
+                },
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: five,
+                },
+            ])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let count = sim.signal("count");
+        let early = sim.signal("early");
+        let late = sim.signal("late");
+        sim.run_until(1601).unwrap();
+        assert_eq!(sim.get(early), 400u16.into());
+        assert_eq!(sim.get(count), 401u16.into());
+        assert_eq!(sim.ticks(), 401);
+        sim.run_until(u64::MAX - 1).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), 4000);
+        assert_eq!(sim.get(late), 1000u16.into());
+        assert_eq!(sim.get(count), 1000u16.into());
+        assert_eq!(sim.ticks(), 1000);
+    }
+
+    fn builder(four_state: bool) -> SimulatorBuilder<'static, Simulator> {
+        Simulator::from_frontend(design(four_state))
+            .four_state(four_state)
+            .emit_triggers()
+    }
+
+    fn check_all_backends(four_state: bool) {
+        check(Simulation::new(
+            builder(four_state).build_interpreter().unwrap(),
+        ));
+        check(Simulation::new(
+            builder(four_state).build_cranelift().unwrap(),
+        ));
+        check(Simulation::new(builder(four_state).build_wasm().unwrap()));
+        check(Simulation::new(builder(four_state).build_tiered().unwrap()));
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        check(Simulation::new(builder(four_state).build_native().unwrap()));
+    }
+
+    #[test]
+    fn clock_waits_run_on_every_backend() {
+        check_all_backends(false);
+    }
+
+    #[test]
+    fn four_state_clock_waits_run_on_every_backend() {
+        check_all_backends(true);
     }
 }

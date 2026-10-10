@@ -11,9 +11,10 @@ use std::path::Path;
 
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
-    InitialStateData, InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH,
-    PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind,
-    RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    InitialStateData, InitialStateValue, ModuleId, PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH,
+    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
@@ -2330,6 +2331,8 @@ fn lower_initial_processes(
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
+                clock: declare("clock", PROCESS_CLOCK_WIDTH),
+                clocks: Vec::new(),
             }
         })
         .collect();
@@ -2354,7 +2357,7 @@ fn lower_initial_processes(
         .zip(slots)
         .map(|(process, slots)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots.clone())?,
                 slots,
             })
         })

@@ -2,8 +2,9 @@
 
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId,
-    PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase,
-    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
+    PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessClock,
+    ProcessSlots, RegionedVarAddrBase, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    VariableMetadata, WORKING_REGION,
 };
 use celox_frontend_sdk::{
     ActiveLevel, Direction, Edge, ExprId, ExprNode, FrontendArtifact, SignalId, SignalSlice,
@@ -1034,6 +1035,7 @@ fn lower_registers(
 fn lower_statements(
     artifact: &FrontendArtifact,
     kernel: &mut ProcessKernelBuilder,
+    clocks: &[SignalId],
     statements: &[Statement],
 ) -> Result<bool, FrontendArtifactError> {
     for statement in statements {
@@ -1075,7 +1077,7 @@ fn lower_statements(
                 let mut join = None;
                 for (block, body) in [(then_block, then_body), (else_block, else_body)] {
                     kernel.builder().switch_to_block(block);
-                    if lower_statements(artifact, kernel, body)? {
+                    if lower_statements(artifact, kernel, clocks, body)? {
                         let builder = kernel.builder();
                         let target = *join.get_or_insert_with(|| builder.new_block());
                         builder.seal_block(SIRTerminator::Jump(target, Vec::new()));
@@ -1100,7 +1102,7 @@ fn lower_statements(
                     false_block: (exit, Vec::new()),
                 });
                 builder.switch_to_block(body_block);
-                if lower_statements(artifact, kernel, body)? {
+                if lower_statements(artifact, kernel, clocks, body)? {
                     kernel
                         .builder()
                         .seal_block(SIRTerminator::Jump(header, Vec::new()));
@@ -1112,7 +1114,7 @@ fn lower_statements(
                 let header = builder.new_block();
                 builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
                 builder.switch_to_block(header);
-                if lower_statements(artifact, kernel, body)? {
+                if lower_statements(artifact, kernel, clocks, body)? {
                     kernel
                         .builder()
                         .seal_block(SIRTerminator::Jump(header, Vec::new()));
@@ -1128,6 +1130,20 @@ fn lower_statements(
                     &mut cache,
                 )?;
                 kernel.delay(amount)?;
+            }
+            Statement::ClockCycles { clock, count } => {
+                let index = clocks
+                    .iter()
+                    .position(|c| c == clock)
+                    .ok_or(FrontendArtifactError::UnknownSignal(clock.index()))?;
+                let count = coerce_sir_expression(
+                    artifact,
+                    *count,
+                    ValueType::bits(PROCESS_DELAY_WIDTH)?,
+                    kernel.builder(),
+                    &mut cache,
+                )?;
+                kernel.wait_clock(index as u32, count)?;
             }
             Statement::Finish => {
                 kernel.finish();
@@ -1176,13 +1192,28 @@ fn lower_processes(
         .enumerate()
         .map(|(index, process)| {
             let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
+            let mut clocks = Vec::new();
+            celox_frontend_sdk::collect_process_clocks(process.body(), &mut clocks);
             let slots = ProcessSlots {
                 resume: declare(name("resume"), PROCESS_RESUME_WIDTH),
                 status: declare(name("status"), PROCESS_STATUS_WIDTH),
                 delay: declare(name("delay"), PROCESS_DELAY_WIDTH),
+                clock: declare(name("clock"), PROCESS_CLOCK_WIDTH),
+                clocks: clocks
+                    .iter()
+                    .map(|clock| {
+                        Ok(ProcessClock {
+                            signal: source_id(*clock),
+                            period: artifact
+                                .clock_period(*clock)
+                                .ok_or(FrontendArtifactError::UnknownSignal(clock.index()))?
+                                .max(2),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, FrontendArtifactError>>()?,
             };
-            let mut kernel = ProcessKernelBuilder::new(slots);
-            lower_statements(artifact, &mut kernel, process.body())?;
+            let mut kernel = ProcessKernelBuilder::new(slots.clone());
+            lower_statements(artifact, &mut kernel, &clocks, process.body())?;
             Ok(SymbolicProcess {
                 kernel: kernel.build(),
                 slots,

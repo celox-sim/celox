@@ -131,6 +131,7 @@ Celox artifact JSON も parse しません。build 可能な addon と load test
 | `If` | 条件で分岐します。不定 bit を含む条件は偽として扱います。 |
 | `While` / `Forever` | 条件が成り立つ間、または永久に body を繰り返します。 |
 | `Delay` | 指定した時間単位だけ suspend します。量は 64 bit 以下です。 |
+| `ClockCycles` | clock の立ち上がりエッジが指定回数過ぎるまで suspend します。clock は register の clock で、`ModuleBuilder::clock_period` で周期を設定しておきます。runtime は最初の待ちからその clock のエッジを生成し、process は最後に数えたエッジの 1 周期後、次のエッジの前に再開します。 |
 | `Finish` | simulation を終了します。 |
 
 ```rust
@@ -154,6 +155,13 @@ schedule された event と同様にその時刻の register を trigger しま
 を置くと、process は同じ時刻のうちに、他の process が実行され、その edge が
 trigger した register が settle した後で再開します。そのため 0 の delay で区切った
 pulse も edge になります。
+
+`ClockCycles` で待つ clock は、いずれかの process が待っている間、半周期ごとに
+toggle します。生きている process がすべて同じ clock を待っていて他に schedule
+された event がないときは、その edge は backend が生成したコードの中で fused tick
+として実行されるため、長い待ちも event 駆動の `Simulator` で同じ回数 tick する
+のと同程度の cost で済みます。この間は clock signal 自身の edge と外部 component
+の edge ごとの hook を省略し、他の process や event が割り込むと再び有効になります。
 
 process が書けるのは、continuous assignment や register が駆動していない
 output と internal signal です。同じ signal を複数の process が書いても

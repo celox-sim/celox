@@ -16,8 +16,8 @@
 //! suspension methods where the source suspends.
 
 use celox_design::{
-    PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots, ProcessStatus, RegionedVarAddrBase,
-    STABLE_REGION,
+    PROCESS_CLOCK_WIDTH, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots, ProcessStatus,
+    RegionedVarAddrBase, STABLE_REGION,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRSwitchCase,
@@ -43,6 +43,8 @@ pub const MAX_PROCESS_SUSPENSIONS: usize = (1 << PROCESS_RESUME_WIDTH) - 1;
 pub enum ProcessKernelError {
     #[error("a process has more than {MAX_PROCESS_SUSPENSIONS} suspension points")]
     TooManySuspensions,
+    #[error("a process waits on clock {0}, which its slots do not list")]
+    UnknownClock(u32),
 }
 
 /// Builder of one process kernel.
@@ -111,6 +113,29 @@ impl ProcessKernelBuilder {
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
         self.end(ProcessStatus::Delay);
+        let resume = self.builder.new_block();
+        self.resume_blocks.push(resume);
+        self.builder.switch_to_block(resume);
+        Ok(())
+    }
+
+    /// Suspend until `count` rising edges of the process clock `clock` (an
+    /// index into the slots' clock list) have passed, and continue at a new
+    /// resume point one period after the last of them. `count` is an
+    /// unsigned two-state register of [`PROCESS_DELAY_WIDTH`] bits; a count
+    /// of zero continues at once.
+    pub fn wait_clock(&mut self, clock: u32, count: RegisterId) -> Result<(), ProcessKernelError> {
+        if clock as usize >= self.slots.clocks.len() {
+            return Err(ProcessKernelError::UnknownClock(clock));
+        }
+        let point = self.resume_blocks.len();
+        if point > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        self.store(self.slots.delay, PROCESS_DELAY_WIDTH, count);
+        self.store_constant(self.slots.clock, PROCESS_CLOCK_WIDTH, u64::from(clock));
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
+        self.end(ProcessStatus::WaitClock);
         let resume = self.builder.new_block();
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);

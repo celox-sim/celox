@@ -227,6 +227,13 @@ pub enum ProcessStatus {
     /// It ran no statement, so no state other than its own wait bookkeeping
     /// changed.
     Pending,
+    /// Resume after the number of rising edges stored in
+    /// [`ProcessSlots::delay`] of the process clock whose index is stored in
+    /// [`ProcessSlots::clock`]. The runtime generates those edges: the clock
+    /// toggles every half period from the first wait on it, and the process
+    /// resumes one period after the last counted edge, before the edge that
+    /// follows.
+    WaitClock,
 }
 
 impl ProcessStatus {
@@ -239,6 +246,7 @@ impl ProcessStatus {
             Self::Finish => 3,
             Self::Wait => 4,
             Self::Pending => 5,
+            Self::WaitClock => 6,
         }
     }
 
@@ -249,7 +257,26 @@ impl ProcessStatus {
             3 => Some(Self::Finish),
             4 => Some(Self::Wait),
             5 => Some(Self::Pending),
+            6 => Some(Self::WaitClock),
             _ => None,
+        }
+    }
+}
+
+/// A clock a process waits on with [`ProcessStatus::WaitClock`]: the clock
+/// signal of a sequential domain, and the period of the edges the runtime
+/// generates for it (at least two time units).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessClock<A> {
+    pub signal: A,
+    pub period: u64,
+}
+
+impl<A> ProcessClock<A> {
+    pub fn map<B>(self, map: impl FnOnce(A) -> B) -> ProcessClock<B> {
+        ProcessClock {
+            signal: map(self.signal),
+            period: self.period,
         }
     }
 }
@@ -258,14 +285,20 @@ impl ProcessStatus {
 ///
 /// A process kernel is a resumable function. On entry it reads `resume` to
 /// find where it stopped; before returning it stores the next resume point,
-/// a [`ProcessStatus`] code in `status` and, for a delay, the number of time
-/// units in `delay`. All three are ordinary two-state state objects, so
-/// checkpoints capture a suspended process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// a [`ProcessStatus`] code in `status` and, for a delay or a clock wait, the
+/// number of time units or edges in `delay`; a clock wait also stores the
+/// index into `clocks` in `clock`. The slots are ordinary two-state state
+/// objects, so checkpoints capture a suspended process.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
     pub resume: A,
     pub status: A,
     pub delay: A,
+    pub clock: A,
+    /// The clocks the process may wait on, in the order its kernel numbers
+    /// them.
+    #[serde(default = "Vec::new")]
+    pub clocks: Vec<ProcessClock<A>>,
 }
 
 impl<A> ProcessSlots<A> {
@@ -274,11 +307,18 @@ impl<A> ProcessSlots<A> {
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
+            clock: map(self.clock),
+            clocks: self
+                .clocks
+                .into_iter()
+                .map(|clock| clock.map(&mut map))
+                .collect(),
         }
     }
 
+    /// The control slots, without the clock signals.
     pub fn iter(&self) -> impl Iterator<Item = &A> {
-        [&self.resume, &self.status, &self.delay].into_iter()
+        [&self.resume, &self.status, &self.delay, &self.clock].into_iter()
     }
 }
 
@@ -286,6 +326,8 @@ impl<A> ProcessSlots<A> {
 pub const PROCESS_STATUS_WIDTH: usize = 8;
 /// Width of [`ProcessSlots::delay`].
 pub const PROCESS_DELAY_WIDTH: usize = 64;
+/// Width of [`ProcessSlots::clock`].
+pub const PROCESS_CLOCK_WIDTH: usize = 32;
 
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]

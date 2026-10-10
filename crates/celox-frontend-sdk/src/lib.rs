@@ -474,6 +474,13 @@ pub enum Statement {
     /// amount count as zero; a zero delay resumes at the same time, after
     /// the other processes and the registers their edges trigger.
     Delay { amount: ExprId },
+    /// Suspend the process until `count` rising edges of `clock` have
+    /// passed. The runtime generates the edges of a clock from the first
+    /// wait on it, with the period set by [`ModuleBuilder::clock_period`],
+    /// and resumes the process one period after the last counted edge,
+    /// before the edge that follows. Unknown bits of the count count as
+    /// zero; a zero count continues at once.
+    ClockCycles { clock: SignalId, count: ExprId },
     /// End the simulation.
     Finish,
 }
@@ -509,6 +516,9 @@ pub struct FrontendArtifact {
     port_order: Vec<SignalId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     processes: Vec<Process>,
+    /// Periods of the clocks processes wait on, in time units.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    clock_periods: Vec<(SignalId, u64)>,
 }
 
 impl FrontendArtifact {
@@ -850,6 +860,43 @@ impl FrontendArtifact {
         for process in &self.processes {
             self.validate_statements(&process.body, &driver_ranges)?;
         }
+        // The same requirements as `ModuleBuilder::clock_period` and
+        // `ModuleBuilder::process` put on the clocks processes wait on.
+        for (clock, period) in &self.clock_periods {
+            let signal = self
+                .signal(*clock)
+                .ok_or(BuildError::UnknownSignal(clock.index()))?;
+            if signal.value_type.width() != 1 {
+                return Err(BuildError::InvalidControlWidth {
+                    name: signal.name.clone(),
+                });
+            }
+            if *period < 2 {
+                return Err(BuildError::InvalidClockPeriod { period: *period });
+            }
+        }
+        for process in &self.processes {
+            let mut clocks = Vec::new();
+            collect_process_clocks(&process.body, &mut clocks);
+            for clock in clocks {
+                let known = self
+                    .clock_periods
+                    .iter()
+                    .any(|(signal, _)| *signal == clock)
+                    && self
+                        .registers
+                        .iter()
+                        .any(|register| register.clock == clock);
+                if !known {
+                    let name = self
+                        .signal(clock)
+                        .ok_or(BuildError::UnknownSignal(clock.index()))?
+                        .name
+                        .clone();
+                    return Err(BuildError::UnknownProcessClock { name });
+                }
+            }
+        }
         let mut ordered_ports = FxHashMap::default();
         for signal in &self.port_order {
             let signal = self
@@ -906,6 +953,14 @@ impl FrontendArtifact {
         &self.processes
     }
 
+    /// The period of `clock` for [`Statement::ClockCycles`], if set.
+    pub fn clock_period(&self, clock: SignalId) -> Option<u64> {
+        self.clock_periods
+            .iter()
+            .find(|(signal, _)| *signal == clock)
+            .map(|(_, period)| *period)
+    }
+
     fn validate_statements(
         &self,
         statements: &[Statement],
@@ -955,6 +1010,10 @@ pub enum BuildError {
     },
     #[error("control signal `{name}` must be one bit wide")]
     InvalidControlWidth { name: String },
+    #[error("a clock period must be at least two time units, not {period}")]
+    InvalidClockPeriod { period: u64 },
+    #[error("clock `{name}` needs a period and a register it clocks before a process waits on it")]
+    UnknownProcessClock { name: String },
     #[error("register target `{name}` must cover the complete signal")]
     PartialRegisterTarget { name: String },
     #[error("module name must not be empty")]
@@ -1014,6 +1073,7 @@ pub struct ModuleBuilder {
     driver_ranges: FxHashMap<SignalId, BTreeMap<usize, usize>>,
     port_order: Vec<SignalId>,
     processes: Vec<Process>,
+    clock_periods: Vec<(SignalId, u64)>,
 }
 
 impl ModuleBuilder {
@@ -1033,6 +1093,7 @@ impl ModuleBuilder {
             driver_ranges: FxHashMap::default(),
             port_order: Vec::new(),
             processes: Vec::new(),
+            clock_periods: Vec::new(),
         })
     }
 
@@ -1366,6 +1427,23 @@ impl ModuleBuilder {
             &|expression| self.expressions.get(expression.index() as usize),
             &self.driver_ranges,
         )?;
+        let mut clocks = Vec::new();
+        collect_process_clocks(&body, &mut clocks);
+        for clock in clocks {
+            let known = self
+                .clock_periods
+                .iter()
+                .any(|(signal, _)| *signal == clock)
+                && self
+                    .registers
+                    .iter()
+                    .any(|register| register.clock == clock);
+            if !known {
+                return Err(BuildError::UnknownProcessClock {
+                    name: self.signal_info(clock)?.name.clone(),
+                });
+            }
+        }
         self.processes.push(Process { body });
         Ok(())
     }
@@ -1384,7 +1462,29 @@ impl ModuleBuilder {
             registers: self.registers,
             port_order: self.port_order,
             processes: self.processes,
+            clock_periods: self.clock_periods,
         }
+    }
+
+    /// Set the period, in time units, of the edges the runtime generates
+    /// for `clock` when a process waits on it with
+    /// [`Statement::ClockCycles`]. The clock must clock a register, and
+    /// the period is at least two.
+    pub fn clock_period(&mut self, clock: SignalId, period: u64) -> Result<(), BuildError> {
+        let signal = self.signal_info(clock)?;
+        if signal.value_type.width() != 1 {
+            return Err(BuildError::InvalidControlWidth {
+                name: signal.name.clone(),
+            });
+        }
+        if period < 2 {
+            return Err(BuildError::InvalidClockPeriod { period });
+        }
+        match self.clock_periods.iter_mut().find(|(s, _)| *s == clock) {
+            Some(entry) => entry.1 = period,
+            None => self.clock_periods.push((clock, period)),
+        }
+        Ok(())
     }
 
     fn signal_info(&self, signal: SignalId) -> Result<&Signal, BuildError> {
@@ -1473,7 +1573,32 @@ fn collect_process_targets(statements: &[Statement], targets: &mut Vec<SignalSli
             Statement::While { body, .. } | Statement::Forever { body } => {
                 collect_process_targets(body, targets);
             }
-            Statement::Delay { .. } | Statement::Finish => {}
+            Statement::Delay { .. } | Statement::ClockCycles { .. } | Statement::Finish => {}
+        }
+    }
+}
+
+/// The clocks the statements wait on, in order of first use.
+pub fn collect_process_clocks(statements: &[Statement], clocks: &mut Vec<SignalId>) {
+    for statement in statements {
+        match statement {
+            Statement::ClockCycles { clock, .. } => {
+                if !clocks.contains(clock) {
+                    clocks.push(*clock);
+                }
+            }
+            Statement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_process_clocks(then_body, clocks);
+                collect_process_clocks(else_body, clocks);
+            }
+            Statement::While { body, .. } | Statement::Forever { body } => {
+                collect_process_clocks(body, clocks);
+            }
+            Statement::Assign { .. } | Statement::Delay { .. } | Statement::Finish => {}
         }
     }
 }
@@ -1548,6 +1673,13 @@ fn validate_statements<'a>(
             }
             Statement::Delay { amount } => {
                 let width = expression_type(*amount)?.width();
+                if width > MAX_DELAY_WIDTH {
+                    return Err(BuildError::DelayTooWide { width });
+                }
+            }
+            Statement::ClockCycles { clock, count } => {
+                signal(*clock).ok_or(BuildError::UnknownSignal(clock.index()))?;
+                let width = expression_type(*count)?.width();
                 if width > MAX_DELAY_WIDTH {
                     return Err(BuildError::DelayTooWide { width });
                 }
@@ -1897,6 +2029,51 @@ mod tests {
             error,
             ArtifactJsonError::InvalidArtifact(BuildError::ZeroWidth)
         ));
+    }
+
+    #[test]
+    fn revalidates_process_clocks_from_json() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("ProcessClocks").unwrap();
+        let clock = module.internal("clock", bit).unwrap();
+        let count = module.output("count", bit).unwrap();
+        let toggled = module.read(count).unwrap();
+        let toggled = module.unary(UnaryOp::BitNot, toggled, bit).unwrap();
+        let target = module.whole(count).unwrap();
+        module
+            .register(target, toggled, clock, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clock, 4).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        module
+            .process(vec![Statement::ClockCycles { clock, count: one }])
+            .unwrap();
+        let artifact = module.finish();
+        let json = serde_json::to_value(&artifact).unwrap();
+
+        // Without its period, the clock clocks nothing.
+        let mut unknown = json.clone();
+        unknown["clock_periods"] = serde_json::json!([]);
+        let error = FrontendArtifact::from_json(&unknown.to_string()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ArtifactJsonError::InvalidArtifact(BuildError::UnknownProcessClock { .. })
+            ),
+            "{error:?}"
+        );
+
+        // A period below two cannot have distinct edges.
+        let mut short = json.clone();
+        short["clock_periods"][0][1] = 1.into();
+        let error = FrontendArtifact::from_json(&short.to_string()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ArtifactJsonError::InvalidArtifact(BuildError::InvalidClockPeriod { period: 1 })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
