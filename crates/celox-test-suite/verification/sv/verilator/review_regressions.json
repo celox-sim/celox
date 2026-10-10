@@ -1,0 +1,235 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/parameters.sv:3:10: Instance attempts to override 'P' as a parameter, but it is a local parameter\n    3 |   Top #(.P(205)) dut ();\n      |          ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "review_regressions::body_parameters_are_local_with_a_parameter_port_list",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::covers_single_bit_bitwise_complementary_guards",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::folds_compound_four_state_case_labels",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::lowers_parameter_casts_in_conditional_generate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::lowers_parameter_casts_in_loop_generate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::normalizes_function_parameter_cast_dimensions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_constant_case_selector_context",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_arithmetic_case_constants",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_equality_case_selectors",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_reduction_case_constants",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_relational_case_selectors",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_four_state_shift_and_bit_select_constants",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_unsigned_128_bit_enum_arithmetic",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::resolves_generate_local_alias_casts_for_all_processes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::run_time_for_condition_uses_the_relational_operand_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:10: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:12: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:13: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::constant_arrays_initialize_comb_and_ff_reads",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::inst_port_default_value_connected_not_folded",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::nested_array_index_const_array",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::struct_bit_field_rhs_no_spill",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::unary_minus_as_shift_amount",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_shift_amount_out_of_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_shift_count_preserves_unknowns_and_sign_fill",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_struct_bit_field_rhs_no_spill",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_ternary_narrow_branch_no_spill",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

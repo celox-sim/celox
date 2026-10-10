@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_scatter_store::packed_scatter_last_lane_does_not_touch_adjacent_storage",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -87,7 +87,7 @@ exit 1
     let results_path = directory.join("output").join("results.json");
     let report = || -> Value { serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap() };
     let retained =
-        || -> Value { serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap() };
+        || -> Value { celox_test_suite::verification::read_report(&report_path).unwrap() };
     let calls = || fs::read_to_string(&invocations).unwrap().lines().count();
 
     fs::write(&mode, "failure\n").unwrap();

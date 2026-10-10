@@ -1,0 +1,87 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_always_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_unknown",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_zero_divisor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "This two-state fixture follows Verilator and expects zero on division by zero. Icarus evaluates the emitted logic ports in four-state SV and correctly produces X, which the two-state adapter refuses to discard. This is a state-model mismatch, not an Icarus SV conformance bug. The four-state companion requires X.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "state_model_difference",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-two-state-zero-division"
+        ],
+        "id": "icarus_two_state_zero_division",
+        "observed_version": "Veryl 0.21.0; Icarus 13.0",
+        "phase": "execute",
+        "reason": "This two-state fixture follows Verilator and expects zero on division by zero. Icarus evaluates the emitted logic ports in four-state SV and correctly produces X, which the two-state adapter refuses to discard. This is a state-model mismatch, not an Icarus SV conformance bug. The four-state companion requires X.",
+        "standard": "IEEE 1800-2023 11.4.3 requires an all-X result for division/remainder by zero in four-state evaluation.",
+        "upstream": []
+      },
+      "name": "signed_divrem::signed_divrem_i128",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_zero_division": "Requires the suite's totalized two-state division/remainder result of zero, including logic destinations; SV arithmetic produces X before any two-state destination conversion (IEEE 1800-2023 11.3.4, 11.4.3)."
+      },
+      "tags": [
+        "two_state_zero_division"
+      ]
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i64",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i8",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

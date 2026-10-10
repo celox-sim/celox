@@ -1,0 +1,312 @@
+{
+  "cases": [
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_array_literal_accepts_array_returning_items",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_array_literal_converts_scalar_items_per_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_direct_array_argument_converts_each_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_direct_array_return_preserves_all_elements",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-function-outputs"
+        ],
+        "id": "icarus_function_outputs",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-function-outputs"
+        ],
+        "id": "icarus_function_outputs",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_loop_skips_conditions_after_break",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_nested_array_literals_preserve_each_dimension_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_function_packed_array_literal_preserves_source_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "assignment_pattern_evaluation": "Requires source-order evaluation or a particular evaluation count for effectful assignment-pattern items; SV does not guarantee these choices (IEEE 1800-2023 10.9.1, 11.4.2)."
+      },
+      "tags": [
+        "assignment_pattern_evaluation"
+      ]
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-function-outputs"
+        ],
+        "id": "icarus_function_outputs",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_named_function_inputs_evaluate_in_source_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order"
+      ]
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-function-outputs"
+        ],
+        "id": "icarus_function_outputs",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
+        "upstream": []
+      },
+      "name": "comb_observer::test_named_function_outputs_apply_in_source_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

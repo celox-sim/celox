@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Veryl emits assignment of a logic vector to an enum without an explicit enum cast. Both SV compilers reject this connection; their rejection is not treated as a simulator conformance bug.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-enum-conversion"
+        ],
+        "id": "sv_enum_conversion",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Veryl emits assignment of a logic vector to an enum without an explicit enum cast. Both SV compilers reject this connection; their rejection is not treated as a simulator conformance bug.",
+        "upstream": []
+      },
+      "name": "enum_type::test_enum_assign_and_compare",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "enum_type::test_enum_case_match",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "enum_type::test_enum_ff_state_machine",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
