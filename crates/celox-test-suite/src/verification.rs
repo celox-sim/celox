@@ -869,22 +869,30 @@ mod incremental_tests {
             "module Top { var a: logic; }".into()
         }
         let original = case_fingerprint(case(SCRIPT, old), &None);
+        let assert_invalidated = |changed: String| {
+            assert_ne!(original, changed);
+            for status in ["passed", "rejected"] {
+                let cached = json!({"status": status, "case_fingerprint": original});
+                assert!(reusable(&cached, &original));
+                assert!(!reusable(&cached, &changed));
+            }
+        };
         assert_eq!(
             original,
             case_fingerprint(case(&format!("\n\n; comment\n{SCRIPT}"), old), &None)
         );
-        assert_ne!(original, case_fingerprint(case(SCRIPT, new), &None));
+        assert_invalidated(case_fingerprint(case(SCRIPT, new), &None));
         for changed in [
             SCRIPT.replace("set a 1", "set a 2"),
             SCRIPT.replace("(+ i 1)", "(+ i 2)"),
             SCRIPT.replace("(top Top)", "(top Other)"),
         ] {
-            assert_ne!(original, case_fingerprint(case(&changed, old), &None));
+            assert_invalidated(case_fingerprint(case(&changed, old), &None));
         }
-        assert_ne!(
-            original,
-            case_fingerprint(case(SCRIPT, old), &Some(json!({"reason": "unsupported"})))
-        );
+        assert_invalidated(case_fingerprint(
+            case(SCRIPT, old),
+            &Some(json!({"reason": "unsupported"})),
+        ));
     }
 
     #[test]
