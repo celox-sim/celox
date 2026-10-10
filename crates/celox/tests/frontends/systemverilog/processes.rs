@@ -393,8 +393,11 @@ fn edge_waits_on_a_clock_the_testbench_drives() {
     assert_eq!(sim.get(seen), 2u8.into());
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get(seen), 2u8.into());
-    assert_eq!(sim.step().unwrap(), None);
+    // The step the write wakes the process in reports the current time;
+    // nothing is scheduled after it.
+    assert_eq!(sim.step().unwrap(), Some(0));
     assert_eq!(sim.get(seen), 3u8.into());
+    assert_eq!(sim.step().unwrap(), None);
 }
 
 #[test]
@@ -619,6 +622,18 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
         module Top(output logic [7:0] woken);
             logic a = 1'b0;
             logic b = 1'b0;
+            logic [7:0] c = 8'd0;
+            function automatic logic id(input logic v);
+                return v;
+            endfunction
+            function automatic logic [7:0] plus_c(input logic [7:0] v);
+                logic [7:0] base;
+                base = c;
+                return base + v;
+            endfunction
+            function automatic logic [7:0] via_plus_c(input logic [7:0] v);
+                return plus_c(v);
+            endfunction
             initial begin
                 woken = 8'd0;
                 #1 a = 1'b1;
@@ -626,6 +641,8 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 #1 b = 1'b1;
                 b = 1'b0;
                 b = 1'b1;
+                c = 8'd1;
+                c = 8'd0;
                 #1 $finish;
             end
             initial begin
@@ -658,6 +675,16 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 $display("b and fell");
                 woken = woken + 8'd1;
             end
+            initial begin
+                @(id(a));
+                $display("a through a function");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(via_plus_c(8'd3));
+                $display("c read by a function c=%0d", c);
+                woken = woken + 8'd1;
+            end
         endmodule
     "#;
     for (four_state, mut sim) in [
@@ -672,12 +699,14 @@ fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
                 (1, "a rose"),
                 (1, "a or b"),
                 (1, "a xor"),
+                (1, "a through a function"),
                 (2, "b fell b=1"),
                 (2, "b and fell"),
+                (2, "c read by a function c=0"),
             ]),
             "four_state={four_state}"
         );
-        assert_eq!(sim.get(woken), 6u8.into(), "four_state={four_state}");
+        assert_eq!(sim.get(woken), 8u8.into(), "four_state={four_state}");
     }
 }
 
@@ -760,6 +789,38 @@ fn waits_on_private_formals_see_only_their_activation() {
     sim.run_until(5).unwrap();
     assert!(sim.is_finished());
     assert_eq!(sim.get(woken), 0u8.into());
+}
+
+/// A package's `automatic` default lifetime gives each activation of a
+/// task it exports its own formals and locals; a static package task shares
+/// them (IEEE 1800-2023 13.3.1).
+#[test]
+fn package_lifetime_decides_the_activations_of_an_imported_timed_task() {
+    let source = r#"
+        package automatic p;
+            task put(input logic [7:0] value);
+                logic [7:0] doubled;
+                doubled = value + value;
+                #1;
+                $display("put %0d", doubled);
+            endtask
+        endpackage
+        module Top(output logic [7:0] y);
+            import p::*;
+            initial y = 8'd0;
+            initial put(8'd1);
+            initial put(8'd2);
+            initial begin
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    assert_eq!(displays(&mut sim), lines(&[(1, "put 2"), (1, "put 4")]));
+
+    let static_package = source.replace("package automatic p;", "package p;");
+    let mut sim = simulation(&static_package);
+    assert_eq!(displays(&mut sim), lines(&[(1, "put 4"), (1, "put 4")]));
 }
 
 /// A task a package exports is classified like a local one: an
