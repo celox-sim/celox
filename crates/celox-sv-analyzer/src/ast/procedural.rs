@@ -1520,6 +1520,7 @@ pub(super) fn subroutine_param_declarations<'t>(
 struct SubroutineSyntax<'t> {
     name: String,
     is_task: bool,
+    automatic: bool,
     return_type: Option<&'t sv_parser::FunctionDataTypeOrImplicit>,
     ports: Option<&'t sv_parser::TfPortList>,
     items: &'t [sv_parser::TfItemDeclaration],
@@ -1527,9 +1528,33 @@ struct SubroutineSyntax<'t> {
     statements: Vec<&'t sv_parser::Statement>,
 }
 
+/// Whether a subroutine's lifetime is `automatic`: its own keyword, or the
+/// module's default lifetime when it has none.
+fn is_automatic(lifetime: Option<&sv_parser::Lifetime>, default_automatic: bool) -> bool {
+    match lifetime {
+        Some(sv_parser::Lifetime::Automatic(_)) => true,
+        Some(sv_parser::Lifetime::Static(_)) => false,
+        None => default_automatic,
+    }
+}
+
+/// Whether a module header declares the `automatic` default lifetime.
+fn module_default_automatic(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|child| match child {
+        RefNode::ModuleAnsiHeader(header) => {
+            matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        RefNode::ModuleNonansiHeader(header) => {
+            matches!(header.nodes.2, Some(sv_parser::Lifetime::Automatic(_)))
+        }
+        _ => false,
+    })
+}
+
 fn function_syntax<'t>(
     declaration: &'t sv_parser::FunctionDeclaration,
     tree: &SyntaxTree,
+    default_automatic: bool,
 ) -> Option<SubroutineSyntax<'t>> {
     let statements = |list: &'t [sv_parser::FunctionStatementOrNull]| {
         list.iter()
@@ -1543,6 +1568,7 @@ fn function_syntax<'t>(
         sv_parser::FunctionBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
             is_task: false,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: Some(&body.nodes.0),
             ports: body.nodes.3.nodes.1.as_ref(),
             items: &[],
@@ -1552,6 +1578,7 @@ fn function_syntax<'t>(
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
             is_task: false,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: Some(&body.nodes.0),
             ports: None,
             items: &body.nodes.4,
@@ -1572,6 +1599,7 @@ fn function_syntax<'t>(
 fn task_syntax<'t>(
     declaration: &'t sv_parser::TaskDeclaration,
     tree: &SyntaxTree,
+    default_automatic: bool,
 ) -> Option<SubroutineSyntax<'t>> {
     let statements = |list: &'t [sv_parser::StatementOrNull]| {
         list.iter()
@@ -1585,6 +1613,7 @@ fn task_syntax<'t>(
         sv_parser::TaskBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
             is_task: true,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: None,
             ports: body.nodes.2.nodes.1.as_ref(),
             items: &[],
@@ -1594,6 +1623,7 @@ fn task_syntax<'t>(
         sv_parser::TaskBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
             is_task: true,
+            automatic: is_automatic(declaration.nodes.1.as_ref(), default_automatic),
             return_type: None,
             ports: None,
             items: &body.nodes.3,
@@ -1627,11 +1657,16 @@ pub(super) fn subroutine_argument_names(
 > {
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
+    let default_automatic = module_default_automatic(node.clone());
     for item in generate::items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+                RefNode::FunctionDeclaration(declaration) => {
+                    function_syntax(declaration, tree, default_automatic)
+                }
+                RefNode::TaskDeclaration(declaration) => {
+                    task_syntax(declaration, tree, default_automatic)
+                }
                 _ => continue,
             };
             let Some(syntax) = syntax else {
@@ -1696,6 +1731,7 @@ pub(super) fn subroutines_from_module_node_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
+    let default_automatic = module_default_automatic(node.clone());
     for item in generate::items(node, tree, const_env, &type_aliases)? {
         if item.is_parameter_declaration() {
             continue;
@@ -1704,8 +1740,12 @@ pub(super) fn subroutines_from_module_node_with(
         let literals = item.parameter_literals(parameter_literals);
         for child in item.node.node() {
             let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+                RefNode::FunctionDeclaration(declaration) => {
+                    function_syntax(declaration, tree, default_automatic)
+                }
+                RefNode::TaskDeclaration(declaration) => {
+                    task_syntax(declaration, tree, default_automatic)
+                }
                 _ => continue,
             };
             let Some(syntax) = syntax else {
@@ -1781,6 +1821,7 @@ pub(super) fn subroutines_from_module_node_with(
                 let mut subroutine = Subroutine {
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
+                    automatic: syntax.automatic,
                     return_type: return_type.map(|r#type| {
                         crate::ir::Type::from_ast(scoped_type(r#type, &item.env), &item.env)
                     }),

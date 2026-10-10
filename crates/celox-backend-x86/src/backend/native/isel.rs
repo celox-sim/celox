@@ -1099,7 +1099,7 @@ pub fn lower_execution_unit_with_diagnostics(
         wide_regs: WideRegMap::default(),
         reg_addrs: crate::HashMap::default(),
         inst_index: 0,
-        block_writes: crate::HashMap::default(),
+        block_writes: Vec::new(),
         block_opaque_writes: Vec::new(),
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
@@ -1169,9 +1169,11 @@ pub fn lower_execution_unit_with_diagnostics(
                 SIRInstruction::Load(dst, addr, SIROffset::Static(bit_offset), _) => {
                     ctx.reg_addrs.insert(*dst, (*addr, *bit_offset, index));
                 }
-                SIRInstruction::Store(addr, _, _, _, _, _)
-                | SIRInstruction::Commit(_, addr, _, _, _) => {
-                    ctx.block_writes.entry(*addr).or_default().push(index);
+                SIRInstruction::Store(addr, offset, width, _, _, _)
+                | SIRInstruction::Commit(_, addr, offset, width, _) => {
+                    for (start, end) in ctx.written_byte_ranges(addr, offset, *width) {
+                        ctx.block_writes.push((index, start, end));
+                    }
                 }
                 SIRInstruction::ExternCall { .. } => ctx.block_opaque_writes.push(index),
                 _ => {}
@@ -1791,9 +1793,11 @@ struct ISelContext<'a> {
     reg_addrs: crate::HashMap<RegisterId, (RegionedAbsoluteAddr, usize, usize)>,
     /// Index of the instruction being lowered in the current block.
     inst_index: usize,
-    /// Indices of the instructions of the current block that write each
-    /// address, and of those that may write any address.
-    block_writes: crate::HashMap<RegionedAbsoluteAddr, Vec<usize>>,
+    /// The physical byte ranges `[start, end)` the instructions of the
+    /// current block write, with the instruction's index, and the indices of
+    /// the instructions that may write any address. Ranges, not addresses:
+    /// distinct state addresses may alias one physical range.
+    block_writes: Vec<(usize, i32, i32)>,
     block_opaque_writes: Vec<usize>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
@@ -1820,15 +1824,57 @@ struct ISelContext<'a> {
 }
 
 impl<'a> ISelContext<'a> {
-    /// Whether no instruction of the current block between index `since`
-    /// (a Load of `addr`) and the one being lowered may have written `addr`.
-    fn memory_unchanged_since(&self, addr: &RegionedAbsoluteAddr, since: usize) -> bool {
-        let between = |index: &usize| since < *index && *index < self.inst_index;
-        !self
-            .block_writes
-            .get(addr)
-            .is_some_and(|writes| writes.iter().any(between))
-            && !self.block_opaque_writes.iter().any(between)
+    /// The physical byte ranges `[start, end)` an access of `width` bits at
+    /// `offset` into `addr` touches: the value plane and, for a four-state
+    /// variable, the mask plane. A dynamic offset touches the whole variable.
+    fn written_byte_ranges(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        offset: &SIROffset,
+        width: usize,
+    ) -> Vec<(i32, i32)> {
+        let (start, end) = match offset {
+            SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+                let (byte, intra) = self.static_byte_and_intra(addr, *bit_offset);
+                (byte, byte + (intra + width).div_ceil(8) as i32)
+            }
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                let start = self.byte_offset(addr, 0);
+                (
+                    start,
+                    start + self.layout.plane_size(&addr.absolute_addr()) as i32,
+                )
+            }
+        };
+        let mut ranges = vec![(start, end)];
+        if self.is_4state_var(addr) {
+            let plane = self.layout.plane_size(&addr.absolute_addr()) as i32;
+            ranges.push((start + plane, end + plane));
+        }
+        ranges
+    }
+
+    /// Whether no instruction of the current block between index `since` (a
+    /// Load of `width` bits at `bit_offset` into `addr`) and the one being
+    /// lowered may have written the loaded bytes.
+    fn memory_unchanged_since(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width: usize,
+        since: usize,
+    ) -> bool {
+        let between = |index: usize| since < index && index < self.inst_index;
+        if self.block_opaque_writes.iter().any(|index| between(*index)) {
+            return false;
+        }
+        let loaded = self.written_byte_ranges(addr, &SIROffset::Static(bit_offset), width);
+        !self.block_writes.iter().any(|&(index, start, end)| {
+            between(index)
+                && loaded
+                    .iter()
+                    .any(|&(load_start, load_end)| start < load_end && load_start < end)
+        })
     }
 
     /// Allocate a fresh VReg with the given spill descriptor.

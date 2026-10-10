@@ -2022,17 +2022,7 @@ fn lower_initial_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
-    for counter in ff::declare_event_counters(&mut pm, &bodies) {
-        let written_mask = (BigUint::from(1u8) << ff::EVENT_COUNTER_WIDTH) - BigUint::from(1u8);
-        values.push(InitialStateValue {
-            address: counter,
-            data: InitialStateData::Packed {
-                value: BigUint::default(),
-                mask: BigUint::default(),
-                written_mask,
-            },
-        });
-    }
+    ff::declare_event_counters(&mut pm, &bodies);
     let processes = runtime
         .into_iter()
         .zip(slots)
@@ -2043,6 +2033,20 @@ fn lower_initial_processes(
             })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();
+    // Every event counter, also one a process declared for itself, starts
+    // at zero rather than unknown.
+    for counter in std::mem::take(&mut pm.event_counter_ids) {
+        let written_mask =
+            (BigUint::from(1u8) << procedural::EVENT_COUNTER_WIDTH) - BigUint::from(1u8);
+        values.push(InitialStateValue {
+            address: counter,
+            data: InitialStateData::Packed {
+                value: BigUint::default(),
+                mask: BigUint::default(),
+                written_mask,
+            },
+        });
+    }
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);

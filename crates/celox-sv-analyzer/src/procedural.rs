@@ -450,6 +450,10 @@ pub struct LocalVariableBase<T> {
 pub struct SubroutineBase<E, L, T> {
     pub name: String,
     pub is_task: bool,
+    /// Declared (or inherited from the module) `automatic` lifetime: each
+    /// activation has its own formals and locals. A static subroutine
+    /// shares them between activations (IEEE 1800-2023 13.3.1).
+    pub automatic: bool,
     /// `None` for a task or a `void` function.
     pub return_type: Option<T>,
     pub params: Vec<SubroutineParamBase<E, T>>,
@@ -479,6 +483,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
         SubroutineBase {
             name: self.name,
             is_task: self.is_task,
+            automatic: self.automatic,
             return_type: self.return_type.map(&mut *ft),
             params: self
                 .params
