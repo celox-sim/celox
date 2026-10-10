@@ -544,8 +544,20 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
             RefNode::ParamAssignment(assignment) => {
                 Some(RefNode::ParameterIdentifier(&assignment.nodes.0))
             }
-            RefNode::GenvarIdentifier(_)
-            | RefNode::InstanceIdentifier(_)
+            // `genvar i;`; a loop's own `genvar i` is the loop's.
+            RefNode::GenvarDeclaration(declaration) => {
+                if let Some(index) = owner(offset, nested) {
+                    for genvar in RefNode::GenvarDeclaration(declaration) {
+                        if let RefNode::GenvarIdentifier(_) = genvar
+                            && let Some(name) = identifier_text(genvar, tree)
+                        {
+                            scopes[index].declared.insert(name);
+                        }
+                    }
+                }
+                continue;
+            }
+            RefNode::InstanceIdentifier(_)
             | RefNode::FunctionIdentifier(_)
             | RefNode::TaskIdentifier(_) => Some(child),
             _ => continue,
@@ -775,6 +787,19 @@ pub(super) fn resolve_imports(
     {
         package(name)?;
     }
+    // So does an import of a generate block, whether or not a reference uses
+    // it.
+    let all_scopes = generate_scopes(node.clone(), tree);
+    for scope in &all_scopes {
+        for name in scope
+            .explicit
+            .iter()
+            .map(|(package, _)| package)
+            .chain(&scope.wildcard)
+        {
+            package(name)?;
+        }
+    }
     // A package may name its own items through its scope.
     let own = match &node {
         RefNode::PackageDeclaration(_) => scope_name_from_node(node.clone(), tree).ok(),
@@ -928,11 +953,10 @@ pub(super) fn resolve_imports(
         }
         Ok(found)
     };
-    let scopes: Vec<GenerateScope> = generate_scopes(node.clone(), tree)
-        .into_iter()
-        .filter(|scope| !scope.explicit.is_empty() || !scope.wildcard.is_empty())
-        .collect();
-    let mut referenced = if imports.wildcard.is_empty() && unit.is_none() && scopes.is_empty() {
+    let scoped_imports = all_scopes
+        .iter()
+        .any(|scope| !scope.explicit.is_empty() || !scope.wildcard.is_empty());
+    let mut referenced = if imports.wildcard.is_empty() && unit.is_none() && !scoped_imports {
         HashMap::default()
     } else {
         unqualified_names(node.clone(), tree)
@@ -941,8 +965,7 @@ pub(super) fn resolve_imports(
     // blocks around it first (IEEE 1800-2023 26.3): the references the
     // imports of a block bind, by name, with the block and the declaration.
     let mut scoped: HashMap<String, Vec<(usize, String)>> = HashMap::default();
-    if !scopes.is_empty() {
-        let all_scopes = generate_scopes(node.clone(), tree);
+    if scoped_imports {
         for scope in &all_scopes {
             let mut explicit: HashMap<&String, String> = HashMap::default();
             for (package_name, name) in &scope.explicit {
