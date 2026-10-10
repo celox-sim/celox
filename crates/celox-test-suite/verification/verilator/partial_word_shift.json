@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "partial_word_shift::two_state_matrix at 168:11: assert_eq c63_64: expected 0x7fffffffffffffff, got 0x0 (constant SAR width=63, count=64)",
+      "expectation": "Simulation",
+      "name": "partial_word_shift::two_state_matrix",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

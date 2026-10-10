@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "issue3_repro::test_comb_mux_i8_vs_i16_correctness",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "issue3_repro::test_comb_mux_i8_vs_i16_four_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,303 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_constant_bounds_preserve_wide_limit_above_loop_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_constant_break_in_synth_comb_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Veryl 0.21.0 rejects negative bounds in elaborated for loops (InvalidForRange::NegativeBound). This is a frontend restriction, not an external simulator mismatch.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-negative-for-bounds"
+        ],
+        "id": "veryl_negative_for_bounds",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects negative bounds in elaborated for loops (InvalidForRange::NegativeBound). This is a frontend restriction, not an external simulator mismatch.",
+        "upstream": []
+      },
+      "name": "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_expression_bounds_in_synth_for_loops",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_i32_bitwise_steps_discard_bits_above_the_counter_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bitwise_steps_in_synth_for_loops",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_forward_overshoot_exits_without_wraparound",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_in_synth_for_loops",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_inclusive_max_bound_runs_full_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_large_additive_step_exits_without_wraparound",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_reverse_singleton_exits_cleanly",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_stalled_step_with_break_exits_cleanly",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency_across_module_boundary",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_bounds_truncate_loop_var_to_declared_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_break_after_assign_in_synth_comb_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_break_condition_dependency_across_module_boundary",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_break_in_synth_comb_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_if_without_break_in_synth_comb_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_runtime_reverse_step_matches_emitted_sv_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synth_dynamic_loop::test_signed_xor_step_uses_loop_counter_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

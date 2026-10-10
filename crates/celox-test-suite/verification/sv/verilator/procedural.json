@@ -1,0 +1,214 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::aggregate_parameters_are_constant_tables",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::always_comb_case_compares_at_the_common_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::always_ff_blocking_assignments_and_run_time_loops",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::concatenated_targets_fix_their_positions_first",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::constant_functions_size_parameters_and_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::declaration_initializers_define_the_initial_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "procedural::declaration_initializers_keep_unknown_bits",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::ff_processes_write_bits_of_separate_array_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::ff_select_index_calls_write_state_and_run_once",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::function_bodies_run_their_index_calls_each_time",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::initial_blocks_define_the_initial_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::initial_blocks_run_after_declaration_initializers",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::loop_initializer_widens_by_its_own_signedness",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::runtime_bits_of_a_constant_element",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "procedural::runtime_bits_stay_within_their_element",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_short_circuit_calls",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs).",
+        "upstream": []
+      },
+      "name": "procedural::select_index_call_skipped_by_logical_and",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_calls_run_as_written",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "procedural::select_indices_call_functions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

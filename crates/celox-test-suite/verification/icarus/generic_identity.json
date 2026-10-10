@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "generic_identity::default_and_explicit_value_generics_preserve_instance_inputs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "generic_identity::nested_value_generics_keep_distinct_bodies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

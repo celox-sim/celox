@@ -21,8 +21,10 @@ mod icarus {
 
     #[test]
     fn retained_negative_diagnostics_are_source_rejections() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/icarus.json")).unwrap();
+        let report: serde_json::Value = celox_test_suite::verification::read_report(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("verification/icarus.json"),
+        )
+        .unwrap();
         let mut checked = 0;
         for case in report["cases"].as_array().unwrap() {
             if case["status"] != "rejected" {
@@ -49,8 +51,10 @@ mod icarus {
 
     #[test]
     fn retained_systemverilog_negative_diagnostics_are_source_rejections() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/sv/icarus.json")).unwrap();
+        let report: serde_json::Value = celox_test_suite::verification::read_report(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("verification/sv/icarus.json"),
+        )
+        .unwrap();
         let mut checked = 0;
         for case in report["cases"].as_array().unwrap() {
             if case["status"] != "rejected" {
@@ -125,8 +129,10 @@ mod verilator {
 
     #[test]
     fn retained_negative_diagnostic_is_a_source_rejection() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/verilator.json")).unwrap();
+        let report: serde_json::Value = celox_test_suite::verification::read_report(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("verification/verilator.json"),
+        )
+        .unwrap();
         let mut checked = 0;
         for case in report["cases"].as_array().unwrap() {
             if case["status"] != "rejected" {
@@ -144,8 +150,11 @@ mod verilator {
 
     #[test]
     fn retained_systemverilog_negative_diagnostics_are_source_rejections() {
-        let report: serde_json::Value =
-            serde_json::from_str(include_str!("../verification/sv/verilator.json")).unwrap();
+        let report: serde_json::Value = celox_test_suite::verification::read_report(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("verification/sv/verilator.json"),
+        )
+        .unwrap();
         let mut checked = 0;
         for case in report["cases"].as_array().unwrap() {
             if case["status"] != "rejected" {

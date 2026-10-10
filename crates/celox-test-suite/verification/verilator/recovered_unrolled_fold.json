@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_independent_reductions_share_input_correctly",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_mmio_read_write_dependencies_are_independent",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_unrolled_guard_uses_procedural_four_state_truth",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_unrolled_multi_state_priority",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_unrolled_store_forward_selects_older_entry",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

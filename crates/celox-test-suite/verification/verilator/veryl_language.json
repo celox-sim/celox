@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_language::inside_outside_range_endpoints",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_language::packed_union_members_alias",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_language::parameter_expression_type_cast_widths",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

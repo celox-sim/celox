@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_fifo::test_fifo_clear",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_fifo::test_fifo_full",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_fifo::test_fifo_initial_empty",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_fifo::test_fifo_ordering",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_fifo::test_fifo_push_pop_single",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
