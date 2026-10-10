@@ -804,3 +804,27 @@ fn instance_paths_ending_in_scope_separators_keep_their_dot() {
     let address = program.get_addr(&[("\\u::", 0)], &["y"]).unwrap();
     assert_eq!(program.get_path(&address), "\\u::.y");
 }
+
+/// A declaration of a nested block shadows a name only inside that block,
+/// and a qualified name of an exported declaration may repeat.
+#[test]
+fn nested_block_declarations_shadow_only_inside_them() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; logic [7:0] shared; endpackage
+             package q; import p1::*; export p1::*;
+               function automatic int f(input int a);
+                 begin int X; X = a; end
+                 return a + X;
+               endfunction
+               localparam int Y = f(1);
+               typedef logic [7:0] byte_t; byte_t unused;
+               function automatic logic [7:0] g(); return shared; endfunction
+             endpackage
+             module W; always_comb q::shared = 8'd5; endmodule
+             module Top(output logic [7:0] y); import q::X; W w();
+               assign y = X * 10 + q::Y + q::shared + q::shared; endmodule"
+        ),
+        30 + 4 + 10
+    );
+}

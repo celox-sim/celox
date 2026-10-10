@@ -347,49 +347,74 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
 }
 
 /// The functions, tasks and blocks under `node` that declare names of their
-/// own: their source ranges, and the names they declare.
+/// own: their source ranges, and the names each declares itself, not in a
+/// block nested in it.
 fn nested_declarations(
     node: RefNode<'_>,
     tree: &SyntaxTree,
 ) -> Vec<(usize, usize, HashSet<String>)> {
-    let mut scopes = Vec::new();
-    for child in node {
-        if !matches!(
-            child,
-            RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_) | RefNode::SeqBlock(_)
-        ) {
-            continue;
-        }
-        let mut declared = HashSet::default();
+    let range = |node: RefNode<'_>| {
         let mut start = usize::MAX;
         let mut end = 0;
-        for inner in child.clone() {
-            let name = match inner {
-                RefNode::Locate(locate) => {
-                    start = start.min(locate.offset);
-                    end = end.max(locate.offset + locate.len);
-                    continue;
-                }
+        for child in node {
+            if let RefNode::Locate(locate) = child {
+                start = start.min(locate.offset);
+                end = end.max(locate.offset + locate.len);
+            }
+        }
+        (start, end)
+    };
+    let scopes: Vec<_> = node
+        .into_iter()
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::SeqBlock(_)
+            )
+        })
+        .map(|child| (range(child.clone()), child))
+        .collect();
+    let mut declarations = Vec::new();
+    for ((start, end), scope) in &scopes {
+        let inner: Vec<_> = scopes
+            .iter()
+            .map(|(range, _)| *range)
+            .filter(|range| *range != (*start, *end) && *start <= range.0 && range.1 <= *end)
+            .collect();
+        let mut declared = HashSet::default();
+        for child in scope.clone() {
+            let name = match child {
                 // A function's name denotes its result inside it.
                 RefNode::FunctionIdentifier(_)
                 | RefNode::VariableIdentifier(_)
                 | RefNode::PortIdentifier(_)
-                | RefNode::ParameterIdentifier(_) => inner,
+                | RefNode::ParameterIdentifier(_) => child,
                 RefNode::TypeDeclarationDataType(declaration) => {
                     RefNode::TypeIdentifier(&declaration.nodes.2)
                 }
                 RefNode::EnumNameDeclaration(member) => RefNode::EnumIdentifier(&member.nodes.0),
                 _ => continue,
             };
+            let Some(locate) = identifier_locate(name.clone()) else {
+                continue;
+            };
+            if inner
+                .iter()
+                .any(|(inner_start, inner_end)| (*inner_start..*inner_end).contains(&locate.offset))
+            {
+                continue;
+            }
             if let Some(name) = identifier_text(name, tree) {
                 declared.insert(name);
             }
         }
         if !declared.is_empty() {
-            scopes.push((start, end, declared));
+            declarations.push((*start, *end, declared));
         }
     }
-    scopes
+    declarations
 }
 
 /// The symbols a scope starts from: those of every package it uses, directly
@@ -474,7 +499,10 @@ pub(super) fn resolve_imports(
                     name: name.clone(),
                 }
             })?;
-            exported_references.push((format!("{package_name}::{name}"), target));
+            let reference = (format!("{package_name}::{name}"), target);
+            if !exported_references.contains(&reference) {
+                exported_references.push(reference);
+            }
         }
     }
     let mut symbols = ScopeSymbols::default();
