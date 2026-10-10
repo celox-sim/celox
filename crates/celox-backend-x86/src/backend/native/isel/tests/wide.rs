@@ -1309,3 +1309,101 @@ fn slice_of_a_loaded_value_survives_a_later_store() {
     assert_eq!(state[0], 0xff, "the store reached memory");
     assert_eq!(state[1] & 0xf, 0b1010, "the slice is of the loaded value");
 }
+
+/// Two state addresses may share one physical range: a store through one
+/// alias also ends the reload shortcut for a value loaded through the other.
+#[test]
+fn slice_of_a_loaded_value_survives_a_store_through_an_alias() {
+    let mut ids = (0..3).map(|index| {
+        let mut var_id = VarId::default();
+        var_id.0 += index;
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id,
+        }
+    });
+    let (var_abs, alias_abs, out_abs) = (
+        ids.next().unwrap(),
+        ids.next().unwrap(),
+        ids.next().unwrap(),
+    );
+    let var = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var_abs);
+    let alias = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, alias_abs);
+    let out = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, out_abs);
+    let loaded = RegisterId(0);
+    let replacement = RegisterId(1);
+    let sliced = RegisterId(2);
+    let bit = |width| RegisterType::Bit {
+        width,
+        signed: false,
+    };
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Load(loaded, var, SIROffset::Static(0), 8),
+                    SIRInstruction::Imm(replacement, SIRValue::new(0xffu8)),
+                    SIRInstruction::Store(
+                        alias,
+                        SIROffset::Static(0),
+                        8,
+                        replacement,
+                        vec![],
+                        vec![],
+                    ),
+                    SIRInstruction::Slice(sliced, loaded, 0, 4),
+                    SIRInstruction::Store(out, SIROffset::Static(0), 4, sliced, vec![], vec![]),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: [(loaded, bit(8)), (replacement, bit(8)), (sliced, bit(4))]
+            .into_iter()
+            .collect(),
+    };
+    unit.verify();
+
+    let mut layout = empty_layout();
+    // The alias shares the variable's bytes.
+    layout.offsets = [(var_abs, 0), (alias_abs, 0), (out_abs, 1)]
+        .into_iter()
+        .collect();
+    layout.widths = [(var_abs, 8), (alias_abs, 8), (out_abs, 4)]
+        .into_iter()
+        .collect();
+    layout.is_4states = [(var_abs, false), (alias_abs, false), (out_abs, false)]
+        .into_iter()
+        .collect();
+    layout.total_size = 2;
+    layout.working_base_offset = 2;
+    layout.sparse_base_offset = 2;
+    layout.merged_total_size = 2;
+    layout.triggered_bits_offset = 2;
+    layout.scratch_base_offset = 2;
+
+    let mut function = lower_execution_unit(&unit, &layout, false);
+    function.verify();
+    mir_legalize::legalize(&mut function);
+    mir_opt::optimize(&mut function);
+    let allocation = regalloc::run_regalloc(&mut function).unwrap();
+    mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+    function.verify();
+    let emitted = emit::emit(
+        &function,
+        &allocation.assignment,
+        allocation.spill_frame_size,
+    )
+    .unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0u8; 2];
+    state[0] = 0b0101_1010;
+    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+    assert_eq!(state[0], 0xff, "the store through the alias reached memory");
+    assert_eq!(state[1] & 0xf, 0b1010, "the slice is of the loaded value");
+}
