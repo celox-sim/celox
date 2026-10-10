@@ -3,6 +3,8 @@
 mod test_utils;
 
 all_backends! {
+    fn four_state_wide_counts(sim) { @case "partial_word_shift::four_state_wide_counts"; }
+
     fn two_state_runtime_matrix(sim) { @case "partial_word_shift::two_state_runtime_matrix"; }
 
     fn sar_padding_does_not_escape(sim) { @case "partial_word_shift::sar_padding_does_not_escape"; }

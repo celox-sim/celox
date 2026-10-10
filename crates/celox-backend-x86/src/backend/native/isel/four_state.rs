@@ -1090,6 +1090,9 @@ pub(super) fn lower_wide_binary_mask(
             let mut lm_chunks = lm_chunks.clone();
             let sign_fill = if matches!(op, BinaryOp::Sar) {
                 let width = ctx.sir_width(&lhs);
+                // get_wide_mask_chunks pads to the common operand/result width.
+                // SAR must use sign fill above the logical source, not those zeros.
+                lm_chunks.truncate(ISelContext::num_chunks(width));
                 let top = (width - 1) / 64;
                 lm_chunks[top] =
                     sign_extend_scalar(ctx, block, lm_chunks[top], (width - 1) % 64 + 1);

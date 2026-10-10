@@ -431,3 +431,51 @@ module Top (
             "runtime SAR width={width}"))
       )))
 )
+
+(case four_state_wide_counts
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    a: input signed logic<65>,
+    n129: input logic<129>,
+    n257: input logic<257>,
+    y129: output signed logic<65>,
+    y257: output signed logic<65>,
+    c64: output signed logic<65>,
+    c128: output signed logic<65>,
+) {
+    assign y129 = a >>> n129;
+    assign y257 = a >>> n257;
+    assign c64 = a >>> 129'd64;
+    assign c128 = a >>> 257'd128;
+}
+"#)
+  (top Top)
+  ; A wider count must not insert zero words between the logical sign and fill.
+  (let sign 0x10000000000000000)
+  (let full 0x1ffffffffffffffff)
+  (for (sign_value sign_mask) (list (0 0) (1 0) (0 1) (1 1))
+    (let payload 5)
+    (let mask 40)
+    (let payload_fill 0)
+    (let mask_fill 0)
+    (if sign_value (do (set! payload (| payload sign)) (set! payload_fill full)))
+    (if sign_mask (do (set! mask (| mask sign)) (set! mask_fill full)))
+    (set a (fourstate payload mask))
+    (expand (count_width top_mask)
+      ((129 0x100000000000000000000000000000000)
+       (257 0x10000000000000000000000000000000000000000000000000000000000000000))
+      (for shift (list 0 1 63 64 65 128 129 256 257 0xffffffff)
+        (let count (min shift 65))
+        (let fill (^ full (>> full count)))
+        (modify (set n{count_width} shift))
+        (assert_eq y{count_width}
+          (fourstate (| (>> payload count) (& payload_fill fill))
+                     (| (>> mask count) (& mask_fill fill)))
+          "SAR with {count_width}-bit count"))
+      (for unknown (list 1 0x10000000000000000 {top_mask})
+        (for count_value (list 0 unknown)
+          (modify (set n{count_width} (fourstate count_value unknown)))
+          (assert_eq y{count_width} (fourstate full full) "X/Z count produces all X"))))
+    (assert_eq c64 (fourstate payload_fill mask_fill))
+    (assert_eq c128 (fourstate payload_fill mask_fill))))
