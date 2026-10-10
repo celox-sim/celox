@@ -54,6 +54,15 @@ impl ScopeImports {
         // package identifier.
         let mut scope: Option<String> = None;
         let mut skip = 0;
+        // An import in a generate block belongs to that block (see
+        // `generate_scopes`); its package is still one the module uses.
+        let blocks = generate_blocks(node.clone());
+        let in_block = |item: RefNode<'_>| {
+            let offset = node_range(item).0;
+            blocks
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(&offset))
+        };
         // The items of an export name what it exports, not imports.
         let mut exported = HashSet::default();
         for child in node.clone() {
@@ -127,7 +136,9 @@ impl ScopeImports {
                         continue;
                     };
                     note(&mut imports.packages, package.clone());
-                    imports.explicit.push((package, name));
+                    if !in_block(RefNode::PackageImportItemIdentifier(item)) {
+                        imports.explicit.push((package, name));
+                    }
                 }
                 RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => {
                     let Some(package) =
@@ -136,7 +147,9 @@ impl ScopeImports {
                         continue;
                     };
                     note(&mut imports.packages, package.clone());
-                    if !imports.wildcard.contains(&package) {
+                    if !in_block(RefNode::PackageImportItemAsterisk(item))
+                        && !imports.wildcard.contains(&package)
+                    {
                         imports.wildcard.push(package);
                     }
                 }
@@ -308,8 +321,11 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
 /// call. Declarations, formal names of connections, members and identifiers
 /// qualified by a package scope are not looked up, nor are names a nested
 /// subroutine or block declares, within it. Each name maps to the source
-/// offset of its first reference.
-pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashMap<String, usize> {
+/// offsets of its references, in order.
+pub(super) fn unqualified_names(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+) -> HashMap<String, Vec<usize>> {
     let nested = nested_declarations(node.clone(), tree);
     let identifiers = |node: RefNode<'_>| {
         node.into_iter()
@@ -373,11 +389,234 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashMap
         {
             names
                 .entry(name)
-                .and_modify(|offset: &mut usize| *offset = (*offset).min(first.offset))
-                .or_insert(first.offset);
+                .or_insert_with(Vec::new)
+                .push(first.offset);
         }
     }
     names
+}
+
+/// The source range of `node`: from its first token to the end of its last.
+pub(super) fn node_range(node: RefNode<'_>) -> (usize, usize) {
+    let mut start = usize::MAX;
+    let mut end = 0;
+    for child in node {
+        if let RefNode::Locate(locate) = child {
+            start = start.min(locate.offset);
+            end = end.max(locate.offset + locate.len);
+        }
+    }
+    (start, end)
+}
+
+/// The source ranges of the generate blocks under a module `node`: each is a
+/// scope of its own (IEEE 1800-2023 27.5).
+fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
+    if !matches!(
+        node,
+        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+    ) {
+        return Vec::new();
+    }
+    node.into_iter()
+        .filter_map(|child| match child {
+            RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(_)) => {
+                Some(node_range(child))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A generate block: its imports, and the names it declares itself.
+struct GenerateScope {
+    start: usize,
+    end: usize,
+    /// `import p::x;`, as `(p, x)`.
+    explicit: Vec<(String, String)>,
+    /// `import p::*;`
+    wildcard: Vec<String>,
+    declared: HashSet<String>,
+}
+
+impl GenerateScope {
+    fn contains(&self, offset: usize) -> bool {
+        (self.start..self.end).contains(&offset)
+    }
+}
+
+/// The generate blocks of a module `node`, each with the imports and
+/// declarations that are its own rather than those of a block, function or
+/// task nested in it.
+fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
+    let blocks = generate_blocks(node.clone());
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let subroutines: Vec<(usize, usize)> = node
+        .clone()
+        .into_iter()
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::SeqBlock(_)
+            )
+        })
+        .map(node_range)
+        .collect();
+    let mut scopes: Vec<GenerateScope> = blocks
+        .iter()
+        .map(|&(start, end)| GenerateScope {
+            start,
+            end,
+            explicit: Vec::new(),
+            wildcard: Vec::new(),
+            declared: HashSet::default(),
+        })
+        .collect();
+    // The innermost block that contains `offset`, outside any subroutine.
+    let owner = |offset: usize, nested: &[(usize, usize)]| -> Option<usize> {
+        if nested
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&offset))
+        {
+            return None;
+        }
+        blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, (start, end))| (*start..*end).contains(&offset))
+            .min_by_key(|(_, (start, end))| end - start)
+            .map(|(index, _)| index)
+    };
+    for child in node {
+        let (offset, nested) = match &child {
+            // A subroutine's name is declared in the enclosing scope.
+            RefNode::FunctionIdentifier(_) | RefNode::TaskIdentifier(_) => {
+                (node_range(child.clone()).0, &[][..])
+            }
+            _ => (node_range(child.clone()).0, &subroutines[..]),
+        };
+        let name = match child {
+            RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
+                if let Some(index) = owner(offset, nested)
+                    && let (Some(package), Some(name)) = (
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
+                    )
+                {
+                    scopes[index].explicit.push((package, name));
+                }
+                continue;
+            }
+            RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => {
+                if let Some(index) = owner(offset, nested)
+                    && let Some(package) =
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
+                    && !scopes[index].wildcard.contains(&package)
+                {
+                    scopes[index].wildcard.push(package);
+                }
+                continue;
+            }
+            RefNode::VariableDeclAssignment(_) => unwrap_node!(child, VariableIdentifier),
+            RefNode::NetDeclAssignment(_) => unwrap_node!(child, NetIdentifier),
+            RefNode::ParamAssignment(assignment) => {
+                Some(RefNode::ParameterIdentifier(&assignment.nodes.0))
+            }
+            RefNode::GenvarIdentifier(_)
+            | RefNode::InstanceIdentifier(_)
+            | RefNode::FunctionIdentifier(_)
+            | RefNode::TaskIdentifier(_) => Some(child),
+            _ => continue,
+        };
+        if let Some(index) = owner(offset, nested)
+            && let Some(name) = name.and_then(|name| identifier_text(name, tree))
+        {
+            scopes[index].declared.insert(name);
+        }
+    }
+    scopes
+}
+
+/// What a reference in a generate block names.
+enum ScopeLookup {
+    /// A declaration of a block around it.
+    Declared,
+    /// The declaration an import of a block around it binds: that block's
+    /// source offset, and the declaration.
+    Imported(usize, String),
+    /// Nothing in the blocks around it: the module's scope decides.
+    Outside,
+}
+
+/// Look `name`, referenced at `offset`, up in the generate blocks around the
+/// reference, innermost first: in each, its declarations, then its explicit
+/// imports, then its wildcard imports (IEEE 1800-2023 26.3).
+fn scope_lookup(
+    name: &String,
+    offset: usize,
+    scopes: &[GenerateScope],
+    provided: &dyn Fn(&String, &String) -> Result<String, AnalyzerError>,
+    packages: &packages::Packages,
+) -> Result<ScopeLookup, AnalyzerError> {
+    let mut around: Vec<&GenerateScope> = scopes
+        .iter()
+        .filter(|scope| scope.contains(offset))
+        .collect();
+    around.sort_by_key(|scope| scope.end - scope.start);
+    for scope in around {
+        if scope.declared.contains(name) {
+            return Ok(ScopeLookup::Declared);
+        }
+        let mut explicit: Option<String> = None;
+        for (package_name, _) in scope.explicit.iter().filter(|(_, item)| item == name) {
+            let target = provided(package_name, name)?;
+            match &explicit {
+                Some(known) if *known != target => {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!("explicitly imported as both `{known}` and `{target}`"),
+                    });
+                }
+                _ => explicit = Some(target),
+            }
+        }
+        if let Some(target) = explicit {
+            return Ok(ScopeLookup::Imported(scope.start, target));
+        }
+        let mut found: Option<(String, &String)> = None;
+        for package_name in &scope.wildcard {
+            let Some(target) = packages
+                .get(package_name)
+                .ok_or_else(|| AnalyzerError::UnknownPackage {
+                    name: package_name.clone(),
+                })?
+                .provides(name)
+            else {
+                continue;
+            };
+            match &found {
+                Some((known, first)) if *known != target => {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!(
+                            "declared by both wildcard-imported packages `{first}` and \
+                             `{package_name}`"
+                        ),
+                    });
+                }
+                Some(_) => {}
+                None => found = Some((target, package_name)),
+            }
+        }
+        if let Some((target, _)) = found {
+            return Ok(ScopeLookup::Imported(scope.start, target));
+        }
+    }
+    Ok(ScopeLookup::Outside)
 }
 
 /// The functions, tasks and blocks under `node` that declare names of their
@@ -671,11 +910,52 @@ pub(super) fn resolve_imports(
         }
         Ok(found)
     };
-    let referenced = if imports.wildcard.is_empty() && unit.is_none() {
+    let scopes: Vec<GenerateScope> = generate_scopes(node.clone(), tree)
+        .into_iter()
+        .filter(|scope| !scope.explicit.is_empty() || !scope.wildcard.is_empty())
+        .collect();
+    let mut referenced = if imports.wildcard.is_empty() && unit.is_none() && scopes.is_empty() {
         HashMap::default()
     } else {
-        unqualified_names(node, tree)
+        unqualified_names(node.clone(), tree)
     };
+    // A reference in a generate block is looked up in that block and the
+    // blocks around it first (IEEE 1800-2023 26.3): the references the
+    // imports of a block bind, by name, with the block and the declaration.
+    let mut scoped: HashMap<String, Vec<(usize, String)>> = HashMap::default();
+    if !scopes.is_empty() {
+        let all_scopes = generate_scopes(node.clone(), tree);
+        for scope in &all_scopes {
+            for (package_name, name) in &scope.explicit {
+                if scope.declared.contains(name) {
+                    return Err(AnalyzerError::ImportConflict {
+                        name: name.clone(),
+                        detail: format!(
+                            "`import {package_name}::{name};` names an item the generate block \
+                             declares"
+                        ),
+                    });
+                }
+            }
+        }
+        for (name, offsets) in &mut referenced {
+            let mut outer = Vec::new();
+            for &offset in offsets.iter() {
+                match scope_lookup(name, offset, &all_scopes, &provided, packages)? {
+                    ScopeLookup::Declared => {}
+                    ScopeLookup::Imported(block, target) => {
+                        scoped
+                            .entry(name.clone())
+                            .or_default()
+                            .push((block, target));
+                    }
+                    ScopeLookup::Outside => outer.push(offset),
+                }
+            }
+            *offsets = outer;
+        }
+        referenced.retain(|_, offsets| !offsets.is_empty());
+    }
     // `export p::x;` refers to `x`: it imports a candidate the scope does
     // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6),
     // before other references bind names through wildcard imports.
@@ -729,6 +1009,7 @@ pub(super) fn resolve_imports(
                     .get(&(package_name.clone(), name.clone()))
                     && referenced
                         .get(name)
+                        .and_then(|offsets| offsets.first())
                         .is_some_and(|reference| reference < export_offset)
                     && let Some((earlier, _)) = candidates(name)?
                     && earlier != target
@@ -866,6 +1147,45 @@ pub(super) fn resolve_imports(
             }
         }
     }
+    // A name the generate blocks import is a name of the whole module when
+    // nothing else gives it a meaning; otherwise each block that imports
+    // another declaration names it there.
+    let mut generate_imports: HashMap<usize, HashMap<String, String>> = HashMap::default();
+    for (name, uses) in scoped {
+        let outside = bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .map(|binding| binding.target.clone());
+        let first = &uses[0].1;
+        if outside.is_none()
+            && !local.contains(&name)
+            && !referenced.contains_key(&name)
+            && uses.iter().all(|(_, target)| target == first)
+        {
+            bindings.push(Binding {
+                name,
+                target: first.clone(),
+                through: Vec::new(),
+            });
+            continue;
+        }
+        for (block, target) in uses {
+            if outside.as_ref() == Some(&target) {
+                continue;
+            }
+            if symbols.type_aliases.contains_key(&target) {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "type `{name}` that a generate block imports as another declaration than \
+                     its module"
+                )));
+            }
+            generate_imports
+                .entry(block)
+                .or_default()
+                .insert(name.clone(), target);
+        }
+    }
+    symbols.generate_imports = generate_imports;
     let mut exports = HashMap::default();
     for export in &imports.exports {
         for binding in &bindings {

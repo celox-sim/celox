@@ -1000,6 +1000,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.

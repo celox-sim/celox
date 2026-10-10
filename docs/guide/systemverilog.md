@@ -206,6 +206,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
+  An import in a generate block makes names visible in that block (and the
+  blocks inside it), ahead of the module's own declarations and imports.
   A package variable is one object shared by every module that uses it,
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
