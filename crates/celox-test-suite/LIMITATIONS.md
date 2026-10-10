@@ -386,7 +386,7 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 | `sv_verilator_unpacked_array_extension` | compile | verilator | 2 | Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through "EXTEND unexpected in assignment to unpacked array" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_unpacked_dimensions_partial_array` | compile | icarus | 1 | Icarus 13.0 rejects queries on partially selected multidimensional arrays and unpacked slices. IEEE 1800-2023 20.7 permits querying their remaining type; Verilator passes the case. |
 | `sv_icarus_unpacked_dimensions_element` | execute | icarus | 1 | Icarus 13.0 returns 1 for `$unpacked_dimensions(a[0])` of `logic [7:0] a [0:1]`; the selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. Verilator cannot check this four-state case. |
-| `sv_icarus_subroutine_unpacked_ports` | compile | icarus | 1 | Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case. |
+| `sv_icarus_subroutine_unpacked_ports` | compile | icarus | 2 | Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable

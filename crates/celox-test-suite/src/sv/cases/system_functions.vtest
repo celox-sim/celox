@@ -827,3 +827,41 @@ a=0a  10
   (eval)
   (assert_eq whole 1)
   (assert_eq element 0))
+
+(case unpacked_dimensions_resolves_preceding_block_declarations
+  (source "preceding_dimensions.sv" #"
+    module Top(output int first_rank, second_rank, width_value);
+      always_comb begin
+        logic [7:0] a [0:1];
+        logic [$unpacked_dimensions(a):0] b;
+        logic [7:0] c [0:$unpacked_dimensions(a)];
+        first_rank = $unpacked_dimensions(a);
+        second_rank = $unpacked_dimensions(c);
+        width_value = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq first_rank 1)
+  (assert_eq second_rank 1)
+  (assert_eq width_value 2))
+
+
+(case unpacked_dimensions_types_function_pattern_arguments
+  (source "dimension_patterns.sv" #"
+    module Top(output int constant_rank, runtime_rank);
+      function automatic logic [7:0] f(input logic [7:0] a [0:1]);
+        $display("must not execute");
+        return a[0];
+      endfunction
+      localparam N = $unpacked_dimensions(f('{8'h1, 8'h2}));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f('{8'h3, 8'h4}));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (expect_output ""))

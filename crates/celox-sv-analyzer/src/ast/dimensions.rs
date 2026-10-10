@@ -457,7 +457,6 @@ fn size_function_expression_type(
         // (including their first return dimension for $size).
         let mut query_dimensions = dimensions.clone();
         query_dimensions.functions = Arc::default();
-        query_dimensions.subroutine_param_shapes = Arc::default();
         if let Some(r#type) = size_function_expression_type_from_dimensions(
             argument,
             syntax_tree,
@@ -497,6 +496,21 @@ fn size_function_expression_type(
             .function_return_types
             .extend(dimensions.function_return_types.clone());
     }
+    let mut shapes = containing_subroutine_param_shapes(
+        RefNode::Expression(argument),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    );
+    if let Some(dimensions) = dimensions {
+        shapes.extend(
+            dimensions
+                .subroutine_param_shapes
+                .iter()
+                .map(|(name, shapes)| (name.clone(), shapes.clone())),
+        );
+    }
+    packed_dimensions.subroutine_param_shapes = Arc::new(shapes);
     size_function_expression_type_from_dimensions(
         argument,
         syntax_tree,
@@ -850,6 +864,88 @@ fn containing_function_return_types(
         return result;
     }
     scope::imported().function_return_types.clone()
+}
+
+/// Return types alone do not provide the context for an untyped argument pattern.
+fn containing_subroutine_param_shapes(
+    target: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> HashMap<String, Vec<VariableDimensions>> {
+    let mut shapes = scope::imported().subroutine_shapes.clone();
+    let Some(target_span) = ref_node_source_span(target) else {
+        return shapes;
+    };
+    let contains = |(start, end): (usize, usize), (inner_start, inner_end): (usize, usize)| {
+        start <= inner_start && inner_end <= end
+    };
+    for node in syntax_tree {
+        if !matches!(
+            node,
+            RefNode::ModuleDeclarationAnsi(_)
+                | RefNode::ModuleDeclarationNonansi(_)
+                | RefNode::PackageDeclaration(_)
+        ) {
+            continue;
+        }
+        let Some(module_span) = ref_node_source_span(node.clone()) else {
+            continue;
+        };
+        if !contains(module_span, target_span) {
+            continue;
+        }
+        // Formal bounds can contain another type query. Do not recursively
+        // reconstruct this same declaration scope while resolving those bounds.
+        if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
+            return shapes;
+        }
+        let _guard = ActivePackedDimensionsGuard { module_span };
+        let generates = node
+            .clone()
+            .into_iter()
+            .filter_map(|child| match child {
+                RefNode::GenerateBlock(_) => ref_node_source_span(child),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut declarations = node
+            .into_iter()
+            .filter_map(|child| {
+                if !matches!(
+                    child,
+                    RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_)
+                ) {
+                    return None;
+                }
+                let span = ref_node_source_span(child.clone())?;
+                let ancestors = generates
+                    .iter()
+                    .filter(|scope| contains(**scope, span))
+                    .collect::<Vec<_>>();
+                if ancestors
+                    .iter()
+                    .any(|scope| !contains(**scope, target_span))
+                {
+                    return None;
+                }
+                Some((ancestors.len(), child))
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by_key(|(depth, _)| *depth);
+        for (_, declaration) in declarations {
+            if let Some((name, params)) = procedural::subroutine_declared_parameter_shapes(
+                declaration,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ) {
+                shapes.insert(name, params);
+            }
+        }
+        break;
+    }
+    shapes
 }
 
 fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {

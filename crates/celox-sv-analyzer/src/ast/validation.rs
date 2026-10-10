@@ -142,7 +142,10 @@ fn reject_silently_ignored_constructs_with_dimensions(
 ) -> Result<(), AnalyzerError> {
     let const_env = &indexed_dimensions.const_env;
     let type_aliases = &indexed_dimensions.type_aliases;
-    let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
+    let is_module = matches!(
+        node,
+        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+    );
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.

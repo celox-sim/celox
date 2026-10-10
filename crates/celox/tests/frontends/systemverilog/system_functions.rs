@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
+    fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
+
     fn unpacked_dimensions_resolves_procedural_scopes(sim) {
         @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
     }
@@ -709,5 +712,17 @@ fn unpacked_dimensions_rejects_zero_size_casts() {
         "localparam N = $unpacked_dimensions(logic); assign y = N'(1'b1);",
     ] {
         build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
     }
 }

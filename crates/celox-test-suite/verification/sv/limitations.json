@@ -671,7 +671,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 rejects task arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+    "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -679,7 +679,8 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::unpacked_dimensions_resolves_procedural_scopes"
+        "system_functions::unpacked_dimensions_resolves_procedural_scopes",
+        "system_functions::unpacked_dimensions_types_function_pattern_arguments"
       ]
     }
   }
