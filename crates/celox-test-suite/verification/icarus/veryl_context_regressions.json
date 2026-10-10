@@ -1,0 +1,213 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:36: Syntax in assignment statement l-value.\n<case>/source_0.sv:36: error: Incomprehensible case expression.\n<case>/source_0.sv:39: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::case_compares_each_label_as_an_if_does",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: Syntax in assignment statement l-value.\n<case>/source_0.sv:15: error: Incomprehensible case expression.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Syntax in assignment statement l-value.\n<case>/source_0.sv:16: error: Incomprehensible case expression.\n<case>/source_0.sv:19: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::case_on_signed_target_matches_negative_labels",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Incomprehensible case expression.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Syntax in assignment statement l-value.\n<case>/source_0.sv:11: error: Incomprehensible case expression.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::constant_case_on_signed_target",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:40: Syntax in assignment statement l-value.\n<case>/source_0.sv:40: error: Incomprehensible case expression.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::constant_case_target_uses_comparison_context",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::constant_ternary_keeps_both_arm_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::dynamic_index_store_is_cut_to_element_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::dynamic_param_array_read_uses_its_elements",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::folded_const_select_keeps_its_sign",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::folded_constant_wider_than_its_operand",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::part_select_of_signed_is_unsigned",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:12: error: Function celox_suite_tb.dut.observe port next_value is not an input port.\n<case>/source_0.sv:12:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::runtime_case_target_uses_comparison_context",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::runtime_for_bound_keeps_its_type",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::runtime_for_with_negative_bound",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::signed_cast_of_folded_constant_sign_extends",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::signed_part_select_sign_extends",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::signed_struct_member_sign_extends",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_context_regressions::wide_logical_operand_keeps_result_type",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

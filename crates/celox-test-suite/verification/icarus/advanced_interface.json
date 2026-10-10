@@ -1,0 +1,111 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "verification/repros/interface_coverage_icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_interface_bidirectional",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "verification/repros/interface_coverage_icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_interface_wide_signal",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "verification/repros/interface_coverage_icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_multiple_interface_instances",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "verification/repros/interface_coverage_icarus.json",
+          "LIMITATIONS.md#icarus-interfaces"
+        ],
+        "id": "icarus_interfaces",
+        "observed_version": "Veryl 0.21.0 and 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the interface/modport port declaration syntax in these designs. Some fixtures may have additional emission issues; this records the first observed blocker.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_transitive_generics",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_transitive_generics_two_level",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

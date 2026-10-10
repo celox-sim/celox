@@ -2,9 +2,9 @@
 """Summarize the retained reports; all counts are recomputed from case rows."""
 import argparse
 import csv
-import json
 from collections import Counter
 from pathlib import Path
+from verification_report import read_report
 
 STATUSES = ("passed", "rejected", "unexpected_accept", "mismatch", "emission_error", "compile_error", "runtime_error", "unsupported", "ignored")
 
@@ -15,7 +15,7 @@ def main():
     args = parser.parse_args()
     reports = []
     for tool in ("verilator", "icarus"):
-        report = json.loads((args.directory / f"{tool}.json").read_text())
+        report = read_report(args.directory / f"{tool}.json")
         rows = {row["name"]: row for row in report["cases"]}
         if len(rows) != len(report["cases"]):
             raise ValueError(f"duplicate cases in {tool}")
@@ -68,7 +68,7 @@ def main():
         for name, group in sorted(limitations.items()):
             anchor = name.replace("_", "-")
             lines.append(f"| [{name}](../LIMITATIONS.md#{anchor}) | {group['issue']['phase']} | {group['verilator']} | {group['icarus']} |")
-    lines += ["", "The [CSV matrix](matrix.csv) contains every case. Full diagnostics and first failing comparisons are retained in [verilator.json](verilator.json) and [icarus.json](icarus.json).", ""]
+    lines += ["", "The [CSV matrix](matrix.csv) contains every case. Full diagnostics and first failing comparisons are retained by test group under [verilator/](verilator/) and [icarus/](icarus/), indexed by [verilator.json](verilator.json) and [icarus.json](icarus.json).", ""]
     (args.directory / "README.md").write_text("\n".join(lines))
     with (args.directory / "matrix.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)

@@ -1,0 +1,328 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::array_queries_handle_runtime_dimensions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::array_queries_preserve_bounds_and_dimensions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_in_constant_expressions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_preserve_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_in_constant_expressions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_in_parameter_specializations_and_generate_scopes",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_matches_four_states_and_variable_controls",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_preserves_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_ignores_unknown_bits_in_comb_and_ff",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_in_constant_expressions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_preserves_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 returns 1 for $dimensions(chandle). IEEE 1800-2023 6.14 and 20.7 make a chandle a nonarray pointer type, not an integral bit vector, so the expected result is 0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_chandle_dimensions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 returns 1 for $dimensions(chandle). IEEE 1800-2023 6.14 and 20.7 make a chandle a nonarray pointer type, not an integral bit vector, so the expected result is 0.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_of_nonarray_handle_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_one_bit_expression_dimensions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_one_bit_expression_dimensions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 reports 0 for one-bit vector operands of $dimensions, including sized literals and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_signing_conversions_are_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_arguments_are_sized_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_tasks_default_to_their_radix",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::display_unknown_bits_as_ieee_specifies",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::immediate_cover_executes_pass_statement",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::immediate_cover_handles_unknown_conditions",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects $ and a parameter whose value is $ as an instance parameter override (UNSUPPORTED / cannot convert defparam value to constant). IEEE 1800-2023 6.20.7 permits assigning the symbolic value to another parameter. Slang accepts all four instances and preserves the unbounded value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_unbounded_parameter_overrides",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects $ and a parameter whose value is $ as an instance parameter override (UNSUPPORTED / cannot convert defparam value to constant). IEEE 1800-2023 6.20.7 permits assigning the symbolic value to another parameter. Slang accepts all four instances and preserves the unbounded value.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 raises an internal error in V3EmitCConstInit.h for $isunbounded on an unpacked array parameter. IEEE 1800-2023 6.20.2 permits aggregate value parameters, and 20.6.3 returns false when the parameter is not $. Slang accepts the case and evaluates QUERY to 1'b0.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_isunbounded_array_parameter",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 raises an internal error in V3EmitCConstInit.h for $isunbounded on an unpacked array parameter. IEEE 1800-2023 6.20.2 permits aggregate value parameters, and 20.6.3 returns false when the parameter is not $. Slang accepts the case and evaluates QUERY to 1'b0.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "system_functions::signed_casts_in_parameters",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
