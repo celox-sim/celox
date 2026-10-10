@@ -47,6 +47,8 @@ export interface RawNapiSimulationHandle {
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
+	/** Whether a process requested the end of the simulation. */
+	isFinished?(): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
@@ -890,6 +892,7 @@ export function wrapDirectSimulationHandle(
 			? { switchVcd: (path: string) => raw.switchVcd!(path) }
 			: {}),
 		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
+		...(raw.isFinished ? { isFinished: () => raw.isFinished!() } : {}),
 	};
 }
 

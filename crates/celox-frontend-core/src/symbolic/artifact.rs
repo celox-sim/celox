@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    ExternFunction, InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VariableMetadata,
+    ExternFunction, InitialStateValue, ModuleId, ProcessSlots, RegionedAbsoluteAddrBase,
+    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VariableMetadata,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -43,6 +43,16 @@ impl<A> FfPart<A> {
     }
 }
 
+/// One resumable process of a module, lowered to a single kernel unit.
+///
+/// The kernel may only access stable state. Its control slots are module
+/// variables, so every instance of the module owns a separate copy.
+#[derive(Clone, Debug)]
+pub struct SymbolicProcess {
+    pub kernel: ExecutionUnit<SymbolicRegionedAddr>,
+    pub slots: ProcessSlots<SourceVarId>,
+}
+
 #[derive(Clone)]
 pub struct SimModule {
     pub name: String,
@@ -71,6 +81,8 @@ pub struct SimModule {
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,
+    /// Resumable processes in declaration order.
+    pub processes: Vec<SymbolicProcess>,
 }
 
 impl SimModule {
@@ -96,6 +108,7 @@ impl fmt::Debug for SimModule {
             .field("comb_boundaries", &self.comb_boundaries)
             .field("arena", &self.arena)
             .field("reset_clock_map", &self.reset_clock_map)
+            .field("processes", &self.processes)
             .finish()
     }
 }

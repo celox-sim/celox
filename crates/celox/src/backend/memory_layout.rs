@@ -203,6 +203,7 @@ pub(crate) fn collect_strided_array_layouts(
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
+        .chain(&program.sir.processes)
     {
         // Zero resets may be coalesced or split at native word boundaries.
         // Strided access expansion handles each logical range, and the native
@@ -258,7 +259,10 @@ fn collect_ff_referenced_addresses(program: &OptimizedSir) -> crate::HashSet<Abs
                 .eval_apply_ffs
                 .values()
                 .flat_map(|kernel| kernel.units().map(|unit| &unit.unit))
-        }));
+        }))
+        // Process kernels run outside the combinational schedule, like FF
+        // domains, so their state cannot share a home either.
+        .chain(&program.sir.processes);
     for eu in ff_eus {
         for block in eu.blocks.values() {
             for inst in &block.instructions {

@@ -297,9 +297,7 @@ assign seen_o = seen;
     }
 
     fn test_instance_output_dynamic_index_function_output_writeback(sim) {
-        // SV arm: the case expects a language rejection, but the SV frontend reports
-        // Unsupported "select index `choose_index(sel, tmp)`" (#88) instead.
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "hierarchy::test_instance_output_dynamic_index_function_output_writeback";
     }
 
@@ -308,9 +306,7 @@ assign seen_o = seen;
 
 
     fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
-        // SV arm: the case expects a language rejection, but the SV frontend reports
-        // Unsupported "select index `choose_index(sel, mem[0])`" (#88) instead.
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback";
     }
 

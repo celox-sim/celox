@@ -16,6 +16,18 @@ pub(super) fn module_name_from_node(
         .ok_or_else(|| AnalyzerError::Unsupported("invalid module identifier span".to_string()))
 }
 
+/// The name of a module or package declaration.
+pub(super) fn scope_name_from_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<String, AnalyzerError> {
+    if let RefNode::PackageDeclaration(package) = node {
+        return identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
+            .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()));
+    }
+    module_name_from_node(node, syntax_tree)
+}
+
 pub(super) fn identifier_locate(node: RefNode<'_>) -> Option<Locate> {
     match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
         Some(RefNode::SimpleIdentifier(identifier)) => Some(identifier.nodes.0),
@@ -210,6 +222,7 @@ pub(super) fn parameters_from_module_node(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
+    let mut environment = parameters::ParameterEnvironment::new(&parameters, base_const_env);
     let parameter_port_list = module_parameter_port_list(node.clone());
     // IEEE 1800-2023 6.20.1: with a parameter port list, even an empty one,
     // a `parameter` declared in the module body is a localparam.
@@ -225,15 +238,14 @@ pub(super) fn parameters_from_module_node(
             base_const_env,
             type_aliases,
             parameter_overrides,
+            &mut environment,
         )?;
     }
 
-    for item in module_non_port_items(node.clone()) {
-        if let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) {
-            match declaration {
-                sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
-                    localparam,
-                ) => parameters_from_ref_node(
+    for declaration in scope_declarations(node.clone()) {
+        match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
+                parameters::parameters_from_ref_node_with_environment(
                     RefNode::LocalParameterDeclaration(&localparam.0),
                     syntax_tree,
                     &mut parameters,
@@ -241,20 +253,22 @@ pub(super) fn parameters_from_module_node(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
-                )?,
-                sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                    parameters_from_ref_node(
-                        RefNode::ParameterDeclaration(&parameter.0),
-                        syntax_tree,
-                        &mut parameters,
-                        body_parameters_are_local,
-                        base_const_env,
-                        type_aliases,
-                        parameter_overrides,
-                    )?
-                }
-                _ => {}
+                    &mut environment,
+                )?
             }
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
+                parameters::parameters_from_ref_node_with_environment(
+                    RefNode::ParameterDeclaration(&parameter.0),
+                    syntax_tree,
+                    &mut parameters,
+                    body_parameters_are_local,
+                    base_const_env,
+                    type_aliases,
+                    parameter_overrides,
+                    &mut environment,
+                )?
+            }
+            _ => {}
         }
     }
 
@@ -268,10 +282,11 @@ fn parameters_from_parameter_port_list(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
+    environment: &mut parameters::ParameterEnvironment,
 ) -> Result<(), AnalyzerError> {
     match list {
         sv_parser::ParameterPortList::Assignment(list) => {
-            parameters_from_ref_node(
+            parameters::parameters_from_ref_node_with_environment(
                 RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0),
                 syntax_tree,
                 parameters,
@@ -279,6 +294,7 @@ fn parameters_from_parameter_port_list(
                 base_const_env,
                 type_aliases,
                 parameter_overrides,
+                environment,
             )?;
             for (_, declaration) in &list.nodes.1.nodes.1.1 {
                 parameters_from_parameter_port_declaration(
@@ -288,6 +304,7 @@ fn parameters_from_parameter_port_list(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
+                    environment,
                 )?;
             }
         }
@@ -300,6 +317,7 @@ fn parameters_from_parameter_port_list(
                     base_const_env,
                     type_aliases,
                     parameter_overrides,
+                    environment,
                 )?;
             }
         }
@@ -315,6 +333,7 @@ fn parameters_from_parameter_port_declaration(
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
+    environment: &mut parameters::ParameterEnvironment,
 ) -> Result<(), AnalyzerError> {
     let is_local = matches!(
         declaration,
@@ -326,7 +345,7 @@ fn parameters_from_parameter_port_declaration(
     ) {
         return Ok(());
     }
-    parameters_from_ref_node(
+    parameters::parameters_from_ref_node_with_environment(
         RefNode::ParameterPortDeclaration(declaration),
         syntax_tree,
         parameters,
@@ -334,6 +353,7 @@ fn parameters_from_parameter_port_declaration(
         base_const_env,
         type_aliases,
         parameter_overrides,
+        environment,
     )
 }
 
@@ -345,9 +365,27 @@ pub(super) fn signals_from_module_node(
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
     for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+        let node = match item.node {
+            ScopeItem::Module(node) => node,
+            // The variables of a package are its constant variables; the
+            // others are rejected with the package.
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(
+                data,
+            )) => {
+                signals.extend(signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    &item.env,
+                    None,
+                )?);
+                continue;
+            }
+            ScopeItem::Package(_) => continue,
+        };
         let start = signals.len();
         signals_from_module_or_generate_item(
-            item.node,
+            node,
             syntax_tree,
             type_aliases,
             &item.env,
@@ -706,7 +744,7 @@ pub(super) fn type_alias_from_ref_node(
     }
     let name =
         if let Some(RefNode::DataTypeType(data_type)) = unwrap_node!(node.clone(), DataTypeType) {
-            identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?
+            reference_name(RefNode::DataTypeType(data_type), syntax_tree)?
         } else {
             let RefNode::TypeIdentifier(identifier) = unwrap_node!(node, TypeIdentifier)? else {
                 return None;
@@ -744,17 +782,75 @@ pub(super) fn module_non_port_items(node: RefNode<'_>) -> Vec<&sv_parser::NonPor
     }
 }
 
+/// An item of a module or package scope.
+#[derive(Clone, Copy)]
+pub(super) enum ScopeItem<'a> {
+    Module(&'a sv_parser::ModuleOrGenerateItem),
+    Package(&'a sv_parser::PackageOrGenerateItemDeclaration),
+}
+
+impl<'a> ScopeItem<'a> {
+    pub(super) fn node(self) -> RefNode<'a> {
+        match self {
+            Self::Module(item) => RefNode::ModuleOrGenerateItem(item),
+            Self::Package(declaration) => RefNode::PackageOrGenerateItemDeclaration(declaration),
+        }
+    }
+
+    /// The declaration the item makes, if it is one.
+    pub(super) fn declaration(self) -> Option<&'a sv_parser::PackageOrGenerateItemDeclaration> {
+        match self {
+            Self::Module(item) => package_or_generate_declaration_from_module_item(item),
+            Self::Package(declaration) => Some(declaration),
+        }
+    }
+}
+
+/// The items of a package (IEEE 1800-2023 26.2) other than exports, anonymous
+/// programs and timeunits.
+pub(super) fn package_declarations(
+    package: &sv_parser::PackageDeclaration,
+) -> impl Iterator<Item = &sv_parser::PackageOrGenerateItemDeclaration> {
+    package.nodes.6.iter().filter_map(|(_, item)| match item {
+        sv_parser::PackageItem::PackageOrGenerateItemDeclaration(declaration) => {
+            Some(&**declaration)
+        }
+        _ => None,
+    })
+}
+
+/// The declarations made directly in a module or package, in source order.
+/// The items of a module's generate constructs and regions are not included.
+pub(super) fn scope_declarations(
+    node: RefNode<'_>,
+) -> Vec<&sv_parser::PackageOrGenerateItemDeclaration> {
+    match node {
+        RefNode::PackageDeclaration(package) => package_declarations(package).collect(),
+        node => module_non_port_items(node)
+            .into_iter()
+            .filter_map(package_or_generate_declaration_from_non_port_item)
+            .collect(),
+    }
+}
+
 // Explicit generate regions do not introduce a scope. Conditional/loop
 // constructs and function bodies do, and must not leak declarations here.
-pub(super) fn module_scope_items(node: RefNode<'_>) -> Vec<&sv_parser::ModuleOrGenerateItem> {
+pub(super) fn scope_items(node: RefNode<'_>) -> Vec<ScopeItem<'_>> {
+    if let RefNode::PackageDeclaration(package) = node {
+        return package_declarations(package)
+            .map(ScopeItem::Package)
+            .collect();
+    }
     let mut direct = Vec::new();
     for item in module_non_port_items(node) {
         match item {
-            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => direct.push(&**item),
+            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
+                direct.push(ScopeItem::Module(item))
+            }
             sv_parser::NonPortModuleItem::GenerateRegion(region) => {
                 for item in &region.nodes.1 {
                     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-                        direct.push(&**item);
+                        direct.push(ScopeItem::Module(item));
                     }
                 }
             }

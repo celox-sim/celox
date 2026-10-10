@@ -162,6 +162,8 @@ impl super::super::EventHandle for NativeEventRef {
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
     comb_unit_funcs: Vec<NativeSimFunc>,
+    /// One function per process kernel.
+    process_funcs: Vec<NativeSimFunc>,
     /// Lane-partitioned kernels and their task functions.
     lane_kernels: Option<super::lanes::NativeLaneKernels>,
     /// Keep the combined executable image alive so every entry pointer remains
@@ -263,6 +265,12 @@ impl SharedNativeCode {
             .copied()
             .map(|offset| native_function_at(&jit_image, offset))
             .collect::<Result<Vec<_>, _>>()?;
+        let process_funcs = program_image
+            .process_offsets
+            .iter()
+            .copied()
+            .map(|offset| native_function_at(&jit_image, offset))
+            .collect::<Result<Vec<_>, _>>()?;
         let event_map = materialize_map(&program_image.event_map)?;
         let eval_only_event_map = materialize_map(&program_image.eval_only_event_map)?;
         let apply_event_map = materialize_map(&program_image.apply_event_map)?;
@@ -288,6 +296,7 @@ impl SharedNativeCode {
         Ok(Self {
             comb_func,
             comb_unit_funcs,
+            process_funcs,
             lane_kernels,
             _jit_image: jit_image,
             event_map,
@@ -379,6 +388,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -390,6 +400,8 @@ pub struct NativeProgramImage {
     symbols: Vec<NativeCodeSymbol>,
     comb_offset: usize,
     comb_unit_offsets: Vec<usize>,
+    /// Entry offset of each process kernel.
+    process_offsets: Vec<usize>,
     required_native_features: u8,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -472,6 +484,7 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                processes: self.runtime_schema.processes.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -517,6 +530,16 @@ impl NativeProgramImage {
             .any(|offset| !entry_offsets.contains(offset))
         {
             return Err("a combinational unit offset does not name an image entry".into());
+        }
+        if self
+            .process_offsets
+            .iter()
+            .any(|offset| !entry_offsets.contains(offset))
+        {
+            return Err("a process kernel offset does not name an image entry".into());
+        }
+        if self.process_offsets.len() != self.runtime_schema.processes.len() {
+            return Err("process kernels and their control slots disagree".into());
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
@@ -1954,6 +1977,28 @@ fn compile_program(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let process_jits = sir
+        .sir
+        .processes
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            if cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            compile_unit_refs(
+                &[unit],
+                layout,
+                options.four_state,
+                &format!("process[{index}]"),
+                None,
+                &options.x86_options,
+                false,
+                &options.optimize_options.diagnostics,
+                cancel,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
@@ -1970,6 +2015,7 @@ fn compile_program(
         .chain(
             comb_unit_jits
                 .iter()
+                .chain(&process_jits)
                 .map(|compiled| compiled.required_state_size),
         )
         .chain(
@@ -1988,6 +2034,7 @@ fn compile_program(
         .chain(
             comb_unit_jits
                 .iter()
+                .chain(&process_jits)
                 .map(|compiled| compiled.required_native_features),
         )
         .chain(
@@ -2014,6 +2061,16 @@ fn compile_program(
             &mut code_entries,
             &mut image_symbols,
             format!("eval_comb_unit[{index}]"),
+            compiled,
+        )?);
+    }
+    let mut process_offsets = Vec::with_capacity(process_jits.len());
+    for (index, compiled) in process_jits.iter().enumerate() {
+        process_offsets.push(append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            format!("process[{index}]"),
             compiled,
         )?);
     }
@@ -2164,6 +2221,7 @@ fn compile_program(
             symbols: image_symbols,
             comb_offset,
             comb_unit_offsets,
+            process_offsets,
             required_native_features,
             event_map,
             eval_only_event_map,
@@ -2187,6 +2245,7 @@ fn compile_program(
                     .iter()
                     .copied()
                     .collect(),
+                processes: sir.runtime().runtime_schema.processes.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
@@ -2941,6 +3000,15 @@ impl super::super::SimBackend for NativeBackend {
 
     fn apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         self.call_func_timed(event.func)
+    }
+
+    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        let func = *self
+            .compiled
+            .process_funcs
+            .get(index)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        self.call_func_timed(func)
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

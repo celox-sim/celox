@@ -43,11 +43,14 @@ mod host {
         IOContext, RuntimeErrorCode,
         backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
         ir::{
-            InitialMemoryData, InitialMemoryWriteRun, InstancePath, RuntimeEventKind,
-            RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
+            DisplaySizing, InitialMemoryData, InitialMemoryWriteRun, InstancePath,
+            RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
         },
     };
-    use celox_testbench::{DisplayFormatArg, format_display_arg};
+    use celox_testbench::{
+        DisplayFormatArg, FieldSpec, format_sized_display_arg, format_veryl_display_arg,
+        pad_veryl_field,
+    };
     use num_bigint::BigUint;
 
     /// Hierarchical instance tree with resolved signals.
@@ -302,19 +305,25 @@ mod host {
         }
     }
 
-    fn runtime_event_format_arg(arg: &RuntimeEventArgValue, spec: Option<char>) -> String {
+    fn runtime_event_format_arg(
+        arg: &RuntimeEventArgValue,
+        spec: char,
+        sizing: DisplaySizing,
+        field: FieldSpec,
+    ) -> String {
         let value = runtime_event_words_to_biguint(&arg.values, arg.width);
         let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
-        format_display_arg(
-            &DisplayFormatArg {
-                value: &value,
-                mask: Some(&mask),
-                width: arg.width,
-                signed: arg.signed,
-                is_string: arg.is_string,
-            },
-            spec,
-        )
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: Some(&mask),
+            width: arg.width,
+            signed: arg.signed,
+            is_string: arg.is_string,
+        };
+        match sizing {
+            DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
+            DisplaySizing::Ieee => format_sized_display_arg(&arg, spec, field.width),
+        }
     }
 
     fn render_runtime_event_message(
@@ -324,6 +333,12 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
+                // Veryl prints arguments without a format string in hexadecimal.
+                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                    if site.sizing == DisplaySizing::Veryl =>
+                {
+                    'x'
+                }
                 RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish => {
                     'd'
                 }
@@ -336,7 +351,9 @@ mod host {
             };
             return args
                 .iter()
-                .map(|arg| runtime_event_format_arg(arg, Some(default_spec)))
+                .map(|arg| {
+                    runtime_event_format_arg(arg, default_spec, site.sizing, FieldSpec::default())
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
         };
@@ -353,9 +370,7 @@ mod host {
                 out.push('%');
                 continue;
             }
-            while matches!(chars.peek(), Some('0'..='9')) {
-                chars.next();
-            }
+            let field = FieldSpec::parse(&mut chars, site.sizing == DisplaySizing::Veryl);
             let spec = chars.next().unwrap_or('d');
             match spec {
                 'x' | 'h' | 'X' | 'H' | 'b' | 'B' | 'o' | 'O' | 'c' | 'C' | 's' | 'S' => {
@@ -363,7 +378,7 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
                 'd' | 'D' | 'i' | 'I' => {
@@ -371,12 +386,22 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, Some(spec)));
+                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
-                't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),
-                'm' | 'M' => {
-                    out.push_str(ctx.scope.or(site.scope.as_deref()).unwrap_or("<hierarchy>"))
+                't' | 'T' | 'm' | 'M' => {
+                    let text = if matches!(spec, 't' | 'T') {
+                        ctx.tb_time.unwrap_or(0).to_string()
+                    } else {
+                        ctx.scope
+                            .or(site.scope.as_deref())
+                            .unwrap_or("<hierarchy>")
+                            .to_string()
+                    };
+                    out.push_str(&match site.sizing {
+                        DisplaySizing::Veryl => pad_veryl_field(text, spec, field),
+                        DisplaySizing::Ieee => text,
+                    });
                 }
                 other => {
                     out.push('%');
@@ -581,7 +606,7 @@ mod host {
 
     // ── Generic methods available for any backend ────────────────────────
     impl<B: SimBackend> Simulator<B> {
-        pub(super) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
+        pub(crate) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {

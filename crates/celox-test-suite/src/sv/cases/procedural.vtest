@@ -118,3 +118,402 @@
     (modify (set index i))
     (assert_eq y (+ (* i 3) 1))
     (assert_eq z 0x5a)))
+
+(case loop_initializer_widens_by_its_own_signedness
+  (source "loop_start.sv" #"
+                module Top(input logic [7:0] value, output logic [7:0] count, output logic [7:0] registered,
+                           input logic clk);
+                    always_comb begin
+                        count = 8'd0;
+                        for (int i = value[1:0]; i < 4; i++) count = count + 8'd1;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [7:0] n;
+                        n = 8'd0;
+                        for (int i = 2'b11; i < 4; i++) n = n + 8'd1;
+                        registered <= n;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 8)
+    (modify (set value value))
+    (tick clk)
+    (assert_eq count (- 4 (& value 3)))
+    (assert_eq registered 1)))
+
+(case select_indices_call_functions
+  (source "call_index.sv" #"
+                module Top(input logic [1:0] sel, input logic [1:0] value,
+                           output logic [3:0] data, output logic [7:0] seen, output logic picked);
+                    function automatic logic [1:0] pick(input logic [1:0] x, output logic [7:0] y);
+                        y = 8'd10 + x;
+                        return x;
+                    endfunction
+                    logic [3:0] source;
+                    always_comb begin
+                        data = 4'd0;
+                        seen = 8'd0;
+                        data[pick(sel, seen)] = 1'b1;
+                        source = 4'b0110;
+                        picked = source[pick(value, seen)];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (s v) (list (0 0) (1 2) (2 3) (3 1))
+    (modify (set sel s) (set value v))
+    (assert_eq data (<< 1 s))
+    (assert_eq seen (+ 10 v))
+    (assert_eq picked (& (>> 6 v) 1))))
+
+(case runtime_bits_of_a_constant_element
+  (source "element_bits.sv" #"
+                module Top(input logic idx, input logic a, input logic [7:0] b, input logic seen,
+                           output logic [7:0] element, output logic [7:0] other,
+                           output logic [1:0] mixed);
+                    logic [7:0] mem [4];
+                    logic [1:0] pairs [2];
+                    always_comb mem[2] = b;
+                    always_comb begin
+                        mem[1] = 8'h00;
+                        mem[1][idx] = a;
+                        element = mem[1];
+                        other = mem[2];
+                    end
+                    always_comb begin
+                        pairs[0] = 2'b10;
+                        pairs[1] = 2'b01;
+                        for (int i = 0; i < 2; i++) mixed[i] = pairs[i][seen];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (i v s) (list (0 1 0) (1 1 1) (1 0 0) (0 0 1))
+    (modify (set idx i) (set a v) (set b 0x5a) (set seen s))
+    (assert_eq element (<< v i))
+    (assert_eq other 0x5a)
+    (assert_eq mixed (- 2 s))))
+
+(case select_index_calls_run_as_written
+  ; Each call in a select index runs once where it is written, and only when
+  ; the arm holding it is evaluated (IEEE 1800-2023 11.4.11).
+  (source "index_calls.sv" #"
+                module Top(input logic clk, input logic c, input logic [1:0] sel,
+                           output logic [3:0] twice, output logic [3:0] chosen,
+                           output logic [3:0] count, output logic [3:0] mux_count,
+                           output logic [3:0] nested, output logic [3:0] element,
+                           output logic [3:0] element_count,
+                           output logic [3:0] ff_bits, output logic [3:0] ff_count,
+                           output logic [3:0] ff_element);
+                    function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                        output logic [3:0] after);
+                        after = prior + 4'd1;
+                        return 2'd1;
+                    endfunction
+                    logic [3:0] marks [4];
+                    function automatic logic [1:0] inner(input logic [1:0] x);
+                        return x + 2'd1;
+                    endfunction
+                    function automatic logic [1:0] outer(input logic [1:0] x);
+                        return x ^ 2'b10;
+                    endfunction
+                    always_comb begin
+                        logic [3:0] calls;
+                        logic [3:0] mux_calls;
+                        calls = 4'd0;
+                        mux_calls = 4'd0;
+                        twice = 4'd0;
+                        twice[tick(calls, calls) + tick(calls, calls)] = 1'b1;
+                        chosen = 4'd0;
+                        chosen[c ? tick(mux_calls, mux_calls) : 2'd3] = 1'b1;
+                        count = calls;
+                        mux_count = mux_calls;
+                        nested = 4'd0;
+                        nested[outer(inner(sel))] = 1'b1;
+                    end
+                    always_comb begin
+                        logic [3:0] element_calls;
+                        element_calls = 4'd0;
+                        for (int i = 0; i < 4; i++) marks[i] = 4'd0;
+                        marks[c ? tick(element_calls, element_calls) : 2'd2] = 4'd5;
+                        element = marks[tick(element_calls, element_calls)];
+                        element_count = element_calls;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [3:0] calls;
+                        logic [3:0] bits;
+                        calls = 4'd0;
+                        bits = 4'd0;
+                        bits[tick(calls, calls) + tick(calls, calls)] = 1'b1;
+                        bits[c ? tick(calls, calls) : 2'd3] = 1'b1;
+                        ff_element <= marks[tick(calls, calls)];
+                        ff_bits <= bits;
+                        ff_count <= calls;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (cond s) (list (0 0) (1 1) (0 2) (1 3))
+    (modify (set c cond) (set sel s))
+    (tick clk)
+    (assert_eq twice 4)
+    (assert_eq chosen (? (== cond 1) 2 8))
+    (assert_eq count 2)
+    (assert_eq mux_count cond)
+    (assert_eq nested (<< 1 (^ (& (+ s 1) 3) 2)))
+    (assert_eq element (? (== cond 1) 5 0))
+    (assert_eq element_count (+ 1 cond))
+    (assert_eq ff_bits (? (== cond 1) 6 12))
+    (assert_eq ff_count (+ 3 cond))
+    (assert_eq ff_element (? (== cond 1) 5 0))))
+
+(case select_index_call_skipped_by_logical_and
+  ; The right operand of `&&` is not evaluated when the left one is false
+  ; (IEEE 1800-2023 11.4.7), so its call does not run.
+  (source "index_and.sv" #"
+                module Top(input logic c, output logic [3:0] chosen,
+                           output logic [3:0] count);
+                    function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                        output logic [3:0] after);
+                        after = prior + 4'd1;
+                        return 2'd1;
+                    endfunction
+                    always_comb begin
+                        logic [3:0] calls;
+                        calls = 4'd0;
+                        chosen = 4'd0;
+                        chosen[(c && tick(calls, calls) == 2'd1) ? 2'd2 : 2'd0] = 1'b1;
+                        count = calls;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (cond) (list (0) (1) (0))
+    (modify (set c cond))
+    (assert_eq chosen (? (== cond 1) 4 1))
+    (assert_eq count cond)))
+
+(case concatenated_targets_fix_their_positions_first
+  (source "concat_positions.sv" #"
+                module Top(input logic clk, input logic [1:0] k,
+                           output logic [3:0] data, output logic [3:0] other,
+                           output logic [1:0] index, output logic [3:0] ff_data);
+                    function automatic logic [1:0] bump(input logic [1:0] prior,
+                                                        output logic [1:0] after);
+                        after = prior + 2'd1;
+                        return 2'd0;
+                    endfunction
+                    always_comb begin
+                        logic [1:0] i;
+                        i = k;
+                        data = 4'd0;
+                        other = 4'd0;
+                        {data[i], other[bump(i, i)]} = 2'b11;
+                        index = i;
+                    end
+                    always_ff @(posedge clk) begin
+                        logic [1:0] i;
+                        logic [3:0] bits;
+                        logic [3:0] unused;
+                        i = k;
+                        bits = 4'd0;
+                        unused = 4'd0;
+                        {bits[i], unused[bump(i, i)]} = 2'b11;
+                        ff_data <= bits;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (n) (list (0) (1) (2) (3))
+    (modify (set k n))
+    (tick clk)
+    (assert_eq data (<< 1 n))
+    (assert_eq other 1)
+    (assert_eq index (& (+ n 1) 3))
+    (assert_eq ff_data (<< 1 n))))
+
+(case ff_select_index_calls_write_state_and_run_once
+  ; A call in an always_ff select index writes the variables its output
+  ; arguments name, and an argument runs once even when the function it is
+  ; passed to could be inlined.
+  (source "ff_index_call_state.sv" #"
+                module Top(input logic clk, output logic [3:0] count, output logic [3:0] bits,
+                           output logic [3:0] calls_out);
+                    function automatic logic [1:0] tick(input logic [3:0] prior,
+                                                        output logic [3:0] after);
+                        after = prior + 4'd1;
+                        return 2'd1;
+                    endfunction
+                    function automatic logic [1:0] twice(input logic [1:0] x);
+                        return x + x;
+                    endfunction
+                    logic [3:0] marks;
+                    always_ff @(posedge clk) begin
+                        logic [3:0] calls;
+                        logic [3:0] local_bits;
+                        calls = 4'd0;
+                        local_bits = 4'd0;
+                        local_bits[twice(tick(calls, calls))] = 1'b1;
+                        bits <= local_bits;
+                        calls_out <= calls;
+                        marks[tick(count, count)] <= 1'b1;
+                    end
+                    initial count = 4'd0;
+                endmodule
+            "#)
+  (top Top)
+  (for (n) (list (1) (2) (3))
+    (tick clk)
+    (assert_eq count n)
+    (assert_eq bits 4)
+    (assert_eq calls_out 1)))
+
+(case function_bodies_run_their_index_calls_each_time
+  ; Two calls of a function whose body calls another function in a select
+  ; index each run that call.
+  (source "body_index_calls.sv" #"
+                module Top(input logic [3:0] tbl, output logic [3:0] calls_out,
+                           output logic [3:0] bits);
+                    logic [3:0] count;
+                    function automatic logic inner(input logic [3:0] prior,
+                                                   output logic [3:0] after);
+                        after = prior + 4'd1;
+                        return 1'b1;
+                    endfunction
+                    function automatic logic [1:0] outer(input logic x);
+                        return {1'b0, tbl[inner(count, count)]};
+                    endfunction
+                    always_comb begin
+                        count = 4'd0;
+                        bits = 4'd0;
+                        bits[outer(1'b0) + outer(1'b0)] = 1'b1;
+                        calls_out = count;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (t) (list (5) (2))
+    (modify (set tbl t))
+    (assert_eq calls_out 2)
+    (assert_eq bits (<< 1 (* 2 (& (>> t 1) 1))))))
+
+(case ff_processes_write_bits_of_separate_array_elements
+  ; One process writes a run-time bit of mem[1], another the whole mem[2];
+  ; each keeps the other's element.
+  (source "ff_element_processes.sv" #"
+                module Top(input logic clk, input logic [2:0] idx, input logic a,
+                           input logic [7:0] b, output logic [7:0] first, output logic [7:0] second);
+                    logic [7:0] mem [4];
+                    always_ff @(posedge clk) mem[2] <= b;
+                    always_ff @(posedge clk) begin
+                        mem[1] <= 8'h00;
+                        mem[1][idx] <= a;
+                    end
+                    assign first = mem[1];
+                    assign second = mem[2];
+                endmodule
+            "#)
+  (top Top)
+  (for (i v) (list (0 0x5a) (3 0xa5) (7 0x3c))
+    (modify (set idx i) (set a 1) (set b v))
+    (tick clk)
+    (assert_eq first (<< 1 i))
+    (assert_eq second v)))
+
+(case runtime_bits_stay_within_their_element
+  ; A run-time bit of a constant array element stays within that element:
+  ; out of range, a read gives X and a write is ignored (IEEE 1800-2023
+  ; 7.4.6, 11.5.1).
+  (four_state)
+  (source "element_window.sv" #"
+                module Top(input logic clk, input logic [3:0] idx, input logic a,
+                           output logic [7:0] element, output logic [7:0] next,
+                           output logic picked);
+                    logic [7:0] mem [4];
+                    logic [7:0] table_ [4];
+                    always_ff @(posedge clk) begin
+                        mem[1] <= 8'h00;
+                        mem[2] <= 8'h00;
+                        mem[1][idx] <= a;
+                    end
+                    always_comb begin
+                        table_[1] = 8'h00;
+                        table_[2] = 8'hff;
+                        picked = table_[1][idx];
+                    end
+                    assign element = mem[1];
+                    assign next = mem[2];
+                endmodule
+            "#)
+  (top Top)
+  (for (i) (list (0) (7) (8) (9) (15))
+    (modify (set idx i) (set a 1))
+    (tick clk)
+    (assert_eq element (? (< i 8) (<< 1 i) 0))
+    (assert_eq next 0)
+    (assert_eq picked (? (< i 8) 0 (fourstate 1 1)))))
+
+(case declaration_initializers_define_the_initial_state
+  (source "initializers.sv" #"
+                module Top(input logic clk, input logic [1:0] index,
+                           output logic [7:0] y, output logic [3:0] count,
+                           output logic [7:0] entry, output logic [7:0] scoped);
+                    localparam int W = 8;
+                    function automatic logic [W-1:0] mix(input logic [W-1:0] v);
+                        return v ^ 8'h0f;
+                    endfunction
+                    logic [W-1:0] seed = mix(8'h55), unused, other = W'(17);
+                    logic [3:0] counter = 4'd7;
+                    logic [7:0] lut [4] = '{8'd10, 8'd20, 8'd30, 8'd40};
+                    always_ff @(posedge clk) counter <= counter + 4'd1;
+                    if (W == 8) begin : g
+                        logic [7:0] v = 8'(W * 2);
+                        assign scoped = v;
+                    end
+                    assign y = seed ^ other;
+                    assign count = counter;
+                    assign entry = lut[index];
+                endmodule
+            "#)
+  (top Top)
+  (for i (range 0 4)
+    (modify (set index i))
+    (assert_eq entry (* (+ i 1) 10)))
+  (assert_eq y 0x4b)
+  (assert_eq scoped 16)
+  (assert_eq count 7)
+  (tick clk)
+  (assert_eq count 8))
+
+(case initial_blocks_run_after_declaration_initializers
+  (source "initializer_order.sv" #"
+                module Top(output logic [7:0] a, output logic [7:0] b);
+                    logic [7:0] x = 8'h01;
+                    logic [7:0] z = 8'h02;
+                    initial x = 8'h33;
+                    assign a = x;
+                    assign b = z;
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq a 0x33)
+  (assert_eq b 2))
+
+(case declaration_initializers_keep_unknown_bits
+  (four_state)
+  (source "initializer_unknown.sv" #"
+                module Top(output logic [3:0] known, output logic [3:0] partial,
+                           output logic [3:0] unset);
+                    logic [3:0] k = 4'b1010;
+                    logic [3:0] p = 4'b1x0x;
+                    logic [3:0] u;
+                    assign known = k;
+                    assign partial = p;
+                    assign unset = u;
+                endmodule
+            "#)
+  (top Top)
+  (assert_eq known 0xa)
+  (assert_eq partial (fourstate 0xd 0x5))
+  (assert_eq unset (fourstate 0xf 0xf)))

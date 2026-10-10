@@ -176,6 +176,33 @@ another clock, the runtime discovers that domain and continues within the same
 step. [Runtime Semantics](./cascade-limitations.md) describes this behavior and
 its boundaries.
 
+### Process kernels
+
+A procedural process with delays is compiled into a process kernel: one SIR
+execution unit that runs the process from its last suspension point to the
+next. Each process owns three hidden two-state state objects:
+
+- a resume slot, which the kernel's entry block dispatches on with a `Switch`
+  (two levels beyond 255 suspension points);
+- a status slot, in which the kernel reports a delay, the end of the process,
+  or `$finish` before it returns;
+- a delay slot, which holds the wait amount.
+
+A suspension stores these slots and returns, so no backend needs a new
+terminator. Kernels are never merged with each other or with a phase, and
+every backend compiles each one as its own function, invoked through
+`SimBackend::run_process`.
+
+The timed scheduler keeps a queue of process wakeups next to its event queue.
+At each time it applies the scheduled values, then runs the processes that
+resume at that time in declaration order. It detects the clock edges they cause
+by comparing event signals before and after, and then settles as for scheduled
+events. Processes that waited for zero time resume in a further round at the
+same time, which repeats the edge detection and settling. Because the slots are ordinary state, a checkpoint captures suspended
+processes. The optimizer does not yet optimize kernels, but it treats their
+accesses like those of FF domains, so identity aliasing and dead-store
+elimination keep the state they use.
+
 A running simulator retains the elaborated design, source lookup, runtime schema,
 bound testbench bytecode, and compiled backend. The backend owns the finalized
 layout. Frontend and optimizer state are discarded after compilation.

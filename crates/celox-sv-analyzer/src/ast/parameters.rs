@@ -47,6 +47,98 @@ pub(super) fn parameters_from_ref_node(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
+    let mut environment = ParameterEnvironment::new(parameters, base_const_env);
+    parameters_from_ref_node_with_environment(
+        node,
+        syntax_tree,
+        parameters,
+        is_local,
+        base_const_env,
+        type_aliases,
+        parameter_overrides,
+        &mut environment,
+    )
+}
+
+/// A declaration-order prefix, independent of the inherited environment.
+/// Keep that prefix separate: its values and type markers override inherited
+/// bindings, but inherited values must not resolve a forward prefix reference.
+pub(super) struct ParameterEnvironment {
+    values: HashMap<String, i128>,
+    types: HashMap<String, ExprType>,
+    constants: HashMap<String, i128>,
+    // Numeric environments cannot represent X/Z. Keep resolved literals for
+    // evaluating later declarations without dropping their state bits.
+    literals: HashMap<String, Expr>,
+}
+
+impl ParameterEnvironment {
+    pub(super) fn new(parameters: &[Parameter], base: &HashMap<String, i128>) -> Self {
+        let mut values = HashMap::default();
+        let mut types = HashMap::default();
+        let mut literals = HashMap::default();
+        for parameter in parameters {
+            bind_parameter(&mut values, &mut types, &mut literals, parameter);
+        }
+        let mut constants = base.clone();
+        constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
+        for name in literals.keys() {
+            if !values.contains_key(name) {
+                constants.remove(name);
+            }
+        }
+        Self {
+            values,
+            types,
+            constants,
+            literals,
+        }
+    }
+
+    fn append(&mut self, parameter: &Parameter) {
+        if !bind_parameter(
+            &mut self.values,
+            &mut self.types,
+            &mut self.literals,
+            parameter,
+        ) {
+            return;
+        }
+        let name = parameter.name();
+        if self.literals.contains_key(name) && !self.values.contains_key(name) {
+            self.constants.remove(name);
+        }
+        let mut keys = vec![
+            name.to_string(),
+            parameter_marker(name),
+            local_parameter_marker(name),
+            parameter_width_marker(name),
+            parameter_signed_marker(name),
+            parameter_dimensions_marker(name),
+            parameter_signed_element_marker(name),
+        ];
+        for index in 0..parameter.packed_ranges.len() {
+            keys.push(parameter_dimension_marker(name, index, "left"));
+            keys.push(parameter_dimension_marker(name, index, "right"));
+        }
+        for key in keys {
+            if let Some(value) = self.values.get(&key) {
+                self.constants.insert(key, *value);
+            }
+        }
+    }
+}
+
+pub(super) fn parameters_from_ref_node_with_environment(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    parameters: &mut Vec<Parameter>,
+    is_local: bool,
+    base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
+    environment: &mut ParameterEnvironment,
+) -> Result<(), AnalyzerError> {
     // Restrict declaration-type queries to the header. Walking the complete
     // declaration also visits data types and ranges nested in initializers,
     // including the target of a size-function cast.
@@ -93,7 +185,7 @@ pub(super) fn parameters_from_ref_node(
         type_node.clone(),
         syntax_tree,
         base_const_env,
-        parameters,
+        environment,
         type_aliases,
         parameter_overrides,
     );
@@ -137,8 +229,7 @@ pub(super) fn parameters_from_ref_node(
                 continue;
             }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
-            let mut const_env = base_const_env.clone();
-            const_env.extend(const_env_from_parameters(parameters));
+            let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
                 if expr.into_iter().any(|node| {
                     matches!(
@@ -148,10 +239,10 @@ pub(super) fn parameters_from_ref_node(
                 }) {
                     let mut dimensions = PackedDimensions::new(
                         parameter_packed_dimensions(parameters),
-                        &const_env,
+                        const_env,
                         type_aliases,
                     );
-                    dimensions.parameter_values = parameter_value_env(parameters, &const_env);
+                    dimensions.parameter_values = parameter_value_env(parameters, const_env).into();
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.
@@ -166,7 +257,7 @@ pub(super) fn parameters_from_ref_node(
                     const_expr_from_constant_param_with_env(
                         expr,
                         syntax_tree,
-                        &const_env,
+                        const_env,
                         type_aliases,
                     )?
                 }
@@ -193,6 +284,7 @@ pub(super) fn parameters_from_ref_node(
             );
             parameter.packed_ranges = parameter_ranges.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
+            environment.append(&parameter);
             parameters.push(parameter);
         }
     }
@@ -203,13 +295,24 @@ fn parameter_declared_width(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     base_const_env: &HashMap<String, i128>,
-    parameters: &[Parameter],
+    environment: &ParameterEnvironment,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Option<usize> {
     let declared_alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    let mut range_env = base_const_env.clone();
-    range_env.extend(const_env_from_parameters(parameters));
+    // Scalar headers have no bounds to evaluate. Avoid copying the growing
+    // environment for the common int/implicit/vector-without-range cases.
+    if declared_alias.is_none()
+        && !node
+            .clone()
+            .into_iter()
+            .any(|child| matches!(child, RefNode::PackedDimension(_)))
+    {
+        return integer_atom_expr_type(node.clone())
+            .map(|ty| ty.width)
+            .or_else(|| unwrap_node!(node, IntegerVectorType).is_some().then_some(1));
+    }
+    let mut range_env = environment.constants.clone();
     // Numeric-size casts in a later parameter declaration can refer to an
     // earlier assignment in the same parameter-port list. Seed range lowering
     // from those assignments while retaining the separate environment below
@@ -259,7 +362,12 @@ fn parameter_declared_width(
             env.remove(&name);
         }
     }
-    env.extend(const_env_from_parameters(parameters));
+    env.extend(
+        environment
+            .values
+            .iter()
+            .map(|(name, value)| (name.clone(), *value)),
+    );
     let mut ranges =
         packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, &range_env, type_aliases);
     if let Some(alias) = &declared_alias {
@@ -327,21 +435,48 @@ pub(super) fn extend_const_env_with_parameters(
     parameters: &[Parameter],
 ) {
     let mut parameter_types = parameter_types_from_const_env(env);
+    let mut literals = HashMap::default();
     for parameter in parameters {
-        let Some(value) = parameter.resolved_value(env, &parameter_types) else {
-            continue;
-        };
-        if let Some(r#type) = parameter.resolved_type(&parameter_types) {
-            parameter_types.insert(parameter.name().to_string(), r#type);
-            insert_parameter_type_markers(env, parameter.name(), r#type);
-        }
-        env.insert(parameter.name().to_string(), value);
-        env.insert(parameter_marker(parameter.name()), value);
-        if parameter.is_local {
-            env.insert(local_parameter_marker(parameter.name()), value);
-        }
-        insert_parameter_dimension_markers(env, parameter);
+        bind_parameter(env, &mut parameter_types, &mut literals, parameter);
     }
+}
+
+fn bind_parameter(
+    env: &mut HashMap<String, i128>,
+    types: &mut HashMap<String, ExprType>,
+    literals: &mut HashMap<String, Expr>,
+    parameter: &Parameter,
+) -> bool {
+    #[cfg(test)]
+    PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
+    let value = parameter.resolved_value_with_literals(env, types, literals);
+    let literal = if value.is_none() {
+        let Some(literal) = parameter.resolved_literal(env, types, literals) else {
+            return false;
+        };
+        Some(literal)
+    } else {
+        None
+    };
+    if let Some(ty) = parameter.resolved_type(types) {
+        types.insert(parameter.name().to_string(), ty);
+        insert_parameter_type_markers(env, parameter.name(), ty);
+    }
+    if let Some(literal) = literal {
+        // Shadow a numeric inherited binding with the four-state declaration.
+        env.remove(parameter.name());
+        literals.insert(parameter.name().to_string(), literal);
+        insert_parameter_dimension_markers(env, parameter);
+        return true;
+    }
+    let value = value.expect("a known value or a resolved literal was checked above");
+    env.insert(parameter.name().to_string(), value);
+    env.insert(parameter_marker(parameter.name()), value);
+    if parameter.is_local {
+        env.insert(local_parameter_marker(parameter.name()), value);
+    }
+    insert_parameter_dimension_markers(env, parameter);
+    true
 }
 
 /// Record the packed dimensions of a parameter whose selects need them: an
@@ -485,14 +620,27 @@ pub(super) fn enum_member_constants_from_module_node(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
+    if !scope_declarations(node.clone())
+        .into_iter()
+        .any(|declaration| {
+            let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = declaration
+            else {
+                return false;
+            };
+            let sv_parser::DataDeclaration::TypeDeclaration(declaration) = &**data else {
+                return false;
+            };
+            matches!(&**declaration, sv_parser::TypeDeclaration::DataType(declaration)
+            if matches!(declaration.nodes.1, sv_parser::DataType::Enum(_)))
+        })
+    {
+        return Ok(EnumMemberConstants::default());
+    }
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
     let mut resolved_type_aliases = type_aliases.clone();
     let mut parameters = Vec::new();
-    for item in module_non_port_items(node.clone()) {
-        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
-            continue;
-        };
+    for declaration in scope_declarations(node.clone()) {
         let data = match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
                 parameters_from_ref_node(
@@ -713,6 +861,7 @@ pub(super) fn parameter_value_env(
                 expr: Box::new(value),
             };
         }
+        value = fold_const_integral_expr_preserving_mask(value, const_env);
         values.insert(parameter.name().to_string(), value);
     }
     values
@@ -744,8 +893,9 @@ fn replace_oob_const_selects_with_unknown(
                 }
             }
         }
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| replace_oob_const_selects_with_unknown(arg, const_env))
@@ -815,7 +965,7 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             lsb: *bit,
             signed: false,
         },
-        ConstExpr::Function { name, args } => Expr::Call {
+        ConstExpr::Function { name, args, .. } => Expr::Call {
             name,
             args: args.into_iter().map(const_expr_to_expr).collect(),
         },
@@ -885,8 +1035,9 @@ pub(super) fn substitute_typed_parameter_literals(
                 parameter_types,
             )),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| substitute_typed_parameter_literals(arg, constants, parameter_types))
@@ -955,7 +1106,7 @@ pub(super) fn infer_const_expr_type(
             signed: false,
         }),
         ConstExpr::Function { name, .. } => match name.as_str() {
-            "$clog2" | "$countones" => Some(ExprType {
+            "$clog2" | "$countones" | "$countbits" => Some(ExprType {
                 width: 32,
                 signed: true,
             }),
@@ -1040,3 +1191,11 @@ pub(super) fn infer_parameter_value_type(
         infer_const_expr_type(value, parameter_types)
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;

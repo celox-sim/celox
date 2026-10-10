@@ -34,6 +34,12 @@ jobs:
       napi: ${{ steps.classify.outputs.napi }}
       napi_arm64: ${{ steps.classify.outputs.napi_arm64 }}
       rust: ${{ steps.classify.outputs.rust }}
+      rust_full: ${{ steps.classify.outputs.rust_full }}
+      rust_packages: ${{ steps.classify.outputs.rust_packages }}
+      rust_features: ${{ steps.classify.outputs.rust_features }}
+      rust_filter: ${{ steps.classify.outputs.rust_filter }}
+      rust_libraries: ${{ steps.classify.outputs.rust_libraries }}
+      rust_library_features: ${{ steps.classify.outputs.rust_library_features }}
       scripts: ${{ steps.classify.outputs.scripts }}
     steps:
       - uses: actions/checkout@v7
@@ -48,6 +54,10 @@ jobs:
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
           RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
+          # Scoping pull request tests reads the workspace graph with
+          # `cargo metadata --no-deps`, which the runner's stable Cargo can
+          # do without installing the pinned toolchain.
+          RUSTUP_TOOLCHAIN: stable
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
       - name: Reject development dependencies from the stable lane
@@ -157,9 +167,11 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.scripts == 'true'
         run: node --test scripts/*.test.mjs
 
-      - name: Check CI runtime dependency exclusions
+      # A new dependency edge can invalidate the NAPI exclusions or the
+      # backend and frontend variants that pull requests narrow celox to.
+      - name: Check CI runtime dependency exclusions and test scopes
         if: needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' && needs.changes.outputs.scripts != 'true'
-        run: node --test scripts/ci-changes.test.mjs
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-rust-scope.test.mjs
 
   rust-tests:
     name: Rust Tests
@@ -195,24 +207,57 @@ jobs:
       # tests run once, rather than once per Cargo feature combination.
       # nextest schedules tests from all binaries on one pool; `cargo test`
       # runs the binaries one after another.
+      # A pull request builds and runs only the tests its changes can affect
+      # (scripts/ci-rust-scope.mjs); merge groups and the daily run keep the
+      # whole workspace, so the tree that lands is still fully tested.
       - name: Run workspace tests with CI features
+        if: needs.changes.outputs.rust_full != 'false'
         run: >-
           Z3_BIN="$(command -v z3)"
           cargo nextest run --locked --workspace --profile ci
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
 
+      - name: Run the tests this pull request can affect
+        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_packages != ''
+        env:
+          PACKAGES: ${{ needs.changes.outputs.rust_packages }}
+          FEATURES: ${{ needs.changes.outputs.rust_features }}
+          FILTER: ${{ needs.changes.outputs.rust_filter }}
+        run: |
+          echo "Packages: $PACKAGES"
+          echo "Filter: $FILTER"
+          args=()
+          for package in $PACKAGES; do args+=(-p "$package"); done
+          if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
+          Z3_BIN="$(command -v z3)" cargo nextest run --locked --profile ci \
+            --no-tests=pass "${args[@]}" -E "$FILTER"
+
       # nextest does not run documentation tests.
       - name: Run workspace documentation tests with CI features
+        if: needs.changes.outputs.rust_full != 'false'
         run: >-
           cargo test --locked --workspace --doc
           --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
 
+      - name: Run the documentation tests of the changed libraries
+        if: needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != ''
+        env:
+          LIBRARIES: ${{ needs.changes.outputs.rust_libraries }}
+          FEATURES: ${{ needs.changes.outputs.rust_library_features }}
+        run: |
+          args=()
+          for package in $LIBRARIES; do args+=(-p "$package"); done
+          if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
+          cargo test --locked --doc "${args[@]}"
+
       - name: Verify default-feature library and documentation tests
+        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_libraries), ' celox ')
         run: |
           cargo test --locked -p celox --lib
           cargo test --locked -p celox --doc
 
       - name: Run cocotb VPI end-to-end test
+        if: needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox-vpi ')
         run: |
           CELOX_COCOTB_PYTHON="$(command -v python)" \
             cargo test --locked -p celox-vpi --test cocotb_e2e \
@@ -266,12 +311,11 @@ jobs:
         run: |
           # The runner returns 1 for retained failures as well as regressions.
           # The next step checks the complete fresh report and the exit status.
-          rm -f "$RUNNER_TEMP/external-suite/report.json"
+          rm -f "$RUNNER_TEMP/external-suite/logs/results.json"
           if nix develop --no-update-lock-file --command \
             cargo run --locked -p celox-test-suite --features "$VERIFY_TOOL" \
             --bin "$VERIFY_BIN" -- --jobs 2 \
-            --output "$RUNNER_TEMP/external-suite/logs" \
-            --report "$RUNNER_TEMP/external-suite/report.json"; then
+            --output "$RUNNER_TEMP/external-suite/logs"; then
             task_verify_status=0
           else
             task_verify_status=$?
@@ -285,7 +329,7 @@ jobs:
         run: >-
           nix develop --no-update-lock-file --command
           node scripts/check-external-suite-report.mjs
-          "$RUNNER_TEMP/external-suite/report.json" "$VERIFY_BASELINE"
+          "$RUNNER_TEMP/external-suite/logs/results.json" "$VERIFY_BASELINE"
           "$RUNNER_TEMP/external-suite/catalogue.json" "$VERIFY_EXIT_STATUS" "$VERIFY_SUITE"
 
       - name: Retain results and failure diagnostics
@@ -296,7 +340,6 @@ jobs:
           # Keep evidence rather than hundreds of generated simulator binaries.
           path: |
             ${{ runner.temp }}/external-suite/catalogue.json
-            ${{ runner.temp }}/external-suite/report.json
             ${{ runner.temp }}/external-suite/logs/**/*.json
             ${{ runner.temp }}/external-suite/logs/**/*.log
             ${{ runner.temp }}/external-suite/logs/**/*.veryl
@@ -332,7 +375,7 @@ jobs:
 
       # Any change from the retained results fails, improvements included, so
       # that the expectations follow the frontend.
-      - name: Compare elaboration results with the retained expectations
+      - name: Compare elaboration and simulation results with the retained expectations
         run: >-
           cargo run --locked --release -p celox --features systemverilog
           --example sv_tests -- "$RUNNER_TEMP/sv-tests/tests"

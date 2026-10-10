@@ -22,7 +22,7 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
-pub use ast::packages::PackageSource;
+pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 pub use parsed::ParsedSource;
@@ -43,6 +43,8 @@ pub enum AnalyzerError {
     MemoryFile(String),
     #[error("Duplicate module declaration: {name}")]
     DuplicateModule { name: String },
+    #[error("Duplicate package declaration: {name}")]
+    DuplicatePackage { name: String },
     #[error("Duplicate modport declaration in interface `{interface}`: {name}")]
     DuplicateModport { interface: String, name: String },
     #[error("Duplicate declaration in interface `{interface}`: {name}")]
@@ -74,6 +76,19 @@ pub enum AnalyzerError {
     DuplicateInstance { module: String, name: String },
     #[error("Generate block `{name}` in module `{module}` has the name of another declaration")]
     DuplicateGenerateScope { module: String, name: String },
+    /// A package scope or an import names a package that is not declared.
+    #[error("unknown package `{name}`")]
+    UnknownPackage { name: String },
+    /// `p::x`, or `import p::x;`, where package `p` declares no `x`.
+    #[error("package `{package}` has no item `{name}`")]
+    UnknownPackageItem { package: String, name: String },
+    /// An import that IEEE 1800-2023 26.3 makes illegal, or a reference that
+    /// matches names of two wildcard-imported packages.
+    #[error("import of `{name}`: {detail}")]
+    ImportConflict { name: String, detail: String },
+    /// Packages that import or refer to each other.
+    #[error("package `{name}` depends on itself")]
+    PackageCycle { name: String },
     #[error("unknown top-level parameter override `{name}`")]
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
@@ -111,7 +126,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("ref port direction", 427),
     ("always and always_latch processes", 431),
     ("non-zero-based multidimensional packed range", 438),
-    ("variable declaration initializer", 439),
     (
         "unpacked struct, union, or unsupported packed struct member",
         440,
@@ -131,6 +145,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
     ("mixed reset-edge polarities for one signal", 471),
+    ("package variable or net", 1146),
 ];
 
 impl AnalyzerError {
@@ -156,9 +171,11 @@ pub fn elaborate_interfaces(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax(&syntax_tree)?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax(&syntax_tree)?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Parse and analyze a SystemVerilog source with parameter overrides applied
@@ -169,13 +186,15 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax_with_module_parameter_overrides(
-        &syntax_tree,
-        module_name,
-        parameter_overrides,
-    )?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax_with_module_parameter_overrides(
+            &syntax_tree,
+            module_name,
+            parameter_overrides,
+        )?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Return the module names declared in a SystemVerilog source without
@@ -202,13 +221,15 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let source = ast::Source::from_syntax_module_with_parameter_overrides(
-        &syntax_tree,
-        module_name,
-        parameter_overrides,
-    )?;
-    analyze::analyze_source(source)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        let source = ast::Source::from_syntax_module_with_parameter_overrides(
+            &syntax_tree,
+            module_name,
+            parameter_overrides,
+        )?;
+        analyze::analyze_source(source)
+    })
 }
 
 /// Analyze only one module from a source file while preserving the literal
@@ -236,31 +257,57 @@ pub fn source_module_interfaces(
     code: &str,
     path: &Path,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::Source::module_interfaces_from_syntax(&syntax_tree)
+    ast::with_call_sites(|| {
+        let syntax_tree = syntax::parse_source(code, path)?;
+        ast::Source::module_interfaces_from_syntax(&syntax_tree)
+    })
 }
 
 #[cfg(test)]
 mod tests;
 
-/// The packages declared in a source, rewritten so that their items can be
-/// inlined into the modules that use them.
-pub fn source_packages(code: &str, path: &Path) -> Result<Vec<PackageSource>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::packages::source_packages(code, &syntax_tree)
+/// Analyze the packages declared in `sources`, each once, after the packages
+/// it depends on.
+pub fn analyze_packages(sources: &[(&str, &Path)]) -> Result<Packages, AnalyzerError> {
+    let parsed = sources
+        .iter()
+        .map(|(code, path)| ParsedSource::parse(code, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    ParsedSource::analyze_packages(&parsed.iter().collect::<Vec<_>>())
 }
 
-/// The source of `module_name` with the packages it uses inlined, or `None`
-/// when it uses no package. Source positions before the module's `endmodule`
-/// are unchanged.
-pub fn inline_module_packages(
+/// Analyze one module of a source with parameter overrides applied before
+/// generate elaboration. The module may use `packages`, which may be
+/// declared in other sources.
+pub fn analyze_source_module_with_packages(
     code: &str,
     path: &Path,
     module_name: &str,
-    packages: &HashMap<String, PackageSource>,
-) -> Result<Option<String>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::packages::inline_packages(code, &syntax_tree, module_name, packages)
+    parameter_overrides: &HashMap<String, i128>,
+    packages: &Packages,
+) -> Result<Ir, AnalyzerError> {
+    let overrides = parameter_overrides
+        .iter()
+        .map(|(name, value)| {
+            let literal = ir::ConstExpr::Literal(value.unsigned_abs().to_string());
+            let value = if *value < 0 {
+                ir::ConstExpr::Unary {
+                    op: ir::UnaryOp::Minus,
+                    expr: Box::new(literal),
+                }
+            } else {
+                literal
+            };
+            (name.clone(), value)
+        })
+        .collect();
+    ParsedSource::parse(code, path)?.analyze_module(
+        module_name,
+        &overrides,
+        &[],
+        &ModuleInterfaces::default(),
+        packages,
+    )
 }
 
 /// The source of `module_name` with each `parameter type` in `overrides`
@@ -273,5 +320,5 @@ pub fn apply_module_type_parameters(
     overrides: &[(String, String)],
 ) -> Result<Option<String>, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
-    ast::packages::apply_type_parameter_overrides(code, &syntax_tree, module_name, overrides)
+    ast::type_parameters::apply_type_parameter_overrides(code, &syntax_tree, module_name, overrides)
 }

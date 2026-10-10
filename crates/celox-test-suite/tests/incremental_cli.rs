@@ -82,7 +82,11 @@ exit 1
             String::from_utf8_lossy(&result.stderr)
         );
     };
-    let report = || -> Value { serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap() };
+    // The cache is the complete results; --report retains only results.
+    let results_path = directory.join("output").join("results.json");
+    let report = || -> Value { serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap() };
+    let retained =
+        || -> Value { serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap() };
     let calls = || fs::read_to_string(&invocations).unwrap().lines().count();
 
     fs::write(&mode, "failure\n").unwrap();
@@ -110,10 +114,20 @@ exit 1
         report()["cases"][0]["verified_at_unix"],
         first["cases"][0]["verified_at_unix"]
     );
+    let mut expected = report();
+    let fields = expected.as_object_mut().unwrap();
+    for key in ["context_fingerprint", "incremental", "run_counts", "counts"] {
+        fields.remove(key).unwrap();
+    }
+    let row = fields["cases"][0].as_object_mut().unwrap();
+    for key in ["case_fingerprint", "reused", "verified_at_unix"] {
+        row.remove(key).unwrap();
+    }
+    assert_eq!(retained(), expected, "retained reports omit run metadata");
 
     let mut changed = report();
     changed["cases"][0]["case_fingerprint"] = json!("prior case contents");
-    fs::write(&report_path, changed.to_string()).unwrap();
+    fs::write(&results_path, changed.to_string()).unwrap();
     execute(true, true);
     assert_eq!(calls(), 4, "changed case must run again");
 
@@ -126,7 +140,7 @@ exit 1
     assert_eq!(calls(), 5, "changed compiler must invalidate reuse");
     execute(false, true);
     assert_eq!(calls(), 6, "default mode must always run afresh");
-    fs::write(&report_path, "corrupted report").unwrap();
+    fs::write(&results_path, "corrupted report").unwrap();
     execute(true, false);
     assert_eq!(calls(), 6, "corrupt baseline must fail before compilation");
     fs::remove_dir_all(directory).unwrap();

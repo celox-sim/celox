@@ -1,15 +1,13 @@
 name: Compile-time Benchmarks
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-  merge_group:
+  schedule:
+    - cron: "17 2 * * *"
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -20,8 +18,9 @@ permissions: {}
 jobs:
   codspeed:
     name: CodSpeed
-    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
+    outputs:
+      run-id: ${{ steps.benchmarks.outputs.run-id }}
     permissions:
       contents: read
       id-token: write
@@ -43,7 +42,33 @@ jobs:
         run: cargo codspeed build --locked -p celox --bench compilation
 
       - name: Run compile-time benchmarks
+        id: benchmarks
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
           run: cargo codspeed run -p celox
+
+  report:
+    name: Report CodSpeed
+    needs: codspeed
+    if: always() && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
+      - name: Report execution failures and performance regressions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BENCHMARK_RESULT: ${{ needs.codspeed.result }}
+          CODSPEED_RUN_ID: ${{ needs.codspeed.outputs.run-id }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/report-codspeed.mjs

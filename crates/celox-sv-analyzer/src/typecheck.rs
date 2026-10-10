@@ -55,6 +55,9 @@ impl std::fmt::Display for UnpackedArrayType {
 
 /// Width and signedness of the supported bit vector system functions (20.9).
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
+    if name == "$countbits" {
+        return (arity >= 2).then_some((32, true));
+    }
     if arity != 1 {
         return None;
     }
@@ -103,7 +106,7 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
-        ConstExpr::Function { name, args } => eval_const_function(name, args, constants),
+        ConstExpr::Function { name, args, .. } => eval_const_function(name, args, constants),
         ConstExpr::Unary { op, expr: operand } => {
             if let Some(result) = integral_literal_from_const_expr(expr)
                 && let Some(value) = integral_literal_as_i128(&result, result.signed)
@@ -346,8 +349,9 @@ pub fn substitute_typed_constants(
             expr: Box::new(substitute_typed_constants(*expr, constants, types)),
             bit: Box::new(substitute_typed_constants(*bit, constants, types)),
         },
-        ConstExpr::Function { name, args } => ConstExpr::Function {
+        ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
+            site,
             args: args
                 .into_iter()
                 .map(|arg| substitute_typed_constants(arg, constants, types))
@@ -789,10 +793,10 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
-        ConstExpr::Function { name, args } => {
+        ConstExpr::Function { name, args, .. } => {
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
-                "$clog2" | "$countones" => (32, "s"),
+                "$clog2" | "$countones" | "$countbits" => (32, "s"),
                 "$onehot" | "$onehot0" | "$isunknown" => (1, ""),
                 _ => return None,
             };
@@ -1084,6 +1088,37 @@ fn eval_const_function(
     if !name.starts_with('$') {
         return crate::ast::const_functions::eval_call(name, args, constants);
     }
+    if name == "$countbits" {
+        let (arg, controls) = args.split_first()?;
+        if controls.is_empty() {
+            return None;
+        }
+        let operand = const_countbits_literal(arg, constants)?;
+        // Control arguments are converted to logic: only their LSB matters.
+        // A set of states prevents duplicate controls from counting twice.
+        let mut states = [false; 4];
+        for control in controls {
+            let literal = const_countbits_literal(control, constants)?;
+            let state = literal.value.bit(0) as usize + 2 * literal.mask.bit(0) as usize;
+            states[state] = true;
+        }
+        let all = (BigUint::from(1u8) << operand.width) - BigUint::from(1u8);
+        let inverted_value = &all ^ &operand.value;
+        let known = &all ^ &operand.mask;
+        let state_bits = [
+            &inverted_value & &known,
+            &operand.value & &known,
+            &inverted_value & &operand.mask,
+            &operand.value & &operand.mask,
+        ];
+        let count = state_bits
+            .iter()
+            .zip(states)
+            .filter(|(_, selected)| *selected)
+            .map(|(bits, _)| bits.iter_u64_digits().map(u64::count_ones).sum::<u32>())
+            .sum::<u32>();
+        return Some(count as i32 as i128);
+    }
     let [arg] = args else {
         return None;
     };
@@ -1108,6 +1143,16 @@ fn eval_const_function(
         }
         _ => None,
     }
+}
+
+fn const_countbits_literal(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+) -> Option<IntegralLiteral> {
+    self_determined_integral_literal(expr).or_else(|| {
+        let value = eval_const_expr(expr, constants)?;
+        parse_integral_literal(&format_typed_constant_literal(value, 32, true))
+    })
 }
 
 fn const_expr_known_one_bits(

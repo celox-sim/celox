@@ -1898,6 +1898,17 @@ impl NativeSimulationHandle {
         Ok(sim.next_event_time().map(|t| t as f64))
     }
 
+    /// Returns whether a process of the design requested the end of the
+    /// simulation.
+    #[napi]
+    pub fn is_finished(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.is_finished())
+    }
+
     /// Evaluate combinational logic.
     #[napi]
     pub fn eval_comb(&mut self) -> Result<()> {

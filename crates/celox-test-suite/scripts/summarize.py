@@ -20,8 +20,9 @@ def main():
         if len(rows) != len(report["cases"]):
             raise ValueError(f"duplicate cases in {tool}")
         counts = Counter(row["status"] for row in rows.values())
-        if set(counts) - set(STATUSES) or any(report["counts"].get(s, 0) != counts[s] for s in STATUSES):
-            raise ValueError(f"inconsistent counts in {tool}")
+        if set(counts) - set(STATUSES):
+            raise ValueError(f"unknown status in {tool}")
+        report["counts"] = counts
         reports.append((report, rows))
     verilator, icarus = (r[1] for r in reports)
     if verilator.keys() != icarus.keys():

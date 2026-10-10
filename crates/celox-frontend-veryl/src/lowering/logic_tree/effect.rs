@@ -98,6 +98,7 @@ fn register_comb_runtime_event_site<'a>(
     let site = RuntimeEventSite {
         kind,
         template,
+        sizing: DisplaySizing::Veryl,
         scope: None,
         arg_widths: value_args
             .iter()

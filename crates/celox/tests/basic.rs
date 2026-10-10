@@ -212,16 +212,10 @@ module Top (
     }
 
     fn test_comb_function_call_with_output_argument_in_index_expression(sim) {
-        // SV frontend rejects a function call in a select index:
-        // "select index `f(sel, q_output)`" (#88).
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_index_expression";
     }
 
     fn test_comb_function_call_with_output_argument_in_destination_index(sim) {
-        // SV frontend rejects a destination index that calls a function with an output
-        // argument: "assignment target `data`" (#88).
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_with_output_argument_in_destination_index";
     }
 

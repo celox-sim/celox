@@ -38,7 +38,7 @@ fn unpacked_array_type(
 
 /// The shape of a variable `name` after `indices` index selects, when that
 /// is still an unpacked array.
-fn selected_unpacked_shape(
+pub(super) fn selected_unpacked_shape(
     name: &str,
     indices: usize,
     dims: &PackedDimensions,
@@ -77,8 +77,7 @@ fn expression_unpacked_shape(
             if select.nodes.0.is_some() || select.nodes.2.is_some() {
                 return None;
             }
-            let name =
-                identifier_text(RefNode::HierarchicalIdentifier(&hierarchical.nodes.1), tree)?;
+            let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), tree)?;
             selected_unpacked_shape(&name, select.nodes.1.nodes.0.len(), dims)
         }
         _ => None,

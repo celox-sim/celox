@@ -49,15 +49,15 @@ synthesis and is tested at the design level.
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
-| Initial blocks | `initial` blocks whose writes have constant values (they define the initial state), with constant `if` / `for`, and `$readmemh` / `$readmemb` |
+| Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` (without timing) with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$clog2`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
-| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop` in `always` processes and subroutines; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| System functions | `$bits`, `$size`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
+| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -93,17 +93,17 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   interfaces may not use `$` in its own identifiers, which the expansion
   reserves for generated names, or escaped identifiers that are not simple
   identifiers.
-- Behavioral and verification constructs: `initial` blocks that read design
-  state or use timing, `final`, delays and delayed continuous assignments
+- Behavioral and verification constructs: `initial` blocks that use timing,
+  nonblocking assignments in an `initial` block that runs as a process, `final`, delays and delayed continuous assignments
   ([#444](https://github.com/celox-sim/celox/issues/444)), event controls other than clock edges, concurrent assertions,
-  `force` / `release`. System tasks inside a combinational loop whose trip
-  count is only known at run time are rejected.
+  `force` / `release`.
 - `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)), level-sensitive sensitivity lists other than `@*`,
   and incomplete combinational assignments that would infer a latch.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
-- Declarations: variable declaration initializers ([#439](https://github.com/celox-sim/celox/issues/439)), packed unions
+- Declarations: variable declaration initializers of members of an interface
+  array, ANSI port default values, packed unions
   ([#440](https://github.com/celox-sim/celox/issues/440)), multidimensional packed ranges that are not zero-based and
   descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)), block-local
   variables that share a name with a variable of another process ([#445](https://github.com/celox-sim/celox/issues/445)),
@@ -122,7 +122,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
 - System tasks and functions: Celox knows every name of IEEE 1800-2023
   clauses 20 and 21. One it does not support where it is called, such as
-  `$time` in an expression, `$fopen`, or `$display` in an `initial` block, is
+  `$time` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments or an omitted argument
@@ -199,9 +199,17 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Wildcard comparisons.** `casez`, `casex`, `inside` and `==?` honor the
   `?`, `x` and `z` bits of a constant pattern in both two-state and four-state
   simulation.
-- **Packages** are inlined into each module that uses them. Names resolve by
-  their plain identifier, so a package item and a module item with the same
-  name are reported as a duplicate declaration.
+- **Packages** are analyzed once each, as scopes of their own, and names
+  resolve as IEEE 1800-2023 26.3 describes. `p::x` names the item of package
+  `p`, so items of one name in several packages, or in a package and a
+  module, do not clash. `import p::x;` makes only `x` visible. With
+  `import p::*;`, a name the scope declares itself hides the package's, and
+  a name that two wildcard-imported packages declare is an error only when a
+  reference uses it. Names in a package function resolve in the package.
+  Package variables and nets are rejected until they can be shared between
+  modules ([#1146](https://github.com/celox-sim/celox/issues/1146)); `const`
+  variables are accepted. Package `export` declarations and compilation-unit (`$unit`) declarations
+  are not supported.
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An

@@ -348,6 +348,35 @@ impl<'a> ProcModule<'a> {
     }
 
     /// Whether an expression calls a user subroutine or a DPI-C import.
+    pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
+        lvalue_calls(lvalue, &|name| {
+            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+        })
+    }
+
+    pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
+        const_calls(expr, &|name| {
+            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+        })
+    }
+
+    /// The largest subexpressions of `expr` that call a subroutine and also
+    /// occur in `other`, left to right.
+    pub fn shared_calls<'e>(
+        &self,
+        expr: &'e sv::ir::ConstExpr,
+        other: &sv::ir::ConstExpr,
+    ) -> Vec<&'e sv::ir::ConstExpr> {
+        let mut shared = Vec::new();
+        shared_calls(
+            expr,
+            other,
+            &|name| self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name),
+            &mut shared,
+        );
+        shared
+    }
+
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
         expr_calls(expr, &|name| {
             self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
@@ -532,8 +561,9 @@ pub(super) fn readmem_destination<'e>(
 }
 
 pub(super) enum SystemTaskKind {
-    /// `$display` and `$write` (and their radix variants).
-    Print(RuntimeEventKind),
+    /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
+    /// variants (`d` otherwise).
+    Print(RuntimeEventKind, char),
     /// `$finish` and `$stop`.
     Finish,
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
@@ -545,10 +575,10 @@ pub(super) enum SystemTaskKind {
 pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
     Some(match name {
         "$display" | "$displayb" | "$displayh" | "$displayo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Display)
+            SystemTaskKind::Print(RuntimeEventKind::Display, print_radix(name))
         }
         "$write" | "$writeb" | "$writeh" | "$writeo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Write)
+            SystemTaskKind::Print(RuntimeEventKind::Write, print_radix(name))
         }
         "$finish" | "$stop" => SystemTaskKind::Finish,
         "$error" | "$warning" | "$info" => SystemTaskKind::Message,
@@ -557,8 +587,37 @@ pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
     })
 }
 
+fn print_radix(name: &str) -> char {
+    match name.as_bytes().last() {
+        Some(radix @ (b'b' | b'o' | b'h')) => char::from(*radix),
+        _ => 'd',
+    }
+}
+
+/// How many arguments the conversions of `template` consume, as the runtime
+/// renders them.
+fn template_arguments(template: &str) -> usize {
+    let mut chars = template.chars().peekable();
+    let mut count = 0;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        while chars.next_if(char::is_ascii_digit).is_some() {}
+        if let Some(spec) = chars.next()
+            && "bBoOhHxXdDiIcCsS".contains(spec)
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// The message template and value arguments of a system task: a leading
 /// string literal is the template. `$fatal` first takes a finish number.
+/// A `$display` or `$write` argument without a conversion of its own is
+/// displayed in the task's radix, directly after the previous one (IEEE
+/// 1800-2023 21.2.1.1).
 pub(super) fn system_task_template(
     kind: &SystemTaskKind,
     args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
@@ -570,12 +629,22 @@ pub(super) fn system_task_template(
         SystemTaskKind::Finish => &[][..],
         _ => args,
     };
-    match args.first() {
+    let (mut template, values) = match args.first() {
         Some(sv::ir::SystemTaskArg::Str(template)) => {
             (Some(unescape(template)), args[1..].to_vec())
         }
         _ => (None, args.to_vec()),
+    };
+    if let SystemTaskKind::Print(_, radix) = kind {
+        let converted = template.as_deref().map_or(0, template_arguments);
+        let rest = values.len().saturating_sub(converted);
+        if rest > 0 {
+            let mut text = template.unwrap_or_default();
+            text.push_str(&format!("%{radix}").repeat(rest));
+            template = Some(text);
+        }
     }
+    (template, values)
 }
 
 /// The value of a string literal's escape sequences (IEEE 1800-2023 5.9.1).
@@ -803,6 +872,15 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             }
         }
         SLTNode::Binary(left, op, right) => {
+            // A logical operator that its left operand decides does not
+            // evaluate its right operand (IEEE 1800-2023 11.4.7), which need
+            // not be constant.
+            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                let decides = matches!(op, BinaryOp::LogicOr);
+                if child(*left).and_then(|left| truth(&left)) == Some(decides) {
+                    return Some((BigUint::from(u8::from(decides)), BigUint::zero(), width));
+                }
+            }
             let (lv, lm, lw) = child(*left)?;
             let (rv, rm, rw) = child(*right)?;
             let both_signed = node_is_signed(arena, *left) && node_is_signed(arena, *right);
@@ -1225,6 +1303,26 @@ pub(super) fn slt_truth<A: std::hash::Hash + Eq + Clone>(
         .map_err(slt_error)
 }
 
+/// Whether the truth of a condition is ambiguous: no bit is one and some
+/// bit is unknown (IEEE 1800-2023 11.4.11). A condition with a known one is
+/// true even when other bits are unknown.
+pub(super) fn slt_truth_unknown<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    consts: &mut ConstCache,
+    condition: NodeId,
+) -> Result<NodeId, sv::AnalyzerError> {
+    let any = arena
+        .alloc(SLTNode::Unary(UnaryOp::Or, condition))
+        .map_err(slt_error)?;
+    let known = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, any))
+        .map_err(slt_error)?;
+    let is_known = arena
+        .alloc(SLTNode::Binary(any, BinaryOp::EqCase, known))
+        .map_err(slt_error)?;
+    slt_not(arena, consts, is_known)
+}
+
 /// Whether a value is not logically false: some bit is one or unknown. The
 /// second operand of `&&` is skipped only when the first is false
 /// (IEEE 1800-2023 11.4.7); an ambiguous first operand still evaluates it.
@@ -1485,13 +1583,124 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     }
 }
 
+/// Whether a constant-expression operand, such as a run-time select index,
+/// calls a subroutine.
+pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> bool) -> bool {
+    use sv::ir::ConstExpr;
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        ConstExpr::Select { expr, bit } => {
+            const_calls(expr, is_callee) || const_calls(bit, is_callee)
+        }
+        ConstExpr::Function { name, args, .. } => {
+            is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
+        }
+        ConstExpr::Unary { expr, .. } => const_calls(expr, is_callee),
+        ConstExpr::Binary { left, right, .. } => {
+            const_calls(left, is_callee) || const_calls(right, is_callee)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_calls(condition, is_callee)
+                || const_calls(then_expr, is_callee)
+                || const_calls(else_expr, is_callee)
+        }
+    }
+}
+
+/// Whether `expr` has `part` as a subexpression.
+fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
+    use sv::ir::ConstExpr;
+    expr == part
+        || match expr {
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+            ConstExpr::Select { expr, bit } => {
+                const_contains(expr, part) || const_contains(bit, part)
+            }
+            ConstExpr::Function { args, .. } => args.iter().any(|arg| const_contains(arg, part)),
+            ConstExpr::Unary { expr, .. } => const_contains(expr, part),
+            ConstExpr::Binary { left, right, .. } => {
+                const_contains(left, part) || const_contains(right, part)
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                const_contains(condition, part)
+                    || const_contains(then_expr, part)
+                    || const_contains(else_expr, part)
+            }
+        }
+}
+
+/// Collect the largest subexpressions of `expr` that call a subroutine and
+/// also occur in `other`, left to right.
+fn shared_calls<'e>(
+    expr: &'e sv::ir::ConstExpr,
+    other: &sv::ir::ConstExpr,
+    is_callee: &dyn Fn(&str) -> bool,
+    shared: &mut Vec<&'e sv::ir::ConstExpr>,
+) {
+    use sv::ir::ConstExpr;
+    if !const_calls(expr, is_callee) {
+        return;
+    }
+    if const_contains(other, expr) {
+        shared.push(expr);
+        return;
+    }
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Select { expr, bit } => {
+            shared_calls(expr, other, is_callee, shared);
+            shared_calls(bit, other, is_callee, shared);
+        }
+        ConstExpr::Function { args, .. } => args
+            .iter()
+            .for_each(|arg| shared_calls(arg, other, is_callee, shared)),
+        ConstExpr::Unary { expr, .. } => shared_calls(expr, other, is_callee, shared),
+        ConstExpr::Binary { left, right, .. } => {
+            shared_calls(left, other, is_callee, shared);
+            shared_calls(right, other, is_callee, shared);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            shared_calls(condition, other, is_callee, shared);
+            shared_calls(then_expr, other, is_callee, shared);
+            shared_calls(else_expr, other, is_callee, shared);
+        }
+    }
+}
+
+/// Whether the select positions of an assignment target call a subroutine.
+pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> bool) -> bool {
+    match lvalue {
+        sv::ir::LValue::Ident(_) => false,
+        sv::ir::LValue::Select { msb, lsb, .. } => {
+            const_calls(msb, is_callee) || const_calls(lsb, is_callee)
+        }
+    }
+}
+
 /// Whether an expression calls a user subroutine.
 pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
-        sv::ir::Expr::Select { expr, .. }
-        | sv::ir::Expr::Resize { expr, .. }
-        | sv::ir::Expr::Unary { expr, .. } => expr_calls(expr, is_callee),
+        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
+            expr_calls(expr, is_callee)
+                || const_calls(msb, is_callee)
+                || const_calls(lsb, is_callee)
+        }
+        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Unary { expr, .. } => {
+            expr_calls(expr, is_callee)
+        }
         sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
             parts.iter().any(|part| expr_calls(part, is_callee))
         }
@@ -1594,5 +1803,185 @@ pub(super) fn stmt_may_jump(stmt: &sv::ir::Stmt, in_loop: bool) -> bool {
         // A `break` or `continue` inside a nested loop belongs to it.
         sv::ir::Stmt::Loop { body, .. } => stmts_may_jump(body, true),
         _ => false,
+    }
+}
+
+/// The user subroutine calls an expression makes, outermost first, with their
+/// arguments.
+pub(super) fn collect_calls(
+    expr: &sv::ir::Expr,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    match expr {
+        sv::ir::Expr::Call { name, args } => {
+            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
+            for arg in args {
+                collect_calls(arg, calls);
+            }
+        }
+        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => {}
+        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
+            collect_calls(expr, calls);
+            collect_const_calls(msb, calls);
+            collect_const_calls(lsb, calls);
+        }
+        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Unary { expr, .. } => {
+            collect_calls(expr, calls)
+        }
+        sv::ir::Expr::Concat(parts) => parts.iter().for_each(|part| collect_calls(part, calls)),
+        sv::ir::Expr::RepeatConcat { count, parts } => {
+            collect_const_calls(count, calls);
+            parts.iter().for_each(|part| collect_calls(part, calls))
+        }
+        sv::ir::Expr::Binary { left, right, .. } => {
+            collect_calls(left, calls);
+            collect_calls(right, calls);
+        }
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_calls(condition, calls);
+            collect_calls(then_expr, calls);
+            collect_calls(else_expr, calls);
+        }
+        sv::ir::Expr::Inside { expr, items } => {
+            collect_calls(expr, calls);
+            for item in items {
+                item.exprs()
+                    .into_iter()
+                    .for_each(|operand| collect_calls(operand, calls));
+            }
+        }
+    }
+}
+
+/// The calls of a constant-expression operand, such as a run-time select
+/// position.
+fn collect_const_calls(
+    expr: &sv::ir::ConstExpr,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    use sv::ir::ConstExpr;
+    match expr {
+        ConstExpr::Function { name, args, .. } => {
+            calls.push((
+                name.clone(),
+                args.iter().map(expr_from_const_expr).collect(),
+            ));
+            args.iter().for_each(|arg| collect_const_calls(arg, calls));
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Select { expr, bit } => {
+            collect_const_calls(expr, calls);
+            collect_const_calls(bit, calls);
+        }
+        ConstExpr::Unary { expr, .. } => collect_const_calls(expr, calls),
+        ConstExpr::Binary { left, right, .. } => {
+            collect_const_calls(left, calls);
+            collect_const_calls(right, calls);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_const_calls(condition, calls);
+            collect_const_calls(then_expr, calls);
+            collect_const_calls(else_expr, calls);
+        }
+    }
+}
+
+/// The calls a statement makes in its own expressions (not in the statements
+/// it contains), including a call statement itself.
+/// The calls in the select positions of an assignment target.
+fn lvalue_position_calls(
+    lvalue: &sv::ir::LValue,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
+        collect_const_calls(msb, calls);
+        collect_const_calls(lsb, calls);
+    }
+}
+
+pub(super) fn stmt_calls(
+    stmt: &sv::ir::Stmt,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
+    match stmt {
+        sv::ir::Stmt::Call { name, args } => {
+            calls.push((name.clone(), args.clone()));
+            exprs.extend(args.iter().flatten());
+        }
+        sv::ir::Stmt::Assign { lhs, rhs, .. } => {
+            lvalue_position_calls(lhs, calls);
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
+            parts
+                .iter()
+                .for_each(|part| lvalue_position_calls(part, calls));
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::Eval(rhs) => exprs.push(rhs),
+        sv::ir::Stmt::If { condition, .. } => exprs.push(condition),
+        sv::ir::Stmt::Case {
+            selector, items, ..
+        } => {
+            exprs.push(selector);
+            for item in items {
+                for label in &item.labels {
+                    match label {
+                        sv::ir::CaseLabel::Value(value) => exprs.push(value),
+                        sv::ir::CaseLabel::Range { low, high } => {
+                            exprs.push(low);
+                            exprs.push(high);
+                        }
+                    }
+                }
+            }
+        }
+        sv::ir::Stmt::Loop {
+            kind, condition, ..
+        } => {
+            if let sv::ir::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs.extend(condition);
+        }
+        sv::ir::Stmt::Return(Some(value)) => exprs.push(value),
+        sv::ir::Stmt::Local {
+            init: Some(init), ..
+        } => exprs.push(init),
+        sv::ir::Stmt::SystemTask { args, .. } => {
+            for arg in args {
+                if let sv::ir::SystemTaskArg::Expr(expr) = arg {
+                    exprs.push(expr);
+                }
+            }
+        }
+        _ => {}
+    }
+    for expr in exprs {
+        collect_calls(expr, calls);
+    }
+}
+
+/// The calls in the default values a call uses for its omitted arguments.
+pub(super) fn default_calls(
+    subroutine: &sv::ir::Subroutine,
+    args: &[Option<sv::ir::Expr>],
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    for (position, param) in subroutine.params.iter().enumerate() {
+        if matches!(args.get(position), None | Some(None))
+            && let Some(default) = &param.default
+        {
+            collect_calls(default, calls);
+        }
     }
 }

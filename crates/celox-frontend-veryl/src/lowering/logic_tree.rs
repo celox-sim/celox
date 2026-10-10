@@ -29,7 +29,9 @@ use crate::{
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
-use celox_design::{BinaryOp, BitAccess, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase};
+use celox_design::{
+    BinaryOp, BitAccess, DisplaySizing, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase,
+};
 use celox_slt::{CombObserver, RangeStore, RangeStoreError};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{ToPrimitive as _, Zero as _};

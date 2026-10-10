@@ -676,6 +676,15 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    // The testbench drives time itself and never resumes process kernels.
+    if !artifact.processes().is_empty() {
+        return Err(
+            celox_frontend_core::FrontendArtifactError::ProcessesInTestbench {
+                module: artifact.module_name().to_string(),
+            }
+            .into(),
+        );
+    }
     let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -1515,6 +1524,13 @@ mod host {
         }
 
         /// Enable 4-state (0, 1, X, Z) simulation mode.
+        /// Generate the trigger stores a timed [`crate::Simulation`] relies on.
+        #[cfg(test)]
+        pub(crate) fn emit_triggers(mut self) -> Self {
+            self.options.emit_triggers = true;
+            self
+        }
+
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
             self

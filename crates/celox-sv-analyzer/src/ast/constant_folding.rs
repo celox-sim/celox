@@ -2,7 +2,7 @@
 
 use super::*;
 
-const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
+pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
 
 pub(super) fn simplify_constant_mux_conditions(
     expr: Expr,
@@ -350,10 +350,10 @@ pub(super) fn constant_with_folded_selections(
             then_expr: Box::new(convert(then_expr)?),
             else_expr: Box::new(convert(else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::Function {
-            name: name.clone(),
-            args: args.iter().map(convert).collect::<Option<Vec<_>>>()?,
-        }),
+        Expr::Call { name, args } => Some(ConstExpr::call(
+            name.clone(),
+            args.iter().map(convert).collect::<Option<Vec<_>>>()?,
+        )),
         _ => expr_to_const(expr.clone()),
     }
 }

@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { readWorkspace, rustTestScope } from "./ci-rust-scope.mjs";
 
 const ALL_AFFECTED = Object.freeze({
   docs: true,
@@ -272,5 +274,45 @@ if (
           }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
-  writeOutputs({ ...affected, release });
+  writeOutputs({
+    ...affected,
+    release,
+    ...rustScopeOutputs(
+      process.env.GITHUB_EVENT_NAME === "pull_request" && !release && affected.rust
+        ? files
+        : null,
+    ),
+  });
+}
+
+// Pull requests run the Rust tests their changes can affect; merge groups,
+// releases and the daily run keep the whole workspace (see ci-rust-scope.mjs).
+function rustScopeOutputs(files) {
+  let scope = { full: true };
+  if (files !== null) {
+    try {
+      const root = fileURLToPath(new URL("../", import.meta.url));
+      scope = rustTestScope(files, readWorkspace(root));
+    } catch (error) {
+      console.warn(`Unable to scope the Rust tests: ${error.message}`);
+    }
+  }
+  if (scope.full) {
+    return {
+      rust_full: true,
+      rust_packages: "",
+      rust_features: "",
+      rust_filter: "",
+      rust_libraries: "",
+      rust_library_features: "",
+    };
+  }
+  return {
+    rust_full: false,
+    rust_packages: scope.packages.join(" "),
+    rust_features: scope.features.join(","),
+    rust_filter: scope.filter,
+    rust_libraries: scope.libraries.join(" "),
+    rust_library_features: scope.libraryFeatures.join(","),
+  };
 }

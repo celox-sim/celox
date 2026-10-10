@@ -105,7 +105,7 @@ pub(super) fn reject_silently_ignored_constructs(
 ) -> Result<(), AnalyzerError> {
     let mut indexed_dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
-    indexed_dimensions.parameter_values = parameter_values.clone();
+    indexed_dimensions.parameter_values = parameter_values.clone().into();
     let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
     let generated_nodes: Vec<_> = if is_module {
         node.clone()
@@ -182,23 +182,6 @@ pub(super) fn reject_silently_ignored_constructs(
         })
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
-        .collect();
-    // Declarations inside procedural blocks and subroutines are scoped
-    // locals: their initializers run where they are declared.
-    let procedural_declarations: Vec<_> = node
-        .clone()
-        .into_iter()
-        .filter(|child| {
-            matches!(
-                child,
-                RefNode::AlwaysConstruct(_)
-                    | RefNode::InitialConstruct(_)
-                    | RefNode::FunctionDeclaration(_)
-                    | RefNode::TaskDeclaration(_)
-            )
-        })
-        .flat_map(|root| root.into_iter())
-        .filter(|child| matches!(child, RefNode::VariableDeclAssignmentVariable(_)))
         .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
@@ -325,14 +308,6 @@ pub(super) fn reject_silently_ignored_constructs(
                     "concurrent assertion".to_string(),
                 ));
             }
-            RefNode::VariableDeclAssignmentVariable(assignment)
-                if assignment.nodes.2.is_some()
-                    && !procedural_declarations.contains(&RefNode::VariableDeclAssignmentVariable(assignment)) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "variable declaration initializer".to_string(),
-                ));
-            }
             RefNode::IndexedRange(range) => {
                 indexed_select_base(
                     RefNode::Expression(&range.nodes.0),
@@ -367,15 +342,14 @@ pub(super) fn reject_silently_ignored_constructs(
                 if matches!(
                     &call.nodes.0.nodes.0,
                     sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some()
-                        && !identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
+                        && !reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
                             .is_some_and(|name| const_functions::is_constant_function(&name))
                 ) =>
             {
                 // A function whose body could not be converted is not a
                 // constant function; report why.
                 if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
-                    && let Some(error) = identifier_text(
-                        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                    && let Some(error) = reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                         syntax_tree,
                     )
                     .and_then(|name| const_functions::conversion_error(&name))
@@ -463,9 +437,16 @@ pub(super) fn reject_silently_ignored_constructs(
                     }
                 }
             }
-            RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
+            // Package scopes and imports resolve through the imported
+            // packages; compilation-unit declarations are not analyzed.
+            RefNode::PackageExportDeclaration(_) => {
                 return Err(AnalyzerError::Unsupported(
-                    "package-dependent systemverilog module".to_string(),
+                    "package export declaration".to_string(),
+                ));
+            }
+            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
+                return Err(AnalyzerError::Unsupported(
+                    "compilation-unit scope reference `$unit::`".to_string(),
                 ));
             }
             RefNode::ParamAssignment(parameter)
@@ -513,7 +494,7 @@ pub(super) fn reject_silently_ignored_constructs(
         for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
             let dimensions = item.dimensions(&indexed_dimensions);
             reject_silently_ignored_constructs(
-                RefNode::ModuleOrGenerateItem(item.node),
+                item.node.node(),
                 syntax_tree,
                 &dimensions.const_env,
                 type_aliases,

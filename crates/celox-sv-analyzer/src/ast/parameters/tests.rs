@@ -1,0 +1,205 @@
+use std::{fmt::Write, path::Path};
+
+use super::*;
+
+fn module_node(tree: &SyntaxTree) -> RefNode<'_> {
+    tree.into_iter()
+        .find(|node| {
+            matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            )
+        })
+        .unwrap()
+}
+
+#[test]
+fn incremental_collection_binds_each_prefix_entry_once() {
+    let mut code = String::from("module Top;\n");
+    for i in 0..128 {
+        let value = if i == 0 {
+            "1".into()
+        } else {
+            format!("P{} + 1", i - 1)
+        };
+        writeln!(code, "localparam int P{i} = {value};").unwrap();
+    }
+    code.push_str("endmodule\n");
+    let tree = crate::syntax::parse_source(&code, Path::new("parameter_prefix.sv")).unwrap();
+    PARAMETER_BINDINGS.with(|count| count.set(0));
+    let parameters = parameters_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert_eq!(PARAMETER_BINDINGS.with(|count| count.get()), 128);
+    assert_eq!(parameters.len(), 128);
+    assert_eq!(const_env_from_parameters(&parameters)["P127"], 128);
+    PARAMETER_BINDINGS.with(|count| count.set(0));
+    let enums = enum_member_constants_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert!(enums.numbers.is_empty());
+    assert_eq!(PARAMETER_BINDINGS.with(|count| count.get()), 0);
+}
+
+#[test]
+fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        module Top;
+            typedef logic signed [3:0] nibble_t;
+            parameter N = 4;
+            parameter logic signed [N-1:0] MASK = '1;
+            parameter SIZE = $bits(MASK);
+            parameter CAST = 3'(N + 1);
+            parameter nibble_t NEG = -1;
+            parameter bit [3:0] TWO = 'x;
+            parameter UNKNOWN = 4'bxxxx;
+            parameter FORWARD = LATER + 1;
+            parameter LATER = 7;
+        endmodule
+    "#,
+        Path::new("parameter_prefix_equivalence.sv"),
+    )
+    .unwrap();
+    let node = module_node(&tree);
+    let mut base =
+        HashMap::from_iter([("N".into(), 99), ("MASK".into(), 255), ("LATER".into(), 9)]);
+    insert_parameter_type_markers(
+        &mut base,
+        "MASK",
+        ExprType {
+            width: 32,
+            signed: false,
+        },
+    );
+    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &base).unwrap();
+    for n in [8, 3, 16, 8] {
+        let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
+        let incremental =
+            parameters_from_module_node(node.clone(), &tree, &aliases, &base, &overrides).unwrap();
+        let mut rebuilt = Vec::new();
+        for declaration in scope_declarations(node.clone()) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
+                declaration
+            else {
+                continue;
+            };
+            parameters_from_ref_node(
+                RefNode::ParameterDeclaration(&parameter.0),
+                &tree,
+                &mut rebuilt,
+                false,
+                &base,
+                &aliases,
+                &overrides,
+            )
+            .unwrap();
+        }
+        assert_eq!(incremental, rebuilt);
+        assert_eq!(incremental[1].declared_width(), Some(n));
+        assert_eq!(
+            incremental[2].value(),
+            Some(&ConstExpr::Literal(n.to_string()))
+        );
+        assert_eq!(incremental[4].declared_signed(), Some(true));
+        assert_eq!(
+            incremental[6].value(),
+            Some(&ConstExpr::Literal("4'bxxxx".into()))
+        );
+        assert_eq!(
+            incremental[7].value(),
+            Some(&ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("LATER".into())),
+                op: BinaryOp::Add,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            })
+        );
+    }
+}
+
+#[test]
+fn parameter_prefix_is_fresh_for_each_specialization() {
+    let source = crate::ParsedSource::parse(
+        r#"
+        module Top #(parameter N = 4, parameter M = N + 1,
+                     parameter logic signed [M-1:0] MASK = '1)
+                    (output logic [31:0] bits);
+            assign bits = $bits(MASK);
+        endmodule
+    "#,
+        Path::new("parameter_prefix_specializations.sv"),
+    )
+    .unwrap();
+    for n in [4, 12, 2, 4] {
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::from_iter([("N".into(), crate::ir::ConstExpr::Literal(n.to_string()))]),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[2].declared_width(),
+            Some(n + 1)
+        );
+        assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(-1));
+        assert_eq!(
+            ir.modules()[0].assignments()[0].rhs(),
+            &crate::ir::Expr::Literal((n + 1).to_string())
+        );
+    }
+}
+
+#[test]
+fn collects_the_declarations_of_a_package() {
+    let code = "package p;\n\
+                localparam int W = 4;\n\
+                parameter int N = W * 2;\n\
+                typedef logic [W-1:0] word_t;\n\
+                typedef enum logic [1:0] { IDLE, RUN = 2 } state_t;\n\
+                function automatic int twice(int x); return x * 2; endfunction\n\
+                endpackage\n";
+    let tree = crate::syntax::parse_source(code, Path::new("package.sv")).unwrap();
+    let package = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
+        .unwrap();
+    let parameters = parameters_from_module_node(
+        package.clone(),
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap();
+    let env = const_env_from_parameters(&parameters);
+    assert_eq!((env["W"], env["N"]), (4, 8));
+    let aliases = type_aliases_from_module_node_with_env(package.clone(), &tree, &env).unwrap();
+    assert_eq!(aliases["word_t"].packed_ranges().len(), 1);
+    let enums = enum_member_constants_from_module_node(
+        package.clone(),
+        &tree,
+        &env,
+        &aliases,
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert_eq!((enums.numbers["IDLE"], enums.numbers["RUN"]), (0, 2));
+    let items = generate::items(package, &tree, &env, &aliases).unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(
+        items
+            .iter()
+            .all(|item| matches!(item.node, ScopeItem::Package(_)))
+    );
+}

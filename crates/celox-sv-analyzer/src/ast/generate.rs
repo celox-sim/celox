@@ -22,16 +22,29 @@ fn scope_component(name: &str) -> String {
 
 #[derive(Clone)]
 pub(super) struct Item<'a> {
-    pub node: &'a sv_parser::ModuleOrGenerateItem,
-    pub env: HashMap<String, i128>,
-    pub literals: HashMap<String, Expr>,
-    parameter_dimensions: VariablePackedDimensions,
+    pub node: ScopeItem<'a>,
+    pub env: SharedMap<i128>,
+    pub literals: SharedMap<Expr>,
+    parameter_dimensions: Arc<VariablePackedDimensions>,
     names: HashMap<String, String>,
     shadowed: HashSet<String>,
     scope: String,
 }
 
 impl Item<'_> {
+    /// These declarations have already populated the constant environment;
+    /// instance/process/subroutine collectors cannot produce bodies from them.
+    pub fn is_parameter_declaration(&self) -> bool {
+        let Some(declaration) = self.node.declaration() else {
+            return false;
+        };
+        matches!(
+            declaration,
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
+                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)
+        )
+    }
+
     pub fn name(&self, name: &str) -> String {
         if let Some(name) = name.strip_prefix(OUTER_BINDING) {
             return name.to_string();
@@ -67,7 +80,12 @@ impl Item<'_> {
     pub fn dimensions(&self, dimensions: &PackedDimensions) -> PackedDimensions {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
-        local.parameter_values = self.parameter_literals(&dimensions.parameter_values);
+        local.parameter_values =
+            if self.shadowed.is_empty() && self.names.is_empty() && self.literals.is_empty() {
+                dimensions.parameter_values.clone()
+            } else {
+                self.parameter_literals(&dimensions.parameter_values).into()
+            };
         // Ordinary module items keep the module's function bindings. Rewriting
         // every function body for every item costs O(items * function size).
         if !self.shadowed.is_empty() || !self.names.is_empty() {
@@ -93,7 +111,11 @@ impl Item<'_> {
             local.remove(name);
             signedness.remove(name);
         }
-        local.extend(self.parameter_dimensions.clone());
+        local.extend(
+            self.parameter_dimensions
+                .iter()
+                .map(|(name, dims)| (name.clone(), dims.clone())),
+        );
         signedness.extend(
             self.parameter_dimensions
                 .iter()
@@ -205,7 +227,7 @@ impl Item<'_> {
                 self.constant(expr);
                 self.constant(bit);
             }
-            ConstExpr::Function { name, args } => {
+            ConstExpr::Function { name, args, .. } => {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.constant(e));
             }
@@ -256,9 +278,10 @@ impl Item<'_> {
 struct Scope {
     path: String,
     in_loop: bool,
-    env: HashMap<String, i128>,
-    literals: HashMap<String, Expr>,
+    env: SharedMap<i128>,
+    literals: SharedMap<Expr>,
     parameters: Vec<Parameter>,
+    parameter_dimensions: Arc<VariablePackedDimensions>,
     names: HashMap<String, String>,
     shadowed: HashSet<String>,
 }
@@ -293,12 +316,19 @@ pub(super) fn items<'a>(
     // Numeric values and their type markers are already carried by `env`.
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
-        env: env.clone(),
-        literals,
+        env: env.clone().into(),
+        literals: literals.into(),
+        parameter_dimensions: Arc::new(parameter_packed_dimensions(&parameters)),
         parameters,
         ..Scope::default()
     };
     let mut ordinal = 0;
+    if let RefNode::PackageDeclaration(package) = node {
+        for declaration in package_declarations(package) {
+            elaborator.push(ScopeItem::Package(declaration), &scope);
+        }
+        return Ok(elaborator.items);
+    }
     for item in module_non_port_items(node) {
         match item {
             sv_parser::NonPortModuleItem::GenerateRegion(region) => {
@@ -343,7 +373,7 @@ impl<'a> Elaborator<'a, '_> {
 
     fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
         match expr {
-            ConstExpr::Function { name, args } => {
+            ConstExpr::Function { name, args, .. } => {
                 for arg in args {
                     self.expand_constant_calls(arg, scope)?;
                 }
@@ -612,6 +642,8 @@ impl<'a> Elaborator<'a, '_> {
                         iteration
                             .parameters
                             .retain(|parameter| parameter.name() != name);
+                        iteration.parameter_dimensions =
+                            Arc::new(parameter_packed_dimensions(&iteration.parameters));
                         iteration.literals.remove(&name);
                         if !self.condition(
                             &generate.nodes.1.nodes.1.2.nodes.0,
@@ -656,16 +688,20 @@ impl<'a> Elaborator<'a, '_> {
                 "function declaration inside loop-generate".to_string(),
             ));
         }
+        self.push(ScopeItem::Module(item), scope);
+        Ok(())
+    }
+
+    fn push(&mut self, node: ScopeItem<'a>, scope: &Scope) {
         self.items.push(Item {
-            node: item,
+            node,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
-            parameter_dimensions: parameter_packed_dimensions(&scope.parameters),
+            parameter_dimensions: scope.parameter_dimensions.clone(),
             names: scope.names.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
         });
-        Ok(())
     }
 
     fn constants_and_signal_types(
@@ -913,6 +949,7 @@ impl<'a> Elaborator<'a, '_> {
             scope.parameters.push(parameter.clone());
             bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
         }
+        scope.parameter_dimensions = Arc::new(parameter_packed_dimensions(&scope.parameters));
         Ok(())
     }
 
@@ -1082,17 +1119,11 @@ fn module_constant_functions(
     let types = parameter_types_from_const_env(env);
     let mut functions = HashMap::default();
     let mut calls = HashMap::default();
-    for item in module_scope_items(node) {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
+    for item in scope_items(node) {
+        let Some(declaration) = item.declaration() else {
             continue;
         };
-        if !matches!(
-            item.nodes.1,
-            sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_)
-        ) {
-            continue;
-        }
-        for node in RefNode::ModuleCommonItem(&item.nodes.1) {
+        for node in RefNode::PackageOrGenerateItemDeclaration(declaration) {
             let RefNode::FunctionDeclaration(declaration) = node else {
                 continue;
             };
@@ -1146,7 +1177,7 @@ fn module_constant_functions(
                         let RefNode::TfCall(call) = node else {
                             return None;
                         };
-                        identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
+                        reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
                     })
                     .collect::<Vec<_>>(),
             );

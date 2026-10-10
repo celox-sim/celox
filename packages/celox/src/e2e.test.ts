@@ -144,6 +144,57 @@ const FRONTEND_ADDER_ARTIFACT = JSON.stringify({
 	port_order: [0, 1, 2],
 });
 
+/** Sets `y` to 7 at time 0, waits 10 time units, then finishes. */
+const FRONTEND_FINISH_ARTIFACT = JSON.stringify({
+	format_version: 2,
+	module_name: "Finisher",
+	signals: [
+		{
+			id: 0,
+			name: "y",
+			direction: "Output",
+			value_type: { width: 8, signed: false, four_state: false },
+			initial: null,
+		},
+	],
+	expressions: [
+		{
+			id: 0,
+			node: {
+				Constant: {
+					payload: [7],
+					mask: [],
+					value_type: { width: 8, signed: false, four_state: false },
+				},
+			},
+			value_type: { width: 8, signed: false, four_state: false },
+		},
+		{
+			id: 1,
+			node: {
+				Constant: {
+					payload: [10],
+					mask: [],
+					value_type: { width: 8, signed: false, four_state: false },
+				},
+			},
+			value_type: { width: 8, signed: false, four_state: false },
+		},
+	],
+	assignments: [],
+	registers: [],
+	port_order: [0],
+	processes: [
+		{
+			body: [
+				{ Assign: { target: { signal: 0, lsb: 0, width: 8 }, value: 0 } },
+				{ Delay: { amount: 1 } },
+				"Finish",
+			],
+		},
+	],
+});
+
 const FRONTEND_ADDER_TB = `
 #[test(t)]
 module NetlistTb {
@@ -281,6 +332,23 @@ describe("E2E: external frontend artifact", () => {
 		sim.dut.a = 10n;
 		sim.dut.b = 23n;
 		expect(sim.dut.y).toBe(33n);
+		sim.dispose();
+	});
+
+	test("reports when a process finishes a timed simulation", () => {
+		interface FinisherPorts {
+			readonly y: bigint;
+		}
+
+		const sim = Simulation.fromFrontendArtifact<FinisherPorts>(
+			FRONTEND_FINISH_ARTIFACT,
+		);
+		expect(sim.isFinished()).toBe(false);
+		sim.runUntil(100);
+		expect(sim.dut.y).toBe(7n);
+		expect(sim.isFinished()).toBe(true);
+		expect(sim.time()).toBe(10);
+		expect(sim.nextEventTime()).toBeNull();
 		sim.dispose();
 	});
 

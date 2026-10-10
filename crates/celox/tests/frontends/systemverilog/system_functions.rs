@@ -1,6 +1,36 @@
 use super::*;
 
 sv_backends! {
+    fn display_arguments_are_sized_as_ieee_specifies(sim) {
+        @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
+    }
+
+    fn display_field_widths_expand_to_the_value(sim) {
+        @case "system_functions::display_field_widths_expand_to_the_value";
+    }
+
+    fn display_unknown_bits_as_ieee_specifies(sim) {
+        @case "system_functions::display_unknown_bits_as_ieee_specifies";
+    }
+
+    fn display_tasks_default_to_their_radix(sim) {
+        @case "system_functions::display_tasks_default_to_their_radix";
+    }
+
+    fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
+        @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
+    }
+
+    fn countbits_preserves_argument_and_return_types(sim) {
+        @case "system_functions::countbits_preserves_argument_and_return_types";
+    }
+    fn countbits_in_constant_expressions(sim) {
+        @case "system_functions::countbits_in_constant_expressions";
+    }
+    fn countbits_matches_four_states_and_variable_controls(sim) {
+        @case "system_functions::countbits_matches_four_states_and_variable_controls";
+    }
+
     fn countones_preserves_argument_and_return_types(sim) {
         @case "system_functions::countones_preserves_argument_and_return_types";
     }
@@ -144,11 +174,11 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule"#,
         ),
         (
-            "system task `$display` inside an initial block",
-            r#"module Top(output logic y);
-                initial $display("x");
+            "system task `$assert` inside an initial block",
+            "module Top(output logic y);
+                initial $assert(1'b1);
                 assign y = 1'b0;
-            endmodule"#,
+            endmodule",
         ),
         (
             "system function `$left`",
@@ -238,5 +268,229 @@ fn value_functions_called_as_statements_evaluate_their_operands_once() {
         vec![celox::RuntimeEvent::Display {
             message: "g 5".to_string(),
         }],
+    );
+}
+
+fn initial_simulation(source: &str) -> celox::Simulation {
+    celox::Simulation::from_sv_sources(vec![(source, Path::new("initial.sv"))], "Top")
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn initial_blocks_run_their_system_tasks_at_time_zero() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic [15:0] a = 16'h1234;
+            logic [7:0] b;
+            initial begin
+                b = a[0+:8];
+                $display("b=%h", b);
+                for (int i = 0; i < 2; i++) $write("%0d,", i);
+                if (b == 8'h35) $display("unreachable");
+                $error("e%0d", b - 8'h30);
+            end
+            assign y = b;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let y = sim.signal("y");
+    // The block runs as a process at time zero, not before it.
+    assert_eq!(sim.get(y), 0u8.into());
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(y), 0x34u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "b=34".to_string(),
+            },
+            celox::RuntimeEvent::Write {
+                message: "0,".to_string(),
+            },
+            celox::RuntimeEvent::Write {
+                message: "1,".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "e4".to_string(),
+            },
+        ],
+    );
+    assert!(!sim.is_finished());
+    assert_eq!(sim.step().unwrap(), None);
+}
+
+#[test]
+fn finish_in_an_initial_block_ends_the_simulation() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $display("before");
+                $finish;
+                $display("after");
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "before".to_string(),
+        }],
+    );
+}
+
+#[test]
+fn fatal_in_an_initial_block_fails_the_simulation() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $display("before");
+                $fatal(1, "boom %0d", 7);
+                $display("after");
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let error = sim.step().unwrap_err();
+    assert!(error.to_string().contains("boom"), "{error}");
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before".to_string(),
+            },
+            celox::RuntimeEvent::AssertFatal {
+                message: "boom 7".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn initial_blocks_skip_the_operands_short_circuits_skip() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            logic d;
+            function automatic logic f(input logic v);
+                $display("called");
+                return v;
+            endfunction
+            initial begin
+                d = 1'b1 || f(a);
+                $display("%0d", d);
+            end
+            assign y = d;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "1".to_string(),
+        }],
+    );
+}
+
+#[test]
+fn initial_blocks_that_read_design_state_run_at_time_zero() {
+    let source = r#"
+        module Top(input logic [3:0] a, output logic [3:0] y);
+            logic [3:0] value = a + 4'd1;
+            initial begin
+                $display("value=%0d", value);
+                if (a == 4'd0) $display("zero");
+            end
+            assign y = value;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let y = sim.signal("y");
+    sim.step().unwrap();
+    // The initializer runs before the initial block.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "value=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "zero".to_string(),
+            },
+        ],
+    );
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn rejects_nonblocking_assignments_in_initial_processes() {
+    let error = build_error(
+        r#"module Top(output logic y);
+            logic v;
+            initial begin v <= 1'b1; $display("%0d", v); end
+            assign y = v;
+        endmodule"#,
+    );
+    assert!(
+        error.contains("nonblocking assignment in an initial block that runs as a process"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_countbits_with_missing_or_omitted_arguments() {
+    for args in ["", "a", "a,", ", a", "a, '1,", "a,, '1"] {
+        let source = format!(
+            "module Top(input logic a, output int y); assign y = $countbits({args}); endmodule"
+        );
+        let error = build_error(&source);
+        assert!(error.contains("$countbits"), "{args}: {error}");
+    }
+}
+
+#[test]
+fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
+    let source = r#"
+        module Top(input logic [3:0] a, output logic y);
+            function automatic logic [3:0] value(input logic [3:0] v);
+                $display("value %0d", v);
+                return v;
+            endfunction
+            function automatic logic control(input logic v);
+                $display("control %0d", v);
+                return v;
+            endfunction
+            always_comb begin
+                $countbits(value(a), control(a[0]), control(a[1]));
+                y = a[0];
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("countbits_statement.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "value 5".to_string()
+            },
+            celox::RuntimeEvent::Display {
+                message: "control 1".to_string()
+            },
+            celox::RuntimeEvent::Display {
+                message: "control 0".to_string()
+            },
+        ]
     );
 }

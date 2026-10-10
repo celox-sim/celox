@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 7,
+    "mismatch": 8,
     "emission_error": 0,
-    "compile_error": 41,
+    "compile_error": 48,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -156,6 +156,14 @@
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:7: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n",
       "expectation": "Simulation",
       "name": "procedural::aggregate_parameters_are_constant_tables",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: Function celox_suite_tb.dut.pick port y is not an input port.\n<case>/source_0.sv:4:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::select_indices_call_functions",
       "phase": "compile",
       "status": "compile_error"
     },
@@ -422,6 +430,62 @@
       "name": "review_regressions::size_of_a_type_uses_the_dimension_argument",
       "phase": "compile",
       "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:10:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_calls_run_as_written",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::select_index_call_skipped_by_logical_and",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Function celox_suite_tb.dut.bump port after is not an input port.\n<case>/source_0.sv:6:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::concatenated_targets_fix_their_positions_first",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.tick port after is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::ff_select_index_calls_write_state_and_run_once",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Function celox_suite_tb.dut.inner port after is not an input port.\n<case>/source_0.sv:6:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "procedural::function_bodies_run_their_index_calls_each_time",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:11: error: A reference to a net or variable (`k') is not allowed in a constant expression.\n<case>/source_0.sv:11: error: Array index expressions must be constant here.\n<case>/source_0.sv:11: error: Unable to elaborate r-value: u[j][k][i]\n<case>/source_0.sv:5: warning: always_comb process has no sensitivities.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::display_field_widths_expand_to_the_value at 245:3: expect_output: expected \":1234:11064:\\n\", got \":00001234:00000011064:\\n\"",
+      "expectation": "Simulation",
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "execute",
+      "status": "mismatch"
     }
   ]
 }

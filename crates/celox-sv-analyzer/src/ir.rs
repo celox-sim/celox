@@ -43,6 +43,7 @@ pub struct Module {
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
+    imported_parameters: Vec<Parameter>,
 }
 
 impl Module {
@@ -75,7 +76,19 @@ impl Module {
             locals,
             subroutines,
             dpi_imports: Vec::new(),
+            imported_parameters: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_imported_parameters(mut self, parameters: Vec<Parameter>) -> Self {
+        self.imported_parameters = parameters;
+        self
+    }
+
+    /// The parameters of the packages the module uses (IEEE 1800-2023 26.3),
+    /// by qualified name `p::x` and by the names its imports bind.
+    pub fn imported_parameters(&self) -> &[Parameter] {
+        &self.imported_parameters
     }
 
     pub(crate) fn with_dpi_imports(mut self, dpi_imports: Vec<DpiImport>) -> Self {
@@ -562,6 +575,10 @@ pub enum ConstExpr {
     Function {
         name: String,
         args: Vec<ConstExpr>,
+        /// Tells a user subroutine call apart from a call written alike: a
+        /// select repeats its index in its bounds and range checks, and the
+        /// copies of one call share its site, so the call runs once.
+        site: Option<usize>,
     },
     Unary {
         op: UnaryOp,
@@ -736,11 +753,22 @@ impl FfProcess {
 pub struct InitialProcess {
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
+    initializer: bool,
 }
 
 impl InitialProcess {
-    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
-        Self { condition, body }
+    pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
+        Self {
+            condition,
+            body,
+            initializer,
+        }
+    }
+
+    /// Whether this process holds variable declaration initializers, which
+    /// run before every `initial` and `always` procedure.
+    pub fn is_initializer(&self) -> bool {
+        self.initializer
     }
 
     /// The condition of the enclosing conditional generate block, if any.
@@ -875,8 +903,9 @@ impl From<ast::ConstExpr> for ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
-            ast::ConstExpr::Function { name, args } => ConstExpr::Function {
+            ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name,
+                site,
                 args: args.into_iter().map(Into::into).collect(),
             },
             ast::ConstExpr::Unary { op, expr } => ConstExpr::Unary {
@@ -910,8 +939,9 @@ impl From<ConstExpr> for ast::ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
-            ConstExpr::Function { name, args } => ast::ConstExpr::Function {
+            ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
                 name,
+                site,
                 args: args.into_iter().map(Into::into).collect(),
             },
             ConstExpr::Unary { op, expr } => ast::ConstExpr::Unary {
@@ -1021,6 +1051,7 @@ impl From<ast::InitialProcess> for InitialProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
+            process.is_initializer(),
         )
     }
 }
@@ -1254,6 +1285,14 @@ pub struct DpiImport {
 }
 
 impl DpiImport {
+    /// This import under the SystemVerilog name `name`, keeping its C name.
+    pub(crate) fn renamed(&self, name: String) -> Self {
+        Self {
+            name,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn new(
         name: String,
         c_name: String,

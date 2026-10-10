@@ -25,7 +25,8 @@ struct Args {
     /// Build artifacts and complete per-case logs.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Also retain a portable, machine-readable report at this path.
+    /// Also retain the results at this path, without run-specific metadata
+    /// (counts, fingerprints, timestamps), so it only changes with results.
     #[arg(long)]
     report: Option<PathBuf>,
     /// Execute known discrepancies and toolchain limitations too.
@@ -37,7 +38,7 @@ struct Args {
     /// Print the selected catalogue as JSON without invoking any tools.
     #[arg(long)]
     list: bool,
-    /// Reuse unchanged successful cases from --report, or output/results.json.
+    /// Reuse unchanged successful cases from output/results.json.
     /// Failed, new, and changed cases always run again.
     #[arg(long, conflicts_with = "list")]
     incremental: bool,
@@ -188,13 +189,8 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
             "incremental reuse unavailable: incomplete verifier/tool fingerprint; verifying selected cases afresh"
         );
     }
-    let baseline_path = args
-        .report
-        .as_deref()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| output.join("results.json"));
     let previous = if args.incremental {
-        read_previous(&baseline_path, context.as_deref())?
+        read_previous(&output.join("results.json"), context.as_deref())?
     } else {
         BTreeMap::new()
     };
@@ -276,7 +272,10 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, &contents)?;
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&retained(&report))? + "\n",
+        )?;
     }
     println!(
         "{}; {} fresh, {} reused; report: {}",
@@ -289,6 +288,23 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// The report without metadata that changes on every run. Committed reports
+/// then differ only where results differ, so branches that add cases merge.
+fn retained(report: &Value) -> Value {
+    let mut report = report.clone();
+    let fields = report.as_object_mut().unwrap();
+    for key in ["context_fingerprint", "incremental", "run_counts", "counts"] {
+        fields.remove(key);
+    }
+    for row in fields["cases"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        for key in ["case_fingerprint", "reused", "verified_at_unix"] {
+            row.remove(key);
+        }
+    }
+    report
 }
 
 fn fingerprint(parts: &[&[u8]]) -> String {
@@ -477,6 +493,11 @@ impl Backend for ObservedBackend {
             .tick(event)
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
+    fn take_output(&mut self) -> Result<String> {
+        self.backend
+            .take_output()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
 }
 
 /// How a runner builds a case for a tool: a design for the process
@@ -526,7 +547,13 @@ fn run_script(
         );
     }
     match backend.run_testbench() {
-        Ok(()) => ("passed", "execute", String::new()),
+        Ok(()) => {
+            let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
+            match crate::script::sv::check_output(&String::from_utf8_lossy(&log)) {
+                Ok(()) => ("passed", "execute", String::new()),
+                Err(detail) => ("mismatch", "execute", detail),
+            }
+        }
         Err(error) => {
             let log = std::fs::read_to_string(directory.join("protocol.log")).unwrap_or_default();
             let assertions: Vec<&str> = log
@@ -653,7 +680,13 @@ fn finish(
     known_issue: Option<Value>,
 ) -> Value {
     std::fs::write(directory.join("error.log"), &detail).unwrap();
-    let mut portable_detail = detail;
+    // Reports do not depend on a developer's absolute checkout/cache path.
+    let absolute = std::fs::canonicalize(directory).ok();
+    let portable = |text: &str| match &absolute {
+        Some(absolute) => portable_text(text, &absolute.to_string_lossy()),
+        None => text.to_owned(),
+    };
+    let mut portable_detail = portable(&detail);
     if status == "compile_error" || status == "rejected" || status == "runtime_error" {
         // Keep actual compiler diagnostics in the retained report.
         if let Ok(log) = std::fs::read_to_string(directory.join(
@@ -664,12 +697,8 @@ fn finish(
             },
         )) {
             portable_detail.push('\n');
-            portable_detail.extend(log.chars().take(6000));
+            portable_detail.extend(portable(&log).chars().take(6000));
         }
-    }
-    // Reports do not depend on a developer's absolute checkout/cache path.
-    if let Ok(absolute) = std::fs::canonicalize(directory) {
-        portable_detail = portable_detail.replace(absolute.to_string_lossy().as_ref(), "<case>");
     }
     portable_detail = portable_detail.chars().take(8000).collect();
     let mut row = case_metadata(case);
@@ -680,6 +709,25 @@ fn finish(
         row["known_issue"] = issue;
     }
     write_result(directory, row)
+}
+
+/// `text` with the case directory `absolute` written as `<case>`. Verilator
+/// aligns continuation lines (`: ... note`) under the end of the source
+/// location, so their padding shrinks with the path.
+fn portable_text(text: &str, absolute: &str) -> String {
+    const CASE: &str = "<case>";
+    let shift = absolute.len().saturating_sub(CASE.len());
+    text.split('\n')
+        .map(|line| {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            if text.contains(absolute) && indent >= shift && line[indent..].starts_with(": ") {
+                line[shift..].to_owned()
+            } else {
+                line.replace(absolute, CASE)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write_result(directory: &Path, row: Value) -> Value {
@@ -701,6 +749,19 @@ fn write_result(directory: &Path, row: Value) -> Value {
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
+
+    #[test]
+    fn portable_diagnostics_do_not_depend_on_the_case_path() {
+        let log = |path: &str| {
+            let pad = " ".repeat(format!("%Error: {path}:6:4").len());
+            format!("%Error: {path}:6:41: Illegal\n{pad}: ... note: In instance\n    6 | x\n")
+        };
+        let expected = log("<case>");
+        for path in ["/tmp/case", "/tmp/a/much/longer/checkout/path"] {
+            assert_eq!(portable_text(&log(path), path), expected);
+        }
+        assert_eq!(portable_text("  : kept", "/tmp/case"), "  : kept");
+    }
 
     fn case(text: &str, resolver: crate::StdResolver) -> &'static TestCase {
         crate::load_group("incremental.vtest", text, resolver)[0]

@@ -2,6 +2,7 @@
 
 mod error;
 pub mod memory_file;
+pub mod process;
 mod sdk;
 pub mod shared;
 pub mod symbolic;

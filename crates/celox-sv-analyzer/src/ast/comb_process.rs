@@ -17,11 +17,18 @@ pub(super) fn comb_processes_from_module_node(
         const_env,
         &packed_dimensions.type_aliases,
     )? {
+        // Packages declare no instances, signals or processes here.
+        let ScopeItem::Module(node) = item.node else {
+            continue;
+        };
+        if item.is_parameter_declaration() {
+            continue;
+        }
         let start = processes.len();
         let dimensions = item.dimensions(packed_dimensions);
         let literals = item.parameter_literals(parameter_literals);
         comb_processes_from_module_or_generate_item(
-            item.node,
+            node,
             None,
             syntax_tree,
             &item.env,
@@ -102,8 +109,8 @@ fn comb_processes_from_module_common_item(
         }
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
             let mut local_packed_dimensions = packed_dimensions.clone();
-            local_packed_dimensions.const_env = const_env.clone();
-            local_packed_dimensions.parameter_values = parameter_literals.clone();
+            local_packed_dimensions.const_env = const_env.clone().into();
+            local_packed_dimensions.parameter_values = parameter_literals.clone().into();
             if let Some(process) = comb_process_from_always_construct(
                 always,
                 condition,

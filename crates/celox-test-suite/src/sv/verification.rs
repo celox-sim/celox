@@ -39,8 +39,8 @@ fn element_width(r#type: &Type) -> Option<usize> {
 }
 
 fn design_info(design: &Design) -> Option<DesignInfo> {
-    // Interfaces are expanded and packages inlined into the top module, as
-    // the Celox frontend does; the tools still compile the sources as written.
+    // Interfaces are expanded as the Celox frontend does; the tools still
+    // compile the sources as written.
     let paths: Vec<_> = design
         .sources
         .iter()
@@ -60,60 +60,26 @@ fn design_info(design: &Design) -> Option<DesignInfo> {
         .zip(&design.sources)
         .map(|(text, source)| (text.as_str(), source.path.as_path()))
         .collect();
-    let packages = sources
-        .iter()
-        .filter_map(|(text, path)| celox_sv_analyzer::source_packages(text, path).ok())
-        .flatten()
-        .map(|package| (package.name.clone(), package))
-        .collect();
+    let packages = celox_sv_analyzer::analyze_packages(&sources).ok()?;
+    // The top takes the case's parameter values. A module that cannot be
+    // analyzed on its own, such as one with a generic interface port that the
+    // elaboration copies per binding, does not hide the others.
     let mut modules: Vec<Module> = Vec::new();
-    for &(source_text, source_path) in &sources {
-        let text = celox_sv_analyzer::inline_module_packages(
-            source_text,
-            source_path,
-            &design.top,
-            &packages,
-        )
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| source_text.to_string());
-        // Another source only widens the value width estimate; the top's
-        // source must be analyzable, with the case's parameter values.
-        let overrides = design
-            .parameters
-            .iter()
-            .map(|(name, value)| (name.clone(), i128::from(*value)))
-            .collect();
-        match celox_sv_analyzer::analyze_source_with_module_parameter_overrides(
-            &text,
-            source_path,
-            &design.top,
-            &overrides,
-        ) {
-            Ok(ir) => modules.extend(ir.modules().iter().cloned()),
-            Err(_) => {
-                // A module that cannot be analyzed on its own, such as one
-                // with a generic interface port that the elaboration copies
-                // per binding, does not hide the others.
-                for name in
-                    celox_sv_analyzer::source_module_names(&text, source_path).unwrap_or_default()
-                {
-                    let overrides = if name == design.top {
-                        overrides.clone()
-                    } else {
-                        Default::default()
-                    };
-                    if let Ok(ir) =
-                        celox_sv_analyzer::analyze_source_module_with_parameter_overrides(
-                            &text,
-                            source_path,
-                            &name,
-                            &overrides,
-                        )
-                    {
-                        modules.extend(ir.modules().iter().cloned());
-                    }
-                }
+    for &(text, path) in &sources {
+        for name in celox_sv_analyzer::source_module_names(text, path).unwrap_or_default() {
+            let overrides = if name == design.top {
+                design
+                    .parameters
+                    .iter()
+                    .map(|(name, value)| (name.clone(), i128::from(*value)))
+                    .collect()
+            } else {
+                Default::default()
+            };
+            if let Ok(ir) = celox_sv_analyzer::analyze_source_module_with_packages(
+                text, path, &name, &overrides, &packages,
+            ) {
+                modules.extend(ir.modules().iter().cloned());
             }
         }
     }

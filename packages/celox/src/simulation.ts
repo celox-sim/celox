@@ -496,6 +496,15 @@ export class Simulation<P = Record<string, unknown>> {
 	}
 
 	/**
+	 * Whether a process of the design requested the end of the simulation.
+	 * Once it has, `step()` and `nextEventTime()` return `null`.
+	 */
+	isFinished(): boolean {
+		this.ensureAlive();
+		return this._handle.isFinished?.() ?? false;
+	}
+
+	/**
 	 * Step until `condition()` returns true.
 	 *
 	 * @returns The simulation time when the condition became true.

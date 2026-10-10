@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use fxhash::FxHashMap as HashMap;
 
-use crate::{AnalyzerError, Ir, ModuleInterfaces, PackageSource, analyze, ast, ir, syntax};
+use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, syntax};
 
 /// A parsed source that can analyze many modules or parameter specializations.
 ///
@@ -23,7 +23,7 @@ pub struct ParsedSource {
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
         let tree = syntax::parse_source(code, path)?;
-        let index = ast::module_index::ModuleIndex::new(&tree)?;
+        let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))?;
         Ok(Self {
             code: code.to_string(),
             path: path.to_path_buf(),
@@ -40,24 +40,28 @@ impl ParsedSource {
         &self.index.interfaces
     }
 
-    pub fn packages(&self) -> Result<Vec<PackageSource>, AnalyzerError> {
-        ast::packages::source_packages(&self.code, &self.tree)
+    /// Analyze the packages declared in `sources`, each once, after the
+    /// packages it depends on.
+    pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {
+        let trees: Vec<_> = sources.iter().map(|source| &source.tree).collect();
+        ast::with_call_sites(|| Packages::analyze(&trees))
     }
 
-    /// Analyze a module, rewriting its type parameters and package imports
-    /// when needed. Numeric overrides reuse the original syntax tree.
+    /// Analyze a module that may use `packages`, rewriting its type
+    /// parameters when needed. Numeric overrides reuse the original syntax
+    /// tree.
     pub fn analyze_module(
         &self,
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
         type_overrides: &[(String, String)],
         interfaces: &ModuleInterfaces,
-        packages: &HashMap<String, PackageSource>,
+        packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
         let typed = if type_overrides.is_empty() {
             None
         } else {
-            ast::packages::apply_type_parameter_overrides(
+            ast::type_parameters::apply_type_parameter_overrides(
                 &self.code,
                 &self.tree,
                 module_name,
@@ -69,38 +73,43 @@ impl ParsedSource {
             .map(|code| Self::parse(code, &self.path))
             .transpose()?;
         let source = typed_source.as_ref().unwrap_or(self);
-        let inlined = if packages.is_empty() {
-            None
-        } else {
-            ast::packages::inline_packages(&source.code, &source.tree, module_name, packages)?
-        };
-        let inlined_source = inlined
-            .as_deref()
-            .map(|code| Self::parse(code, &self.path))
-            .transpose()?;
-        let source = inlined_source.as_ref().unwrap_or(source);
-        source.analyze_module_with_parameter_expr_overrides(module_name, overrides, interfaces)
+        source.analyze_module_with_packages(module_name, overrides, interfaces, packages)
     }
 
-    /// Analyze without rewriting the source, retaining literal override types.
+    /// Analyze without rewriting the source, retaining literal override
+    /// types. The module may use the packages this source declares.
     pub fn analyze_module_with_parameter_expr_overrides(
         &self,
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
         interfaces: &ModuleInterfaces,
     ) -> Result<Ir, AnalyzerError> {
+        let packages = Self::analyze_packages(&[self])?;
+        self.analyze_module_with_packages(module_name, overrides, interfaces, &packages)
+    }
+
+    fn analyze_module_with_packages(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+    ) -> Result<Ir, AnalyzerError> {
         let overrides = overrides
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        let source = ast::Source::from_indexed_syntax_module(
-            &self.tree,
-            &self.index,
-            module_name,
-            &overrides,
-            interfaces,
-        )?;
-        analyze::analyze_source(source)
+        ast::with_call_sites(|| {
+            let source = ast::Source::from_indexed_syntax_module(
+                &self.tree,
+                &self.index,
+                module_name,
+                &overrides,
+                interfaces,
+                packages,
+            )?;
+            analyze::analyze_source(source)
+        })
     }
 }
 
@@ -200,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_type_parameters_and_packages_before_analysis() {
+    fn rewrites_type_parameters_and_resolves_packages() {
         let code = r#"
             package p; localparam V = 3; endpackage
             module Top #(parameter type T = logic [3:0]) (output T y);
@@ -210,12 +219,7 @@ mod tests {
         "#;
         let path = Path::new("rewritten.sv");
         let source = ParsedSource::parse(code, path).unwrap();
-        let packages = source
-            .packages()
-            .unwrap()
-            .into_iter()
-            .map(|p| (p.name.clone(), p))
-            .collect();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
         let types = vec![("T".into(), "logic [7:0]".into())];
         let actual = source
             .analyze_module(
@@ -229,10 +233,7 @@ mod tests {
         let typed = crate::apply_module_type_parameters(code, path, "Top", &types)
             .unwrap()
             .unwrap();
-        let inlined = crate::inline_module_packages(&typed, path, "Top", &packages)
-            .unwrap()
-            .unwrap();
-        let expected = crate::analyze_source(&inlined, path).unwrap();
+        let expected = crate::analyze_source(&typed, path).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(
             actual.modules()[0].ports()[0].r#type().resolved_width(),

@@ -42,7 +42,9 @@ empty selections, compilation failures, and simulator errors are not passes.
 
 For repeated external verification, use `--incremental --report <report.json>`
 to refresh the full selection while running only new/changed cases and prior
-failures. The report records reused evidence separately. Keep filters out of a
+failures. Reuse is decided from `<output>/results.json`, which records reused
+evidence separately; the retained report holds only the results, so branches
+that add different cases do not conflict in it. Keep filters out of a
 full-report refresh; filtered runs still produce partial reports. See the
 [runner documentation](crates/celox-test-suite/README.md#independent-verification).
 Daily CI omits `--incremental` and runs the complete corpus afresh.
@@ -70,6 +72,19 @@ Each change is validated where it matters rather than repeatedly:
   are skipped there, which their required checks accept, and run in the merge
   group instead. They rarely fail when the Linux jobs pass. Dispatch `ci.yml` on
   a branch to run them before queueing.
+- Pull requests run only the Rust tests their changes can affect
+  (`scripts/ci-rust-scope.mjs`):
+    - A library change runs its package and every package that depends on it.
+    - A change to one integration test file runs only that test binary.
+    - A backend or frontend crate that only one variant of celox's
+      `all_backends!` tests uses runs only that variant, plus the tests that
+      are not generated per variant. For example, `celox-backend-x86` runs
+      `native` and `native_parallel`, and `celox-frontend-sv` runs `sv` and the
+      `systemverilog` binary.
+    - Manifests, the lockfile, the toolchain, shared test data and CI changes
+      run the whole workspace.
+
+  Merge groups and the daily run always run the whole workspace.
 - The merge group validates the exact tree that lands, so pushes to `master` and
   `develop` do not run CI again. Daily full runs keep those branches' build
   caches current for pull requests.
@@ -99,9 +114,12 @@ uses the finer behavior-based matrix above.
 | Cadence | Coverage |
 | --- | --- |
 | Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary workspace tests. |
-| Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Existing nightly package and Heliodor coverage continues. |
+| Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
+| Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
+| Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
+| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Weekly and on relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. Existing Heliodor scheduled runs cover the longer simulator workloads daily. |
+| Weekly, and on pull requests with relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Merge groups that cut a release | A `master` merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` merge group whose diff cannot be determined is treated the same way. |
 

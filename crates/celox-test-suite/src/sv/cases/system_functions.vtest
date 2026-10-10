@@ -204,3 +204,285 @@
     (assert_eq unknown_wide (!= mask 0) "unknown_wide")
     (assert_eq unknown_bit (bit mask 0) "unknown_bit")
     (assert_eq unknown_partial (!= (slice mask 128 0) 0) "unknown_partial")))
+
+(case countbits_preserves_argument_and_return_types
+  (source "countbits.sv" #"
+    module Child(input int a, output int y);
+        assign y = a;
+    endmodule
+    module Top(input logic signed [7:0] a, input logic [7:0] control,
+               output int ones, zeros, selected, via_child, sum_count, nested,
+               output logic [63:0] inverted, output logic [1:0] narrow,
+               output logic negative);
+        function automatic int count(input logic [7:0] v, c);
+            return $countbits(v, c);
+        endfunction
+        assign ones = $countbits(a, '1, '1);
+        assign zeros = $countbits(a, '0);
+        assign selected = count(a, control);
+        assign inverted = ~$countbits(a, '1);
+        assign narrow = $countbits(a, '1);
+        assign sum_count = $countbits(a + 8'd1, '1);
+        assign nested = $countbits($countbits(a, '1), '1);
+        assign negative = ($countbits(a, '1) - 32'sd9) < 0;
+        Child child(.a($countbits(a[5:2], '1)), .y(via_child));
+    endmodule
+  "#)
+  (top Top)
+  (for value (range 0 256)
+    (modify (set a value) (set control value))
+    (let ones (popcount value))
+    (assert_eq ones ones)
+    (assert_eq zeros (- 8 ones))
+    (assert_eq selected (? (bit value 0) ones (- 8 ones)))
+    (assert_eq inverted (trunc 64 (~ ones)))
+    (assert_eq narrow (& ones 3))
+    (assert_eq sum_count (popcount (trunc 8 (+ value 1))))
+    (assert_eq nested (popcount ones))
+    (assert_eq negative 1)
+    (assert_eq via_child (popcount (& (>> value 2) 15)))))
+
+(case countbits_in_constant_expressions
+  (four_state)
+  (source "countbits_constants.sv" #"
+    module Top(output int result, literals);
+        localparam logic signed [7:0] NEG = -1;
+        localparam logic [7:0] MIXED = 8'b10xz_11xz;
+        localparam logic [255:0] WIDE_X = 'x;
+        localparam logic [7:0] CTRL_X = 8'b0000_000x;
+        localparam logic [7:0] CTRL_Z = 8'b1111_111z;
+        localparam C = $countbits(NEG, 8'hff, '1);
+        localparam X = $countbits(MIXED, 'x);
+        localparam Z = $countbits(MIXED, 'z);
+        localparam K = $countbits(MIXED, '0, '1);
+        if (C == 8 && X == 2 && Z == 2 && K == 4 &&
+            $bits(C) == 32 && $size(C) == 32 &&
+            $countbits(MIXED[2:0], 'x, 'z) == 2 &&
+            $countbits(8'hff + 8'd1, '0) == 8 &&
+            $countbits(1'bx ? 4'b1010 : 4'b1000, 'x) == 1 &&
+            $countbits(8'hfe, 8'hfe) == 1 &&
+            $countbits(WIDE_X, CTRL_X, CTRL_X) == 256 &&
+            $countbits(MIXED, CTRL_Z) == 2 &&
+            $countbits({MIXED[2:0], MIXED[7:4]}, 'x, 'z) == 4 &&
+            $countbits({2{MIXED}}, 'x, 'z) == 8) begin
+            assign result = $countbits(256'hx, 'x, 'x) +
+                            $countbits(256'hz, 'z) +
+                            $countbits(MIXED, '0, '1, 'x, 'z, '0);
+        end else begin
+            assign result = 0;
+        end
+        assign literals = $countbits('1, '1) + $countbits(-1, '1) +
+                          $countbits('x, 'x) + $countbits('z, 'z);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 520)
+  (assert_eq literals 35))
+
+(case countbits_matches_four_states_and_variable_controls
+  (four_state)
+  (source "countbits_four_state.sv" #"
+    module Child(input logic [255:0] a, input logic c, output int y);
+        assign y = $countbits(a, c, c);
+    endmodule
+    module Top(input bit clk, input logic [255:0] a,
+               input logic [7:0] c, d,
+               output int zeros, ones, xs, zs, selected, registered, via_child,
+               output int all_states, literal_controlled);
+        assign zeros = $countbits(a, '0);
+        assign ones = $countbits(a, '1);
+        assign xs = $countbits(a, 'x);
+        assign zs = $countbits(a, 'z);
+        always_comb selected = $countbits(a, c, d, c);
+        always_ff @(posedge clk) registered <= $countbits(a, c, d, c);
+        Child child(.a(a), .c(c[0]), .y(via_child));
+        assign all_states = $countbits(a, '0, '1, 'x, 'z);
+        assign literal_controlled = $countbits(8'b10xz_11xz, c[0], d[0], c[0]);
+    endmodule
+  "#)
+  (top Top)
+  (let all (- (<< 1 256) 1))
+  ; Exercise every pair of control states, with upper control bits ignored.
+  (for mask (range 0 4)
+    (for value (range 0 4)
+      (for cm (range 0 2)
+        (for cv (range 0 2)
+          (for dm (range 0 2)
+            (for dv (range 0 2)
+              (modify (set a (fourstate value mask))
+                      (set c (fourstate (| 0xa0 cv) (| 0xf0 cm)))
+                      (set d (fourstate (| 0x50 dv) (| 0xf0 dm))))
+              (tick clk)
+              (let zeros (- 256 (popcount (| value mask))))
+              (let ones (popcount (& value (~ mask))))
+              (let xs (popcount (& value mask)))
+              (let zs (popcount (& (~ value) mask)))
+              (let cc (? cm (? cv xs zs) (? cv ones zeros)))
+              (let dc (? dm (? dv xs zs) (? dv ones zeros)))
+              (let expected (+ cc (? (&& (== cm dm) (== cv dv)) 0 dc)))
+              (assert_eq zeros zeros)
+              (assert_eq ones ones)
+              (assert_eq xs xs)
+              (assert_eq zs zs)
+              (expand name (selected registered)
+                (assert_eq {name} expected "{name}"))
+              (assert_eq via_child cc)
+              (assert_eq all_states 256)
+              (let lc (? cm 2 (? cv 3 1)))
+              (let ld (? dm 2 (? dv 3 1)))
+              (assert_eq literal_controlled (+ lc (? (&& (== cm dm) (== cv dv)) 0 ld)))))))))
+  ; Unknown states across machine-word boundaries, including the highest bit.
+  (for b (list 63 64 127 128 200 255)
+    (for value (list 0 (<< 1 b))
+      (modify (set a (fourstate value (<< 1 b)))
+              (set c (fourstate 1 1)) (set d (fourstate 0 1)))
+      (tick clk)
+      (assert_eq zeros 255)
+      (assert_eq ones 0)
+      (assert_eq xs (!= value 0))
+      (assert_eq zs (== value 0))
+      (assert_eq selected 1)
+      (assert_eq registered 1)
+      (assert_eq via_child (!= value 0))
+      (assert_eq all_states 256)))
+  (modify (set a (fourstate all all)))
+  (tick clk)
+  (assert_eq xs 256)
+  (assert_eq zs 0)
+  (assert_eq selected 256)
+  (assert_eq registered 256))
+
+(case countbits_in_parameter_specializations_and_generate_scopes
+  (four_state)
+  (source "countbits_parameters.sv" #"
+    module Child #(parameter logic [7:0] MASK = 8'b10xz_11xz,
+                   parameter int C = $countbits(MASK, 'x, 'z))
+                  (output logic [C:0] y, output int count);
+        localparam ALIAS = MASK;
+        assign y = '1;
+        assign count = $countbits(ALIAS, 'x, 'z);
+    endmodule
+    module Top(output logic [4:0] original, output logic [0:0] known,
+               output int c_original, c_known,
+               output int scoped, extended, via_function);
+        localparam logic [7:0] MIXED = 8'b10xz_11xz;
+        localparam logic signed [3:0] SIGNED_X = 4'bx001;
+        localparam logic signed [7:0] EXTENDED_X = SIGNED_X;
+        function automatic int count_parameter();
+            return $countbits(MIXED, 'x, 'z);
+        endfunction
+        assign extended = $countbits(EXTENDED_X, 'x);
+        assign via_function = count_parameter();
+        Child a(.y(original), .count(c_original));
+        Child #(.MASK(8'hff)) b(.y(known), .count(c_known));
+        if ($countbits(MIXED, 'x, 'z) == 4) begin : g
+            localparam logic [7:0] CONTROL = 8'bxxxx_xxxz;
+            localparam COUNT = $countbits(MIXED, CONTROL, CONTROL);
+            assign scoped = COUNT;
+        end else begin
+            assign scoped = -1;
+        end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq original 31)
+  (assert_eq known 1)
+  (assert_eq c_original 4)
+  (assert_eq c_known 0)
+  (assert_eq scoped 2)
+  (assert_eq extended 5)
+  (assert_eq via_function 4))
+
+; IEEE 1800-2023 21.2.1.2: radices keep leading zeros up to the argument's
+; largest value, decimals pad with spaces, a field width overrides both, and
+; `%0` displays the minimum width. Table 21-1 gives `%H` the meaning of `%h`.
+(case display_arguments_are_sized_as_ieee_specifies
+  (source "sizing.sv" #"
+                module Top(input logic clk, input logic [11:0] a,
+                           input logic signed [7:0] s);
+                    always_ff @(posedge clk) begin
+                        $display(":%h:%0h:%3h:%x:", a, a, a, 32'h5);
+                        $display(":%b:%0b:%o:%0o:", a, a, a, a);
+                        $display(":%d:%0d:%3d:%d:", a, a, a, s);
+                        $write(":%3d:%5s:", 32'd1234, "ab");
+                        $write("|%H|\n", a);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set s (trunc 8 -2)))
+  (expect_output "")
+  (tick clk)
+  (expect_output #":00a:a:00a:00000005:
+:000000001010:1010:0012:12:
+:  10:10: 10:  -2:
+:1234:   ab:|00a|
+"#))
+
+; IEEE 1800-2023 21.2.1.2: a value wider than its field width expands the
+; field without leading zeros (`%3h` of 32'h1234 displays 1234).
+(case display_field_widths_expand_to_the_value
+  (source "field.sv" #"
+                module Top(input logic clk, input logic [31:0] a);
+                    always_ff @(posedge clk) $display(":%3h:%2o:", a, a);
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0x1234))
+  (tick clk)
+  (expect_output ":1234:11064:\n"))
+
+; IEEE 1800-2023 21.2.1.3: a digit whose bits are all X (or all Z) displays
+; as x (z), one with only some unknown bits as X (Z, unless some are X), and
+; a decimal value with unknown bits as one such character.
+(case display_unknown_bits_as_ieee_specifies
+  (four_state)
+  (source "unknown.sv" #"
+                module Top(input logic clk, input logic [11:0] a,
+                           input logic [7:0] b, input logic [7:0] c);
+                    always_ff @(posedge clk) begin
+                        $display(":%h:%o:%b:%d:", a, a, a, a);
+                        $display(":%h:%h:%d:%d:%0h:", b, c, b, c, c);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 12'b001xxx101x01) (set b 8'bzzzzzzzz) (set c 8'b0000000z))
+  (tick clk)
+  (expect_output #":XXX:1x5X:001xxx101x01:   X:
+:zz:0Z:  z:  Z:Z:
+"#))
+
+; IEEE 1800-2023 21.2.1.1: an argument without a format specification of its
+; own is displayed, with automatic sizing, in the task's radix: decimal for
+; $display and $write, and binary, octal or hexadecimal for their b, o and h
+; variants. Consecutive arguments are not separated.
+(case display_tasks_default_to_their_radix
+  (source "radix.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           input logic [11:0] b);
+                    always_ff @(posedge clk) begin
+                        $display(a, b);
+                        $displayh(a, b);
+                        $displayb(a);
+                        $displayo(b);
+                        $displayh("a=", a, " b=", b);
+                        $display("a=%h", a, b);
+                        $writeh(a);
+                        $write("|\n");
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 10) (set b 10))
+  (tick clk)
+  (expect_output #" 10  10
+0a00a
+00001010
+0012
+a=0a b=00a
+a=0a  10
+0a|
+"#))

@@ -34,6 +34,10 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
+    /// A suspended process is not a named state object, so a state file
+    /// cannot record where it resumes.
+    #[error("state files are not supported for simulations with processes")]
+    Processes,
 }
 
 /// Differences between a state file and the design it is loaded into.
@@ -436,6 +440,9 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (resolve(event), *count))
                 .collect(),
             high_events: record.high_events.iter().map(|name| events[name]).collect(),
+            // State files are rejected for designs with processes.
+            process_wakeups: Vec::new(),
+            finished: false,
         })
     }
 }

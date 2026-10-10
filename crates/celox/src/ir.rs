@@ -9,7 +9,7 @@ pub(crate) use celox_design::{
 pub(crate) use celox_design::{BinaryOp, UnaryOp};
 #[cfg(feature = "host-runtime")]
 pub(crate) use celox_design::{
-    InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
+    DisplaySizing, InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
 pub use celox_frontend_core::shared::{
     FrontendLookup, InstancePath, SourceAddr, SourceVarId, VariableInfo, VariableKind,
@@ -738,6 +738,7 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
+        .chain(&program.sir.processes)
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {

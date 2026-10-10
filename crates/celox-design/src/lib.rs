@@ -63,10 +63,24 @@ pub enum RuntimeEventKind {
     Finish,
 }
 
+/// How a runtime event site sizes its formatted arguments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplaySizing {
+    /// The formatting of Veryl's simulator: radices at the argument's width,
+    /// decimals at their minimum, and C-style field widths that never
+    /// truncate.
+    #[default]
+    Veryl,
+    /// Automatic sizing and field widths of IEEE 1800-2023 21.2.1.2.
+    Ieee,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeEventSite {
     pub kind: RuntimeEventKind,
     pub template: Option<String>,
+    #[serde(default)]
+    pub sizing: DisplaySizing,
     /// Fully elaborated module-instance scope that emitted this event.
     pub scope: Option<String>,
     pub arg_widths: Vec<usize>,
@@ -194,6 +208,72 @@ pub struct RuntimeErrorInfo<A> {
     pub signals: Vec<A>,
 }
 
+/// How a process kernel returned control to the runtime, as stored in its
+/// [`ProcessSlots::status`] slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcessStatus {
+    /// Resume after the number of time units stored in [`ProcessSlots::delay`].
+    Delay,
+    /// The process ran to the end of its body.
+    Done,
+    /// The process requested the end of the simulation.
+    Finish,
+}
+
+impl ProcessStatus {
+    /// Encoding in the status slot. Zero is never written, so a kernel that
+    /// returned without reporting a status is detected.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Delay => 1,
+            Self::Done => 2,
+            Self::Finish => 3,
+        }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Delay),
+            2 => Some(Self::Done),
+            3 => Some(Self::Finish),
+            _ => None,
+        }
+    }
+}
+
+/// State through which one process kernel exchanges control with the runtime.
+///
+/// A process kernel is a resumable function. On entry it reads `resume` to
+/// find where it stopped; before returning it stores the next resume point,
+/// a [`ProcessStatus`] code in `status` and, for a delay, the number of time
+/// units in `delay`. All three are ordinary two-state state objects, so
+/// checkpoints capture a suspended process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessSlots<A> {
+    pub resume: A,
+    pub status: A,
+    pub delay: A,
+}
+
+impl<A> ProcessSlots<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
+        ProcessSlots {
+            resume: map(self.resume),
+            status: map(self.status),
+            delay: map(self.delay),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &A> {
+        [&self.resume, &self.status, &self.delay].into_iter()
+    }
+}
+
+/// Width of [`ProcessSlots::status`].
+pub const PROCESS_STATUS_WIDTH: usize = 8;
+/// Width of [`ProcessSlots::delay`].
+pub const PROCESS_DELAY_WIDTH: usize = 64;
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -212,6 +292,8 @@ pub struct RuntimeSchema<A> {
     /// derived from the other state, so state files recompute rather than
     /// compare them.
     pub comb_writes: HashSet<A>,
+    /// Control slots of the process kernels, in kernel order.
+    pub processes: Vec<ProcessSlots<A>>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -224,6 +306,7 @@ impl<A> Default for RuntimeSchema<A> {
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
+            processes: Vec::new(),
         }
     }
 }
@@ -691,6 +774,7 @@ mod tests {
         runtime.runtime_event_sites.push(RuntimeEventSite {
             kind: RuntimeEventKind::AssertFatal,
             template: Some("failed".to_string()),
+            sizing: DisplaySizing::Veryl,
             scope: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
