@@ -1088,3 +1088,26 @@ fn generate_block_imports_reach_declarations_and_single_items() {
     ));
     assert!(detail.contains("no item `missing`"), "{detail}");
 }
+
+/// Review cases: unused block wildcard imports name packages, and a loop's
+/// genvar is not a declaration of the block around the loop.
+#[test]
+fn generate_block_imports_check_packages_and_skip_loop_genvars() {
+    let detail = error(
+        "module Top(output logic [7:0] y); if (1) begin : g import missing::*; end assign y = 0;
+         endmodule",
+    );
+    assert!(detail.contains("unknown package `missing`"), "{detail}");
+    assert_eq!(
+        output(
+            "package p; localparam int i = 4; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::i;
+                 for (genvar i = 0; i < 1; i++) begin : l end
+                 assign y = i;
+               end
+             endmodule"
+        ),
+        4
+    );
+}
