@@ -458,6 +458,15 @@ impl<B: SimBackend> Simulation<B> {
         self.state.step(&mut self.simulator)
     }
 
+    /// Settle the combinational logic after host writes and resume the
+    /// processes they woke at the current time, with the rounds that
+    /// follow, as [`Self::step`] does before advancing. Time does not
+    /// advance.
+    pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.simulator.eval_comb()?;
+        self.state.poll_waiting(&mut self.simulator)
+    }
+
     /// Advance time and run until `end_time` (inclusive). As for
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
