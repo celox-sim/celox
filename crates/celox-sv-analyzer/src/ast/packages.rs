@@ -24,6 +24,9 @@ pub(super) struct Package {
     dependencies: Vec<String>,
     /// Its symbols and those of its dependencies, by qualified name.
     pub symbols: ScopeSymbols,
+    /// The package as a module, when it has variables: the module the
+    /// package's one instance holds them in.
+    state_module: Option<crate::ir::Module>,
 }
 
 impl Package {
@@ -40,6 +43,17 @@ impl Packages {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.packages.keys().map(String::as_str)
+    }
+
+    /// The packages that declare variables, as modules named after them.
+    /// The design holds one instance of each, outside the instance
+    /// hierarchy; a signal with a [`package
+    /// variable`](crate::ir::Signal::package_variable) denotes a signal of
+    /// one of them.
+    pub fn state_modules(&self) -> impl Iterator<Item = &crate::ir::Module> {
+        self.packages
+            .values()
+            .filter_map(|package| package.state_module.as_ref())
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Package> {
@@ -90,7 +104,6 @@ impl Packages {
                 if declarations.iter().any(|(known, ..)| *known == name) {
                     return Err(AnalyzerError::DuplicatePackage { name });
                 }
-                reject_package_state(&name, &package.nodes.6, tree)?;
                 declarations.push((name, RefNode::PackageDeclaration(package), tree));
             }
         }
@@ -132,47 +145,62 @@ impl Packages {
     }
 }
 
-/// Reject the variables and nets of package `name`. A package declares one
-/// object shared by every module (IEEE 1800-2023 26.2), but each module that
-/// uses the package lowers its own copy of the package items. Constant
-/// variables cannot change, so a copy is equivalent.
-fn reject_package_state(
+/// The variables package `name` declares: each is one object, shared by
+/// every module that uses it (IEEE 1800-2023 26.2). Constant variables are
+/// left out; they are copied like parameters. Package nets are rejected.
+fn package_variables(
     name: &str,
     items: &[(Vec<sv_parser::AttributeInstance>, sv_parser::PackageItem)],
     syntax_tree: &SyntaxTree,
-) -> Result<(), AnalyzerError> {
+) -> Result<HashSet<String>, AnalyzerError> {
     use sv_parser::{DataDeclaration, PackageItem, PackageOrGenerateItemDeclaration};
+    let mut variables = HashSet::default();
     for (_, item) in items {
         let PackageItem::PackageOrGenerateItemDeclaration(declaration) = item else {
             continue;
         };
-        let state = match declaration.as_ref() {
-            PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
-                Some(RefNode::NetDeclaration(net))
-            }
-            PackageOrGenerateItemDeclaration::DataDeclaration(data) => match data.as_ref() {
-                DataDeclaration::Variable(variable) if variable.nodes.0.is_none() => {
-                    Some(RefNode::DataDeclarationVariable(variable))
+        match declaration.as_ref() {
+            // `word_t v;` with a typedef `word_t` is a variable; user-defined
+            // net types are not supported.
+            PackageOrGenerateItemDeclaration::NetDeclaration(net)
+                if matches!(**net, sv_parser::NetDeclaration::NetTypeIdentifier(_)) =>
+            {
+                for node in RefNode::NetDeclaration(net) {
+                    if let RefNode::NetIdentifier(_) = node
+                        && let Some(variable) = identifier_text(node, syntax_tree)
+                    {
+                        variables.insert(variable);
+                    }
                 }
-                _ => None,
-            },
-            _ => None,
-        };
-        let Some(state) = state else {
-            continue;
-        };
-        let identifier = state.into_iter().find_map(|node| match node {
-            RefNode::VariableIdentifier(_) | RefNode::NetIdentifier(_) => {
-                identifier_text(node, syntax_tree)
             }
-            _ => None,
-        });
-        return Err(AnalyzerError::Unsupported(format!(
-            "package variable or net `{name}::{}`",
-            identifier.as_deref().unwrap_or("?")
-        )));
+            PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
+                let identifier = RefNode::NetDeclaration(net).into_iter().find_map(|node| {
+                    matches!(node, RefNode::NetIdentifier(_))
+                        .then(|| identifier_text(node, syntax_tree))
+                        .flatten()
+                });
+                return Err(AnalyzerError::Unsupported(format!(
+                    "package net `{name}::{}`",
+                    identifier.as_deref().unwrap_or("?")
+                )));
+            }
+            PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
+                if let DataDeclaration::Variable(variable) = data.as_ref()
+                    && variable.nodes.0.is_none()
+                {
+                    for node in RefNode::ListOfVariableDeclAssignments(&variable.nodes.4) {
+                        if let RefNode::VariableIdentifier(_) = node
+                            && let Some(variable) = identifier_text(node, syntax_tree)
+                        {
+                            variables.insert(variable);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
-    Ok(())
+    Ok(variables)
 }
 
 fn visit(
@@ -244,7 +272,11 @@ fn analyze_package_scope(
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(node.clone(), tree);
-    let module = Module::from_module_node_with_parameter_overrides(
+    let variables = match &node {
+        RefNode::PackageDeclaration(package) => package_variables(name, &package.nodes.6, tree)?,
+        _ => HashSet::default(),
+    };
+    let mut module = Module::from_module_node_with_parameter_overrides(
         node,
         tree,
         "",
@@ -257,7 +289,46 @@ fn analyze_package_scope(
     )?;
     let mut symbols = module
         .symbols
+        .take()
         .expect("a package analysis keeps the package symbols");
+    // The package's variables, and those it imports, are shared objects;
+    // the other signals are constants, copied with their initializers.
+    let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)
+        .into_iter()
+        .partition(|signal| signal.package_variable.is_some() || variables.contains(signal.name()));
+    symbols.initial_processes.retain(|process| {
+        !state
+            .iter()
+            .any(|signal| scope::initializes(process, signal.name()))
+    });
+    symbols.signals = constants;
+    // A declaration of a user-defined net type gives no signal.
+    if let Some(net) = variables.iter().find(|variable| {
+        !state
+            .iter()
+            .any(|signal| signal.name() == variable.as_str())
+    }) {
+        return Err(AnalyzerError::Unsupported(format!(
+            "package net `{name}::{net}`"
+        )));
+    }
+    symbols.state_signals = state
+        .into_iter()
+        .map(|mut signal| {
+            if signal.package_variable.is_none() {
+                signal.package_variable = Some((name.to_string(), signal.name().to_string()));
+            }
+            signal
+        })
+        .collect();
+    let state_module = if variables.is_empty() {
+        None
+    } else {
+        let ir = crate::analyze::analyze_source(Source {
+            modules: vec![module],
+        })?;
+        ir.modules().first().cloned()
+    };
     let qualified = |item: &String| format!("{name}::{item}");
     let mut names: HashMap<String, String> = own
         .iter()
@@ -280,5 +351,6 @@ fn analyze_package_scope(
         own,
         dependencies: Vec::new(),
         symbols,
+        state_module,
     })
 }

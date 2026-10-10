@@ -2788,7 +2788,9 @@ impl NativeBackend {
             timing.calls = timing.calls.saturating_add(1);
         }
         result.map_err(|failure| match failure.code {
-            code if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+                SimulatorErrorCode::DetectedTrueLoopCode(code)
+            }
             _ => SimulatorErrorCode::InternalError,
         })
     }
@@ -2823,7 +2825,9 @@ impl NativeBackend {
         let ret = unsafe { func(ptr) };
         match ret {
             0 => Ok(()),
-            code if code > 0 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
+            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+                Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
+            }
             _ => Err(SimulatorErrorCode::InternalError),
         }
     }
@@ -2861,7 +2865,9 @@ impl NativeBackend {
         let completed = count.saturating_sub(memory[remaining_word]);
         let result = match ret {
             0 => Ok(()),
-            code if code > 0 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
+            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+                Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
+            }
             _ => Err(SimulatorErrorCode::InternalError),
         };
         (completed, result)

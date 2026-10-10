@@ -2386,9 +2386,14 @@ pub(crate) fn read_memory_file(
     depth: usize,
     destination_token: &veryl_parser::token_range::TokenRange,
 ) -> Result<InitialMemoryData, ParserError> {
+    let task = if radix == 2 { "$readmemb" } else { "$readmemh" };
     let Some(filename) = static_string_expr(&filename_arg.0) else {
         return Err(ParserError::illegal_context(
-            "$readmemh filename expression",
+            if radix == 2 {
+                "$readmemb filename expression"
+            } else {
+                "$readmemh filename expression"
+            },
             "filename must be a compile-time string",
             Some(&filename_arg.0.comptime().token),
         ));
@@ -2410,7 +2415,7 @@ pub(crate) fn read_memory_file(
     let read_start = timing.then(Instant::now);
     let content = std::fs::read_to_string(&path).map_err(|err| {
         ParserError::memory_file(
-            format!("failed to read {}: {err}", path.display()),
+            format!("{task}: failed to read {}: {err}", path.display()),
             Some(&filename_arg.0.comptime().token),
         )
     })?;
@@ -2433,7 +2438,7 @@ pub(crate) fn read_memory_file(
     )
     .map_err(|error| {
         ParserError::memory_file(
-            error.message,
+            format!("{task}: {}", error.message),
             error.at_destination.then_some(destination_token),
         )
     })?;

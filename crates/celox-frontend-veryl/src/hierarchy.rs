@@ -127,6 +127,9 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                 })?;
             }
         }
+        for binding in external_module.sim_module.package_bindings.values_mut() {
+            binding.package = external_ids[&binding.package];
+        }
         module_names.insert(global_id, external_module.sim_module.name.clone());
         modules.insert(global_id, external_module.sim_module.clone());
         external_modules_by_global.insert(global_id, external_module);
@@ -345,6 +348,11 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             modules,
             module_names,
             root_id,
+            packages: external
+                .packages
+                .iter()
+                .map(|(name, module_id)| (name.clone(), external_ids[module_id]))
+                .collect(),
         },
         module_ir,
         source_id_maps,

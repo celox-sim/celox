@@ -1,0 +1,121 @@
+{
+  "issue": 1063,
+  "standard": "IEEE 1800-2023",
+  "clauses": [
+    "11.7",
+    "16.3",
+    "20.2",
+    "20.7",
+    "21.4"
+  ],
+  "tool_versions": {
+    "icarus": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "verilator": "Verilator 5.052 2026-09-05"
+  },
+  "observations": [
+    {
+      "case_fingerprint": "4a264bd243c075a7136b669a5d2cb9979a2cc2d79e9022916f62d6f9b5e16636",
+      "category": "Functions",
+      "detail": "native testbench failed: signal: 6 (SIGABRT); see runtime.log and protocol.log\nvvp error: get 83 not supported by vpiBinaryConst\nvvp: vpi_const.cc:394: virtual int __vpiBinaryConst::vpi_get(int): Assertion `0' failed.\ntimeout: the monitored command dumped core\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_runtime_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "execute",
+        "reason": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_handle_runtime_dimensions",
+      "phase": "execute",
+      "reused": false,
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791570536,
+      "compiler_log": "/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:7: error: A reference to a net or variable (`mem') is not allowed in a constant expression.\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:7: error: Type names are not valid expressions here.\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:7:               : Expression is: <type>\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:7:               : Expression type: 10PETypename\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:8: error: Type names are not valid expressions here.\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:8: internal error: I do not know how to elaborate this expression. \n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:8:               : Expression is: <type>\n/tmp/celox-1063-icarus-array-final/system_functions/array_queries_preserve_bounds_and_dimensions/source_0.sv:8:               : Expression type: 10PETypename\n5 error(s) during elaboration.\n"
+    },
+    {
+      "case_fingerprint": "b0506a67d2d237a915dcf6ef4f139719741c8396657db83aabba9a321a1b492d",
+      "category": "Functions",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:7: error: A reference to a net or variable (`mem') is not allowed in a constant expression.\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:8: error: Type names are not valid expressions here.\n<case>/source_0.sv:8: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:8:               : Expression is: <type>\n<case>/source_0.sv:8:               : Expression type: 10PETypename\n5 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_constant_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_preserve_bounds_and_dimensions",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791570535
+    },
+    {
+      "case_fingerprint": "59f72c722e50bcc0fe0d829fce12f0b08b2d4a4a2c3510bf6a86cbf203cbbe09",
+      "category": "Functions",
+      "detail": "system_functions::immediate_cover_executes_pass_statement at 397:5: assert_eq comb: expected 0xa5, got 0x0",
+      "expectation": "Simulation",
+      "name": "system_functions::immediate_cover_executes_pass_statement",
+      "phase": "execute",
+      "reused": false,
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1791569583
+    }
+  ],
+  "minimal_runtime_query_source": "module Top;\n  logic [7:4] mem [2:5];\n  integer dimension;\n  initial begin\n    dimension = 1;\n    $display(\"%d\", $left(mem, dimension));\n    dimension = 2;\n    $display(\"%d\", $left(mem, dimension));\n    $finish;\n  end\nendmodule\n",
+  "minimal_runtime_query_command": "iverilog -g2012 -s Top -o query.vvp query.sv && vvp query.vvp",
+  "minimal_runtime_query_result": "$left expects an array and optionally an integer; exit 1",
+  "minimal_cover_source": "module Top; initial begin cover (1) $display(\"covered\"); $finish; end endmodule\n",
+  "minimal_cover_command": "iverilog -g2012 -gassertions -s Top -o cover.vvp cover.sv && vvp cover.vvp",
+  "minimal_cover_result": "Exit 0, $finish printed; no covered output. Verilator with --assert --coverage-user executes the pass action.",
+  "readmem": {
+    "source": "module Top;\n  logic [7:0] desc_mem [3:0];\n  logic [7:0] short_mem [0:3];\n  logic [7:0] long_mem [-1:2];\n  initial begin\n    short_mem[0]=8'h11; short_mem[1]=8'h22; short_mem[2]=8'h33; short_mem[3]=8'h44;\n    long_mem[-1]=8'h11; long_mem[0]=8'h22; long_mem[1]=8'h33; long_mem[2]=8'h44;\n    $readmemh(\"descending.hex\", desc_mem, 3, 1);\n    $readmemh(\"short.hex\", short_mem, 3, 2);\n    $readmemh(\"long.hex\", long_mem, -1, 0);\n    if ({desc_mem[3],desc_mem[2],desc_mem[1]} !== 24'haabbcc) $fatal(1,\"descending\");\n    if ({short_mem[0],short_mem[1],short_mem[2],short_mem[3]} !== 32'h112233aa) $fatal(1,\"short\");\n    if ({long_mem[-1],long_mem[0],long_mem[1],long_mem[2]} !== 32'hbbcc3344) $fatal(1,\"long\");\n    $display(\"memory checks passed\");\n    $finish;\n  end\nendmodule\n",
+    "files": {
+      "descending.hex": "aa @2 bb cc\n",
+      "short.hex": "aa\n",
+      "long.hex": "bb cc dd\n"
+    },
+    "icarus_command": "iverilog -g2012 -s Top -o memory.vvp memory.sv && vvp memory.vvp",
+    "icarus_result": "Passed all three assertions; warnings for short [3:2] and long [-1:0] ranges.",
+    "verilator_command": "verilator --binary --assert --top-module Top --Mdir obj memory.sv && ./obj/VTop",
+    "verilator_result": "%Error: long.hex:0: $readmem file address beyond bounds of array; Aborting. Replacing the file with exactly two words still fails on this negative-index memory; not a passing comparison."
+  },
+  "note": "Failure observations are retained as evidence, never converted into passes. Exact Icarus exclusions retain the original shared assertions.",
+  "separate_partial_width_shift_observation": {
+    "scope": "outside #1063; array query tables are padded to whole 64-bit words",
+    "source": "module Top(input logic signed [64:0] a, input logic [31:0] n, output logic signed [64:0] y); assign y = a >>> n; endmodule",
+    "stimulus": {
+      "a_payload": "0x5",
+      "a_mask": "0x10000000000000000",
+      "n": 1
+    },
+    "expected": {
+      "payload": "0x2",
+      "mask": "0x18000000000000000"
+    },
+    "observed_cranelift_and_wasm": {
+      "payload": "0x2",
+      "mask": "0x8000000000000000"
+    },
+    "note": "The existing partial-word shift behavior is not changed by this PR. Its failing observation is retained, not counted as a pass or used to exclude a suite case."
+  }
+}
