@@ -618,6 +618,71 @@ material overall generate speedup. Existing numeric and ranged modes also pass
 at 32/128/512, checking values and widths. These probes exclude backend compilation
 and simulation, and do not establish linear behavior for every scope pattern.
 
+## Retaining resolved parameter literals
+
+After synchronizing master `ef37b2c6c` (#1170), parameter binding still resolved a
+nonnumeric literal twice. The numeric resolver first tried a literal fallback,
+then discarded that literal when it could not represent the result as `i128`.
+Module binding, generate binding and AST-to-IR conversion each called the literal
+resolver again to publish the X/Z or wide value.
+
+The internal resolver now returns the numeric result and its fallback literal
+together. A directly numeric value skips literal resolution. A number recovered
+from a literal (for example, after two-state conversion of an unknown dependency)
+still takes precedence and publishes no fallback literal. Otherwise the caller
+retains that literal, including an unresolved `None`. Type publication order,
+numeric formatting and the generate binder's unresolved-expression fallback remain
+unchanged. The evaluator initializes constant-function frames independently for
+each invocation, consistent with IEEE 1800-2023 13.4.3; retaining a result introduces
+no cross-binding or cross-analysis cache.
+
+Owning-crate tests compare the combined result with the former separate resolution
+for unknown and wide values, dependencies/selects, signed shifts, stale self-values,
+two-state conversion and unresolved names. They check zero literal calls for a
+direct numeric result, one for a numeric result recovered from an unknown literal,
+and one for generated unknown/unresolved bindings. Through full module AST and IR
+construction, 16/64/256 unknown parameters make exactly one literal-resolution call
+per binding and one per exported IR parameter. Existing type, mask, override and
+scope regressions remain in place. No shared executable language cases are added.
+
+A manual owning-crate probe replays the same synthetic unknown parameter prefix
+with the old two-stage resolver and the retained-result resolver in one process.
+It publishes type/literal metadata and checks every 32-bit X mask. It alternates
+execution order and reports medians of seven runs without timing thresholds:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib compare_retained_and_repeated_parameter_resolution -- --ignored --nocapture
+```
+
+| Parameters | Repeated resolution (ms) | Retained result (ms) | Literal calls before/after |
+| ---: | ---: | ---: | ---: |
+| 32 | 0.570 | 0.361 | 64 / 32 |
+| 128 | 6.296 | 1.548 | 256 / 128 |
+| 512 | 28.168 | 10.178 | 1,024 / 512 |
+
+The 512-entry replay sample is about 2.8x faster. This measures resolution,
+publication and mask assertions; it excludes source parsing, declaration discovery,
+backend compilation and simulation. Shared-machine variation remains possible
+even with alternating paired measurements. Counts establish the eliminated second
+literal evaluation independently of elapsed time.
+
+The complete four-state probe before/after this patch gives:
+
+| Workload | Parameters | AST before/after (ms) | Parse before/after (ms) | IR before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| module declarations | 32 | 18.634 / 23.414 | 5.550 / 11.286 | 0.303 / 0.202 |
+| module declarations | 128 | 72.677 / 79.250 | 20.908 / 30.394 | 1.216 / 0.834 |
+| module declarations | 512 | 285.531 / 481.522 | 80.219 / 137.527 | 5.204 / 5.861 |
+| reverse generate dependencies | 32 | 277.599 / 346.573 | 7.326 / 8.659 | 0.017 / 0.026 |
+| reverse generate dependencies | 128 | 1,067.596 / 1,711.479 | 22.990 / 26.694 | 0.019 / 0.029 |
+| reverse generate dependencies | 512 | 3,961.605 / 8,534.573 | 85.630 / 209.199 | 0.019 / 0.033 |
+
+These separate process samples do not establish an overall AST speedup: parsing
+also became substantially slower, and preliminary generated size-query discovery
+remains expensive. Numeric and ranged modes also pass at 32/128/512 with IR
+value/width assertions. This step reduces repeated resolution rather than removing
+the remaining preliminary declaration walks or establishing universal linearity.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
