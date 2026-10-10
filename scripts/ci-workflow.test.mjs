@@ -164,6 +164,7 @@ test("scheduled and manual validation run all paths and external suites", () => 
   // The check reads the complete results, with run counts and reuse flags;
   // a retained --report copy omits them.
   assert.match(external, /--output "\$RUNNER_TEMP\/external-suite\/logs"/);
+  assert.match(external, /--bin "\$VERIFY_BIN" -- --fresh --jobs 2/);
   assert.match(
     external,
     /"\$RUNNER_TEMP\/external-suite\/logs\/results\.json" "\$VERIFY_BASELINE"/,

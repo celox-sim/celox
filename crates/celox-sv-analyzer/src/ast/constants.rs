@@ -87,7 +87,8 @@ pub(super) fn bind_generate_parameter(
 ) {
     let parameter_types = parameter_types_from_const_env(const_env);
     let resolved_type = parameter.resolved_type(&parameter_types);
-    let resolved = parameter.resolved_value(const_env, &parameter_types);
+    let resolved =
+        parameter.resolved_value_with_literals(const_env, &parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -96,9 +97,13 @@ pub(super) fn bind_generate_parameter(
             value.to_string()
         }))
     } else {
-        parameter_value_env(std::slice::from_ref(&parameter), const_env)
-            .remove(parameter.name())
-            .map(|value| substitute_expr_idents(value, parameter_literals))
+        parameter
+            .resolved_literal(const_env, &parameter_types, parameter_literals)
+            .or_else(|| {
+                parameter_value_env(std::slice::from_ref(&parameter), const_env)
+                    .remove(parameter.name())
+                    .map(|value| substitute_expr_idents(value, parameter_literals))
+            })
     };
     if let Some(ty) = resolved_type {
         insert_parameter_type_markers(const_env, parameter.name(), ty);
@@ -363,6 +368,9 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                     width: ty.width,
                     signed: name == "$signed",
                 }
+            } else if name == "$countbits" {
+                // Resolve constant calls before SLT lowering while retaining X/Z masks.
+                fold_const_integral_expr_preserving_mask(Expr::Call { name, args }, const_env)
             } else {
                 Expr::Call { name, args }
             }
@@ -571,11 +579,8 @@ fn const_expr_from_primary(
                 return Ok(None);
             }
             let ident = some!(
-                identifier_text(
-                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-                    syntax_tree,
-                )
-                .map(ConstExpr::Ident)
+                reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
+                    .map(ConstExpr::Ident)
             );
             // A single bit-select is kept; other selections need the typed
             // expression path and must not be dropped here.
@@ -593,7 +598,7 @@ fn const_expr_from_primary(
             })
         }
         sv_parser::Primary::FunctionSubroutineCall(call) => {
-            const_expr_from_function_subroutine_call(call, syntax_tree)
+            const_expr_from_function_subroutine_call(call, syntax_tree, &HashMap::default())
         }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
@@ -913,15 +918,12 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     // never replace a member by the entire parameter value.
                     return Ok(None);
                 }
-                let identifier = some!(unwrap_node!(
-                    RefNode::ConstantPrimaryPsParameter(parameter),
-                    SimpleIdentifier,
-                    EscapedIdentifier
-                ));
                 let base = some!(
-                    identifier_locate(identifier)
-                        .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
-                        .map(ConstExpr::Ident)
+                    reference_name(
+                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                        syntax_tree
+                    )
+                    .map(ConstExpr::Ident)
                 );
                 Ok(Some(
                     const_select_expr(
@@ -980,7 +982,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                 {
                     return Ok(Some(ConstExpr::Literal(ty.width.to_string())));
                 }
-                let lowered = const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree)?;
+                let lowered = const_expr_from_function_subroutine_call(
+                    &call.nodes.0,
+                    syntax_tree,
+                    const_env,
+                )?;
                 if let Some(ConstExpr::Function { name, args, .. }) = &lowered
                     && name == "$bits"
                     && let [arg] = args.as_slice()
@@ -996,14 +1002,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     if tf_call.nodes.2.is_some() {
                         return None;
                     }
-                    let identifier = unwrap_node!(
-                        RefNode::ConstantFunctionCall(call),
-                        SimpleIdentifier,
-                        EscapedIdentifier
-                    )?;
-                    identifier_locate(identifier)
-                        .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
-                        .map(ConstExpr::Ident)
+                    reference_name(
+                        RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
+                        syntax_tree,
+                    )
+                    .map(ConstExpr::Ident)
                 }))
             }
             sv_parser::ConstantPrimary::ConstantCast(cast) => Ok(constant_cast_const_expr(
@@ -1118,6 +1121,7 @@ fn const_select_expr(
 fn const_expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
 ) -> Converted<Option<ConstExpr>> {
     let system_call = match &call.nodes.0 {
         sv_parser::SubroutineCall::SystemTfCall(system_call) => system_call,
@@ -1142,18 +1146,27 @@ fn const_expr_from_function_subroutine_call(
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };
-    if matches!(name, "$countones" | "$onehot" | "$onehot0" | "$isunknown") {
+    if matches!(
+        name,
+        "$countbits" | "$countones" | "$onehot" | "$onehot0" | "$isunknown"
+    ) {
         // Use expression lowering so selections are never silently discarded
         // by the limited constant-primary identifier path below. Unsupported
         // constant argument forms must remain unresolved rather than counting
         // the entire identifier in place of its selection.
-        return Ok(expr_from_function_subroutine_call(
+        let expression = expr_from_function_subroutine_call(
             call,
             syntax_tree,
-            &PackedDimensions::default(),
+            &PackedDimensions::new(HashMap::default(), const_env, &HashMap::default()),
         )
-        .ok()
-        .and_then(expr_to_const));
+        .ok();
+        return Ok(expression.and_then(|expression| {
+            if name == "$countbits" {
+                countbits_constant_call(expression, const_env)
+            } else {
+                expr_to_const(expression)
+            }
+        }));
     }
     let mut lowered = Vec::new();
     for argument in expression_call.nodes.1.nodes.1.0.contents() {
@@ -1162,6 +1175,100 @@ fn const_expr_from_function_subroutine_call(
         lowered.push(parsed!(const_expr_from_expr(argument, syntax_tree)));
     }
     Ok(Some(ConstExpr::call(name.to_string(), lowered)))
+}
+
+// ConstExpr represents bit selects but not concatenations or part selects.
+// Counting each stream segment separately keeps parameter dependencies symbolic
+// and preserves the selected width, including when zero bits are counted.
+fn countbits_constant_call(
+    expression: Expr,
+    const_env: &HashMap<String, i128>,
+) -> Option<ConstExpr> {
+    let Expr::Call { name, mut args } = expression else {
+        return None;
+    };
+    let operand = args.remove(0);
+    let controls = args
+        .into_iter()
+        .map(|control| match control {
+            Expr::Select { expr, lsb, .. } => Some(ConstExpr::Select {
+                expr: Box::new(expr_to_const(*expr)?),
+                bit: Box::new(lsb),
+            }),
+            control => expr_to_const(control),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    countbits_constant_operand(operand, &name, &controls, const_env)
+}
+
+fn countbits_constant_operand(
+    operand: Expr,
+    name: &str,
+    controls: &[ConstExpr],
+    const_env: &HashMap<String, i128>,
+) -> Option<ConstExpr> {
+    let call = |operand| {
+        let mut args = Vec::with_capacity(controls.len() + 1);
+        args.push(operand);
+        args.extend_from_slice(controls);
+        ConstExpr::call(name.to_string(), args)
+    };
+    let sum = |mut terms: Vec<ConstExpr>| {
+        // Keep large selected vectors from creating a deeply nested sum.
+        while terms.len() > 1 {
+            let mut next = Vec::with_capacity(terms.len().div_ceil(2));
+            let mut terms_iter = terms.into_iter();
+            while let Some(left) = terms_iter.next() {
+                next.push(match terms_iter.next() {
+                    Some(right) => ConstExpr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Add,
+                        right: Box::new(right),
+                    },
+                    None => left,
+                });
+            }
+            terms = next;
+        }
+        terms.pop()
+    };
+    match operand {
+        Expr::Select { expr, msb, lsb, .. } if msb != lsb => {
+            let msb = usize::try_from(eval_ast_const_expr(&msb, const_env)?).ok()?;
+            let lsb = usize::try_from(eval_ast_const_expr(&lsb, const_env)?).ok()?;
+            let width = msb.checked_sub(lsb)?.checked_add(1)?;
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                return None;
+            }
+            let operand = expr_to_const(*expr)?;
+            sum((lsb..=msb)
+                .map(|bit| {
+                    call(ConstExpr::Select {
+                        expr: Box::new(operand.clone()),
+                        bit: Box::new(ConstExpr::Literal(bit.to_string())),
+                    })
+                })
+                .collect())
+        }
+        Expr::Concat(parts) => sum(parts
+            .into_iter()
+            .map(|part| countbits_constant_operand(part, name, controls, const_env))
+            .collect::<Option<Vec<_>>>()?),
+        Expr::RepeatConcat { count, parts } => {
+            let count = eval_ast_const_expr(&count, const_env)?;
+            if count < 0 {
+                return None;
+            }
+            let counted =
+                countbits_constant_operand(Expr::Concat(parts), name, controls, const_env)?;
+            Some(ConstExpr::Binary {
+                left: Box::new(counted),
+                op: BinaryOp::Mul,
+                right: Box::new(ConstExpr::Literal(format!("32'sd{count}"))),
+            })
+        }
+        operand => Some(call(expr_to_const(operand)?)),
+    }
 }
 
 fn integral_number_literal(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {

@@ -51,9 +51,10 @@ exit 1
 "#,
     );
     let report_path = directory.join("report.json");
+    let cache = directory.join("cache");
     let mode = directory.join("mode");
     let invocations = directory.join("invocations");
-    let execute = |incremental: bool, expected_success: bool| {
+    let execute = |flags: &[&str], expected_success: bool| {
         let mut command = Command::new(binary);
         command
             .args([
@@ -65,14 +66,14 @@ exit 1
                 "--output",
             ])
             .arg(directory.join("output"))
+            .arg("--cache")
+            .arg(&cache)
             .arg("--report")
             .arg(&report_path)
+            .args(flags)
             .env("PATH", &directory)
             .env("CELOX_INCREMENTAL_MODE", &mode)
             .env("CELOX_INCREMENTAL_INVOCATIONS", &invocations);
-        if incremental {
-            command.arg("--incremental");
-        }
         let result = command.output().unwrap();
         assert_eq!(
             result.status.success(),
@@ -82,7 +83,7 @@ exit 1
             String::from_utf8_lossy(&result.stderr)
         );
     };
-    // The cache is the complete results; --report retains only results.
+    // The local baseline keeps run metadata; --report retains only results.
     let results_path = directory.join("output").join("results.json");
     let report = || -> Value { serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap() };
     let retained =
@@ -91,18 +92,18 @@ exit 1
 
     fs::write(&mode, "failure\n").unwrap();
     for expected_calls in [1, 2] {
-        execute(true, false);
+        execute(&[], false);
         assert_eq!(calls(), expected_calls);
         assert_eq!(report()["run_counts"], json!({"fresh": 1, "reused": 0}));
         assert_eq!(report()["cases"][0]["status"], "compile_error");
     }
     fs::write(&mode, "reject\n").unwrap();
-    execute(true, true);
+    execute(&[], true);
     let first = report();
     assert!(first["context_fingerprint"].is_string());
     assert_eq!(calls(), 3);
     assert_eq!(first["cases"][0]["status"], "rejected");
-    execute(true, true);
+    execute(&["--incremental"], true);
     assert_eq!(
         calls(),
         3,
@@ -125,23 +126,61 @@ exit 1
     }
     assert_eq!(retained(), expected, "retained reports omit run metadata");
 
+    // A stale local fingerprint does not change the actual case. The shared
+    // cache still contains matching evidence and must supply the fallback.
     let mut changed = report();
     changed["cases"][0]["case_fingerprint"] = json!("prior case contents");
     fs::write(&results_path, changed.to_string()).unwrap();
-    execute(true, true);
-    assert_eq!(calls(), 4, "changed case must run again");
+    execute(&[], true);
+    assert_eq!(
+        calls(),
+        3,
+        "stale local results must fall back to shared evidence"
+    );
+    assert_eq!(report()["run_counts"], json!({"fresh": 0, "reused": 1}));
+    let mut reused_case = first["cases"][0].clone();
+    reused_case["reused"] = json!(true);
+    assert_eq!(report()["cases"][0], reused_case);
+
+    // A new output directory can reuse the same isolated shared cache.
+    fs::remove_dir_all(directory.join("output")).unwrap();
+    execute(&[], true);
+    assert_eq!(calls(), 3, "shared reuse must not require a local report");
+    assert_eq!(report()["run_counts"], json!({"fresh": 0, "reused": 1}));
+
+    // With no local evidence, corrupt shared evidence must trigger execution.
+    let shared = cache
+        .join(first["context_fingerprint"].as_str().unwrap())
+        .join(format!(
+            "{}.json",
+            first["cases"][0]["case_fingerprint"].as_str().unwrap()
+        ));
+    fs::write(&shared, "corrupted shared report").unwrap();
+    fs::remove_file(&results_path).unwrap();
+    execute(&[], true);
+    assert_eq!(calls(), 4, "corrupt shared evidence must be reverified");
+    assert_eq!(report()["run_counts"], json!({"fresh": 1, "reused": 0}));
 
     let contents = fs::read_to_string(&compiler).unwrap();
     script(
         &compiler,
         &format!("{contents}\n# changed compiler build\n"),
     );
-    execute(true, true);
+    execute(&[], true);
     assert_eq!(calls(), 5, "changed compiler must invalidate reuse");
-    execute(false, true);
-    assert_eq!(calls(), 6, "default mode must always run afresh");
+    assert_ne!(
+        report()["context_fingerprint"],
+        first["context_fingerprint"]
+    );
+    assert_eq!(report()["run_counts"], json!({"fresh": 1, "reused": 0}));
+    execute(&[], true);
+    assert_eq!(calls(), 5, "default mode must reuse unchanged successes");
+    assert_eq!(report()["run_counts"], json!({"fresh": 0, "reused": 1}));
+    execute(&["--fresh"], true);
+    assert_eq!(calls(), 6, "explicit fresh mode must always run afresh");
+    assert_eq!(report()["run_counts"], json!({"fresh": 1, "reused": 0}));
     fs::write(&results_path, "corrupted report").unwrap();
-    execute(true, false);
+    execute(&[], false);
     assert_eq!(calls(), 6, "corrupt baseline must fail before compilation");
     fs::remove_dir_all(directory).unwrap();
 }

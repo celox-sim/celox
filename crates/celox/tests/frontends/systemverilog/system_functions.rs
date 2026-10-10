@@ -106,6 +106,20 @@ sv_backends! {
         @case "system_functions::display_tasks_default_to_their_radix";
     }
 
+    fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
+        @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
+    }
+
+    fn countbits_preserves_argument_and_return_types(sim) {
+        @case "system_functions::countbits_preserves_argument_and_return_types";
+    }
+    fn countbits_in_constant_expressions(sim) {
+        @case "system_functions::countbits_in_constant_expressions";
+    }
+    fn countbits_matches_four_states_and_variable_controls(sim) {
+        @case "system_functions::countbits_matches_four_states_and_variable_controls";
+    }
+
     fn countones_preserves_argument_and_return_types(sim) {
         @case "system_functions::countones_preserves_argument_and_return_types";
     }
@@ -551,5 +565,57 @@ fn rejects_nonblocking_assignments_in_initial_processes() {
     assert!(
         error.contains("nonblocking assignment in an initial block that runs as a process"),
         "{error}"
+    );
+}
+
+#[test]
+fn rejects_countbits_with_missing_or_omitted_arguments() {
+    for args in ["", "a", "a,", ", a", "a, '1,", "a,, '1"] {
+        let source = format!(
+            "module Top(input logic a, output int y); assign y = $countbits({args}); endmodule"
+        );
+        let error = build_error(&source);
+        assert!(error.contains("$countbits"), "{args}: {error}");
+    }
+}
+
+#[test]
+fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
+    let source = r#"
+        module Top(input logic [3:0] a, output logic y);
+            function automatic logic [3:0] value(input logic [3:0] v);
+                $display("value %0d", v);
+                return v;
+            endfunction
+            function automatic logic control(input logic v);
+                $display("control %0d", v);
+                return v;
+            endfunction
+            always_comb begin
+                $countbits(value(a), control(a[0]), control(a[1]));
+                y = a[0];
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("countbits_statement.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "value 5".to_string()
+            },
+            celox::RuntimeEvent::Display {
+                message: "control 1".to_string()
+            },
+            celox::RuntimeEvent::Display {
+                message: "control 0".to_string()
+            },
+        ]
     );
 }
