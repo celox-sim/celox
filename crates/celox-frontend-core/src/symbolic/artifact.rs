@@ -83,6 +83,19 @@ pub struct SimModule {
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,
     /// Resumable processes in declaration order.
     pub processes: Vec<SymbolicProcess>,
+    /// Variables of the module that denote a variable of a package (IEEE
+    /// 1800-2023 26.2). Every instance of the module refers to that one
+    /// object instead of a state object of its own.
+    pub package_bindings: HashMap<SourceVarId, PackageBinding>,
+}
+
+/// The package variable a module variable denotes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PackageBinding {
+    /// The module holding the package's variables; see
+    /// [`SymbolicRtl::packages`].
+    pub package: ModuleId,
+    pub var_id: SourceVarId,
 }
 
 impl SimModule {
@@ -109,6 +122,7 @@ impl fmt::Debug for SimModule {
             .field("arena", &self.arena)
             .field("reset_clock_map", &self.reset_clock_map)
             .field("processes", &self.processes)
+            .field("package_bindings", &self.package_bindings)
             .finish()
     }
 }
@@ -124,12 +138,20 @@ pub struct ExternalModule {
 pub struct ExternalHierarchy {
     pub modules: HashMap<ModuleId, ExternalModule>,
     pub roots: HashMap<String, ModuleId>,
+    /// The modules of `modules` that hold package variables, by package
+    /// name; see [`SymbolicRtl::packages`].
+    pub packages: Vec<(String, ModuleId)>,
 }
 
 pub struct SymbolicRtl {
     pub modules: HashMap<ModuleId, SimModule>,
     pub module_names: HashMap<ModuleId, String>,
     pub root_id: ModuleId,
+    /// Modules holding the variables of a package, by package name. Each is
+    /// instantiated once, outside the instance hierarchy, and the
+    /// [`SimModule::package_bindings`] of other modules refer to its
+    /// variables.
+    pub packages: Vec<(String, ModuleId)>,
 }
 
 #[derive(Clone)]

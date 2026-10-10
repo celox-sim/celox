@@ -17,8 +17,8 @@ use celox_design::{
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
-    ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicProcess,
-    SymbolicRtl, SymbolicVariable,
+    ExternalHierarchy, ExternalModule, PackageBinding, SimModule, SymbolicGlueAddr as GlueAddr,
+    SymbolicProcess, SymbolicRtl, SymbolicVariable,
 };
 use celox_frontend_core::{
     FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
@@ -103,6 +103,8 @@ pub(crate) struct LoweredSvModule {
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
     pub instances: Vec<LoweredSvInstance>,
+    /// Variables that denote a package variable, with its package and name.
+    package_variables: Vec<(SourceVarId, String, String)>,
 }
 
 #[derive(Clone)]
@@ -462,6 +464,162 @@ fn validate_net_driver_ranges(
         return Err(sv::AnalyzerError::Unsupported(format!(
             "undriven net declaration `{signal_name}`"
         )));
+    }
+    Ok(())
+}
+
+/// The packages that declare variables, lowered as the modules of their one
+/// instance each, numbered from `first`.
+fn lower_package_states(
+    packages: &sv::Packages,
+    first: usize,
+    four_state: bool,
+    ff_parts: bool,
+) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
+    let mut states = packages.state_modules().collect::<Vec<_>>();
+    states.sort_by(|left, right| left.name().cmp(right.name()));
+    states
+        .into_iter()
+        .enumerate()
+        .map(|(index, module)| {
+            let lowered = lower_module(module, four_state, true, ff_parts)?;
+            // Declaration initializers run before every `initial` block
+            // (IEEE 1800-2023 10.5); one that is not folded into an initial
+            // value would run among them.
+            if !lowered.sim_module.processes.is_empty() {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "package variable initializer that is not constant in package `{}`",
+                    module.name()
+                )));
+            }
+            Ok((module.name().to_string(), ModuleId(first + index), lowered))
+        })
+        .collect()
+}
+
+/// Bind each variable that denotes a package variable to the variable of
+/// the package's module, in the modules and in the package modules.
+fn bind_package_variables<'a>(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    lowered: impl Iterator<Item = (ModuleId, &'a LoweredSvModule)>,
+    packages: &'a [(String, ModuleId, LoweredSvModule)],
+) -> Result<(), sv::AnalyzerError> {
+    let target = |package: &str, variable: &str| {
+        let (_, module_id, state) = packages
+            .iter()
+            .find(|(name, ..)| name == package)
+            .ok_or_else(|| sv::AnalyzerError::UnknownPackage {
+                name: package.to_string(),
+            })?;
+        let var_id = state.signal_names.get(variable).copied().ok_or_else(|| {
+            sv::AnalyzerError::UnknownPackageItem {
+                package: package.to_string(),
+                name: variable.to_string(),
+            }
+        })?;
+        Ok::<_, sv::AnalyzerError>(PackageBinding {
+            package: *module_id,
+            var_id,
+        })
+    };
+    let mut bindings = Vec::new();
+    for (module_id, module) in lowered.chain(
+        packages
+            .iter()
+            .map(|(_, module_id, state)| (*module_id, state)),
+    ) {
+        for (var_id, package, variable) in &module.package_variables {
+            if module.variables[var_id].domain_kind != DomainKind::Other {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "package variable `{package}::{variable}` used as a clock or reset"
+                )));
+            }
+            bindings.push((module_id, *var_id, target(package, variable)?));
+        }
+    }
+    for (module_id, var_id, binding) in bindings {
+        if let Some(module) = modules.get_mut(&module_id) {
+            module.package_bindings.insert(var_id, binding);
+        }
+    }
+    Ok(())
+}
+
+/// Reject a package variable that several drivers write, counting every
+/// instance of a module that writes it (IEEE 1800-2023 6.5). The checks of
+/// one module and its children cannot see writes from other subtrees.
+fn validate_package_variable_drivers<'a>(
+    roots: impl IntoIterator<Item = &'a LoweredSvModuleKey>,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+) -> Result<(), sv::AnalyzerError> {
+    // How many instances of each module the design holds.
+    let mut instances: HashMap<ModuleId, usize> = HashMap::default();
+    fn count(
+        key: &LoweredSvModuleKey,
+        multiplicity: usize,
+        module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+        modules: &HashMap<ModuleId, LoweredSvModule>,
+        instances: &mut HashMap<ModuleId, usize>,
+    ) {
+        // A child of another frontend has no package variables here.
+        let Some(&module_id) = module_ids.get(key) else {
+            return;
+        };
+        *instances.entry(module_id).or_default() += multiplicity;
+        for instance in &modules[&module_id].instances {
+            count(
+                &LoweredSvModuleKey::instance_key(instance),
+                multiplicity,
+                module_ids,
+                modules,
+                instances,
+            );
+        }
+    }
+    for root in roots {
+        count(root, 1, module_ids, modules, &mut instances);
+    }
+    // A driver is one process or child output of one instance; a process may
+    // assign the variable several times.
+    type Driver = (ModuleId, usize, bool, usize);
+    let mut drivers: HashMap<(String, String), Vec<(Driver, Option<(i128, i128)>)>> =
+        HashMap::default();
+    for (&module_id, module) in modules {
+        let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
+        for (var_id, package, variable) in &module.package_variables {
+            let name = &module.variables[var_id].path[0];
+            let local = local_driver_ranges(
+                &module.source,
+                name,
+                &module.constants,
+                &module.parameter_types,
+            );
+            let children = child_output_driver_ranges(module, name, module_ids, modules);
+            let entry = drivers
+                .entry((package.clone(), variable.clone()))
+                .or_default();
+            for copy in 0..multiplicity {
+                for &(driver, range) in &local {
+                    entry.push(((module_id, copy, false, driver), range));
+                }
+                for &(driver, range) in &children {
+                    entry.push(((module_id, copy, true, driver), range));
+                }
+            }
+        }
+    }
+    for ((package, variable), ranges) in drivers {
+        let overlap = ranges.iter().enumerate().any(|(index, (driver, range))| {
+            ranges[index + 1..].iter().any(|(other, other_range)| {
+                other != driver && net_driver_ranges_overlap(*range, *other_range)
+            })
+        });
+        if overlap {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "multiple drivers of package variable `{package}::{variable}`"
+            )));
+        }
     }
     Ok(())
 }
@@ -836,7 +994,53 @@ pub fn prepare_external_hierarchy(
         .filter(|(key, _)| key.parameter_overrides.is_empty())
         .map(|(key, &module_id)| (key.name.clone(), module_id))
         .collect();
-    Ok(ExternalHierarchy { modules, roots })
+    let Some(any_module) = analyzed.values().next() else {
+        return Ok(ExternalHierarchy {
+            modules,
+            roots,
+            packages: Vec::new(),
+        });
+    };
+    let package_states =
+        lower_package_states(&any_module.packages, module_ids.len(), four_state, false)?;
+    // How often the design instantiates these modules is not known here;
+    // assembly checks the drivers of package variables across instances.
+    let mut sim_modules: HashMap<ModuleId, SimModule> = modules
+        .iter()
+        .map(|(&module_id, module)| (module_id, module.sim_module.clone()))
+        .collect();
+    let mut packages = Vec::new();
+    for (name, module_id, lowered) in &package_states {
+        sim_modules.insert(*module_id, lowered.sim_module.clone());
+        packages.push((name.clone(), *module_id));
+    }
+    bind_package_variables(
+        &mut sim_modules,
+        lowered_modules
+            .iter()
+            .map(|(&module_id, lowered)| (module_id, lowered)),
+        &package_states,
+    )?;
+    for (module_id, sim_module) in sim_modules {
+        match modules.get_mut(&module_id) {
+            Some(module) => module.sim_module = sim_module,
+            None => {
+                modules.insert(
+                    module_id,
+                    ExternalModule {
+                        sim_module,
+                        port_order: Vec::new(),
+                        unresolved_instances: Vec::new(),
+                    },
+                );
+            }
+        }
+    }
+    Ok(ExternalHierarchy {
+        modules,
+        roots,
+        packages,
+    })
 }
 
 /// Analyze SystemVerilog sources and lower the selected top through Celox's
@@ -956,10 +1160,31 @@ pub fn schedule_sources(
         modules.insert(module_id, sim_module);
     }
 
+    let package_states = lower_package_states(
+        &analyzed[&top].packages,
+        module_ids.len(),
+        four_state,
+        parallel.enabled(),
+    )?;
+    validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
+    let mut packages = Vec::new();
+    for (name, module_id, lowered) in &package_states {
+        module_names.insert(*module_id, name.clone());
+        modules.insert(*module_id, lowered.sim_module.clone());
+        packages.push((name.clone(), *module_id));
+    }
+    bind_package_variables(
+        &mut modules,
+        lowered_modules
+            .iter()
+            .map(|(&module_id, lowered)| (module_id, lowered)),
+        &package_states,
+    )?;
     let symbolic = SymbolicRtl {
         modules,
         module_names,
         root_id,
+        packages,
     };
     celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl(
         symbolic,
@@ -1075,6 +1300,7 @@ fn lower_module_with_overrides(
     implicit_nets_allowed: bool,
     ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let mut package_variables = Vec::new();
     let name = module.name().to_string();
     let mut next_id = SourceVarId::default();
     let mut variables = HashMap::default();
@@ -1153,6 +1379,10 @@ fn lower_module_with_overrides(
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(signal.r#type(), &constants, &parameter_types)?;
         let path = vec![signal.name().to_string()];
+        // A package variable is the package's object, not the module's.
+        if let Some((package, variable)) = signal.package_variable() {
+            package_variables.push((id, package.to_string(), variable.to_string()));
+        }
         let variable = SvVariable {
             path,
             width: type_info.width,
@@ -1167,7 +1397,8 @@ fn lower_module_with_overrides(
             hidden: false,
         };
         name_to_id.insert(signal.name().to_string(), id);
-        if signal.is_net() || type_info.is_4state {
+        // The package's object has its own default value.
+        if (signal.is_net() || type_info.is_4state) && signal.package_variable().is_none() {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if signal.is_net() {
                 BigUint::default()
@@ -1331,6 +1562,7 @@ fn lower_module_with_overrides(
             arena: SLTNodeArena::new(),
             reset_clock_map,
             processes,
+            package_bindings: HashMap::default(),
         },
         variables,
         port_order,
@@ -1338,6 +1570,7 @@ fn lower_module_with_overrides(
         constants: constants.clone(),
         parameter_types,
         instances,
+        package_variables,
     })
 }
 

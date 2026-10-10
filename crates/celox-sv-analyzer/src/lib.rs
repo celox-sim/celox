@@ -145,7 +145,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
     ("mixed reset-edge polarities for one signal", 471),
-    ("package variable or net", 1146),
+    ("package net", 1146),
 ];
 
 impl AnalyzerError {

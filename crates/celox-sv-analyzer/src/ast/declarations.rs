@@ -381,6 +381,20 @@ pub(super) fn signals_from_module_node(
                 )?);
                 continue;
             }
+            // `word_t v;` with a typedef `word_t` parses as a net declaration
+            // of a net type; real package nets are rejected with the package.
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(
+                net,
+            )) => {
+                signals.extend(signals_from_net_declaration(
+                    net,
+                    syntax_tree,
+                    type_aliases,
+                    &item.env,
+                    None,
+                )?);
+                continue;
+            }
             ScopeItem::Package(_) => continue,
         };
         let start = signals.len();
