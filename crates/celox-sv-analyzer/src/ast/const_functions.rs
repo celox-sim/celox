@@ -11,6 +11,7 @@ use std::cell::{Cell, RefCell};
 
 use super::*;
 use crate::procedural::{CaseKind, CaseLabel, LoopKind};
+use crate::typecheck::ConstantEnvironment;
 
 /// Bounds on one evaluation, so a non-terminating constant function fails
 /// instead of hanging the analyzer.
@@ -301,13 +302,13 @@ pub(super) fn module_constant_functions(
 pub(crate) fn eval_call(
     name: &str,
     args: &[crate::ir::ConstExpr],
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
     let functions = FUNCTIONS.with(|current| current.borrow().clone());
     let function = functions.get(name)?;
     let values = args
         .iter()
-        .map(|arg| crate::typecheck::eval_const_expr(arg, constants))
+        .map(|arg| crate::typecheck::eval_const_expr_in_env(arg, constants))
         .collect::<Option<Vec<_>>>()?;
     let depth = DEPTH.with(Cell::get);
     if depth >= MAX_DEPTH {
@@ -322,20 +323,24 @@ pub(crate) fn eval_call(
 fn call(
     function: &ConstantFunction,
     args: &[i128],
-    constants: &HashMap<String, i128>,
+    constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    if args.len() != function.params.len() {
-        return None;
-    }
-    let mut frame = Frame {
-        values: constants.clone(),
-        types: parameter_types_from_const_env(constants)
-            .into_iter()
-            .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
-            .collect(),
+    let frame = Frame {
+        constants,
+        values: HashMap::default(),
+        types: HashMap::default(),
         temporaries: 0,
         iterations: 0,
     };
+    call_in_frame(function, args, frame)
+}
+
+fn call_in_frame(function: &ConstantFunction, args: &[i128], mut frame: Frame<'_>) -> Option<i128> {
+    if args.len() != function.params.len() {
+        return None;
+    }
+    #[cfg(test)]
+    FUNCTION_CALLS.with(|count| count.set(count.get() + 1));
     for ((name, r#type), value) in function.params.iter().zip(args) {
         frame.declare(name, r#type)?;
         frame.set(name, *value);
@@ -360,7 +365,11 @@ enum Flow {
     Return(Option<i128>),
 }
 
-struct Frame {
+/// Calls borrow their caller's values; only parameters, locals, the return
+/// variable, and typed temporaries are owned here. Nested calls borrow this
+/// overlay, preserving the former copied environment's lookup precedence.
+struct Frame<'a> {
+    constants: &'a dyn ConstantEnvironment,
     values: HashMap<String, i128>,
     types: HashMap<String, (usize, bool)>,
     temporaries: usize,
@@ -381,7 +390,26 @@ fn fit(value: i128, width: usize, signed: bool) -> i128 {
     }
 }
 
-impl Frame {
+impl ConstantEnvironment for Frame<'_> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        self.values.get(name).or_else(|| self.constants.get(name))
+    }
+}
+
+impl Frame<'_> {
+    fn type_of(&self, name: &str) -> Option<(usize, bool)> {
+        self.types.get(name).copied().or_else(|| {
+            dimensions::parameter_type_from_lookup(name, &|marker| {
+                self.constants.get(marker).copied()
+            })
+            .map(|ty| (ty.width, ty.signed))
+        })
+    }
+
+    fn eval_lowered(&self, expr: &crate::ir::ConstExpr) -> Option<i128> {
+        crate::typecheck::eval_const_expr_with_types_in_env(expr, self, &|name| self.type_of(name))
+    }
+
     fn declare(&mut self, name: &str, r#type: &crate::ir::Type) -> Option<()> {
         if !r#type.unpacked_ranges().is_empty() {
             return None;
@@ -389,10 +417,7 @@ impl Frame {
         let width = r#type
             .resolved_width()
             .or_else(|| {
-                crate::typecheck::resolve_packed_width_with_env(
-                    r#type.packed_ranges(),
-                    &self.values,
-                )
+                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)
             })?
             .max(1);
         self.types
@@ -401,8 +426,8 @@ impl Frame {
     }
 
     fn set(&mut self, name: &str, value: i128) {
-        let value = match self.types.get(name) {
-            Some(&(width, signed)) => fit(value, width, signed),
+        let value = match self.type_of(name) {
+            Some((width, signed)) => fit(value, width, signed),
             None => value,
         };
         self.values.insert(name.to_string(), value);
@@ -417,14 +442,14 @@ impl Frame {
         let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
         // The literal evaluator propagates expression widths; the plain one
         // covers what it does not model.
-        if let Some(literal) = crate::typecheck::eval_const_integral_literal_with_types(
-            &lowered,
-            &self.values,
-            &self.types,
-        ) {
+        if let Some(literal) =
+            crate::typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
+                self.type_of(name)
+            })
+        {
             return crate::typecheck::integral_literal_as_i128(&literal, literal.signed);
         }
-        crate::typecheck::eval_const_expr_with_types(&lowered, &self.values, &self.types)
+        self.eval_lowered(&lowered)
     }
 
     fn truth(&mut self, expr: &Expr) -> Option<bool> {
@@ -477,16 +502,8 @@ impl Frame {
             },
             Expr::Select { expr, msb, lsb, .. } => {
                 let value = self.eval(expr)?;
-                let msb = crate::typecheck::eval_const_expr_with_types(
-                    &msb.clone().into(),
-                    &self.values,
-                    &self.types,
-                )?;
-                let lsb = crate::typecheck::eval_const_expr_with_types(
-                    &lsb.clone().into(),
-                    &self.values,
-                    &self.types,
-                )?;
+                let msb = self.eval_lowered(&msb.clone().into())?;
+                let lsb = self.eval_lowered(&lsb.clone().into())?;
                 let (high, low) = (msb.max(lsb), msb.min(lsb));
                 let width = usize::try_from(high - low).ok()? + 1;
                 let shifted = value.checked_shr(u32::try_from(low).ok()?)?;
@@ -541,23 +558,15 @@ impl Frame {
     fn assign(&mut self, lhs: &LValue, value: i128) -> Option<()> {
         match lhs {
             LValue::Ident(name) => {
-                if !self.types.contains_key(name) {
+                if self.type_of(name).is_none() {
                     let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
                     self.declare(name, &r#type)?;
                 }
                 self.set(name, value);
             }
             LValue::Select { name, msb, lsb, .. } => {
-                let msb = crate::typecheck::eval_const_expr_with_types(
-                    &msb.clone().into(),
-                    &self.values,
-                    &self.types,
-                )?;
-                let lsb = crate::typecheck::eval_const_expr_with_types(
-                    &lsb.clone().into(),
-                    &self.values,
-                    &self.types,
-                )?;
+                let msb = self.eval_lowered(&msb.clone().into())?;
+                let lsb = self.eval_lowered(&lsb.clone().into())?;
                 let (high, low) = (msb.max(lsb), msb.min(lsb));
                 let width = u32::try_from(high - low).ok()? + 1;
                 let low = u32::try_from(low).ok()?;
@@ -565,7 +574,7 @@ impl Frame {
                     return None;
                 }
                 let mask = ((1i128 << width) - 1) << low;
-                let old = *self.values.get(name)?;
+                let old = *self.get(name)?;
                 self.set(name, (old & !mask) | ((value << low) & mask));
             }
         }
@@ -701,3 +710,11 @@ impl Frame {
         Some(Flow::Next)
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    static FUNCTION_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;
