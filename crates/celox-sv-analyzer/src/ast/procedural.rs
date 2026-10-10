@@ -12,6 +12,9 @@ use crate::procedural::{
     SystemTaskArg,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
     entries: Vec<ScopeEntry>,
@@ -1677,9 +1680,12 @@ pub(super) fn subroutine_declared_dimensions(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<VariablePackedDimensions> {
+    // This lexical metadata lookup reads only declarations, not `automatic`
+    // or lowered statements. Its placeholder default cannot affect lifetime;
+    // actual lowering supplies the enclosing module/package's default.
     let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree, false),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree, false),
         _ => None,
     }?;
     let params =
@@ -1705,9 +1711,11 @@ pub(super) fn subroutine_declared_parameter_shapes(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<(String, Vec<VariableDimensions>)> {
+    // As in `subroutine_declared_dimensions`, lifetime is unused here: only
+    // the name and formal declarations contribute to lexical shape metadata.
     let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree, false),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree, false),
         _ => None,
     }?;
     let params =
