@@ -531,3 +531,23 @@ module Top (
         "{error:?}"
     );
 }
+
+#[test]
+fn initial_blocks_write_package_variables_after_their_initializers() {
+    let source = "package p; logic [7:0] shared = 8'd1; logic [7:0] other; endpackage
+        module Top(output logic [7:0] y, output logic [7:0] z);
+          initial begin p::shared = 8'd42; p::other = 8'd7; end
+          assign y = p::shared;
+          assign z = p::other;
+        endmodule";
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("initial.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    let (y, z) = (simulator.signal("y"), simulator.signal("z"));
+    assert_eq!(simulator.get(y), 42u8.into());
+    assert_eq!(simulator.get(z), 7u8.into());
+    // Diagnostics name the package variable as written.
+    let address = simulator.program().get_addr(&[], &["p::shared"]).unwrap();
+    assert_eq!(simulator.program().get_path(&address), "p::shared");
+}

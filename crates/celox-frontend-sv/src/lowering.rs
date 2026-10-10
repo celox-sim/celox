@@ -1391,7 +1391,8 @@ fn lower_module_with_overrides(
             hidden: false,
         };
         name_to_id.insert(signal.name().to_string(), id);
-        if signal.is_net() || type_info.is_4state {
+        // The package's object has its own default value.
+        if (signal.is_net() || type_info.is_4state) && signal.package_variable().is_none() {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if signal.is_net() {
                 BigUint::default()

@@ -1086,23 +1086,25 @@ pub fn schedule_symbolic_rtl(
     };
 
     let (mod_vars, mod_path_idx) = module_variables(&modules);
-    // A variable bound to a package variable has no state object or initial
-    // value of its own; the package's instance holds them.
-    let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = instance_modules
-        .iter()
+    // A variable bound to a package variable has no state object of its own:
+    // its initial writes, such as a constant `initial` assignment, go to the
+    // package's object. Declaration initializers of packages come first
+    // (IEEE 1800-2023 10.5).
+    let mut initial_instances = instance_modules.iter().collect::<Vec<_>>();
+    initial_instances.sort_unstable_by_key(|(instance, module)| {
+        (!package_instances.contains_key(*module), instance.0)
+    });
+    let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+        .into_iter()
         .flat_map(|(&instance_id, module_id)| {
             modules[module_id]
                 .initial_memory_values
                 .iter()
                 .map(move |init| InitialStateValue {
-                    address: AbsoluteAddr {
-                        instance_id,
-                        var_id: init.address,
-                    },
+                    address: bindings.locate(instance_id, init.address),
                     data: init.data.clone(),
                 })
         })
-        .filter(|init| !bindings.is_bound(&init.address))
         .collect();
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
@@ -1290,8 +1292,11 @@ pub fn schedule_symbolic_rtl(
         .into_iter()
         .map(|slots| slots.map(project))
         .collect();
+    // A package variable's state object maps back to the package's own
+    // variable, not to one of its aliases.
     let state_to_source = source_to_state
         .iter()
+        .filter(|(source, _)| !bindings.is_bound(source))
         .map(|(source, state)| (*state, *source))
         .collect();
 

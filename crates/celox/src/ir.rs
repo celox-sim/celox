@@ -255,13 +255,15 @@ impl RuntimeDesign {
         let Some(instance) = self.instances.get(&address.instance_id) else {
             return address.to_string();
         };
-        instance
-            .display_path
-            .iter()
-            .chain(&variable.path)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(".")
+        // A package instance is named `p::`, and its variables `p::v`.
+        let mut path = String::new();
+        for segment in instance.display_path.iter().chain(&variable.path) {
+            if !path.is_empty() && !path.ends_with("::") {
+                path.push('.');
+            }
+            path.push_str(segment);
+        }
+        path
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
