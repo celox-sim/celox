@@ -106,7 +106,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   の規則で解決します。`p::x` は package `p` の項目を指すため、複数の package、または package と
   モジュールに同名の項目があっても衝突しません。`import p::x;` で見えるのは `x` だけです。
   `import p::*;` では、スコープ自身の宣言が package の同名の項目を隠し、2 つの wildcard import
-  の package が宣言する名前は、参照したときだけエラーになります。package の関数の中の名前は
+  の package が宣言する名前は、参照したときだけエラーになります。generate ブロック内の import は、そのブロック
+  （と内側のブロック）でだけ名前を見えるようにし、モジュール自身の宣言や import より優先されます。package の関数の中の名前は
   package の中で解決します。package の変数は、それを使うすべてのモジュール（Veryl からインスタンス化した
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む

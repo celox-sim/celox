@@ -1097,6 +1097,18 @@ impl<'a> Elaborator<'a, '_> {
             sv_parser::GenerateBlock::GenerateItem(item) => vec![item],
             sv_parser::GenerateBlock::Multiple(block) => block.nodes.3.iter().collect(),
         };
+        // The names the block's imports bind to another declaration than its
+        // module does (see `imports::resolve_imports`), before the block's
+        // declarations are evaluated with them.
+        let imported = scope::imported();
+        if let Some(bindings) = imported
+            .generate_imports
+            .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
+        {
+            for (name, target) in bindings {
+                bind_import(&mut scope, name, target);
+            }
+        }
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
         if let Some((genvar, _)) = index {
@@ -1201,6 +1213,41 @@ impl<'a> Elaborator<'a, '_> {
         }
         Ok(())
     }
+}
+
+/// Make `name` in `scope` denote the package item `target`, as an import of
+/// the generate block does.
+fn bind_import(scope: &mut Scope, name: &str, target: &str) {
+    Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
+    scope.names.insert(name.to_string(), target.to_string());
+    // The constant value and type markers of the item, under the name.
+    let names = |key: &str| -> Option<String> {
+        if key == target {
+            return Some(name.to_string());
+        }
+        let (prefix, marked) = scope::split_marker(key)?;
+        (marked == target).then(|| format!("{prefix}{name}"))
+    };
+    scope.env.retain(|key, _| {
+        key != name && scope::split_marker(key).is_none_or(|(_, marked)| marked != name)
+    });
+    let constants: Vec<(String, i128)> = scope
+        .env
+        .iter()
+        .filter_map(|(key, value)| Some((names(key)?, *value)))
+        .collect();
+    scope.env.extend(constants);
+    match scope.literals.get(target).cloned() {
+        Some(value) => {
+            scope.literals.insert(name.to_string(), value);
+        }
+        None => {
+            scope.literals.remove(name);
+        }
+    }
+    scope
+        .parameters
+        .retain(|parameter| parameter.name() != name);
 }
 
 // Bootstrap only module-scope functions; collecting the full function map would
