@@ -2,6 +2,284 @@
 
 use super::*;
 
+/// IEEE 1800-2023 20.7: count the declared dimensions without evaluating
+/// the operand. Preserve array shape before expression lowering flattens it.
+pub(super) fn dimensions_system_function_call_value(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
+) -> Option<usize> {
+    match call {
+        sv_parser::SystemTfCall::ArgDataType(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions"
+                || call.nodes.1.nodes.1.1.is_some()
+            {
+                return None;
+            }
+            match &call.nodes.1.nodes.1.0 {
+                sv_parser::DataType::String(_) => return Some(1),
+                sv_parser::DataType::NonIntegerType(_)
+                | sv_parser::DataType::Chandle(_)
+                | sv_parser::DataType::Event(_) => return Some(0),
+                _ => {}
+            }
+            let ty = function_type_from_ref_node(
+                RefNode::DataType(&call.nodes.1.nodes.1.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?;
+            Some(ty.unpacked_ranges().len() + ty.packed_ranges().len())
+        }
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions" {
+                return None;
+            }
+            let arguments = call.nodes.1.nodes.1.0.contents();
+            let [Some(argument)] = arguments.as_slice() else {
+                return None;
+            };
+            let mut context = if let Some(dimensions) = dimensions
+                && dimensions.scope_types_complete
+            {
+                dimensions.clone()
+            } else {
+                let mut context = containing_packed_dimensions(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .unwrap_or_else(|| {
+                    PackedDimensions::new(HashMap::default(), const_env, type_aliases)
+                });
+                context.function_return_types = containing_function_return_types(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                );
+                if let Some(dimensions) = dimensions {
+                    context.extend(
+                        dimensions
+                            .iter()
+                            .map(|(name, metadata)| (name.clone(), metadata.clone())),
+                    );
+                    context
+                        .function_return_types
+                        .extend(dimensions.function_return_types.clone());
+                    context.parameter_values = dimensions.parameter_values.clone();
+                }
+                if let Some(locals) = containing_function_dimensions(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ) {
+                    for (name, ty) in &locals {
+                        context.const_env.insert(
+                            variable_dimensions_marker(name),
+                            (ty.unpacked.len() + ty.packed.len()) as i128,
+                        );
+                    }
+                    context.extend(locals);
+                }
+                context
+            };
+            // Cast lowering needs signedness even in declaration-time queries.
+            let signedness = context
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.signed))
+                .collect::<Vec<_>>();
+            context.expression_signedness.extend(signedness);
+            // Query declared return types, including functions with side effects.
+            context.functions = Arc::default();
+            if !context.scope_types_complete {
+                let mut shapes = containing_subroutine_param_shapes(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                );
+                if let Some(dimensions) = dimensions {
+                    shapes.extend(
+                        dimensions
+                            .subroutine_param_shapes
+                            .iter()
+                            .map(|(name, shapes)| (name.clone(), shapes.clone())),
+                    );
+                }
+                context.subroutine_param_shapes = Arc::new(shapes);
+            }
+            expression_dimensions(
+                argument,
+                syntax_tree,
+                &context.const_env,
+                type_aliases,
+                &context,
+            )
+        }
+        sv_parser::SystemTfCall::ArgOptionl(_) => None,
+    }
+}
+
+fn expression_dimensions(
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: &PackedDimensions,
+) -> Option<usize> {
+    match argument {
+        sv_parser::Expression::Unary(unary)
+            if matches!(
+                syntax_tree.get_str(&unary.nodes.0.nodes.0.nodes.0)?,
+                "+" | "-" | "~"
+            ) =>
+        {
+            let operand = sv_parser::Expression::Primary(Box::new(unary.nodes.2.clone()));
+            return expression_dimensions(
+                &operand,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                dimensions,
+            );
+        }
+        sv_parser::Expression::Binary(binary)
+            if matches!(
+                syntax_tree.get_str(&binary.nodes.1.nodes.0.nodes.0)?,
+                "<<" | ">>" | "<<<" | ">>>"
+            ) =>
+        {
+            return expression_dimensions(
+                &binary.nodes.0,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                dimensions,
+            );
+        }
+        _ => {}
+    }
+    if let sv_parser::Expression::Primary(primary) = argument {
+        match &**primary {
+            sv_parser::Primary::MintypmaxExpression(grouped) => {
+                if let sv_parser::MintypmaxExpression::Expression(argument) =
+                    &grouped.nodes.0.nodes.1
+                {
+                    return expression_dimensions(
+                        argument,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                        dimensions,
+                    );
+                }
+            }
+            sv_parser::Primary::PrimaryLiteral(literal) => {
+                if unwrap_node!(RefNode::PrimaryLiteral(literal), StringLiteral).is_some() {
+                    return Some(1);
+                }
+                if unwrap_node!(RefNode::PrimaryLiteral(literal), RealNumber).is_some() {
+                    return Some(0);
+                }
+                if matches!(
+                    &**literal,
+                    sv_parser::PrimaryLiteral::Number(_)
+                        | sv_parser::PrimaryLiteral::UnbasedUnsizedLiteral(_)
+                ) {
+                    return Some(1);
+                }
+            }
+            sv_parser::Primary::Hierarchical(hierarchical) => {
+                let select = &hierarchical.nodes.2;
+                if packed_structs::has_member_access(
+                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                    RefNode::Select(select),
+                ) && let Some(count) = packed_structs::member_dimension_count(
+                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                    select,
+                    syntax_tree,
+                    dimensions,
+                ) {
+                    return Some(count);
+                }
+                let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)?;
+                let declared_count = dimensions
+                    .get(&name)
+                    .map(|ty| ty.unpacked.len() + ty.packed.len());
+                let scoped_count = const_env
+                    .get(&variable_dimensions_marker(&name))
+                    .and_then(|n| usize::try_from(*n).ok());
+                // Preliminary discovery sees module declarations; generated
+                // locals are already represented by the current scope's markers.
+                let count = if dimensions.scope_types_complete {
+                    declared_count.or(scoped_count)
+                } else {
+                    scoped_count.or(declared_count)
+                }
+                .or_else(|| {
+                    const_env
+                        .get(&parameter_rank_marker(&name))
+                        .and_then(|n| usize::try_from(*n).ok())
+                })
+                .or_else(|| {
+                    type_aliases
+                        .get(&name)
+                        .map(|ty| ty.unpacked_ranges().len() + ty.packed_ranges().len())
+                });
+                if let Some(count) = count {
+                    let remaining = count.checked_sub(select.nodes.1.nodes.0.len())?;
+                    if select.nodes.2.is_some() && remaining == 0 {
+                        return None;
+                    }
+                    return Some(remaining);
+                }
+            }
+            sv_parser::Primary::Cast(cast) => {
+                if let Some(ty) = type_from_ref_node_with_env(
+                    RefNode::CastingType(&cast.nodes.0),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .or_else(|| {
+                    type_alias_from_ref_node(
+                        RefNode::CastingType(&cast.nodes.0),
+                        syntax_tree,
+                        type_aliases,
+                    )
+                }) {
+                    return Some(ty.unpacked_ranges().len() + ty.packed_ranges().len());
+                }
+            }
+            _ => {}
+        }
+    }
+    let expression = expr_from_expression_with_types(argument, syntax_tree, dimensions).ok()?;
+    if let Expr::Call { name, .. } = &expression
+        && let Some(metadata) = dimensions.function_return_types.get(name)
+    {
+        return metadata.dimensions;
+    }
+    // Ordinary integral expression results are scalar or simple bit vectors.
+    expr_static_width(&expression, dimensions).map(|width| {
+        usize::from(
+            width > 1
+                || matches!(
+                    expression,
+                    Expr::Literal(_)
+                        | Expr::Concat(_)
+                        | Expr::RepeatConcat { .. }
+                        | Expr::Resize { .. }
+                ),
+        )
+    })
+}
+
 mod queries;
 pub(super) use queries::array_query_call;
 
@@ -17,6 +295,14 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0.nodes.0 else {
         return None;
     };
+    if let Some(count) =
+        dimensions_system_function_call_value(call, syntax_tree, const_env, type_aliases, None)
+    {
+        return Some(ExprType {
+            width: count,
+            signed: false,
+        });
+    }
     size_system_function_call_type(call, syntax_tree, const_env, type_aliases, None)
 }
 
@@ -293,7 +579,6 @@ fn size_function_expression_type(
         // (including their first return dimension for $size).
         let mut query_dimensions = dimensions.clone();
         query_dimensions.functions = Arc::default();
-        query_dimensions.subroutine_param_shapes = Arc::default();
         if let Some(r#type) = size_function_expression_type_from_dimensions(
             argument,
             syntax_tree,
@@ -333,6 +618,21 @@ fn size_function_expression_type(
             .function_return_types
             .extend(dimensions.function_return_types.clone());
     }
+    let mut shapes = containing_subroutine_param_shapes(
+        RefNode::Expression(argument),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    );
+    if let Some(dimensions) = dimensions {
+        shapes.extend(
+            dimensions
+                .subroutine_param_shapes
+                .iter()
+                .map(|(name, shapes)| (name.clone(), shapes.clone())),
+        );
+    }
+    packed_dimensions.subroutine_param_shapes = Arc::new(shapes);
     size_function_expression_type_from_dimensions(
         argument,
         syntax_tree,
@@ -485,6 +785,7 @@ fn containing_packed_dimensions(
         let module = match node {
             RefNode::ModuleDeclarationAnsi(module) => RefNode::ModuleDeclarationAnsi(module),
             RefNode::ModuleDeclarationNonansi(module) => RefNode::ModuleDeclarationNonansi(module),
+            RefNode::PackageDeclaration(package) => RefNode::PackageDeclaration(package),
             _ => continue,
         };
         let Some((module_start, module_end)) = ref_node_source_span(module.clone()) else {
@@ -503,10 +804,29 @@ fn containing_packed_dimensions(
         let _guard = ActivePackedDimensionsGuard { module_span };
         let ports =
             ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        let signals =
+        let mut signals =
             signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        let mut dimensions =
+        signals.extend(
+            array_parameters::array_parameters_from_module_node(
+                module.clone(),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .ok()?
+            .into_iter()
+            .map(|parameter| parameter.signal),
+        );
+        let imported = scope::imported();
+        let mut dimensions = packed_dimensions_from_ports_and_signals(
+            &[],
+            &imported.signals,
+            const_env,
+            type_aliases,
+        );
+        let declared =
             packed_dimensions_from_ports_and_signals(&ports, &signals, const_env, type_aliases);
+        dimensions.extend(declared.iter().map(|(name, ty)| (name.clone(), ty.clone())));
         if let Some(locals) =
             containing_function_dimensions(target.clone(), syntax_tree, const_env, type_aliases)
         {
@@ -524,70 +844,47 @@ fn containing_function_dimensions(
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, VariableDimensions>> {
     let (target_start, target_end) = ref_node_source_span(target)?;
-    for child in syntax_tree {
-        let RefNode::FunctionDeclaration(declaration) = child else {
-            continue;
-        };
-        let (start, end) = ref_node_source_span(RefNode::FunctionDeclaration(declaration))?;
-        if target_start < start || target_end > end {
-            continue;
-        }
-        let function_span = (start, end);
-        if !ACTIVE_FUNCTION_DIMENSIONS.with(|active| active.borrow_mut().insert(function_span)) {
-            return None;
-        }
-        let _guard = ActiveFunctionDimensionsGuard { function_span };
-        let mut dimensions = HashMap::default();
-        let (params, locals) = match &declaration.nodes.2 {
-            sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-                let params = body
-                    .nodes
-                    .3
-                    .nodes
-                    .1
-                    .as_ref()
-                    .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
-                    .unwrap_or_default();
-                let locals = function_local_packed_dimensions_from_block_items(
-                    &body.nodes.5,
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )?;
-                (params, locals)
+    let mut scopes = syntax_tree
+        .into_iter()
+        .filter_map(|node| {
+            if !matches!(
+                node,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::SeqBlock(_)
+            ) {
+                return None;
             }
-            sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
-                let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
-                let items = body.nodes.4.iter().filter_map(|item| match item {
-                    sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
-                    sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
-                });
-                let locals = function_local_packed_dimensions_from_block_item_iter(
-                    items,
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )?;
-                (params, locals)
-            }
-        };
-        dimensions.extend(params.into_iter().map(|param| {
-            (
-                param.name,
-                VariableDimensions {
-                    packed: param.packed_dimensions,
-                    unpacked: Vec::new(),
-                    signed: param.signed,
-                    is_2state: param.is_2state,
-                    members: Vec::new(),
-                    signed_element_depth: param.signed_element_depth,
-                },
-            )
-        }));
-        dimensions.extend(locals);
-        return Some(dimensions);
+            let (start, end) = ref_node_source_span(node.clone())?;
+            (start <= target_start && target_end <= end).then_some(((start, end), node))
+        })
+        .collect::<Vec<_>>();
+    // Only ancestors contribute names; inner declarations shadow outer ones.
+    scopes.sort_by_key(|((start, end), _)| std::cmp::Reverse(end - start));
+    let function_span = scopes.first()?.0;
+    if !ACTIVE_FUNCTION_DIMENSIONS.with(|active| active.borrow_mut().insert(function_span)) {
+        return None;
     }
-    None
+    let _guard = ActiveFunctionDimensionsGuard { function_span };
+    let mut dimensions = HashMap::default();
+    for (_, scope) in scopes {
+        let locals = match scope {
+            RefNode::SeqBlock(block) => function_local_packed_dimensions_from_block_items(
+                &block.nodes.2,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ),
+            node => procedural::subroutine_declared_dimensions(
+                node,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ),
+        }?;
+        dimensions.extend(locals);
+    }
+    Some(dimensions)
 }
 
 fn containing_function_return_types(
@@ -605,6 +902,7 @@ fn containing_function_return_types(
         let module = match node {
             RefNode::ModuleDeclarationAnsi(module) => RefNode::ModuleDeclarationAnsi(module),
             RefNode::ModuleDeclarationNonansi(module) => RefNode::ModuleDeclarationNonansi(module),
+            RefNode::PackageDeclaration(package) => RefNode::PackageDeclaration(package),
             _ => continue,
         };
         let Some((module_start, module_end)) = ref_node_source_span(module.clone()) else {
@@ -666,7 +964,7 @@ fn containing_function_return_types(
         // Populate outer declarations first so inner declarations shadow them
         // regardless of their relative order in the source text.
         declarations.sort_by_key(|(depth, _)| *depth);
-        let mut result = HashMap::default();
+        let mut result = scope::imported().function_return_types.clone();
         // A return range may depend on a function declared later in the
         // module. Revisit declarations after publishing each partial pass;
         // recursive discovery reads that partial map instead of recursing.
@@ -687,7 +985,89 @@ fn containing_function_return_types(
         }
         return result;
     }
-    HashMap::default()
+    scope::imported().function_return_types.clone()
+}
+
+/// Return types alone do not provide the context for an untyped argument pattern.
+fn containing_subroutine_param_shapes(
+    target: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> HashMap<String, Vec<VariableDimensions>> {
+    let mut shapes = scope::imported().subroutine_shapes.clone();
+    let Some(target_span) = ref_node_source_span(target) else {
+        return shapes;
+    };
+    let contains = |(start, end): (usize, usize), (inner_start, inner_end): (usize, usize)| {
+        start <= inner_start && inner_end <= end
+    };
+    for node in syntax_tree {
+        if !matches!(
+            node,
+            RefNode::ModuleDeclarationAnsi(_)
+                | RefNode::ModuleDeclarationNonansi(_)
+                | RefNode::PackageDeclaration(_)
+        ) {
+            continue;
+        }
+        let Some(module_span) = ref_node_source_span(node.clone()) else {
+            continue;
+        };
+        if !contains(module_span, target_span) {
+            continue;
+        }
+        // Formal bounds can contain another type query. Do not recursively
+        // reconstruct this same declaration scope while resolving those bounds.
+        if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
+            return shapes;
+        }
+        let _guard = ActivePackedDimensionsGuard { module_span };
+        let generates = node
+            .clone()
+            .into_iter()
+            .filter_map(|child| match child {
+                RefNode::GenerateBlock(_) => ref_node_source_span(child),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut declarations = node
+            .into_iter()
+            .filter_map(|child| {
+                if !matches!(
+                    child,
+                    RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_)
+                ) {
+                    return None;
+                }
+                let span = ref_node_source_span(child.clone())?;
+                let ancestors = generates
+                    .iter()
+                    .filter(|scope| contains(**scope, span))
+                    .collect::<Vec<_>>();
+                if ancestors
+                    .iter()
+                    .any(|scope| !contains(**scope, target_span))
+                {
+                    return None;
+                }
+                Some((ancestors.len(), child))
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by_key(|(depth, _)| *depth);
+        for (_, declaration) in declarations {
+            if let Some((name, params)) = procedural::subroutine_declared_parameter_shapes(
+                declaration,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ) {
+                shapes.insert(name, params);
+            }
+        }
+        break;
+    }
+    shapes
 }
 
 fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {
@@ -719,6 +1099,12 @@ fn function_declaration_return_metadata(
         name,
         FunctionReturnMetadata {
             width: return_type.map(|r#type| r#type.width),
+            dimensions: function_return_dimensions(
+                return_node,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ),
             first_packed_dimension_width: function_return_first_packed_dimension_width(
                 return_node,
                 syntax_tree,
@@ -880,6 +1266,10 @@ pub(super) fn parameter_signed_marker(name: &str) -> String {
     format!("__parameter::signed::{name}")
 }
 
+pub(super) fn parameter_rank_marker(name: &str) -> String {
+    format!("__parameter::rank::{name}")
+}
+
 pub(super) fn parameter_dimensions_marker(name: &str) -> String {
     format!("__parameter::dimensions::{name}")
 }
@@ -898,6 +1288,10 @@ pub(super) fn variable_bits_marker(name: &str) -> String {
 
 pub(super) fn variable_size_marker(name: &str) -> String {
     format!("__variable::size::{name}")
+}
+
+pub(super) fn variable_dimensions_marker(name: &str) -> String {
+    format!("__variable::dimensions::{name}")
 }
 
 pub(super) fn variable_signed_marker(name: &str) -> String {
@@ -928,6 +1322,10 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
     for (name, r#type) in variables {
+        const_env.insert(
+            variable_dimensions_marker(name),
+            (r#type.unpacked_ranges().len() + r#type.packed_ranges().len()) as i128,
+        );
         let dimension_width = |range: &PackedRange| {
             let left = eval_ast_const_expr(range.left(), const_env)?;
             let right = eval_ast_const_expr(range.right(), const_env)?;

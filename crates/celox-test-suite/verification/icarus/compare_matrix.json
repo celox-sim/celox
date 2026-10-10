@@ -1,0 +1,153 @@
+{
+  "cases": [
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_compare_matrix_merger",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_compare_matrix_selector",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_compare_matrix_stage1_sort",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_compare_matrix_stage1cm",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_generic_module_instantiation",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-package-types"
+        ],
+        "id": "icarus_package_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects package-qualified types in these emitted module port declarations. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "compare_matrix::test_proto_const_max_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "compare_matrix::test_proto_function_basic",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

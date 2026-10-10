@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "Verilator rejects the emitted standard-library mux/demux connection because its port and actual disagree on packed versus unpacked array shape. The smoke fixture remains unvalidated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-mux-port-shape"
+        ],
+        "id": "sv_mux_port_shape",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator rejects the emitted standard-library mux/demux connection because its port and actual disagree on packed versus unpacked array shape. The smoke fixture remains unvalidated.",
+        "upstream": []
+      },
+      "name": "std_mux::test_demux_build_smoke",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Verilator rejects the emitted standard-library mux/demux connection because its port and actual disagree on packed versus unpacked array shape. The smoke fixture remains unvalidated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-mux-port-shape"
+        ],
+        "id": "sv_mux_port_shape",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator rejects the emitted standard-library mux/demux connection because its port and actual disagree on packed versus unpacked array shape. The smoke fixture remains unvalidated.",
+        "upstream": []
+      },
+      "name": "std_mux::test_mux_build_smoke",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

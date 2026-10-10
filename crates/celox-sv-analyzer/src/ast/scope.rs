@@ -104,16 +104,18 @@ pub(super) fn imported() -> Arc<ScopeSymbols> {
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 9] = [
+    const FIXED: [&str; 11] = [
         "__parameter::local::",
         "__parameter::width::",
         "__parameter::signed_element::",
         "__parameter::signed::",
         "__parameter::dimensions::",
+        "__parameter::rank::",
         "__enum::",
         "__variable::bits::",
         "__variable::size::",
         "__variable::signed::",
+        "__variable::dimensions::",
     ];
     for prefix in FIXED {
         if let Some(name) = key.strip_prefix(prefix) {

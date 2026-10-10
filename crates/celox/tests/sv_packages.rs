@@ -254,25 +254,168 @@ fn qualified_types_formals_and_escaped_names_resolve() {
     );
 }
 
+/// An export makes imported declarations visible to the importers of the
+/// package; an import through an export denotes the original declaration
+/// (IEEE 1800-2023 26.6).
 #[test]
-fn package_exports_are_unsupported() {
-    let error = Simulator::from_sv_sources(
-        vec![(
-            "package base; localparam int X = 1; endpackage
-             package ext; import base::*; export base::X; endpackage
-             module Top(output logic [7:0] y); assign y = 0; endmodule",
-            std::path::Path::new("packages.sv"),
-        )],
-        "Top",
-    )
-    .build()
-    .expect_err("package exports are not supported");
-    match error.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { detail, .. }) => {
-            assert!(detail.contains("package export declaration"), "{detail}")
-        }
-        other => panic!("expected an unsupported construct, got {other:?}"),
-    }
+fn packages_export_imported_names() {
+    let p1 = "package p1; localparam int X = 3; localparam int Y = 4; endpackage";
+    // `export p1::*` exports what the package imports from `p1`.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::*; endpackage
+             module Top(output logic [7:0] y); import p2::*; assign y = X; endmodule"
+        )),
+        3
+    );
+    // Exports chain, and a declaration exported through two packages does
+    // not make a wildcard reference ambiguous.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::*; endpackage
+             package p3; import p1::*; import p2::*; export p2::*; localparam int Q = X; endpackage
+             package p4; import p1::*; export p1::*; localparam int Z = X + 1; endpackage
+             module Top(output logic [7:0] y); import p3::*; import p4::*;
+               assign y = X * 10 + Q + Z; endmodule"
+        )),
+        30 + 3 + 4
+    );
+    // `export p::x` imports an unreferenced candidate; `export *::*` exports
+    // every imported declaration.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p5; import p1::*; export p1::Y; endpackage
+             package p6; export *::*; import p1::X; endpackage
+             module Top(output logic [7:0] y); import p5::*; import p6::X;
+               assign y = X * 10 + Y; endmodule"
+        )),
+        34
+    );
+    // An explicit import of an exported name, and of the same declaration
+    // through two packages.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::X; endpackage
+             module Top(output logic [7:0] y); import p2::X; import p1::X; assign y = X; endmodule"
+        )),
+        3
+    );
+}
+
+#[test]
+fn packages_export_only_imported_names() {
+    let p1 = "package p1; localparam int X = 3; localparam int Y = 4; endpackage";
+    // `Y` is a candidate for import into `p3` but not imported, so the
+    // export does not make it available.
+    let detail = error(&format!(
+        "{p1}
+         package p3; import p1::*; export p1::*; localparam int Q = X; endpackage
+         module Top(output logic [7:0] y); import p3::Y; assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `Y`"), "{detail}");
+    // A name a subroutine of the package declares is not imported by the
+    // references to it there.
+    let detail = error(&format!(
+        "{p1}
+         package p3; import p1::*; export p1::*;
+           function automatic int f(input int X); return X; endfunction
+         endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// A qualified name may name an exported declaration: `p2::X` and `p1::X`
+/// are the same declaration (IEEE 1800-2023 26.6).
+#[test]
+fn qualified_names_reach_exported_declarations() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; typedef logic [5:0] t; endpackage
+             package p2; import p1::X; import p1::t; export p1::X, p1::t; endpackage
+             module Top(output logic [7:0] y); p2::t v; assign v = '1; assign y = p2::X + v; endmodule"
+        ),
+        66
+    );
+}
+
+/// A wildcard reference a function local shadows is not ambiguous, and a
+/// named export binds its name before other references look it up.
+#[test]
+fn shadowed_and_exported_names_are_not_ambiguous() {
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             module Top(output logic [7:0] y); import p::*; import q::*;
+               function automatic int f(input int X); return X + 1; endfunction
+               assign y = f(1); endmodule"
+        ),
+        2
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        3
+    );
+}
+
+#[test]
+fn illegal_exports_are_errors() {
+    let p1 = "package p1; localparam int X = 3; endpackage
+              package q; localparam int X = 5; endpackage";
+    // An export refers to the name, so the package cannot declare it.
+    let detail = error(&format!(
+        "{p1}
+         package p6; import p1::*; export p1::X; localparam int X = 1; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(
+        detail.contains("names an item the package declares"),
+        "{detail}"
+    );
+    // The package must import the name from the package it exports it from.
+    let detail = error(&format!(
+        "{p1}
+         package p7; export p1::X; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("does not import"), "{detail}");
+    let detail = error(&format!(
+        "{p1}
+         package p8; import q::X; import p1::*; export p1::X; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("`p1::X`"), "{detail}");
+    let detail = error(&format!(
+        "{p1}
+         package p9; import p1::*; export p1::Z; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `Z`"), "{detail}");
+}
+
+/// An exported package variable is the original package's one object.
+#[test]
+fn exported_package_variables_are_shared() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared; function automatic logic [7:0] inc(logic [7:0] v);
+               return v + 8'd1; endfunction endpackage
+             package q; import p::*; export p::shared, p::inc; localparam int K = 2; endpackage
+             module W(input logic [7:0] a); import q::*; always_comb shared = inc(a) + K; endmodule
+             module Top(output logic [7:0] y); W w(.a(8'd9)); assign y = p::shared; endmodule"
+        ),
+        12
+    );
 }
 
 #[test]
@@ -660,4 +803,94 @@ fn instance_paths_ending_in_scope_separators_keep_their_dot() {
     let program = simulator.program();
     let address = program.get_addr(&[("\\u::", 0)], &["y"]).unwrap();
     assert_eq!(program.get_path(&address), "\\u::.y");
+}
+
+/// A declaration of a nested block shadows a name only inside that block,
+/// and a qualified name of an exported declaration may repeat.
+#[test]
+fn nested_block_declarations_shadow_only_inside_them() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; logic [7:0] shared; endpackage
+             package q; import p1::*; export p1::*;
+               function automatic int f(input int a);
+                 begin int X; X = a; end
+                 return a + X;
+               endfunction
+               localparam int Y = f(1);
+               typedef logic [7:0] byte_t; byte_t unused;
+               function automatic logic [7:0] g(); return shared; endfunction
+             endpackage
+             module W; always_comb q::shared = 8'd5; endmodule
+             module Top(output logic [7:0] y); import q::X; W w();
+               assign y = X * 10 + q::Y + q::shared + q::shared; endmodule"
+        ),
+        30 + 4 + 10
+    );
+}
+
+/// A named export does not repair an earlier reference, and a name an
+/// explicit import binds is not imported through a wildcard as well.
+#[test]
+fn exports_follow_lexical_order_and_explicit_imports() {
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package q; localparam int X = 5; endpackage
+         package r; import p::*; import q::*; localparam int Y = X; export p::X; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("`X`"), "{detail}");
+    let detail = error(
+        "package p1; localparam int X = 3; endpackage
+         package p2; import p1::X; export p1::X; endpackage
+         package p3; import p2::X; import p1::*; localparam int Y = X; export p1::*; endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// Review cases: the first of repeated exports, `for` loop scopes, and a
+/// package naming its own export.
+#[test]
+fn exports_loops_and_self_qualified_exports() {
+    let p = "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{p}
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; export p::X;
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        )),
+        3
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::*;
+               function automatic int f();
+                 int s = 0;
+                 for (int X = 0; X < 2; X++) s += X;
+                 return s + X;
+               endfunction
+               localparam int Y = f();
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::X; export p::X; localparam int Y = r::X + 1; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package r; import p::X; localparam int Y = r::X + 1; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
 }
