@@ -3067,7 +3067,7 @@ pub(super) fn lower_instruction(
             // memory: the register's shift and mask are saved. A store in
             // between leaves the register as the only holder of the value.
             if let Some((addr, source_bit_offset, loaded_at)) = ctx.reg_addrs.get(src).cloned()
-                && ctx.memory_unchanged_since(&addr, loaded_at)
+                && ctx.memory_unchanged_since(&addr, source_bit_offset, src_width, loaded_at)
             {
                 let slice_bit_offset = source_bit_offset + *bit_offset;
                 let value_base = ctx.byte_offset(&addr, slice_bit_offset);
