@@ -599,7 +599,7 @@ chapter-7/arrays/packed/querying-functions/left.sv	fail
 chapter-7/arrays/packed/querying-functions/low.sv	fail
 chapter-7/arrays/packed/querying-functions/right.sv	fail
 chapter-7/arrays/packed/querying-functions/size.sv	pass
-chapter-7/arrays/packed/querying-functions/unpacked-dimensions.sv	fail
+chapter-7/arrays/packed/querying-functions/unpacked-dimensions.sv	pass
 chapter-7/arrays/packed/slice-equality.sv	pass
 chapter-7/arrays/packed/slice.sv	pass
 chapter-7/arrays/packed/treat-as-integer.sv	pass
