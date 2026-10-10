@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 8,
     "emission_error": 0,
-    "compile_error": 48,
+    "compile_error": 52,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -486,6 +486,38 @@
       "name": "system_functions::display_field_widths_expand_to_the_value",
       "phase": "execute",
       "status": "mismatch"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: packed array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_is_independent_of_unknown_values",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_of_nonarray_handle_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:16: error: A reference to a net or variable (`index') is not allowed in a constant expression.\n<case>/source_0.sv:16: error: Array index expressions must be constant here.\n<case>/source_0.sv:16: error: Unable to elaborate r-value: $dimensions(a[index]['sd0])\n<case>/source_0.sv:19: error: Array memory[index] needs 2 indices, but got only 1.\n<case>/source_0.sv:19: error: Unable to elaborate r-value: $dimensions(memory[index])\n5 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_preserves_selected_and_expression_types",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:33: assert: netmisc.cc:1860: failed assertion packed_dims.size() == 1\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::dimensions_resolves_types_and_constant_scopes",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

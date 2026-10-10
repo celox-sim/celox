@@ -44,6 +44,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                 FunctionReturnMetadata {
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
+                    dimensions: f.return_dimensions,
                     signed: f.return_signed,
                     is_2state: f.return_is_2state,
                 },

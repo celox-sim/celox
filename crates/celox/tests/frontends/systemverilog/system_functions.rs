@@ -1,6 +1,24 @@
 use super::*;
 
 sv_backends! {
+    fn dimensions_of_nonarray_handle_types(sim) {
+        @case "system_functions::dimensions_of_nonarray_handle_types";
+    }
+
+    fn dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::dimensions_is_independent_of_unknown_values";
+    }
+
+    fn dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::dimensions_counts_declared_arrays";
+    }
+    fn dimensions_preserves_selected_and_expression_types(sim) {
+        @case "system_functions::dimensions_preserves_selected_and_expression_types";
+    }
+    fn dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
+    }
+
     fn display_arguments_are_sized_as_ieee_specifies(sim) {
         @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
     }
@@ -58,7 +76,13 @@ sv_backends! {
 
 #[test]
 fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
-    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+    for name in [
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$dimensions",
+    ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
             let source =
@@ -237,6 +261,9 @@ fn value_functions_called_as_statements_check_their_operands() {
         endmodule",
         "module Top(input logic a, output logic y);
             always_comb begin $bits(no_such_signal); y = a; end
+        endmodule",
+        "module Top(input logic a, output logic y);
+            always_comb begin $dimensions(no_such_signal); y = a; end
         endmodule",
     ] {
         build_error(source);
@@ -493,4 +520,14 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
             },
         ]
     );
+}
+
+#[test]
+fn dimensions_rejects_undefined_constant_operands() {
+    for source in [
+        "module Top(output int y); localparam N = $dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+    ] {
+        build_error(source);
+    }
 }

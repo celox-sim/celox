@@ -2,6 +2,244 @@
 
 use super::*;
 
+/// IEEE 1800-2023 20.7: count the declared dimensions without evaluating
+/// the operand. Preserve array shape before expression lowering flattens it.
+pub(super) fn dimensions_system_function_call_value(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
+) -> Option<usize> {
+    match call {
+        sv_parser::SystemTfCall::ArgDataType(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions"
+                || call.nodes.1.nodes.1.1.is_some()
+            {
+                return None;
+            }
+            match &call.nodes.1.nodes.1.0 {
+                sv_parser::DataType::String(_) => return Some(1),
+                sv_parser::DataType::NonIntegerType(_)
+                | sv_parser::DataType::Chandle(_)
+                | sv_parser::DataType::Event(_) => return Some(0),
+                _ => {}
+            }
+            let ty = function_type_from_ref_node(
+                RefNode::DataType(&call.nodes.1.nodes.1.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?;
+            Some(ty.unpacked_ranges().len() + ty.packed_ranges().len())
+        }
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions" {
+                return None;
+            }
+            let arguments = call.nodes.1.nodes.1.0.contents();
+            let [Some(argument)] = arguments.as_slice() else {
+                return None;
+            };
+            let mut context = if let Some(dimensions) = dimensions
+                && dimensions.scope_types_complete
+            {
+                dimensions.clone()
+            } else {
+                let mut context = containing_packed_dimensions(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .unwrap_or_else(|| {
+                    PackedDimensions::new(HashMap::default(), const_env, type_aliases)
+                });
+                context.function_return_types = containing_function_return_types(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                );
+                if let Some(dimensions) = dimensions {
+                    context.extend(
+                        dimensions
+                            .iter()
+                            .map(|(name, metadata)| (name.clone(), metadata.clone())),
+                    );
+                    context
+                        .function_return_types
+                        .extend(dimensions.function_return_types.clone());
+                    context.parameter_values = dimensions.parameter_values.clone();
+                }
+                if let Some(locals) = containing_function_dimensions(
+                    RefNode::Expression(argument),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ) {
+                    for (name, ty) in &locals {
+                        context.const_env.insert(
+                            variable_dimensions_marker(name),
+                            (ty.unpacked.len() + ty.packed.len()) as i128,
+                        );
+                    }
+                    context.extend(locals);
+                }
+                context
+            };
+            // Query declared return types, including functions with side effects.
+            context.functions = Arc::default();
+            context.subroutine_param_shapes = Arc::default();
+            expression_dimensions(
+                argument,
+                syntax_tree,
+                &context.const_env,
+                type_aliases,
+                &context,
+            )
+        }
+        sv_parser::SystemTfCall::ArgOptionl(_) => None,
+    }
+}
+
+fn expression_dimensions(
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: &PackedDimensions,
+) -> Option<usize> {
+    match argument {
+        sv_parser::Expression::Unary(unary)
+            if matches!(
+                syntax_tree.get_str(&unary.nodes.0.nodes.0.nodes.0)?,
+                "+" | "-" | "~"
+            ) =>
+        {
+            let operand = sv_parser::Expression::Primary(Box::new(unary.nodes.2.clone()));
+            return expression_dimensions(
+                &operand,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                dimensions,
+            );
+        }
+        sv_parser::Expression::Binary(binary)
+            if matches!(
+                syntax_tree.get_str(&binary.nodes.1.nodes.0.nodes.0)?,
+                "<<" | ">>" | "<<<" | ">>>"
+            ) =>
+        {
+            return expression_dimensions(
+                &binary.nodes.0,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                dimensions,
+            );
+        }
+        _ => {}
+    }
+    if let sv_parser::Expression::Primary(primary) = argument {
+        match &**primary {
+            sv_parser::Primary::MintypmaxExpression(grouped) => {
+                if let sv_parser::MintypmaxExpression::Expression(argument) =
+                    &grouped.nodes.0.nodes.1
+                {
+                    return expression_dimensions(
+                        argument,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                        dimensions,
+                    );
+                }
+            }
+            sv_parser::Primary::PrimaryLiteral(literal) => {
+                if unwrap_node!(RefNode::PrimaryLiteral(literal), StringLiteral).is_some() {
+                    return Some(1);
+                }
+                if unwrap_node!(RefNode::PrimaryLiteral(literal), RealNumber).is_some() {
+                    return Some(0);
+                }
+            }
+            sv_parser::Primary::Hierarchical(hierarchical) => {
+                let select = &hierarchical.nodes.2;
+                if packed_structs::has_member_access(
+                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                    RefNode::Select(select),
+                ) && let Some(count) = packed_structs::member_dimension_count(
+                    RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                    select,
+                    syntax_tree,
+                    dimensions,
+                ) {
+                    return Some(count);
+                }
+                let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)?;
+                let declared_count = dimensions
+                    .get(&name)
+                    .map(|ty| ty.unpacked.len() + ty.packed.len());
+                let scoped_count = const_env
+                    .get(&variable_dimensions_marker(&name))
+                    .and_then(|n| usize::try_from(*n).ok());
+                // Preliminary discovery sees module declarations; generated
+                // locals are already represented by the current scope's markers.
+                let count = if dimensions.scope_types_complete {
+                    declared_count.or(scoped_count)
+                } else {
+                    scoped_count.or(declared_count)
+                }
+                .or_else(|| {
+                    const_env
+                        .get(&parameter_rank_marker(&name))
+                        .and_then(|n| usize::try_from(*n).ok())
+                })
+                .or_else(|| {
+                    type_aliases
+                        .get(&name)
+                        .map(|ty| ty.unpacked_ranges().len() + ty.packed_ranges().len())
+                });
+                if let Some(count) = count {
+                    let remaining = count.checked_sub(select.nodes.1.nodes.0.len())?;
+                    if select.nodes.2.is_some() && remaining == 0 {
+                        return None;
+                    }
+                    return Some(remaining);
+                }
+            }
+            sv_parser::Primary::Cast(cast) => {
+                if let Some(ty) = type_from_ref_node_with_env(
+                    RefNode::CastingType(&cast.nodes.0),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .or_else(|| {
+                    type_alias_from_ref_node(
+                        RefNode::CastingType(&cast.nodes.0),
+                        syntax_tree,
+                        type_aliases,
+                    )
+                }) {
+                    return Some(ty.unpacked_ranges().len() + ty.packed_ranges().len());
+                }
+            }
+            _ => {}
+        }
+    }
+    let expression = expr_from_expression_with_types(argument, syntax_tree, dimensions).ok()?;
+    if let Expr::Call { name, .. } = &expression
+        && let Some(metadata) = dimensions.function_return_types.get(name)
+    {
+        return metadata.dimensions;
+    }
+    // Ordinary integral expression results are scalar or simple bit vectors.
+    expr_static_width(&expression, dimensions).map(|width| usize::from(width > 1))
+}
+
 pub(super) fn size_system_function_expr_type(
     primary: &sv_parser::ConstantPrimary,
     syntax_tree: &SyntaxTree,
@@ -14,6 +252,14 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0.nodes.0 else {
         return None;
     };
+    if let Some(count) =
+        dimensions_system_function_call_value(call, syntax_tree, const_env, type_aliases, None)
+    {
+        return Some(ExprType {
+            width: count,
+            signed: false,
+        });
+    }
     size_system_function_call_type(call, syntax_tree, const_env, type_aliases, None)
 }
 
@@ -716,6 +962,12 @@ fn function_declaration_return_metadata(
         name,
         FunctionReturnMetadata {
             width: return_type.map(|r#type| r#type.width),
+            dimensions: function_return_dimensions(
+                return_node,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            ),
             first_packed_dimension_width: function_return_first_packed_dimension_width(
                 return_node,
                 syntax_tree,
@@ -877,6 +1129,10 @@ pub(super) fn parameter_signed_marker(name: &str) -> String {
     format!("__parameter::signed::{name}")
 }
 
+pub(super) fn parameter_rank_marker(name: &str) -> String {
+    format!("__parameter::rank::{name}")
+}
+
 pub(super) fn parameter_dimensions_marker(name: &str) -> String {
     format!("__parameter::dimensions::{name}")
 }
@@ -895,6 +1151,10 @@ pub(super) fn variable_bits_marker(name: &str) -> String {
 
 pub(super) fn variable_size_marker(name: &str) -> String {
     format!("__variable::size::{name}")
+}
+
+pub(super) fn variable_dimensions_marker(name: &str) -> String {
+    format!("__variable::dimensions::{name}")
 }
 
 pub(super) fn variable_signed_marker(name: &str) -> String {
@@ -925,6 +1185,10 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
     for (name, r#type) in variables {
+        const_env.insert(
+            variable_dimensions_marker(name),
+            (r#type.unpacked_ranges().len() + r#type.packed_ranges().len()) as i128,
+        );
         let dimension_width = |range: &PackedRange| {
             let left = eval_ast_const_expr(range.left(), const_env)?;
             let right = eval_ast_const_expr(range.right(), const_env)?;

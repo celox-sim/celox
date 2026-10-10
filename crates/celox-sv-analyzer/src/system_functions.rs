@@ -139,7 +139,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function("$bits", 1, 1),
     unsupported("$isunbounded", Function),
     // 20.7 Array query functions
-    unsupported("$dimensions", Function),
+    function("$dimensions", 1, 1),
     unsupported("$unpacked_dimensions", Function),
     unsupported("$left", Function),
     unsupported("$right", Function),

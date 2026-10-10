@@ -117,6 +117,7 @@ impl<'a> ParameterEnvironment<'a> {
             parameter_width_marker(name),
             parameter_signed_marker(name),
             parameter_dimensions_marker(name),
+            parameter_rank_marker(name),
             parameter_signed_element_marker(name),
         ];
         for index in 0..parameter.packed_ranges.len() {
@@ -502,6 +503,12 @@ fn bind_parameter(
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
+        let rank = if parameter.packed_ranges.is_empty() {
+            usize::from(ty.width > 1)
+        } else {
+            parameter.packed_ranges.len()
+        };
+        env.insert(parameter_rank_marker(parameter.name()), rank as i128);
     }
     if let Some(literal) = literal {
         // Shadow a numeric inherited binding with the four-state declaration.
