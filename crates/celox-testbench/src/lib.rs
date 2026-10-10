@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 mod format;
 mod vm;
-pub use format::{DisplayFormatArg, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg};
+pub use format::{
+    DisplayFormatArg, FieldSpec, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
+    format_veryl_display_arg, pad_veryl_field,
+};
 pub use vm::{CompiledExpr, TestbenchValue};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

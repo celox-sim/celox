@@ -6,8 +6,8 @@ const execFileAsync = promisify(execFile);
 
 const FAILED_RESULTS = new Set(["failure", "cancelled"]);
 
-export function issueTitle(branch) {
-  return `Full CI is failing on ${branch}`;
+export function issueTitle(branch, name = "Full CI") {
+  return `${name} is failing on ${branch}`;
 }
 
 // `needs` is the workflow's toJSON(needs). Skipped jobs are not failures: a
@@ -19,8 +19,8 @@ export function failedJobs(needs) {
     .sort();
 }
 
-export async function reportFullCi({ github, needs, branch, sha, runUrl, log = console.log }) {
-  const title = issueTitle(branch);
+export async function reportFullCi({ github, needs, branch, sha, runUrl, name = "Full CI", details = "", log = console.log }) {
+  const title = issueTitle(branch, name);
   const failed = failedJobs(needs);
   const open = (await github.listOpenIssues(title)).filter(
     (issue) => issue.title === title,
@@ -32,23 +32,24 @@ export async function reportFullCi({ github, needs, branch, sha, runUrl, log = c
 
   if (failed.length === 0) {
     if (issue === null) {
-      log(`Full CI passed on ${branch}.`);
+      log(`${name} passed on ${branch}.`);
       return { outcome: "passed" };
     }
     await github.comment(
       issue.number,
-      `Full CI passed again on \`${sha}\`: ${runUrl}`,
+      `${name} passed again on \`${sha}\`: ${runUrl}`,
     );
     await github.close(issue.number);
-    log(`Closed #${issue.number}: full CI passed on ${branch}.`);
+    log(`Closed #${issue.number}: ${name} passed on ${branch}.`);
     return { outcome: "closed", number: issue.number };
   }
 
   const body = [
-    `Full CI failed on \`${branch}\` at \`${sha}\`: ${runUrl}`,
+    `${name} failed on \`${branch}\` at \`${sha}\`: ${runUrl}`,
     "",
     "Failed jobs:",
     ...failed.map((job) => `- ${job}`),
+    ...(details ? ["", details] : []),
   ].join("\n");
   if (issue !== null) {
     await github.comment(issue.number, body);
@@ -57,7 +58,7 @@ export async function reportFullCi({ github, needs, branch, sha, runUrl, log = c
   }
   const number = await github.create(
     title,
-    `${body}\n\nThis issue closes automatically when full CI passes on \`${branch}\` again.`,
+    `${body}\n\nThis issue closes automatically when ${name} passes on \`${branch}\` again.`,
   );
   log(`Opened #${number}.`);
   return { outcome: "opened", number };

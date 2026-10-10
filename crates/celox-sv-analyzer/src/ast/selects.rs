@@ -51,6 +51,7 @@ pub(super) fn variable_lvalue_from_node(
             {
                 return packed_structs::variable_member(
                     node,
+                    None,
                     &identifier.nodes.2,
                     syntax_tree,
                     packed_dimensions,
@@ -1716,7 +1717,7 @@ fn indexed_constant_expression(
                 if parameter.nodes.1.nodes.0.is_some() {
                     return Err(unsupported("member select of a parameter"));
                 }
-                let name = identifier_text(
+                let name = reference_name(
                     RefNode::PsParameterIdentifier(&parameter.nodes.0),
                     syntax_tree,
                 )

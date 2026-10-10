@@ -45,14 +45,14 @@ let mut sim = Simulator::from_sv_sources(
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット |
 | initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むもの、システムタスクを呼ぶもの、タイミング制御を使うものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
-| タイミング制御 | 整数リテラル・パラメータ・変数・括弧付きの式による `#delay`。`@(posedge x)`、`@(negedge x)`、`@(x)` と、`or` または `,` でつないだリスト。`wait (条件)`。`initial` ブロック、タイミング制御を持つ `always` プロセス（`always #5 clk = ~clk;`、`always @(a or b) ...`、本体にタイミング制御を含むエッジセンシティブな `always`）、およびそれらが呼ぶ task で使えます。遅延はシミュレーションの時間単位で数え、`timescale` は適用しません。エッジで再開したプロセスは、そのエッジのレジスタが更新される前に実行されるため、更新前の値を読みます |
+| タイミング制御 | 整数リテラル・パラメータ・変数・括弧付きの式による `#delay`。`@(posedge x)`、`@(negedge x)`、`@(x)` と、`or` または `,` でつないだリスト。`wait (条件)`。`initial` ブロック、タイミング制御を持つ `always` プロセス（`always #5 clk = ~clk;`、`always @(a or b) ...`、本体にタイミング制御を含むエッジセンシティブな `always`。呼び出す task を通じて含む場合も同様）、およびそれらが呼ぶ task で使えます。遅延はシミュレーションの時間単位で数え、`timescale` は適用しません。エッジで再開したプロセスは、そのエッジのレジスタが更新される前に実行されるため、更新前の値を読みます |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
-| 関数 | `input` / `output` / `inout` 引数を持てる `function` と `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開されるため、タイミング制御を持つ task をプロセスから呼べます。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
+| 関数 | `input` / `output` / `inout` 引数を持てる `function` と `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開されるため、タイミング制御を持つ task をプロセスから呼べます。その引数とローカル変数はプロセスごとに別のコピーを持ちます。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -106,11 +106,15 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   として読み、書き込みは存在するビットだけを更新します。
 - **ワイルドカード比較。** `casez`、`casex`、`inside`、`==?` は、定数パターンの `?`、`x`、`z`
   ビットを、2 値・4 値のどちらのシミュレーションでも尊重します。
-- **package** は、使うモジュールごとにインライン展開します。名前は素の識別子で解決するため、
-  package の項目とモジュールの項目が同名だと、重複宣言として報告します。package の変数と net は、
-  1 つのオブジェクトを共有せずモジュールごとのコピーになってしまうため拒否します。`const` 変数は
-  受け付けます。package をスコープとして解決する対応は
-  [#1146](https://github.com/celox-sim/celox/issues/1146) で追跡しています。
+- **package** はそれぞれ独立したスコープとして 1 回だけ解析し、名前は IEEE 1800-2023 26.3
+  の規則で解決します。`p::x` は package `p` の項目を指すため、複数の package、または package と
+  モジュールに同名の項目があっても衝突しません。`import p::x;` で見えるのは `x` だけです。
+  `import p::*;` では、スコープ自身の宣言が package の同名の項目を隠し、2 つの wildcard import
+  の package が宣言する名前は、参照したときだけエラーになります。package の関数の中の名前は
+  package の中で解決します。package の変数と net は、モジュール間で共有できるようになるまで
+  拒否します（[#1146](https://github.com/celox-sim/celox/issues/1146)）。`const` 変数は受け付けます。
+  package の `export` 宣言とコンパイル単位（`$unit`）の宣言は
+  未対応です。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の

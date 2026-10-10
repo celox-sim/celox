@@ -742,6 +742,9 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.step_round(executor, time, Vec::new(), Vec::new(), true)?;
+        // A process the settled state woke may wait for zero time: the
+        // rounds of this time are drained, as `step` drains them.
+        self.run_remaining_rounds(executor, time, u64::MAX)?;
         executor.finish_timed_step(time);
         Ok(Some(time))
     }

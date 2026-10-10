@@ -50,14 +50,14 @@ synthesis and is tested at the design level.
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state, calls a system task or uses timing controls, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
-| Timing controls | `#delay` with an integer literal, parameter, variable or parenthesized expression; `@(posedge x)`, `@(negedge x)`, `@(x)` and lists joined by `or` or `,`; `wait (condition)`; in `initial` blocks, `always` processes with timing controls (`always #5 clk = ~clk;`, `always @(a or b) ...`, an edge-sensitive body with timing inside), and tasks they call. A delay counts simulation time units; `timescale` is not applied. A process woken by an edge runs before the registers of that edge update, so it reads their previous values |
+| Timing controls | `#delay` with an integer literal, parameter, variable or parenthesized expression; `@(posedge x)`, `@(negedge x)`, `@(x)` and lists joined by `or` or `,`; `wait (condition)`; in `initial` blocks, `always` processes with timing controls (`always #5 clk = ~clk;`, `always @(a or b) ...`, an edge-sensitive body with timing inside, also through the tasks it calls), and tasks they call. A delay counts simulation time units; `timescale` is not applied. A process woken by an edge runs before the registers of that edge update, so it reads their previous values |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
-| Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined, so a task with timing controls may be called from a process. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
+| Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined, so a task with timing controls may be called from a process, and each process has its own copy of such a task's arguments and locals. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$clog2`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
+| System functions | `$bits`, `$size`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -204,12 +204,17 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Wildcard comparisons.** `casez`, `casex`, `inside` and `==?` honor the
   `?`, `x` and `z` bits of a constant pattern in both two-state and four-state
   simulation.
-- **Packages** are inlined into each module that uses them. Names resolve by
-  their plain identifier, so a package item and a module item with the same
-  name are reported as a duplicate declaration. Package variables and nets
-  are rejected, since each module would get its own copy instead of sharing
-  one object; `const` variables are accepted. Resolving packages as scopes is
-  tracked in [#1146](https://github.com/celox-sim/celox/issues/1146).
+- **Packages** are analyzed once each, as scopes of their own, and names
+  resolve as IEEE 1800-2023 26.3 describes. `p::x` names the item of package
+  `p`, so items of one name in several packages, or in a package and a
+  module, do not clash. `import p::x;` makes only `x` visible. With
+  `import p::*;`, a name the scope declares itself hides the package's, and
+  a name that two wildcard-imported packages declare is an error only when a
+  reference uses it. Names in a package function resolve in the package.
+  Package variables and nets are rejected until they can be shared between
+  modules ([#1146](https://github.com/celox-sim/celox/issues/1146)); `const`
+  variables are accepted. Package `export` declarations and compilation-unit (`$unit`) declarations
+  are not supported.
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An

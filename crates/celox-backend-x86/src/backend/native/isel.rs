@@ -1098,6 +1098,9 @@ pub fn lower_execution_unit_with_diagnostics(
         layout,
         wide_regs: WideRegMap::default(),
         reg_addrs: crate::HashMap::default(),
+        inst_index: 0,
+        block_writes: crate::HashMap::default(),
+        block_opaque_writes: Vec::new(),
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
         four_state,
@@ -1154,11 +1157,24 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut mblock = MBlock::new(mir_block_id);
         ctx.trigger_only_seen.clear();
 
-        // Record static Load origins before lowering this block so Slice can
-        // reload the same range after an intervening partial Store.
-        for inst in &sir_block.instructions {
-            if let SIRInstruction::Load(dst, addr, SIROffset::Static(bit_offset), _) = inst {
-                ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
+        // Record the static Load origins of this block, and the instructions
+        // that write memory, so Slice can reload the sliced range of a loaded
+        // value while nothing has written it since the Load. A value loaded
+        // in another block is not reloaded.
+        ctx.reg_addrs.clear();
+        ctx.block_writes.clear();
+        ctx.block_opaque_writes.clear();
+        for (index, inst) in sir_block.instructions.iter().enumerate() {
+            match inst {
+                SIRInstruction::Load(dst, addr, SIROffset::Static(bit_offset), _) => {
+                    ctx.reg_addrs.insert(*dst, (*addr, *bit_offset, index));
+                }
+                SIRInstruction::Store(addr, _, _, _, _, _)
+                | SIRInstruction::Commit(_, addr, _, _, _) => {
+                    ctx.block_writes.entry(*addr).or_default().push(index);
+                }
+                SIRInstruction::ExternCall { .. } => ctx.block_opaque_writes.push(index),
+                _ => {}
             }
         }
 
@@ -1232,6 +1248,7 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut trace_marks = HashSet::default();
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            ctx.inst_index = inst_idx;
             let target = match inst {
                 SIRInstruction::Store(addr, _, width, _, _, _)
                 | SIRInstruction::Commit(_, addr, _, width, _)
@@ -1767,9 +1784,17 @@ struct ISelContext<'a> {
     wide_regs: WideRegMap,
     /// Known constant values for SIR registers (from Imm, Mul of constants, etc.)
     consts: ConstMap,
-    /// RegisterId → (sim-state address, static load bit offset).
-    /// Used by Slice to reload memory after an intervening partial Store.
-    reg_addrs: crate::HashMap<RegisterId, (RegionedAbsoluteAddr, usize)>,
+    /// RegisterId → (sim-state address, static load bit offset, index of the
+    /// Load in the current block). Slice reloads the sliced range from
+    /// memory instead of shifting the register when nothing wrote that
+    /// address between the Load and the Slice (see [`Self::memory_unchanged_since`]).
+    reg_addrs: crate::HashMap<RegisterId, (RegionedAbsoluteAddr, usize, usize)>,
+    /// Index of the instruction being lowered in the current block.
+    inst_index: usize,
+    /// Indices of the instructions of the current block that write each
+    /// address, and of those that may write any address.
+    block_writes: crate::HashMap<RegionedAbsoluteAddr, Vec<usize>>,
+    block_opaque_writes: Vec<usize>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
     /// byte addressing without a dynamic intra-byte shift.
@@ -1795,6 +1820,17 @@ struct ISelContext<'a> {
 }
 
 impl<'a> ISelContext<'a> {
+    /// Whether no instruction of the current block between index `since`
+    /// (a Load of `addr`) and the one being lowered may have written `addr`.
+    fn memory_unchanged_since(&self, addr: &RegionedAbsoluteAddr, since: usize) -> bool {
+        let between = |index: &usize| since < *index && *index < self.inst_index;
+        !self
+            .block_writes
+            .get(addr)
+            .is_some_and(|writes| writes.iter().any(between))
+            && !self.block_opaque_writes.iter().any(between)
+    }
+
     /// Allocate a fresh VReg with the given spill descriptor.
     fn alloc_vreg(&mut self, desc: SpillDesc) -> VReg {
         let vreg = self.vregs.alloc();

@@ -1177,7 +1177,7 @@ fn module_constant_functions(
                         let RefNode::TfCall(call) = node else {
                             return None;
                         };
-                        identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
+                        reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
                     })
                     .collect::<Vec<_>>(),
             );
