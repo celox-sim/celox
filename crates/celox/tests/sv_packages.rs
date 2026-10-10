@@ -317,13 +317,55 @@ fn packages_export_only_imported_names() {
          module Top(output logic [7:0] y); import p3::Y; assign y = 0; endmodule"
     ));
     assert!(detail.contains("no item `Y`"), "{detail}");
-    // A qualified name names a declaration of the package itself.
+    // A name a subroutine of the package declares is not imported by the
+    // references to it there.
     let detail = error(&format!(
         "{p1}
-         package p2; import p1::X; export p1::X; endpackage
-         module Top(output logic [7:0] y); assign y = p2::X; endmodule"
+         package p3; import p1::*; export p1::*;
+           function automatic int f(input int X); return X; endfunction
+         endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule"
     ));
     assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// A qualified name may name an exported declaration: `p2::X` and `p1::X`
+/// are the same declaration (IEEE 1800-2023 26.6).
+#[test]
+fn qualified_names_reach_exported_declarations() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; typedef logic [5:0] t; endpackage
+             package p2; import p1::X; import p1::t; export p1::X, p1::t; endpackage
+             module Top(output logic [7:0] y); p2::t v; assign v = '1; assign y = p2::X + v; endmodule"
+        ),
+        66
+    );
+}
+
+/// A wildcard reference a function local shadows is not ambiguous, and a
+/// named export binds its name before other references look it up.
+#[test]
+fn shadowed_and_exported_names_are_not_ambiguous() {
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             module Top(output logic [7:0] y); import p::*; import q::*;
+               function automatic int f(input int X); return X + 1; endfunction
+               assign y = f(1); endmodule"
+        ),
+        2
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        3
+    );
 }
 
 #[test]

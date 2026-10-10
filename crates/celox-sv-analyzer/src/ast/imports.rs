@@ -284,8 +284,10 @@ pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<Strin
 /// The names a scope looks up without a package scope: the first identifier
 /// of each name reference in an expression, a constant, a data type or a
 /// call. Declarations, formal names of connections, members and identifiers
-/// qualified by a package scope are not looked up.
+/// qualified by a package scope are not looked up, nor are names a nested
+/// subroutine or block declares, within it.
 pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+    let nested = nested_declarations(node.clone(), tree);
     let identifiers = |node: RefNode<'_>| {
         node.into_iter()
             .filter_map(|node| match node {
@@ -334,11 +336,60 @@ pub(super) fn unqualified_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
             && let Some(name) = tree
                 .get_str(first)
                 .map(super::instances::normalize_identifier)
+            && !nested.iter().any(|(start, end, declared)| {
+                (*start..*end).contains(&first.offset) && declared.contains(&name)
+            })
         {
             names.insert(name);
         }
     }
     names
+}
+
+/// The functions, tasks and blocks under `node` that declare names of their
+/// own: their source ranges, and the names they declare.
+fn nested_declarations(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+) -> Vec<(usize, usize, HashSet<String>)> {
+    let mut scopes = Vec::new();
+    for child in node {
+        if !matches!(
+            child,
+            RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_) | RefNode::SeqBlock(_)
+        ) {
+            continue;
+        }
+        let mut declared = HashSet::default();
+        let mut start = usize::MAX;
+        let mut end = 0;
+        for inner in child.clone() {
+            let name = match inner {
+                RefNode::Locate(locate) => {
+                    start = start.min(locate.offset);
+                    end = end.max(locate.offset + locate.len);
+                    continue;
+                }
+                // A function's name denotes its result inside it.
+                RefNode::FunctionIdentifier(_)
+                | RefNode::VariableIdentifier(_)
+                | RefNode::PortIdentifier(_)
+                | RefNode::ParameterIdentifier(_) => inner,
+                RefNode::TypeDeclarationDataType(declaration) => {
+                    RefNode::TypeIdentifier(&declaration.nodes.2)
+                }
+                RefNode::EnumNameDeclaration(member) => RefNode::EnumIdentifier(&member.nodes.0),
+                _ => continue,
+            };
+            if let Some(name) = identifier_text(name, tree) {
+                declared.insert(name);
+            }
+        }
+        if !declared.is_empty() {
+            scopes.push((start, end, declared));
+        }
+    }
+    scopes
 }
 
 /// The symbols a scope starts from: those of every package it uses, directly
@@ -399,6 +450,7 @@ pub(super) fn resolve_imports(
         _ => None,
     };
     let mut own_names = None;
+    let mut exported_references = Vec::new();
     for (package_name, name) in &imports.qualified {
         if own.as_ref() == Some(package_name) {
             // The package names one of its own items.
@@ -411,13 +463,18 @@ pub(super) fn resolve_imports(
             }
             continue;
         }
-        // A qualified name names a declaration of the package; the names it
-        // exports are visible only through imports (IEEE 1800-2023 26.6).
-        if !package(package_name)?.declares(name) {
-            return Err(AnalyzerError::UnknownPackageItem {
-                package: package_name.clone(),
-                name: name.clone(),
-            });
+        // A qualified name names a declaration of the package, or one it
+        // exports: `q::x` then denotes the declaration `x` denotes in `q`
+        // (IEEE 1800-2023 26.6).
+        let package_symbols = package(package_name)?;
+        if !package_symbols.declares(name) {
+            let target = package_symbols.provides(name).ok_or_else(|| {
+                AnalyzerError::UnknownPackageItem {
+                    package: package_name.clone(),
+                    name: name.clone(),
+                }
+            })?;
+            exported_references.push((format!("{package_name}::{name}"), target));
         }
     }
     let mut symbols = ScopeSymbols::default();
@@ -435,6 +492,9 @@ pub(super) fn resolve_imports(
         if let Some(package) = packages.get(package) {
             symbols.extend(&package.symbols);
         }
+    }
+    for (reference, target) in &exported_references {
+        symbols.alias(reference, target);
     }
     let local = scope_names(node.clone(), tree);
     // The declaration `package_name::name` denotes, for an import.
@@ -513,34 +573,9 @@ pub(super) fn resolve_imports(
         }
         Ok(found)
     };
-    if !imports.wildcard.is_empty() {
-        for name in unqualified_names(node, tree) {
-            if local.contains(&name) {
-                continue;
-            }
-            if let Some(binding) = bindings.iter_mut().find(|binding| binding.name == name) {
-                // A wildcard import of the explicitly imported declaration
-                // imports it through that package too.
-                for package_name in &imports.wildcard {
-                    if package(package_name)?.provides(&name).as_ref() == Some(&binding.target)
-                        && !binding.through.contains(package_name)
-                    {
-                        binding.through.push(package_name.clone());
-                    }
-                }
-                continue;
-            }
-            if let Some((target, through)) = candidates(&name)? {
-                bindings.push(Binding {
-                    name,
-                    target,
-                    through,
-                });
-            }
-        }
-    }
     // `export p::x;` refers to `x`: it imports a candidate the scope does
-    // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6).
+    // not otherwise reference, like an explicit import (IEEE 1800-2023 26.6),
+    // before other references bind names through wildcard imports.
     for export in &imports.exports {
         let Export::Item(package_name, name) = export else {
             continue;
@@ -585,6 +620,32 @@ pub(super) fn resolve_imports(
                 }
             }
             None => bind_explicitly(&mut bindings, package_name, name, "export")?,
+        }
+    }
+    if !imports.wildcard.is_empty() {
+        for name in unqualified_names(node, tree) {
+            if local.contains(&name) {
+                continue;
+            }
+            if let Some(binding) = bindings.iter_mut().find(|binding| binding.name == name) {
+                // A wildcard import of the explicitly imported declaration
+                // imports it through that package too.
+                for package_name in &imports.wildcard {
+                    if package(package_name)?.provides(&name).as_ref() == Some(&binding.target)
+                        && !binding.through.contains(package_name)
+                    {
+                        binding.through.push(package_name.clone());
+                    }
+                }
+                continue;
+            }
+            if let Some((target, through)) = candidates(&name)? {
+                bindings.push(Binding {
+                    name,
+                    target,
+                    through,
+                });
+            }
         }
     }
     let mut exports = HashMap::default();

@@ -115,7 +115,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   （[#1146](https://github.com/celox-sim/celox/issues/1146)）。`export` 宣言（26.6）は、import
   した宣言をその package を import する側から見えるようにします。`export p::*;` が export するのは
   package が `p` から実際に import した名前だけです。export を経由した import は元の宣言を指すため、
-  2 つの経路で同じ宣言を import しても曖昧になりません。修飾名 `q::x` が指すのは `q` 自身の宣言だけです。
+  2 つの経路で同じ宣言を import しても曖昧になりません。`q::x` は `q` が `x` として export する宣言も指します。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の

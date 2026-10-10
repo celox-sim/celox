@@ -215,8 +215,7 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   visible to the importers of a package: `export p::*;` exports only the
   names the package actually imports from `p`, and an import through an
   export denotes the original declaration, so importing it along two paths
-  is not ambiguous. A qualified name `q::x` names only a declaration of `q`
-  itself. Package nets and compilation-unit (`$unit`) declarations are not
+  is not ambiguous; `q::x` names the declaration `q` exports as `x`. Package nets and compilation-unit (`$unit`) declarations are not
   supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
