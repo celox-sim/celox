@@ -1097,6 +1097,18 @@ impl<'a> Elaborator<'a, '_> {
             sv_parser::GenerateBlock::GenerateItem(item) => vec![item],
             sv_parser::GenerateBlock::Multiple(block) => block.nodes.3.iter().collect(),
         };
+        // The names the block's imports bind to another declaration than its
+        // module does (see `imports::resolve_imports`), before the block's
+        // declarations are evaluated with them.
+        let imported = scope::imported();
+        if let Some(bindings) = imported
+            .generate_imports
+            .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
+        {
+            for (name, target) in bindings {
+                bind_import(&mut scope, name, target);
+            }
+        }
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
         if let Some((genvar, _)) = index {
@@ -1193,17 +1205,6 @@ impl<'a> Elaborator<'a, '_> {
                     signal.name.clone(),
                     format!("{}.{}", scope.path, scope_component(&signal.name)),
                 );
-            }
-        }
-        // The names the block's imports bind to another declaration than its
-        // module does (see `imports::resolve_imports`).
-        let imported = scope::imported();
-        if let Some(bindings) = imported
-            .generate_imports
-            .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
-        {
-            for (name, target) in bindings {
-                bind_import(&mut scope, name, target);
             }
         }
         let mut ordinal = 0;

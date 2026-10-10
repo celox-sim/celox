@@ -1053,3 +1053,38 @@ module Top (
     let y = veryl.signal("y");
     assert_eq!(u64::try_from(veryl.get(y)).unwrap(), 35);
 }
+
+/// Review cases: block declarations see the block's imports, single-item
+/// blocks are scopes, and every explicit block import is checked.
+#[test]
+fn generate_block_imports_reach_declarations_and_single_items() {
+    let pk = "package p; localparam int X = 3; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y); localparam int X = 9;
+               if (1) begin : g import p::*; localparam int Y = X; assign y = Y; end
+             endmodule"
+        )),
+        3
+    );
+    let result = Simulator::from_sv_sources(
+        vec![(
+            format!(
+                "{pk}
+                 module Top(output logic [7:0] y); if (1) import p::*; assign y = X; endmodule"
+            )
+            .as_str(),
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(result.is_err(), "a single-item block is a scope of its own");
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y); if (1) begin : g import p::missing; end assign y = 0;
+         endmodule"
+    ));
+    assert!(detail.contains("no item `missing`"), "{detail}");
+}
