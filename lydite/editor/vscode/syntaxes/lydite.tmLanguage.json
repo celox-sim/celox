@@ -11,8 +11,7 @@
     { "include": "#document-kind" },
     { "include": "#declaration-modifiers" },
     { "include": "#sections" },
-    { "include": "#quantifiers" },
-    { "include": "#modes" },
+    { "include": "#mode-values" },
     { "include": "#types" },
     { "include": "#builtin-operations" },
     { "include": "#namespaces" },
@@ -98,22 +97,17 @@
     "sections": {
       "patterns": [
         {
-          "match": "(?:^|(?<=[{};]))\\s*(accept|all|any|assume|bind|binding|bound|can_step|cases|claim|commit|component|components|composition|compositions|context|contract|cover_depth|depends|enabled|endpoints|ensure|example|examples|expect|execution|expectation|from|guard|hold_when|implementation|impl|initial|init|inputs|instances|invariant|lemma|let|members|mode|next|no_comb_path|observe|observations|operation|operations|outputs|parameter|partition|partitioning|pending|post|postcondition|pre|precondition|progress|proof|rank|reset|reset_input|responses|result|rhs|spec|specs|split|state|states|steps|structure|target|terminal|to|trace|wires)\\b(?!\\s*=(?!=))",
+          "match": "(?:^|(?<=[{};]))\\s*(accept|all|any|assume|bind|binding|bound|can_step|cases|claim|commit|component|components|composition|compositions|context|contract|cover_depth|depends|enabled|endpoints|ensure|example|examples|expect|execution|expectation|forall|from|guard|hold_when|implementation|impl|initial|init|inputs|instances|invariant|lemma|let|members|mode|next|no_comb_path|observe|observations|operation|operations|outputs|parameter|partition|partitioning|pending|post|postcondition|pre|precondition|progress|proof|rank|reset|reset_input|responses|result|rhs|spec|specs|split|state|states|steps|structure|target|terminal|to|trace|wires)\\b(?!\\s*=(?!=))",
           "captures": {
             "1": { "name": "keyword.other.lydite" }
           }
         }
       ]
     },
-    "quantifiers": {
-      "patterns": [
-        { "match": "\\b(forall|exists|not_exists)\\b", "name": "keyword.other.lydite" }
-      ]
-    },
-    "modes": {
+    "mode-values": {
       "patterns": [
         {
-          "match": "\\b(positive|negative|independent_lemmas|shared_query)\\b",
+          "match": "(?<=\\b(?:expect|execution|mode)\\s)(positive|negative|exists|not_exists|forall|independent_lemmas|shared_query)\\b",
           "name": "constant.language.lydite"
         }
       ]
@@ -122,19 +116,15 @@
       "patterns": [
         { "match": "\\bbool\\b", "name": "storage.type.lydite" },
         {
-          "begin": "\\b(bv|mem)\\s*(<)",
-          "beginCaptures": {
+          "match": "\\b(bv|mem)\\s*(<)\\s*(\\d+)(?:\\s*(,)\\s*(\\d+))?\\s*(>)",
+          "captures": {
             "1": { "name": "storage.type.lydite" },
-            "2": { "name": "punctuation.definition.typeparameters.begin.lydite" }
-          },
-          "end": "(>)",
-          "endCaptures": {
-            "1": { "name": "punctuation.definition.typeparameters.end.lydite" }
-          },
-          "patterns": [
-            { "include": "#numbers" },
-            { "match": ",", "name": "punctuation.separator.lydite" }
-          ]
+            "2": { "name": "punctuation.definition.typeparameters.begin.lydite" },
+            "3": { "name": "constant.numeric.integer.lydite" },
+            "4": { "name": "punctuation.separator.lydite" },
+            "5": { "name": "constant.numeric.integer.lydite" },
+            "6": { "name": "punctuation.definition.typeparameters.end.lydite" }
+          }
         }
       ]
     },
@@ -168,7 +158,7 @@
     "named-blocks": {
       "patterns": [
         {
-          "match": "(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\{)",
+          "match": "(?<=(?:[{};]|target|lemma|expectation|example|operation|component|composition|spec|impl|bind|structure)\\s*|^\\s*)(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\{)",
           "name": "entity.name.section.lydite"
         }
       ]

@@ -110,6 +110,7 @@ samples.design = `design "Counter" {
   /* comments hold checked claims */
   proof {
     forall word: bv<8>;
+    mode shared_query;
     target counter_step {
       rhs spec.x';
       lemma step {
@@ -182,9 +183,19 @@ component Counter {
   operation advance { expect n.value == s.value + 1u4; }
   example small {
     expect positive;
+    execution exists;
     initial { value = 0u4; }
     trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }
   }
+}`;
+
+// An unfinished type must not leak, and contextual words stay variables when
+// they are used as names or as bare conditions.
+samples.recovery = `design "Recovery" {
+  input half: bv<8
+  input whole: bool;
+  input forall: bool;
+  next { x = if forall { i.half } else { s.x }; }
 }`;
 
 // [sample, line, token, occurrence, expected innermost scope]
@@ -223,6 +234,8 @@ const expectations = [
   ['design', '  /* comments hold checked claims */', ' comments hold checked claims ', 1, 'comment.block.lydite'],
   ['design', '  proof {', 'proof', 1, 'keyword.other.lydite'],
   ['design', '    forall word: bv<8>;', 'forall', 1, 'keyword.other.lydite'],
+  ['design', '    mode shared_query;', 'mode', 1, 'keyword.other.lydite'],
+  ['design', '    mode shared_query;', 'shared_query', 1, 'constant.language.lydite'],
   ['design', '    target counter_step {', 'counter_step', 1, 'entity.name.section.lydite'],
   ['design', "      rhs spec.x';", 'rhs', 1, 'keyword.other.lydite'],
   ['design', "      rhs spec.x';", "'", 1, 'punctuation.definition.prime.lydite'],
@@ -279,7 +292,19 @@ const expectations = [
   ['expectations', '  steps { add = n.value == s.value + i.amount; }', 'i', 1, 'variable.language.namespace.lydite'],
   ['expectations', '  operation advance { expect n.value == s.value + 1u4; }', 'expect', 1, 'keyword.other.lydite'],
   ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'observe', 1, 'keyword.other.lydite'],
-  ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'no', 1, 'variable.language.namespace.lydite']
+  ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'no', 1, 'variable.language.namespace.lydite'],
+  ['expectations', '    execution exists;', 'execution', 1, 'keyword.other.lydite'],
+  ['expectations', '    execution exists;', 'exists', 1, 'constant.language.lydite'],
+  // An unfinished type stays local, so later lines keep their scopes.
+  ['recovery', '  input half: bv<8', 'bv', 1, 'variable.other.lydite'],
+  ['recovery', '  input half: bv<8', '8', 1, 'constant.numeric.integer.lydite'],
+  ['recovery', '  input whole: bool;', 'input', 1, 'storage.modifier.lydite'],
+  ['recovery', '  input whole: bool;', 'bool', 1, 'storage.type.lydite'],
+  // Contextual words are variables when used as names, conditions or fields.
+  ['recovery', '  input forall: bool;', 'forall', 1, 'variable.other.lydite'],
+  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'forall', 1, 'variable.other.lydite'],
+  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'else', 1, 'keyword.control.lydite'],
+  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'i', 1, 'variable.language.namespace.lydite']
 ];
 
 function findFiles(directory) {
