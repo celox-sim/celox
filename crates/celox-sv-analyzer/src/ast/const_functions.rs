@@ -21,6 +21,7 @@ const MAX_DEPTH: usize = 64;
 /// A function whose calls in constant expressions are evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConstantFunction {
+    automatic: bool,
     params: Vec<(String, crate::ir::Type)>,
     return_var: Option<(String, crate::ir::Type)>,
     body: Vec<Stmt>,
@@ -176,6 +177,7 @@ impl ConstantFunctions {
                 (
                     name(function_name),
                     ConstantFunction {
+                        automatic: function.automatic,
                         params: function
                             .params
                             .iter()
@@ -216,6 +218,7 @@ impl ConstantFunctions {
             .map(|(name, function)| crate::ir::Subroutine {
                 name: name.clone(),
                 is_task: false,
+                automatic: function.automatic,
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
                 params: function
@@ -342,6 +345,7 @@ pub(super) fn symbolic_module_constant_functions(
             Some((
                 subroutine.name.clone(),
                 ConstantFunction {
+                    automatic: subroutine.automatic,
                     params,
                     return_var: Some(return_var?),
                     body: subroutine.body,
