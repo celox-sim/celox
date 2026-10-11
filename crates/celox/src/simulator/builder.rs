@@ -117,11 +117,24 @@ fn component_runtime_config(
     (libraries, Some(root))
 }
 
-fn elaborate_parameterized_top(
+pub(super) fn elaborate_parameterized_top(
     ir: &mut Ir,
     context: &mut Context,
     top: &str,
     param_overrides: &[(String, u64)],
+) -> Result<(), ParserError> {
+    let values = param_overrides
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::new(*value, 64, false)))
+        .collect::<Vec<_>>();
+    elaborate_parameterized_top_values(ir, context, top, &values)
+}
+
+pub(super) fn elaborate_parameterized_top_values(
+    ir: &mut Ir,
+    context: &mut Context,
+    top: &str,
+    param_overrides: &[(String, Value)],
 ) -> Result<(), ParserError> {
     let top_name = resource_table::insert_str(top);
     let Some(top_index) = ir.components.iter().rposition(
@@ -147,7 +160,7 @@ fn elaborate_parameterized_top(
     };
     let values: fxhash::FxHashMap<_, _> = param_overrides
         .iter()
-        .map(|(name, value)| (resource_table::insert_str(name), *value))
+        .map(|(name, value)| (resource_table::insert_str(name), value.clone()))
         .collect();
 
     // push_override expects expressions that have already been evaluated in
@@ -181,9 +194,7 @@ fn elaborate_parameterized_top(
             let path = VarPath::new(parameter.name);
             let mut expr = if let Some(value) = values.get(&parameter.name) {
                 let width = r#type.total_width().ok_or_else(invalid)?;
-                let mut value = Value::new(*value, 64, false)
-                    .expand(width, false)
-                    .into_owned();
+                let mut value = value.expand(width, value.signed()).into_owned();
                 value.trunc(width);
                 value.set_signed(r#type.signed);
                 let mut comptime = Comptime::create_value(value.clone(), token);
@@ -326,10 +337,10 @@ fn analyze(
     // Per-file: parse + pass1
     let mut parsers = Vec::new();
     let mut errors = vec![];
+    let mut authored_parsers = Vec::new();
     for (code, path) in sources {
-        let parsed = match Parser::parse(code, path) {
-            Ok(parsed) => parsed,
-            // A syntax error stops analysis; later passes need every file.
+        match Parser::parse(code, path) {
+            Ok(parsed) => authored_parsers.push(parsed),
             Err(error) => {
                 return (
                     Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
@@ -337,7 +348,48 @@ fn analyze(
                     Vec::new(),
                 );
             }
+        }
+    }
+    #[cfg(feature = "systemverilog")]
+    let mut sv_interface_signatures = Vec::new();
+    #[cfg(feature = "systemverilog")]
+    if let Some(sv_sources) = sv_sources {
+        let references = super::mixed::referenced_sv_components(
+            authored_parsers.iter().map(|parser| &parser.veryl),
+        );
+        let contracts = celox_frontend_sv::interface_signatures_for(sv_sources, Some(&references))
+            .map_err(|error| match error {
+                celox_frontend_sv::FrontendError::Analyzer(error) => {
+                    parser::sv_analysis_error(error)
+                }
+                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+            })
+            .and_then(|mut signatures| {
+                signatures.retain(|signature| references.contains(&signature.name));
+                let source = super::mixed::veryl_interface_contracts(&signatures)?;
+                sv_interface_signatures = signatures;
+                Ok(source)
+            });
+        let contracts = match contracts {
+            Ok(contracts) => contracts,
+            Err(error) => return (Err(error.into()), errors, Vec::new()),
         };
+        if !contracts.is_empty() {
+            let parsed = match Parser::parse(&contracts, &Path::new("<sv-interface-contracts>")) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return (
+                        Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
+                        errors,
+                        Vec::new(),
+                    );
+                }
+            };
+            errors.append(&mut analyzer.analyze_pass1("$sv", &parsed.veryl));
+            parsers.push(parsed);
+        }
+    }
+    for ((_, path), parsed) in sources.iter().zip(authored_parsers) {
         let source_project = source_projects.get(*path).unwrap_or(&project_name);
         errors.append(&mut analyzer.analyze_pass1(source_project, &parsed.veryl));
         parsers.push(parsed);
@@ -356,7 +408,9 @@ fn analyze(
     for parsed in &parsers {
         errors.append(&mut analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)));
     }
+    let native_top = ir.components.iter().any(|component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name.to_string() == top));
     if !param_overrides.is_empty()
+        && (sv_sources.is_none() || native_top)
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
@@ -424,6 +478,7 @@ fn analyze(
             &ir,
             &loop_provenance,
             external,
+            None,
             &build_config,
             ignored_loops,
             true_loops,
@@ -441,24 +496,60 @@ fn analyze(
         #[cfg(feature = "systemverilog")]
         {
             if let Some(sv_sources) = sv_sources {
-                parser::parse_mixed(
-                    &top,
-                    &ir,
-                    &loop_provenance,
-                    sv_sources,
-                    &build_config,
-                    ignored_loops,
-                    true_loops,
-                    four_state,
-                    trace_opts,
-                    trace_out,
-                    optimize_options,
-                    diagnostics,
-                    preserve_element_storage_layout,
-                    testbench_random_seed,
-                    component_libraries,
-                    component_file_base,
-                )
+                (|| {
+                    let mut used_names = super::mixed::component_names(sv_sources)?;
+                    let behavior_sources = super::mixed::attach_sv_interface_behavior(
+                        &mut ir,
+                        &sv_interface_signatures,
+                        &mut context,
+                        &mut used_names,
+                    )?;
+                    let mut joint_sources = sv_sources.to_vec();
+                    joint_sources.extend(
+                        behavior_sources
+                            .iter()
+                            .map(|source| (source.as_str(), Path::new("<sv-interface-behavior>"))),
+                    );
+                    let requests = super::mixed::specialize_sv_instances(
+                        &mut ir,
+                        &joint_sources,
+                        &mut context,
+                        &mut used_names,
+                    )?;
+                    let declarations = super::mixed::sv_declaration_contracts(
+                        &ir,
+                        &mut context,
+                        &joint_sources,
+                        &requests,
+                    )?;
+                    parser::parse_mixed(
+                        &top,
+                        &mut ir,
+                        &mut context,
+                        &loop_provenance,
+                        &joint_sources,
+                        &[(
+                            declarations.as_str(),
+                            Path::new("<veryl-declaration-contracts>"),
+                        )],
+                        param_overrides,
+                        &requests,
+                        &sv_interface_signatures,
+                        &mut used_names,
+                        &build_config,
+                        ignored_loops,
+                        true_loops,
+                        four_state,
+                        trace_opts,
+                        trace_out,
+                        optimize_options,
+                        diagnostics,
+                        preserve_element_storage_layout,
+                        testbench_random_seed,
+                        component_libraries,
+                        component_file_base,
+                    )
+                })()
             } else {
                 parser::parse(
                     &top,
@@ -904,7 +995,8 @@ fn compile_sv_to_sir_with_layout_mode(
     .map_err(SimulatorError::from)
 }
 
-/// Compile a Veryl hierarchy with SystemVerilog modules to optimized SIR.
+/// Compile a mixed Veryl/SystemVerilog hierarchy to optimized SIR.
+/// Either language may supply the top or instantiate the other language.
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir(
@@ -1153,20 +1245,7 @@ mod host {
     use crate::backend::JitBackend;
     use crate::ir::LaidOutProgram;
 
-    /// Controls which stores the dead store elimination pass preserves.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-    pub enum DeadStorePolicy {
-        /// Keep all stores (no dead store elimination). Default for user-facing builds.
-        #[default]
-        Off,
-        /// Eliminate stores except those explicitly marked live via `live_signal()`
-        /// and those loaded by execution units.
-        PreserveListedSignals,
-        /// Eliminate stores except those to top-module ports and those loaded by EUs.
-        PreserveTopPorts,
-        /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
-        PreserveAllPorts,
-    }
+    pub use celox_design::DeadStorePolicy;
 
     /// Controls when the tiered backend adopts background-compiled code.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1970,6 +2049,7 @@ mod host {
         }
 
         #[cfg(feature = "systemverilog")]
+        /// Combine native Veryl and SV sources, with a top in either language.
         pub fn from_mixed_sources(
             sources: Vec<(&'a str, &'a Path)>,
             sv_sources: Vec<(&'a str, &'a Path)>,
@@ -2951,13 +3031,19 @@ mod host {
         externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
         // User-specified live signals
+        let mut listed = HashSet::default();
         for (inst_path, var_path) in live_signals {
             let inst_refs: Vec<(&str, usize)> =
                 inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
             let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
             let addr = program.get_addr(&inst_refs, &var_refs).unwrap();
             externally_live.insert(addr);
+            listed.insert(addr);
         }
+        // The runtime resolves handles from the policy and the design, not
+        // from what this particular run happened to keep.
+        program.runtime.runtime_schema.dead_store_policy = options.dead_store_policy;
+        program.runtime.runtime_schema.live_signals = listed;
 
         // PreserveTopPorts: auto-collect top module port addresses
         if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {

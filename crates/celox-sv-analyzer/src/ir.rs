@@ -45,6 +45,7 @@ pub struct Module {
     initial_processes: Vec<InitialProcess>,
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
+    declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
 }
@@ -78,6 +79,7 @@ impl Module {
             initial_processes,
             locals,
             subroutines,
+            declaration_subroutines: Vec::new(),
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
         }
@@ -86,6 +88,17 @@ impl Module {
     pub(crate) fn with_imported_parameters(mut self, parameters: Vec<Parameter>) -> Self {
         self.imported_parameters = parameters;
         self
+    }
+
+    pub(crate) fn with_declaration_subroutines(mut self, subroutines: Vec<Subroutine>) -> Self {
+        self.declaration_subroutines = subroutines;
+        self
+    }
+
+    /// Constant-function bodies with symbolic module parameter references,
+    /// used to inspect declaration dependencies before default substitution.
+    pub fn declaration_subroutines(&self) -> &[Subroutine] {
+        &self.declaration_subroutines
     }
 
     /// The parameters of the packages the module uses (IEEE 1800-2023 26.3),
@@ -160,6 +173,8 @@ impl Module {
 pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
+    declaration_value: Option<ConstExpr>,
+    packed_ranges: Vec<PackedRange>,
     resolved_value: Option<i128>,
     resolved_width: Option<usize>,
     resolved_signed: Option<bool>,
@@ -180,12 +195,35 @@ impl Parameter {
         Self {
             name,
             value,
+            declaration_value: None,
+            packed_ranges: Vec::new(),
             resolved_value,
             resolved_width,
             resolved_signed,
             declared_width,
             declared_signed,
         }
+    }
+
+    pub(crate) fn with_declaration(
+        mut self,
+        value: Option<ConstExpr>,
+        packed_ranges: Vec<PackedRange>,
+    ) -> Self {
+        self.declaration_value = value;
+        self.packed_ranges = packed_ranges;
+        self
+    }
+
+    /// The default with native constant-function expression bodies expanded,
+    /// retaining references to parameters for later specialization.
+    pub fn declaration_value(&self) -> Option<&ConstExpr> {
+        self.declaration_value.as_ref().or(self.value.as_ref())
+    }
+
+    /// Symbolic declared packed ranges, before resolving parameter defaults.
+    pub fn packed_ranges(&self) -> &[PackedRange] {
+        &self.packed_ranges
     }
 
     pub fn name(&self) -> &str {
@@ -483,6 +521,17 @@ impl Type {
 
     pub fn resolved_width(&self) -> Option<usize> {
         self.resolved_width
+    }
+
+    pub(crate) fn has_symbolic_ranges(&self) -> bool {
+        let constants = fxhash::FxHashMap::default();
+        self.packed_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        }) || self.unpacked_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        })
     }
 }
 

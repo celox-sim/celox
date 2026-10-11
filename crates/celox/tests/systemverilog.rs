@@ -42,6 +42,7 @@ macro_rules! sv_backends {
         sv_backends! { $($rest)* }
     };
     (
+        $(#[$attr:meta])*
         fn $name:ident($sim:ident) {
             @setup { $($setup:tt)* }
             @build $builder:expr;
@@ -53,6 +54,7 @@ macro_rules! sv_backends {
             use super::*;
 
             #[test]
+            $(#[$attr])*
             #[allow(unused_mut, unused_variables)]
             fn native() {
                 $($setup)*
@@ -61,6 +63,7 @@ macro_rules! sv_backends {
             }
 
             #[test]
+            $(#[$attr])*
             #[allow(unused_mut, unused_variables)]
             fn cranelift() {
                 $($setup)*
@@ -70,6 +73,7 @@ macro_rules! sv_backends {
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             #[test]
+            $(#[$attr])*
             #[allow(unused_mut, unused_variables)]
             fn native_parallel() {
                 $($setup)*
@@ -82,6 +86,7 @@ macro_rules! sv_backends {
             }
 
             #[test]
+            $(#[$attr])*
             #[allow(unused_mut, unused_variables)]
             fn wasm() {
                 $($setup)*
