@@ -1304,6 +1304,74 @@ mod host {
             Ok(())
         }
 
+        /// Advance several events as one coincident edge.
+        ///
+        /// Every triggered domain samples the state settled before the edge,
+        /// then all of them update, then combinational logic settles once.
+        /// This is the behaviour of clocks that share an edge in hardware,
+        /// such as a divided clock and its source, which sequential
+        /// [`Self::tick`] calls cannot express: each of them would settle
+        /// the design between the domains. Events of the same domain are
+        /// applied once. A single event behaves like [`Self::tick`].
+        pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
+            if events.len() < 2 {
+                return match events {
+                    [event] => self.tick(*event),
+                    _ => Ok(()),
+                };
+            }
+            use celox_runtime::backend::EventHandle;
+            let mut domains = Vec::with_capacity(events.len());
+            for event in events {
+                let addr = self.backend.id_to_addr_slice()[event.id()];
+                let canonical = self.program.design.events.canonical(addr);
+                if domains
+                    .iter()
+                    .any(|(existing, _, _)| *existing == canonical)
+                {
+                    continue;
+                }
+                let eval_only = self.backend.resolve_eval_only_event(&canonical);
+                let apply = self.backend.resolve_apply_event(&canonical);
+                let (Some(eval_only), Some(apply)) = (eval_only, apply) else {
+                    return Err(RuntimeErrorCode::NotAnEvent(format!(
+                        "event_id={}",
+                        event.id()
+                    )));
+                };
+                domains.push((canonical, eval_only, apply));
+            }
+            let timing_enabled = self.diagnostics.tick_timing_every.is_some();
+            let mut eval_comb_ns = 0u64;
+            let mut eval_apply_ns = 0u64;
+            if self.dirty {
+                let start = timing_enabled.then(crate::timing::now);
+                self.eval_comb_checked()?;
+                if let Some(start) = start {
+                    eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+                }
+                self.dirty = false;
+            }
+            let start = timing_enabled.then(crate::timing::now);
+            for (_, eval_only, _) in &domains {
+                self.eval_only_ff_at_checked(*eval_only)?;
+            }
+            for (_, _, apply) in &domains {
+                self.apply_ff_at_checked(*apply)?;
+            }
+            if let Some(start) = start {
+                eval_apply_ns = eval_apply_ns.saturating_add(start.elapsed().as_nanos() as u64);
+            }
+            let start = timing_enabled.then(crate::timing::now);
+            self.eval_comb_checked()?;
+            if let Some(start) = start {
+                eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+                self.record_tick_timing(eval_apply_ns, eval_comb_ns);
+            }
+            self.dirty = false;
+            Ok(())
+        }
+
         /// Advance one event while deferring the post-edge combinational settle.
         /// Native testbenches use this between observable expressions so the
         /// preceding comb phase and this FF phase can share one compiled function.
