@@ -335,3 +335,78 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
         Some(1)
     );
 }
+
+#[test]
+fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
+    for declaration in [
+        "module Top; logic [7:0] a [0:1]; logic [$unpacked_dimensions(a):0] b;",
+        "module Top(input logic [7:0] a [0:1], output logic [$unpacked_dimensions(a):0] b);",
+    ] {
+        let code = format!("{declaration} localparam W = $bits(b); endmodule");
+        let tree = crate::syntax::parse_source(&code, Path::new("preceding_query.sv")).unwrap();
+        let calls = tree
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::SystemTfCall(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unpacked_dimensions_call_value(
+                calls[0],
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            ),
+            Some(1),
+            "{declaration}",
+        );
+        assert_eq!(
+            size_system_function_call_type(
+                calls[1],
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            )
+            .map(|ty| ty.width),
+            Some(2),
+            "{declaration}",
+        );
+    }
+}
+
+#[test]
+fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        package P;
+            typedef logic [7:0] row_t [0:1];
+        endpackage
+        module Top;
+            import P::*;
+            logic row_t;
+            localparam N = $unpacked_dimensions(row_t);
+        endmodule
+        "#,
+        Path::new("imported_query.sv"),
+    )
+    .unwrap();
+    let package = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
+        .unwrap();
+    let aliases = type_aliases_from_module_node(package, &tree).unwrap();
+    let call = tree
+        .into_iter()
+        .find_map(|node| match node {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &aliases, None),
+        Some(0)
+    );
+}

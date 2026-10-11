@@ -838,7 +838,8 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::unpacked_dimensions_preserves_selection_and_return_types"
+        "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+        "system_functions::unpacked_dimensions_checks_unevaluated_indices"
       ]
     }
   },
@@ -856,6 +857,23 @@
     "cases": {
       "icarus": [
         "system_functions::unpacked_dimensions_is_independent_of_unknown_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_wildcard_typedef_shadowing",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_prefers_values_over_imported_types"
       ]
     }
   }

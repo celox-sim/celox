@@ -765,6 +765,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_unpacked_dimensions_partial_array",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "system_functions::unpacked_dimensions_checks_unevaluated_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
       "expectation": "Simulation",
       "known_issue": {
@@ -780,6 +803,29 @@
         "upstream": []
       },
       "name": "system_functions::unpacked_dimensions_is_independent_of_unknown_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_wildcard_typedef_shadowing",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "system_functions::unpacked_dimensions_prefers_values_over_imported_types",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

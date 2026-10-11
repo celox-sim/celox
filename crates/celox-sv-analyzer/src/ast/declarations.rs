@@ -45,6 +45,7 @@ pub(super) fn ports_from_module_node(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Port>, AnalyzerError> {
+    let scope_span = dimensions::ref_node_source_span(node.clone());
     let mut ports = Vec::new();
     let mut inherited_direction = PortDirection::Unspecified;
     let mut inherited_type = Type::implicit();
@@ -135,7 +136,10 @@ pub(super) fn ports_from_module_node(
                 inherited_type = r#type.clone();
                 ports.push(Port::new(name, direction, r#type, false));
             }
-            _ => {}
+            _ => continue,
+        }
+        if let Some(span) = scope_span {
+            dimensions::publish_declaration_dimensions(span, &ports[ports.len() - 1..], &[]);
         }
     }
     Ok(ports)
@@ -424,6 +428,65 @@ pub(super) fn signals_from_module_node(
         )));
     }
     Ok(signals)
+}
+
+/// Direct value declarations for preliminary type queries. This avoids
+/// re-evaluating parameter initializers and generate conditions during discovery.
+pub(super) fn signals_from_scope_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Result<(), AnalyzerError> {
+    let scope_span = dimensions::ref_node_source_span(node.clone());
+    for item in scope_items(node) {
+        let mut declared = Vec::new();
+        match item {
+            ScopeItem::Module(item) if item_is_value_declaration(item) => {
+                signals_from_module_or_generate_item(
+                    item,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    None,
+                    &mut declared,
+                )?;
+            }
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(
+                data,
+            )) => {
+                declared = signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    None,
+                )?;
+            }
+            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(
+                net,
+            )) => {
+                declared =
+                    signals_from_net_declaration(net, syntax_tree, type_aliases, const_env, None)?;
+            }
+            _ => {}
+        }
+        if let Some(span) = scope_span {
+            dimensions::publish_declaration_dimensions(span, &[], &declared);
+        }
+    }
+    Ok(())
+}
+
+fn item_is_value_declaration(item: &sv_parser::ModuleOrGenerateItem) -> bool {
+    matches!(item, sv_parser::ModuleOrGenerateItem::Module(_))
+        || matches!(
+            package_or_generate_declaration_from_module_item(item),
+            Some(
+                sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(_)
+                    | sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_)
+            )
+        )
 }
 
 pub(super) fn signals_from_module_or_generate_item(

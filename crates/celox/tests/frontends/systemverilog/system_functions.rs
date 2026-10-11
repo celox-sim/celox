@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_resolves_preceding_module_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_module_declarations"; }
+    fn unpacked_dimensions_prefers_values_over_imported_types(sim) { @case "system_functions::unpacked_dimensions_prefers_values_over_imported_types"; }
+    fn unpacked_dimensions_checks_unevaluated_indices(sim) { @case "system_functions::unpacked_dimensions_checks_unevaluated_indices"; }
+
     fn unpacked_dimensions_restores_shadowed_array_rank(sim) { @case "system_functions::unpacked_dimensions_restores_shadowed_array_rank"; }
     fn unpacked_dimensions_accepts_explicit_default_omissions(sim) { @case "system_functions::unpacked_dimensions_accepts_explicit_default_omissions"; }
     fn unpacked_dimensions_validates_writable_function_arguments(sim) { @case "system_functions::unpacked_dimensions_validates_writable_function_arguments"; }
@@ -891,6 +895,28 @@ fn unpacked_dimensions_rejects_omitted_required_arguments() {
             build_error(&format!(
                 "module Top(output int y); function int f(input int a = 1, input int b, input int c = 3); return a + b + c; endfunction {use_site} endmodule"
             ));
+        }
+    }
+}
+
+#[test]
+fn dimension_queries_reject_invalid_indices() {
+    for query in ["$unpacked_dimensions", "$dimensions"] {
+        for index in [
+            "MISSING",
+            "(MISSING == 0)",
+            "(0 << MISSING)",
+            "f()",
+            "f(1, 2)",
+        ] {
+            for statement in [
+                format!("assign y = {query}(a[{index}]);"),
+                format!("localparam N = {query}(a[{index}]); assign y = N;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); logic [7:0] a [0:1][0:2]; function int f(input int x); return x; endfunction {statement} endmodule"
+                ));
+            }
         }
     }
 }

@@ -252,7 +252,7 @@ fn expression_dimensions(
                     if select.nodes.2.is_some() && remaining == 0 {
                         return None;
                     }
-                    validate_query_range(
+                    validate_query_selection(
                         argument,
                         select,
                         syntax_tree,
@@ -353,7 +353,7 @@ pub(super) fn unpacked_dimensions_call_value(
     }
 }
 
-fn validate_query_range(
+fn validate_query_selection(
     argument: &sv_parser::Expression,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
@@ -361,11 +361,29 @@ fn validate_query_range(
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
 ) -> Option<()> {
+    if select.nodes.1.nodes.0.is_empty() && select.nodes.2.is_none() {
+        return Some(());
+    }
+    let context =
+        query_operand_dimensions(argument, syntax_tree, const_env, type_aliases, dimensions);
+    // Ordinary indices and indexed-range bases may be runtime expressions.
+    // Validate their types and calls without evaluating either expression.
+    let validate_index = |index: &sv_parser::Expression| {
+        for node in RefNode::Expression(index) {
+            if let RefNode::Expression(expression) = node {
+                let expression =
+                    expr_from_expression_with_types(expression, syntax_tree, &context).ok()?;
+                expr_static_width(&expression, &context)?;
+            }
+        }
+        Some(())
+    };
+    for index in &select.nodes.1.nodes.0 {
+        validate_index(&index.nodes.1)?;
+    }
     let Some(range) = &select.nodes.2 else {
         return Some(());
     };
-    let context =
-        query_operand_dimensions(argument, syntax_tree, const_env, type_aliases, dimensions);
     match &range.nodes.1 {
         sv_parser::PartSelectRange::ConstantRange(range) => {
             for bound in [&range.nodes.0, &range.nodes.2] {
@@ -382,13 +400,7 @@ fn validate_query_range(
             // A comparison or shift has a known result width even if one
             // of its operands is undefined. Check each subexpression too,
             // while allowing a declared runtime base without evaluating it.
-            for node in RefNode::Expression(&range.nodes.0) {
-                if let RefNode::Expression(expression) = node {
-                    let expression =
-                        expr_from_expression_with_types(expression, syntax_tree, &context).ok()?;
-                    expr_static_width(&expression, &context)?;
-                }
-            }
+            validate_index(&range.nodes.0)?;
             let width = selects::indexed_select_base(
                 RefNode::ConstantExpression(&range.nodes.2),
                 syntax_tree,
@@ -439,7 +451,7 @@ fn unpacked_expression_dimensions(
                     if hierarchical.nodes.2.nodes.2.is_some() && remaining == 0 {
                         return None;
                     }
-                    validate_query_range(
+                    validate_query_selection(
                         argument,
                         &hierarchical.nodes.2,
                         syntax_tree,
@@ -487,9 +499,6 @@ fn unpacked_expression_dimensions(
                         .unwrap_or(usize::from(ty.width > 1));
                     return selected(0, packed);
                 }
-                if let Some(ty) = type_aliases.get(&name) {
-                    return selected(ty.unpacked_ranges().len(), ty.packed_ranges().len());
-                }
                 if dimensions.is_none_or(|dimensions| !dimensions.scope_types_complete)
                     && let Some(context) = containing_packed_dimensions(
                         RefNode::Expression(argument),
@@ -500,6 +509,11 @@ fn unpacked_expression_dimensions(
                     && let Some(ty) = context.get(&name)
                 {
                     return selected(ty.unpacked.len(), ty.packed.len());
+                }
+                // A local value hides a wildcard-imported type name even
+                // before the module's complete signal metadata is installed.
+                if let Some(ty) = type_aliases.get(&name) {
+                    return selected(ty.unpacked_ranges().len(), ty.packed_ranges().len());
                 }
             }
             _ => {}
@@ -1044,37 +1058,48 @@ fn containing_packed_dimensions(
         }
         let module_span = (module_start, module_end);
         if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
-            return None;
+            // A range in the current declaration can refer to an earlier
+            // declaration. Use shapes already collected by the outer scan.
+            return DISCOVERED_PACKED_DIMENSIONS
+                .with(|contexts| contexts.borrow().get(&module_span).cloned());
         }
-        // A declaration range can query a size that requires this same
-        // module's metadata. Recursive discovery uses the caller's constant
-        // and function type environments instead of rebuilding declarations.
         let _guard = ActivePackedDimensionsGuard { module_span };
-        let ports =
-            ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        let mut signals =
-            signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        signals.extend(
-            array_parameters::array_parameters_from_module_node(
-                module.clone(),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )
-            .ok()?
-            .into_iter()
-            .map(|parameter| parameter.signal),
-        );
         let imported = scope::imported();
-        let mut dimensions = packed_dimensions_from_ports_and_signals(
+        let dimensions = packed_dimensions_from_ports_and_signals(
             &[],
             &imported.signals,
             const_env,
             type_aliases,
         );
-        let declared =
-            packed_dimensions_from_ports_and_signals(&ports, &signals, const_env, type_aliases);
-        dimensions.extend(declared.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+        DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
+            contexts.borrow_mut().insert(module_span, dimensions);
+        });
+        ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        // Discover direct value declarations without re-elaborating generate
+        // conditions or parameter initializers that may contain this query.
+        declarations::signals_from_scope_node(module.clone(), syntax_tree, const_env, type_aliases)
+            .ok()?;
+        for parameter in array_parameters::array_parameters_from_module_node(
+            module.clone(),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        )
+        .ok()?
+        {
+            publish_declaration_dimensions(
+                module_span,
+                &[],
+                std::slice::from_ref(&parameter.signal),
+            );
+        }
+        // With direct declarations available, retain the original discovery
+        // of elaborated generate signals and hoisted procedural variables.
+        let signals =
+            signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        publish_declaration_dimensions(module_span, &[], &signals);
+        let mut dimensions = DISCOVERED_PACKED_DIMENSIONS
+            .with(|contexts| contexts.borrow().get(&module_span).cloned())?;
         if let Some(locals) =
             containing_function_dimensions(target.clone(), syntax_tree, const_env, type_aliases)
         {
@@ -1083,6 +1108,29 @@ fn containing_packed_dimensions(
         return Some(dimensions);
     }
     None
+}
+
+/// Publish each completed declaration before resolving the next range.
+/// Only a live preliminary scope scan owns this temporary metadata.
+pub(super) fn publish_declaration_dimensions(
+    scope_span: (usize, usize),
+    ports: &[Port],
+    signals: &[Signal],
+) {
+    DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
+        let mut contexts = contexts.borrow_mut();
+        if let Some(context) = contexts.get_mut(&scope_span) {
+            // Reuse the scan's environment instead of cloning all parameters
+            // and aliases for every preceding declaration.
+            for (name, ty) in ports.iter().map(|port| (port.name(), port.r#type())).chain(
+                signals
+                    .iter()
+                    .map(|signal| (signal.name(), signal.r#type())),
+            ) {
+                context.insert(name.to_string(), procedural::dimensions_from_type(ty));
+            }
+        }
+    });
 }
 
 fn containing_function_dimensions(
@@ -1345,7 +1393,7 @@ fn containing_subroutine_param_shapes(
     shapes
 }
 
-fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {
+pub(super) fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {
     let mut start = None;
     let mut end = None;
     for child in node {
@@ -1716,6 +1764,8 @@ thread_local! {
         RefCell::new(HashSet::default());
     static ACTIVE_PACKED_DIMENSIONS: RefCell<HashSet<(usize, usize)>> =
         RefCell::new(HashSet::default());
+    static DISCOVERED_PACKED_DIMENSIONS: RefCell<HashMap<(usize, usize), PackedDimensions>> =
+        RefCell::new(HashMap::default());
     static ACTIVE_FUNCTION_RETURN_METADATA:
         RefCell<HashMap<(usize, usize), HashMap<String, FunctionReturnMetadata>>> =
         RefCell::new(HashMap::default());
@@ -1750,6 +1800,9 @@ impl Drop for ActivePackedDimensionsGuard {
     fn drop(&mut self) {
         ACTIVE_PACKED_DIMENSIONS.with(|active| {
             active.borrow_mut().remove(&self.module_span);
+        });
+        DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
+            contexts.borrow_mut().remove(&self.module_span);
         });
     }
 }

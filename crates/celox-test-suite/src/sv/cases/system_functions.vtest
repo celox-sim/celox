@@ -1637,3 +1637,70 @@ a=0a  10
   (assert_eq rank 0)
   (assert_eq untouched 7)
   (expect_output ""))
+
+(case unpacked_dimensions_resolves_preceding_module_declarations
+  (source "preceding_module_shapes.sv" #"
+    module Top(input logic [7:0] port_array [0:1],
+               input logic [$unpacked_dimensions(port_array):0] sized_port,
+               output int signal_width, port_width, chained_width, header_width);
+      logic [7:0] a [0:1];
+      logic [$unpacked_dimensions(a):0] b;
+      logic [$unpacked_dimensions(port_array):0] c;
+      logic [$dimensions(b):0] d;
+      localparam W = $bits(b);
+      assign signal_width = W;
+      assign port_width = $bits(c);
+      assign chained_width = $bits(d);
+      assign header_width = $bits(sized_port);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signal_width 2)
+  (assert_eq port_width 2)
+  (assert_eq chained_width 2)
+  (assert_eq header_width 2))
+
+(case unpacked_dimensions_prefers_values_over_imported_types
+  (source "value_shadows_imported_type.sv" #"
+    package P;
+      typedef logic [7:0] row_t [0:1];
+      typedef logic [7:0] port_t [0:1];
+    endpackage
+    module Top(input logic port_t, output int signal_rank, port_rank, type_rank);
+      import P::*;
+      logic row_t;
+      localparam N = $unpacked_dimensions(row_t);
+      localparam M = $unpacked_dimensions(port_t);
+      assign signal_rank = N;
+      assign port_rank = M;
+      assign type_rank = $unpacked_dimensions(P::row_t);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signal_rank 0)
+  (assert_eq port_rank 0)
+  (assert_eq type_rank 1))
+
+(case unpacked_dimensions_checks_unevaluated_indices
+  (source "unevaluated_query_indices.sv" #"
+    module Top(input int index, output int constant_rank, runtime_rank, total_rank);
+      logic [7:0] a [0:1][0:2];
+      function automatic int f(input int x);
+        $display("must not execute");
+        return x;
+      endfunction
+      localparam N = $unpacked_dimensions(a[f(index)]);
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(a[index][f(index)]);
+      assign total_rank = $dimensions(a[f(index)]);
+    endmodule
+  "#)
+  (top Top)
+  (set index 1)
+  (eval)
+  (assert_eq constant_rank 1)
+  (assert_eq runtime_rank 0)
+  (assert_eq total_rank 2)
+  (expect_output ""))
