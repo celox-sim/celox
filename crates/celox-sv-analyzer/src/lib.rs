@@ -184,6 +184,15 @@ pub fn elaborate_interfaces_with_roots(
     ast::interfaces::elaborate_interfaces_with_roots(sources, Some(roots))
 }
 
+/// Time declarations for synthetic foreign declaration files, preserving the
+/// authored design's explicit/default settings and simulation precision.
+pub fn generated_time_declarations(
+    sources: &[(&str, &Path)],
+    roots: Option<&[&str]>,
+) -> Result<String, AnalyzerError> {
+    ast::generated_time_declarations(sources, roots)
+}
+
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
     ast::with_call_sites(|| {

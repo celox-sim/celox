@@ -6,8 +6,8 @@ pub use celox_sv_analyzer::AnalyzerError;
 pub use celox_sv_analyzer::ModuleInterfaces;
 pub use celox_sv_analyzer::ir as analyzer_ir;
 pub use celox_sv_analyzer::typecheck as analyzer_typecheck;
-pub use lowering::SvModuleRequest;
 pub use lowering::{ForeignModuleResolver, prepare_external_hierarchy_with_foreign_resolver};
+pub use lowering::{SvModuleRequest, SvParameterValue};
 
 pub fn module_interfaces(
     sources: &[(&str, &std::path::Path)],

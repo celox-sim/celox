@@ -252,6 +252,24 @@ pub(super) fn module_constant_functions(
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
+    symbolic_module_constant_functions(
+        node,
+        tree,
+        const_env,
+        type_aliases,
+        parameter_literals,
+        &HashSet::default(),
+    )
+}
+
+pub(super) fn symbolic_module_constant_functions(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_literals: &HashMap<String, Expr>,
+    symbolic_parameters: &HashSet<String>,
+) -> ConstantFunctions {
     let has_functions = node
         .clone()
         .into_iter()
@@ -277,7 +295,7 @@ pub(super) fn module_constant_functions(
         statics: Vec::new(),
     };
     let mut rejected = HashMap::default();
-    let subroutines = match procedural::subroutines_from_module_node_with(
+    let subroutines = match procedural::subroutines_with_symbolic_parameters(
         node,
         tree,
         const_env,
@@ -285,6 +303,7 @@ pub(super) fn module_constant_functions(
         parameter_literals,
         &mut state,
         Some(&mut rejected),
+        symbolic_parameters,
     ) {
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),

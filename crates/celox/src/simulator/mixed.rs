@@ -187,9 +187,15 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             statement.walk(&mut |statement| {
                 use sv::StmtBase::*;
                 match statement {
-                    Assign { rhs, .. } | AssignConcat { rhs, .. } | Eval(rhs) => {
-                        dependent |= expression(rhs, signature, visited)
+                    Assign { lhs, rhs, .. } => {
+                        dependent |= destination(lhs, signature, visited)
+                            || expression(rhs, signature, visited);
                     }
+                    AssignConcat { parts, rhs, .. } => {
+                        dependent |= parts.iter().any(|lhs| destination(lhs, signature, visited))
+                            || expression(rhs, signature, visited);
+                    }
+                    Eval(rhs) => dependent |= expression(rhs, signature, visited),
                     Return(Some(expr))
                     | Local {
                         init: Some(expr), ..
@@ -235,6 +241,27 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             });
         }
         dependent
+    }
+    fn destination(
+        lhs: &sv::LValue,
+        signature: &InterfaceSignature,
+        visited: &mut fxhash::FxHashSet<String>,
+    ) -> bool {
+        match lhs {
+            sv::LValue::Ident(_) => false,
+            sv::LValue::Select {
+                msb,
+                lsb,
+                array_slice_width,
+                ..
+            } => {
+                visit(msb, signature, visited)
+                    || visit(lsb, signature, visited)
+                    || array_slice_width
+                        .as_ref()
+                        .is_some_and(|width| visit(width, signature, visited))
+            }
+        }
     }
     fn expression(
         expr: &sv::Expr,
@@ -773,27 +800,36 @@ pub(crate) fn attach_sv_interface_behavior(
                 .iter()
                 .map(|count| format!("[0:{}]", count - 1))
                 .collect::<String>();
+            let mut internal_names = members
+                .iter()
+                .map(|variable| variable.path.0[1].to_string())
+                .collect::<fxhash::FxHashSet<_>>();
+            let mut next_internal = 0;
+            let handle = fresh_name("h", &mut internal_names, &mut next_internal);
             let mut source = format!(
-                "module {name}({});\n{} {parameter_text} h {instance_dims} ();\n",
+                "module {name}({});\n{}{} {parameter_text} {handle} {instance_dims} ();\n",
                 ports.join(", "),
+                signature.time_declarations,
                 signature.name
             );
             let mut selects = String::new();
-            for (index, count) in dimensions.iter().enumerate() {
+            for count in &dimensions {
+                let variable = fresh_name("g", &mut internal_names, &mut next_internal);
+                let block = fresh_name("elements", &mut internal_names, &mut next_internal);
                 source.push_str(&format!(
-                    "for(genvar g{index}=0; g{index}<{count}; g{index}++) begin: elements{index}\n"
+                    "for(genvar {variable}=0; {variable}<{count}; {variable}++) begin: {block}\n"
                 ));
-                selects.push_str(&format!("[g{index}]"));
+                selects.push_str(&format!("[{variable}]"));
             }
             for variable in &members {
                 let member = variable.path.0[1].to_string();
                 if signature.driven.contains(&member) {
                     source.push_str(&format!(
-                        "assign {member}{selects} = h{selects}.{member};\n"
+                        "assign {member}{selects} = {handle}{selects}.{member};\n"
                     ));
                 } else {
                     source.push_str(&format!(
-                        "assign h{selects}.{member} = {member}{selects};\n"
+                        "assign {handle}{selects}.{member} = {member}{selects};\n"
                     ));
                 }
             }
@@ -921,9 +957,25 @@ pub(super) fn sv_declaration_contracts(
                 continue;
             }
             if variable.kind == VarKind::Const {
-                if let Some(value) = variable.value.first() {
-                    source.push_str(&format!("localparam {} = {value:x};\n", variable.path));
-                }
+                let symbol = symbol_table::resolve(&variable.token.beg)
+                    .map_err(|_| unsupported("cannot resolve Veryl interface constant"))?
+                    .found
+                    .clone();
+                let parameter = veryl_analyzer::symbol::Parameter {
+                    name: symbol.token.text,
+                    symbol: symbol.id,
+                };
+                let value = sv_value(
+                    &parameter,
+                    &property.parameters,
+                    &interface.variables,
+                    context,
+                )?;
+                source.push_str(&format!(
+                    "localparam {} {} = {value};\n",
+                    sv_type(&variable.r#type),
+                    variable.path
+                ));
                 continue;
             }
             source.push_str(&format!(
@@ -1006,7 +1058,8 @@ pub(super) fn sv_declaration_contracts(
     Ok(source)
 }
 
-fn sv_parameters(
+fn sv_value(
+    parameter: &veryl_analyzer::symbol::Parameter,
     parameters: &[veryl_analyzer::symbol::Parameter],
     variables: &fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Variable>,
     context: &mut veryl_analyzer::Context,
@@ -1142,6 +1195,64 @@ fn sv_parameters(
         }
         evaluation.insert_var_path_with_id(variable.path.clone(), variable.id, comptime);
     }
+    let variable = variables
+        .values()
+        .find(|variable| variable.path.0.as_slice() == [parameter.name])
+        .ok_or_else(|| {
+            unsupported(format!(
+                "cannot resolve foreign parameter `{}`",
+                parameter.name
+            ))
+        })?;
+    let symbol = veryl_analyzer::symbol_table::get(parameter.symbol).unwrap();
+    let property = parameter.property();
+    let value = property
+        .value
+        .as_ref()
+        .ok_or_else(|| unsupported("foreign parameter without a default"))?;
+    let mut dependencies = Dependencies {
+        parameters: parameters
+            .iter()
+            .map(|parameter| parameter.symbol)
+            .collect(),
+        visited: Default::default(),
+        dependent: false,
+    };
+    dependencies.expression(value);
+    let value = if dependencies.dependent {
+        evaluation.push_namespace(symbol.namespace);
+        let expression = veryl_analyzer::conv::utils::eval_expr(
+            &mut evaluation,
+            Some(variable.r#type.clone()),
+            value,
+            false,
+        )
+        .map_err(|_| {
+            unsupported(format!(
+                "cannot resolve default of foreign parameter `{}`",
+                parameter.name
+            ))
+        });
+        evaluation.pop_namespace();
+        let (_, expression) = expression?;
+        render(&expression, &evaluation.variables)?
+    } else {
+        // Defaults independent of the overridable header retain the full
+        // native evaluator, including constant functions and casts.
+        let value = variable
+            .value
+            .first()
+            .ok_or_else(|| unsupported("foreign parameter without a concrete default"))?;
+        format!("{value:x}")
+    };
+    Ok(value)
+}
+
+fn sv_parameters(
+    parameters: &[veryl_analyzer::symbol::Parameter],
+    variables: &fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Variable>,
+    context: &mut veryl_analyzer::Context,
+) -> Result<String, ParserError> {
     let mut declarations = Vec::new();
     for parameter in parameters {
         let variable = variables
@@ -1153,47 +1264,7 @@ fn sv_parameters(
                     parameter.name
                 ))
             })?;
-        let symbol = veryl_analyzer::symbol_table::get(parameter.symbol).unwrap();
-        let property = parameter.property();
-        let value = property
-            .value
-            .as_ref()
-            .ok_or_else(|| unsupported("foreign parameter without a default"))?;
-        let mut dependencies = Dependencies {
-            parameters: parameters
-                .iter()
-                .map(|parameter| parameter.symbol)
-                .collect(),
-            visited: Default::default(),
-            dependent: false,
-        };
-        dependencies.expression(value);
-        let value = if dependencies.dependent {
-            evaluation.push_namespace(symbol.namespace);
-            let expression = veryl_analyzer::conv::utils::eval_expr(
-                &mut evaluation,
-                Some(variable.r#type.clone()),
-                value,
-                false,
-            )
-            .map_err(|_| {
-                unsupported(format!(
-                    "cannot resolve default of foreign parameter `{}`",
-                    parameter.name
-                ))
-            });
-            evaluation.pop_namespace();
-            let (_, expression) = expression?;
-            render(&expression, &evaluation.variables)?
-        } else {
-            // Defaults independent of the overridable header retain the full
-            // native evaluator, including constant functions and casts.
-            let value = variable
-                .value
-                .first()
-                .ok_or_else(|| unsupported("foreign parameter without a concrete default"))?;
-            format!("{value:x}")
-        };
+        let value = sv_value(parameter, parameters, variables, context)?;
         declarations.push(format!(
             "parameter {} {} = {value}",
             sv_type(&variable.r#type),
@@ -1226,25 +1297,19 @@ pub(crate) fn specialize_sv_instances(
                 Component::Interface(_) => None,
             }),
     );
-    fn numeric(value: &veryl_analyzer::value::Value) -> Result<i128, ParserError> {
-        if value.width() > 128
-            || value.mask_xz().as_ref() != &num_bigint::BigUint::default()
-            || (!value.signed() && value.payload_u128() > i128::MAX as u128)
-        {
+    fn numeric(
+        value: &veryl_analyzer::value::Value,
+    ) -> Result<celox_frontend_sv::SvParameterValue, ParserError> {
+        if value.width() > 128 || value.mask_xz().as_ref() != &num_bigint::BigUint::default() {
             return Err(unsupported(
                 "foreign numeric parameter wider than 128 bits or containing X/Z",
             ));
         }
-        let raw = value.payload_u128();
-        if value.signed()
-            && value.width() > 0
-            && value.width() < 128
-            && (raw >> (value.width() - 1)) & 1 != 0
-        {
-            Ok((raw | (!0u128 << value.width())) as i128)
-        } else {
-            Ok(raw as i128)
-        }
+        Ok(celox_frontend_sv::SvParameterValue {
+            bits: value.payload_u128(),
+            width: value.width(),
+            signed: value.signed(),
+        })
     }
     fn walk(
         module: &mut Module,
@@ -1441,7 +1506,7 @@ pub(crate) fn specialize_foreign_module(
     base: &veryl_analyzer::ir::Ir,
     context: &mut veryl_analyzer::Context,
     name: &str,
-    parameters: &[(String, i128)],
+    parameters: &[(String, celox_frontend_sv::SvParameterValue)],
     used_names: &mut fxhash::FxHashSet<String>,
 ) -> Result<veryl_analyzer::ir::Module, ParserError> {
     use veryl_analyzer::{ir::*, symbol_table};
@@ -1453,7 +1518,7 @@ pub(crate) fn specialize_foreign_module(
         .map(|(name, value)| {
             (
                 name.clone(),
-                veryl_analyzer::value::Value::from_u128(*value as u128, 0, 128, *value < 0),
+                veryl_analyzer::value::Value::from_u128(value.bits, 0, value.width, value.signed),
             )
         })
         .collect::<Vec<_>>();
@@ -1513,9 +1578,10 @@ pub(crate) fn specialize_foreign_module(
         let width = ty
             .total_width()
             .ok_or_else(|| unsupported("unknown interface parameter width"))?;
-        let mut value = veryl_analyzer::value::Value::from_u128(*value as u128, 0, 128, *value < 0)
-            .expand(width, *value < 0)
-            .into_owned();
+        let mut value =
+            veryl_analyzer::value::Value::from_u128(value.bits, 0, value.width, value.signed)
+                .expand(width, value.signed)
+                .into_owned();
         value.trunc(width);
         value.set_signed(ty.signed);
         interface.parameters.retain(|(name, _)| *name != parameter);
@@ -1618,6 +1684,27 @@ mod tests {
                 .contains("header-dependent SV constant function"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn assignment_destinations_retain_constant_function_dependencies() {
+        for assignment in ["result[W-1] = 1;", "{result[W-1], result[0]} = 2'b10;"] {
+            let sv = format!(
+                "interface Bus #(parameter W = 8); function automatic integer value(); integer result; result = 0; {assignment} return result; endfunction localparam N = value(); logic [7:0] req; endinterface"
+            );
+            let signatures = celox_frontend_sv::interface_signatures(&[(
+                sv.as_str(),
+                std::path::Path::new("bus.sv"),
+            )])
+            .unwrap_or_else(|error| panic!("{assignment}: {error}"));
+            let error = veryl_interface_contracts(&signatures).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("header-dependent SV constant function"),
+                "{assignment}: {error}"
+            );
+        }
     }
 
     #[test]

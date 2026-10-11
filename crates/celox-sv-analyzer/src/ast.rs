@@ -539,14 +539,20 @@ impl Module {
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
         // Contract dependency analysis must see module parameter references
         // before the normal procedural lowering substitutes default literals.
-        let declaration_subroutines = with_imported(const_functions::module_constant_functions(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-            &imported.parameter_values,
-        ))
-        .declarations();
+        let symbolic_parameters = parameters
+            .iter()
+            .map(|parameter| parameter.name().to_string())
+            .collect();
+        let declaration_subroutines =
+            with_imported(const_functions::symbolic_module_constant_functions(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+                &imported.parameter_values,
+                &symbolic_parameters,
+            ))
+            .declarations();
         const_functions::replace(with_imported(const_functions::module_constant_functions(
             node.clone(),
             syntax_tree,
@@ -1077,6 +1083,27 @@ impl Module {
         imported_parameters
             .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
 
+        // Expression construction tracks only whole-variable assignments.
+        // Leave calls of functions with selected/concatenated writes symbolic
+        // in declaration contracts rather than publishing a partial body.
+        for subroutine in &declaration_subroutines {
+            let mut selected_write = false;
+            for statement in &subroutine.body {
+                statement.walk(&mut |statement| {
+                    selected_write |= matches!(
+                        statement,
+                        crate::procedural::StmtBase::Assign {
+                            lhs: crate::ir::LValue::Select { .. },
+                            ..
+                        } | crate::procedural::StmtBase::AssignConcat { .. }
+                    );
+                });
+            }
+            if selected_write && let Some(function) = functions.get_mut(&subroutine.name) {
+                function.body = None;
+            }
+        }
+
         Ok(Self {
             name,
             parameters,
@@ -1150,6 +1177,13 @@ impl Module {
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
     }
+}
+
+pub(crate) fn generated_time_declarations(
+    sources: &[(&str, &std::path::Path)],
+    roots: Option<&[&str]>,
+) -> Result<String, AnalyzerError> {
+    timescales::generated_source_declarations(sources, roots)
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;

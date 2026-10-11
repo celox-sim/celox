@@ -43,6 +43,7 @@ pub struct InterfacePrototype {
     pub name: String,
     pub probe_name: String,
     pub probe_source: String,
+    pub time_declarations: String,
     pub modports: std::collections::BTreeMap<String, Vec<(String, String)>>,
     pub parameters: Vec<String>,
     pub driven: Vec<String>,
@@ -59,6 +60,17 @@ pub fn interface_prototypes(
     let design = Design::collect(&files)?;
     let mut declarations = design.interfaces.values().collect::<Vec<_>>();
     declarations.sort_by(|left, right| left.name.cmp(&right.name));
+    let timescales = if declarations.is_empty() {
+        None
+    } else {
+        Some(super::timescales::Timescales::collect(
+            &files
+                .iter()
+                .zip(sources)
+                .map(|(file, (_, path))| (&file.syntax_tree, *path))
+                .collect::<Vec<_>>(),
+        )?)
+    };
     let signature_sources = files
         .iter()
         .enumerate()
@@ -80,6 +92,10 @@ pub fn interface_prototypes(
             .into_iter()
             .map(|interface| {
                 let probe_name = format!("__celox_interface_{}", interface.name);
+                let time_declarations = timescales
+                    .as_ref()
+                    .unwrap()
+                    .declaration_statements(&interface.name)?;
                 let behavior_functions = interface
                     .items
                     .iter()
@@ -94,10 +110,10 @@ pub fn interface_prototypes(
                     .collect::<HashSet<_>>();
                 let behavior_captures =
                     interface.captured_members(&interface.function_closure(&behavior_functions));
-                InterfacePrototype {
+                Ok(InterfacePrototype {
                     name: interface.name.clone(),
                     probe_source: format!(
-                        "module {}{probe_name}({} h); endmodule",
+                        "module {}{probe_name}({} h); {time_declarations} endmodule",
                         if interface.automatic {
                             "automatic "
                         } else {
@@ -106,6 +122,7 @@ pub fn interface_prototypes(
                         interface.name
                     ),
                     probe_name,
+                    time_declarations,
                     parameters: interface
                         .parameters
                         .iter()
@@ -155,9 +172,9 @@ pub fn interface_prototypes(
                             )
                         })
                         .collect(),
-                }
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, AnalyzerError>>()?,
         signature_sources,
     ))
 }

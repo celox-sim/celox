@@ -195,6 +195,7 @@ pub struct InterfaceSignature {
     pub parameters: Vec<String>,
     pub driven: Vec<String>,
     pub has_behavior: bool,
+    pub time_declarations: String,
 }
 
 pub fn interface_signatures(
@@ -246,16 +247,55 @@ pub fn interface_signatures_for(
                 parameters: prototype.parameters,
                 driven: prototype.driven,
                 has_behavior: prototype.has_behavior,
+                time_declarations: prototype.time_declarations,
             })
         })
         .collect()
+}
+
+/// A numeric override retains its integral type across frontend boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SvParameterValue {
+    pub bits: u128,
+    pub width: usize,
+    pub signed: bool,
+}
+
+impl SvParameterValue {
+    fn expression(self) -> sv::ir::ConstExpr {
+        sv::ir::ConstExpr::Literal(format!(
+            "{}'{}h{:x}",
+            self.width.max(1),
+            if self.signed { "s" } else { "" },
+            self.bits
+        ))
+    }
+
+    fn from_expression(expr: &sv::ir::ConstExpr) -> Option<Self> {
+        let literal = sv::typecheck::eval_const_integral_literal_with_types(
+            expr,
+            &HashMap::default(),
+            &HashMap::default(),
+        )?;
+        if literal.width > 128 || literal.mask != BigUint::default() {
+            return None;
+        }
+        let digits = literal.value.to_u64_digits();
+        let bits = u128::from(digits.first().copied().unwrap_or(0))
+            | (u128::from(digits.get(1).copied().unwrap_or(0)) << 64);
+        Some(Self {
+            bits,
+            width: literal.width,
+            signed: literal.signed,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SvModuleRequest {
     pub alias: String,
     pub module: String,
-    pub parameters: Vec<(String, i128)>,
+    pub parameters: Vec<(String, SvParameterValue)>,
     pub interfaces: Vec<(String, String)>,
 }
 
@@ -278,20 +318,6 @@ fn analyze_sources_with_requests(
             }
         }
     }
-    let mut joint_sources = sources.to_vec();
-    joint_sources.extend_from_slice(declarations);
-    let sources = joint_sources.as_slice();
-    // Interfaces are expanded into the modules that use them first.
-    let bindings = requests
-        .iter()
-        .map(|request| {
-            (
-                request.alias.clone(),
-                request.module.clone(),
-                request.interfaces.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
     let selected_roots = roots.map(|roots| {
         roots
             .iter()
@@ -304,6 +330,32 @@ fn analyze_sources_with_requests(
             })
             .collect::<Vec<_>>()
     });
+    let time_declarations = if declarations.iter().any(|(code, _)| !code.is_empty()) {
+        sv::generated_time_declarations(sources, selected_roots.as_deref())?
+    } else {
+        String::new()
+    };
+    let declarations = declarations
+        .iter()
+        .map(|(code, path)| (format!("{time_declarations}{code}"), *path))
+        .collect::<Vec<_>>();
+    let mut joint_sources = sources.to_vec();
+    joint_sources.extend(
+        declarations
+            .iter()
+            .map(|(code, path)| (code.as_str(), *path)),
+    );
+    let sources = joint_sources.as_slice();
+    let bindings = requests
+        .iter()
+        .map(|request| {
+            (
+                request.alias.clone(),
+                request.module.clone(),
+                request.interfaces.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let elaboration = sv::elaborate_interfaces_with_metadata_and_roots(
         sources,
         &bindings,
@@ -364,7 +416,18 @@ fn analyze_sources_with_requests(
         Some(roots) => {
             let roots = roots
                 .iter()
-                .map(|root| root_names.get(*root).map(String::as_str).unwrap_or(root))
+                .map(|root| {
+                    root_names
+                        .get(*root)
+                        .map(String::as_str)
+                        .or_else(|| {
+                            requests
+                                .iter()
+                                .find(|request| request.alias == *root)
+                                .map(|request| request.module.as_str())
+                        })
+                        .unwrap_or(root)
+                })
                 .collect::<Vec<_>>();
             sv::ParsedSource::analyze_packages_with_roots(&parsed, &roots)?
         }
@@ -1103,7 +1166,7 @@ pub fn prepare_external_hierarchy_with_foreign(
 }
 
 pub type ForeignModuleResolver<'a> =
-    dyn FnMut(&str, &[(String, i128)]) -> Result<ExternalModule, ParserError> + 'a;
+    dyn FnMut(&str, &[(String, SvParameterValue)]) -> Result<ExternalModule, ParserError> + 'a;
 
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_external_hierarchy_with_foreign_resolver(
@@ -1214,7 +1277,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 .iter()
                 .map(|(name, value)| LoweredSvParameterOverride {
                     name: name.clone(),
-                    value: Some(const_expr_from_i128(*value)),
+                    value: Some(value.expression()),
                     type_text: None,
                 })
                 .collect();
@@ -1265,9 +1328,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                         let value = parameter
                             .value
                             .as_ref()
-                            .and_then(|value| {
-                                sv::typecheck::eval_const_expr(value, &HashMap::default())
-                            })
+                            .and_then(SvParameterValue::from_expression)
                             .ok_or_else(|| {
                                 sv::AnalyzerError::Unsupported(format!(
                                     "foreign parameter `{}` without a numeric value",
@@ -1290,7 +1351,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                         .iter()
                         .map(|(name, value)| LoweredSvParameterOverride {
                             name: name.clone(),
-                            value: Some(const_expr_from_i128(*value)),
+                            value: Some(value.expression()),
                             type_text: None,
                         })
                         .collect();

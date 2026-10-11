@@ -720,73 +720,74 @@ pub fn parse_mixed(
         let mut pending_sources = Vec::new();
         let mut pending_requests = Vec::new();
         let mut pending_roots = Vec::new();
-        let mut resolver = |name: &str, parameters: &[(String, i128)]| {
-            let key = (name.to_string(), parameters.to_vec());
-            if let Some(signature) = signatures.get(&key) {
-                return Ok(signature.clone());
-            }
-            if signatures
-                .keys()
-                .filter(|(module, _)| module == name)
-                .count()
-                >= 64
-            {
-                return Err(celox_frontend_core::ParserError::illegal_context(
-                    "foreign module specialization",
-                    format!("too many specializations of `{name}`"),
-                    None,
-                ));
-            }
-            let mut prepare = || -> Result<_, ParserError> {
-                let module = crate::simulator::mixed::specialize_foreign_module(
-                    &base, context, name, parameters, used_names,
-                )?;
-                let mut specialized = veryl_analyzer::ir::Ir {
-                    components: vec![veryl_analyzer::ir::Component::Module(module)],
-                };
-                let behavior = crate::simulator::mixed::attach_sv_interface_behavior(
-                    &mut specialized,
-                    sv_interfaces,
-                    context,
-                    used_names,
-                )?;
-                let mut joint_sources = borrowed_sources.clone();
-                joint_sources.extend(behavior.iter().map(|source| {
-                    (
-                        source.as_str(),
-                        std::path::Path::new("<sv-interface-behavior>"),
-                    )
-                }));
-                let requests = crate::simulator::mixed::specialize_sv_instances(
-                    &mut specialized,
-                    &joint_sources,
-                    context,
-                    used_names,
-                )?;
-                let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
-                let signature = exported.modules.values().next().cloned().ok_or_else(|| {
-                    ParserError::illegal_context(
+        let mut resolver =
+            |name: &str, parameters: &[(String, celox_frontend_sv::SvParameterValue)]| {
+                let key = (name.to_string(), parameters.to_vec());
+                if let Some(signature) = signatures.get(&key) {
+                    return Ok(signature.clone());
+                }
+                if signatures
+                    .keys()
+                    .filter(|(module, _)| module == name)
+                    .count()
+                    >= 64
+                {
+                    return Err(celox_frontend_core::ParserError::illegal_context(
                         "foreign module specialization",
-                        format!("no concrete signature for `{name}`"),
+                        format!("too many specializations of `{name}`"),
+                        None,
+                    ));
+                }
+                let mut prepare = || -> Result<_, ParserError> {
+                    let module = crate::simulator::mixed::specialize_foreign_module(
+                        &base, context, name, parameters, used_names,
+                    )?;
+                    let mut specialized = veryl_analyzer::ir::Ir {
+                        components: vec![veryl_analyzer::ir::Component::Module(module)],
+                    };
+                    let behavior = crate::simulator::mixed::attach_sv_interface_behavior(
+                        &mut specialized,
+                        sv_interfaces,
+                        context,
+                        used_names,
+                    )?;
+                    let mut joint_sources = borrowed_sources.clone();
+                    joint_sources.extend(behavior.iter().map(|source| {
+                        (
+                            source.as_str(),
+                            std::path::Path::new("<sv-interface-behavior>"),
+                        )
+                    }));
+                    let requests = crate::simulator::mixed::specialize_sv_instances(
+                        &mut specialized,
+                        &joint_sources,
+                        context,
+                        used_names,
+                    )?;
+                    let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
+                    let signature = exported.modules.values().next().cloned().ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "foreign module specialization",
+                            format!("no concrete signature for `{name}`"),
+                            None,
+                        )
+                    })?;
+                    pending_roots.extend(signature.unresolved_instances.iter().cloned());
+                    pending_sources.extend(behavior);
+                    pending_requests.extend(requests);
+                    specializations.extend(specialized.components);
+                    Ok(signature)
+                };
+                let signature = prepare().map_err(|error| {
+                    celox_frontend_core::ParserError::illegal_context(
+                        "foreign module specialization",
+                        error.to_string(),
                         None,
                     )
                 })?;
-                pending_roots.extend(signature.unresolved_instances.iter().cloned());
-                pending_sources.extend(behavior);
-                pending_requests.extend(requests);
-                specializations.extend(specialized.components);
+                signatures.insert(key, signature.clone());
                 Ok(signature)
             };
-            let signature = prepare().map_err(|error| {
-                celox_frontend_core::ParserError::illegal_context(
-                    "foreign module specialization",
-                    error.to_string(),
-                    None,
-                )
-            })?;
-            signatures.insert(key, signature.clone());
-            Ok(signature)
-        };
         let external = celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver(
             &borrowed_sources,
             &external_roots,
