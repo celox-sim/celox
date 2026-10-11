@@ -556,9 +556,16 @@ fn constant_pattern_text(
     let mut edits = Vec::new();
     for child in node {
         let value = match child {
-            RefNode::AssignmentPatternExpression(pattern) if pattern.nodes.0.is_some() => Some(
-                patterns::constant_typed_pattern_text(pattern, tree, dimensions)?,
-            ),
+            RefNode::AssignmentPatternExpression(pattern)
+                if matches!(
+                    pattern.nodes.0,
+                    Some(sv_parser::AssignmentPatternExpressionType::PsTypeIdentifier(_))
+                ) =>
+            {
+                Some(patterns::constant_typed_pattern_text(
+                    pattern, tree, dimensions,
+                )?)
+            }
             RefNode::Primary(primary)
                 if !matches!(
                     primary,

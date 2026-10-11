@@ -908,7 +908,7 @@
     },
     {
       "category": "Hierarchy",
-      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:10: error: Invalid module instantiation\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:12: error: Invalid module instantiation\n",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:7: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context",
       "phase": "compile",

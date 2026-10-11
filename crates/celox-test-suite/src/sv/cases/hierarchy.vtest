@@ -265,18 +265,25 @@
       localparam bit CHOOSE = 0;
       assign y = {Q[1], Q[0]};
     endmodule
-    module Top(output logic [31:0] fills, expressions, repeated);
+    module Scalar #(parameter logic [63:0] P = '{default: 0})
+      (output logic [63:0] y);
+      assign y = P;
+    endmodule
+    module Top(output logic [31:0] fills, expressions, repeated,
+      output logic [63:0] builtin);
       localparam bit CHOOSE = 1;
       localparam logic [7:0] A = 8'hff;
       Child #(.Q('{default: '1})) a(fills);
       Child #(.Q('{A + 8'd1, CHOOSE ? '1 : '0})) b(expressions);
       Child #(.Q('{2{('1)}})) c(repeated);
+      Scalar #(.P(int'{default: 0})) d(builtin);
     endmodule
   "#)
   (top Top)
   (assert_eq fills 0xffffffff)
   (assert_eq expressions 0xffff0100)
-  (assert_eq repeated 0xffffffff))
+  (assert_eq repeated 0xffffffff)
+  (assert_eq builtin 0))
 
 ; Explicit pattern types are self-determined in the caller, not the child.
 (case parameter_patterns_bind_caller_types
