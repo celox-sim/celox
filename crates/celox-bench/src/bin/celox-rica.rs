@@ -799,6 +799,22 @@ fn run(cli: Cli) -> Result<(), RicaError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     if cli.model == Model::Timed {
+        if cli.compile_only {
+            // The timed model compiles a fresh simulation per run.
+            let compile_start = Instant::now();
+            builder(
+                Simulation::builder(&source, "HardwareCoreTestTop"),
+                &cli,
+                platform,
+                &config,
+            )
+            .build()?;
+            println!(
+                "CELOX_COMPILE top=HardwareCoreTestTop compile_ns={}",
+                compile_start.elapsed().as_nanos()
+            );
+            return Ok(());
+        }
         for image in &images {
             for _ in 0..cli.repeat {
                 let (outcome, compile_elapsed, execute_elapsed) =

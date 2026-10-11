@@ -1314,23 +1314,26 @@ mod host {
         /// the design between the domains. Events of the same domain are
         /// applied once. A single event behaves like [`Self::tick`].
         pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
-            if events.len() < 2 {
-                return match events {
-                    [event] => self.tick(*event),
-                    _ => Ok(()),
-                };
-            }
             use celox_runtime::backend::EventHandle;
-            let mut domains = Vec::with_capacity(events.len());
+            // Deduplicate domains before requiring split kernels: a design
+            // with a single domain has no split kernels, and aliases of one
+            // domain are an ordinary tick.
+            let mut unique: Vec<(crate::ir::AbsoluteAddr, B::Event)> =
+                Vec::with_capacity(events.len());
             for event in events {
                 let addr = self.backend.id_to_addr_slice()[event.id()];
                 let canonical = self.program.design.events.canonical(addr);
-                if domains
-                    .iter()
-                    .any(|(existing, _, _)| *existing == canonical)
-                {
-                    continue;
+                if unique.iter().all(|(existing, _)| *existing != canonical) {
+                    unique.push((canonical, *event));
                 }
+            }
+            match unique.as_slice() {
+                [] => return Ok(()),
+                [(_, event)] => return self.tick(*event),
+                _ => {}
+            }
+            let mut domains = Vec::with_capacity(unique.len());
+            for (canonical, event) in unique {
                 let eval_only = self.backend.resolve_eval_only_event(&canonical);
                 let apply = self.backend.resolve_apply_event(&canonical);
                 let (Some(eval_only), Some(apply)) = (eval_only, apply) else {
@@ -1339,7 +1342,7 @@ mod host {
                         event.id()
                     )));
                 };
-                domains.push((canonical, eval_only, apply));
+                domains.push((eval_only, apply));
             }
             let timing_enabled = self.diagnostics.tick_timing_every.is_some();
             let mut eval_comb_ns = 0u64;
@@ -1353,10 +1356,10 @@ mod host {
                 self.dirty = false;
             }
             let start = timing_enabled.then(crate::timing::now);
-            for (_, eval_only, _) in &domains {
+            for (eval_only, _) in &domains {
                 self.eval_only_ff_at_checked(*eval_only)?;
             }
-            for (_, _, apply) in &domains {
+            for (_, apply) in &domains {
                 self.apply_ff_at_checked(*apply)?;
             }
             if let Some(start) = start {
@@ -1591,12 +1594,21 @@ mod host {
             instance_id: crate::ir::InstanceId,
         ) -> Vec<NamedSignal> {
             let instance = self.program.design.instance(instance_id).unwrap();
+            let in_root = self
+                .program
+                .design
+                .root_instance()
+                .is_some_and(|root| root.id == instance.id);
 
             let mut result = Vec::new();
             for address in instance.state_addresses() {
                 let variable = self.program.design.variable(address).unwrap();
                 // Skip variables whose VarPath is ambiguous (None in the path index).
                 if !instance.resolves_path_to(&variable.path, *address) {
+                    continue;
+                }
+                // Enumeration exposes the same handles path lookup would.
+                if !self.observable_under_dead_store_policy(*address, in_root) {
                     continue;
                 }
                 let name = variable.path.join(".");
@@ -1686,6 +1698,9 @@ mod host {
 
         /// Try to resolve a signal inside a child instance.
         ///
+        /// [`Self::named_signals`], [`Self::instance_signals`] and
+        /// [`Self::named_hierarchy`] omit the same signals.
+        ///
         /// Under a dead store elimination policy, only state the policy
         /// guarantees to keep resolves: ports the policy preserves, signals
         /// listed with `live_signal()`, and state no combinational logic
@@ -1697,7 +1712,12 @@ mod host {
             var: &str,
         ) -> Result<SignalRef, crate::ir::AddrLookupError> {
             let addr = self.program.get_addr(instance_path, &[var])?;
-            if !self.observable_under_dead_store_policy(instance_path, addr) {
+            let in_root = self
+                .program
+                .design
+                .root_instance()
+                .is_some_and(|root| root.state_addresses().contains(&addr));
+            if !self.observable_under_dead_store_policy(addr, in_root) {
                 let path = instance_path
                     .iter()
                     .map(|(name, index)| format!("{name}[{index}]."))
@@ -1708,10 +1728,13 @@ mod host {
             Ok(self.backend.resolve_signal(&addr))
         }
 
+        /// Whether the dead store elimination policy guarantees that `addr`
+        /// stays current. `in_root` says whether it belongs to the top
+        /// instance, whose ports `PreserveTopPorts` keeps.
         fn observable_under_dead_store_policy(
             &self,
-            instance_path: &[(&str, usize)],
             addr: crate::ir::AbsoluteAddr,
+            in_root: bool,
         ) -> bool {
             use crate::DeadStorePolicy;
             let schema = &self.program.runtime_schema;
@@ -1730,7 +1753,7 @@ mod host {
             match schema.dead_store_policy {
                 DeadStorePolicy::Off => true,
                 DeadStorePolicy::PreserveListedSignals => false,
-                DeadStorePolicy::PreserveTopPorts => instance_path.is_empty() && is_port,
+                DeadStorePolicy::PreserveTopPorts => in_root && is_port,
                 DeadStorePolicy::PreserveAllPorts => is_port,
             }
         }

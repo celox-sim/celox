@@ -497,6 +497,25 @@ module Top (
     assert!(sim.try_signal("top_in").is_ok());
     assert!(sim.try_signal("count").is_ok());
 
+    // Enumeration omits the same signals.
+    let names = sim
+        .named_signals()
+        .into_iter()
+        .map(|signal| signal.name)
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|name| name == "top_out"));
+    assert!(names.iter().any(|name| name == "count"));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "observed" || name == "echo")
+    );
+    assert!(
+        !sim.instance_signals(&[("u_sub", 0)])
+            .iter()
+            .any(|signal| signal.name == "o_data")
+    );
+
     let all_ports = Simulator::builder(source, "Top")
         .dead_store_policy(DeadStorePolicy::PreserveAllPorts)
         .build()

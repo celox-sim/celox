@@ -114,6 +114,40 @@ module Top (
         check_coincident_edges!(builder().build_wasm().unwrap());
     }
 
+    // A single-domain design has no split kernels; repeated or aliased
+    // events of that domain are one ordinary tick.
+    #[test]
+    fn single_domain() {
+        let mut sim = Simulator::builder(
+            r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    count: output logic<8>,
+) {
+    always_ff {
+        if_reset {
+            count = 0;
+        } else {
+            count = count + 1;
+        }
+    }
+}
+"#,
+            "Top",
+        )
+        .build()
+        .unwrap();
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let count = sim.signal("count");
+        sim.modify(|io| io.set(rst, 0u8)).unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+        sim.tick_events(&[clk, clk]).unwrap();
+        assert_eq!(sim.get(count), 1u64.into());
+    }
+
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn native_o2() {
