@@ -54,6 +54,7 @@ pub(super) struct Timescales {
 #[cfg(test)]
 thread_local! {
     static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PARENT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -365,6 +366,39 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
     })
 }
 
+/// Syntax scopes are sorted by start and either nest or are disjoint. Each
+/// scope is pushed and popped at most once, including in flat generated files.
+fn scope_parents(scopes: &[Scope]) -> Vec<Option<usize>> {
+    let mut parents = Vec::with_capacity(scopes.len());
+    let mut active: Vec<usize> = Vec::new();
+    for (i, scope) in scopes.iter().enumerate() {
+        while let Some(&parent) = active.last() {
+            #[cfg(test)]
+            PARENT_CHECKS.with(|count| count.set(count.get() + 1));
+            if scopes[parent].start < scope.start && scope.end < scopes[parent].end {
+                break;
+            }
+            active.pop();
+        }
+        parents.push(active.last().copied());
+        active.push(i);
+    }
+    parents
+}
+
+fn scope_at(scopes: &[Scope], parents: &[Option<usize>], at: usize) -> Option<usize> {
+    let mut candidate = scopes
+        .partition_point(|scope| scope.start <= at)
+        .checked_sub(1);
+    while let Some(i) = candidate {
+        if at < scopes[i].end {
+            return Some(i);
+        }
+        candidate = parents[i];
+    }
+    None
+}
+
 impl Timescales {
     pub(super) fn select_roots(&mut self, roots: &[&str]) {
         self.roots = Some(roots.iter().map(|name| (*name).to_string()).collect());
@@ -401,6 +435,7 @@ impl Timescales {
                 .filter_map(|node| scope_node(node, tree))
                 .collect();
             scopes.sort_by_key(|s| s.start);
+            let parents = scope_parents(&scopes);
             let mut declarations = vec![(None, None); scopes.len()];
             let mut unit_decl = (None, None);
             let unit_time_items_end = tree
@@ -438,12 +473,7 @@ impl Timescales {
                             design.precision = Some(design.precision.map_or(p, |old| old.min(p)));
                         }
                         let at = offset(RefNode::TimeunitsDeclaration(v)).unwrap_or_default();
-                        let target = scopes
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, s)| s.start <= at && at < s.end)
-                            .min_by_key(|(_, s)| s.end - s.start)
-                            .map(|(i, _)| i);
+                        let target = scope_at(&scopes, &parents, at);
                         let time_items_end =
                             target.map_or(unit_time_items_end, |i| scopes[i].time_items_end);
                         let previous = target.map_or(&mut unit_decl, |i| &mut declarations[i]);
@@ -491,11 +521,8 @@ impl Timescales {
                             continue;
                         }
                         let at = offset(RefNode::ModuleInstantiation(v)).unwrap_or_default();
-                        if let Some(scope) = scopes
-                            .iter_mut()
-                            .filter(|s| s.start <= at && at < s.end)
-                            .min_by_key(|s| s.end - s.start)
-                        {
+                        if let Some(i) = scope_at(&scopes, &parents, at) {
+                            let scope = &mut scopes[i];
                             let module =
                                 identifier_text(RefNode::ModuleIdentifier(&v.nodes.0), tree)
                                     .unwrap_or_default();
@@ -526,17 +553,16 @@ impl Timescales {
                 return Err(unsupported("timeprecision coarser than timeunit"));
             }
             for i in 0..scopes.len() {
-                let enclosing = scopes[..i]
-                    .iter()
-                    .filter(|s| s.start < scopes[i].start && scopes[i].end < s.end)
-                    .min_by_key(|s| s.end - s.start)
-                    .map(|s| (s.scale, s.specified));
+                let enclosing = parents[i].map(|parent| {
+                    let scope = &scopes[parent];
+                    (scope.scale, scope.specified)
+                });
                 let inherited = enclosing
                     .or_else(|| {
-                        directives
-                            .iter()
-                            .rev()
-                            .find(|(at, _)| *at < scopes[i].start)
+                        let before = directives.partition_point(|(at, _)| *at < scopes[i].start);
+                        before
+                            .checked_sub(1)
+                            .map(|i| &directives[i])
                             .and_then(|(_, scale)| scale.map(|scale| (scale, (true, true))))
                     })
                     .unwrap_or((unit, (unit_decl.0.is_some(), unit_decl.1.is_some())));
@@ -819,6 +845,71 @@ pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Conver
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sibling_scope_collection_uses_linear_parent_checks() {
+        let mut code = "timeunit 1ns / 1ps;".to_string();
+        for i in 0..1024 {
+            code.push_str(&format!(
+                "module M{i}(); timeunit 1us / 1ns; M0 child(); endmodule\n"
+            ));
+        }
+        let tree = crate::syntax::parse_source(&code, Path::new("many_scopes.sv")).unwrap();
+        let before = PARENT_CHECKS.with(|count| count.get());
+        let design = Timescales::collect(&[(&tree, Path::new("many_scopes.sv"))]).unwrap();
+        let checks = PARENT_CHECKS.with(|count| count.get()) - before;
+        assert!(checks < 2 * 1024, "performed {checks} parent checks");
+        assert_eq!(design.definitions.len(), 1024);
+        for scope in design.definitions.values() {
+            assert_eq!((scope.scale.unit, scope.scale.precision), (-6, -9));
+            assert_eq!(scope.instances.get("child").map(String::as_str), Some("M0"));
+        }
+    }
+
+    #[test]
+    fn nested_scopes_inherit_from_their_parent_without_leaking_to_siblings() {
+        let code = "timeunit 1ns / 1ps;
+            `timescale 1ms / 1us
+            module Outer(); timeunit 100ns / 10ps;
+                module First(); timeunit 10ns;
+                    module Deep(); endmodule
+                    Deep deep();
+                endmodule
+                module Second(); endmodule
+                First first(); Second second();
+                timeprecision 10ps;
+            endmodule
+            module Sibling(); endmodule
+            `resetall
+            package After; endpackage";
+        let tree = crate::syntax::parse_source(code, Path::new("nested_scopes.sv")).unwrap();
+        let design = Timescales::collect(&[(&tree, Path::new("nested_scopes.sv"))]).unwrap();
+        for (name, unit, precision) in [
+            ("Outer", -7, -11),
+            ("First", -8, -11),
+            ("Deep", -8, -11),
+            ("Second", -7, -11),
+            ("Sibling", -3, -6),
+        ] {
+            let scope = &design.definitions[name];
+            assert_eq!(
+                (scope.scale.unit, scope.scale.precision),
+                (unit, precision),
+                "{name}"
+            );
+        }
+        assert_eq!(design.definitions["Outer"].instances.len(), 2);
+        assert_eq!(
+            design.definitions["First"]
+                .instances
+                .get("deep")
+                .map(String::as_str),
+            Some("Deep")
+        );
+        assert!(design.definitions["Deep"].instances.is_empty());
+        let after = &design.packages["After"];
+        assert_eq!((after.scale.unit, after.scale.precision), (-9, -12));
+    }
+
     #[test]
     fn rejects_invalid_and_hidden_query_operands() {
         for expression in [
