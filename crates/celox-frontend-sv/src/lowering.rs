@@ -1246,10 +1246,25 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 &specialized
             };
             for name in &signature.unresolved_instances {
-                if !analyzed.contains_key(name) && !foreign_modules.contains_key(name) {
+                let mut dependency = LoweredSvModuleKey::base(name.clone());
+                if let Some(request) = requests.iter().find(|request| &request.alias == name) {
+                    dependency.name = bound_names.get(name).unwrap_or(&request.module).clone();
+                    dependency.parameter_overrides = request
+                        .parameters
+                        .iter()
+                        .map(|(name, value)| LoweredSvParameterOverride {
+                            name: name.clone(),
+                            value: Some(const_expr_from_i128(*value)),
+                            type_text: None,
+                        })
+                        .collect();
+                    requested_roots.insert(name.clone(), dependency.clone());
+                }
+                if !analyzed.contains_key(&dependency.name)
+                    && !foreign_modules.contains_key(&dependency.name)
+                {
                     continue;
                 }
-                let dependency = LoweredSvModuleKey::base(name.clone());
                 if !module_ids.contains_key(&dependency) {
                     let id = ModuleId(module_ids.len());
                     module_ids.insert(dependency.clone(), id);

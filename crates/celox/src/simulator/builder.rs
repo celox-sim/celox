@@ -496,10 +496,12 @@ fn analyze(
         {
             if let Some(sv_sources) = sv_sources {
                 (|| {
+                    let mut used_names = super::mixed::component_names(sv_sources)?;
                     let behavior_sources = super::mixed::attach_sv_interface_behavior(
                         &mut ir,
                         &sv_interface_signatures,
                         &mut context,
+                        &mut used_names,
                     )?;
                     let mut joint_sources = sv_sources.to_vec();
                     joint_sources.extend(
@@ -511,6 +513,7 @@ fn analyze(
                         &mut ir,
                         &joint_sources,
                         &mut context,
+                        &mut used_names,
                     )?;
                     let declarations = super::mixed::sv_declaration_contracts(
                         &ir,
@@ -530,6 +533,8 @@ fn analyze(
                         )],
                         param_overrides,
                         &requests,
+                        &sv_interface_signatures,
+                        &mut used_names,
                         &build_config,
                         ignored_loops,
                         true_loops,

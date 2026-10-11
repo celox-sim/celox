@@ -19,6 +19,20 @@ fn fresh_name(prefix: &str, used: &mut fxhash::FxHashSet<String>, next: &mut usi
     }
 }
 
+pub(super) fn component_names(
+    sources: &[(&str, &std::path::Path)],
+) -> Result<fxhash::FxHashSet<String>, ParserError> {
+    let interfaces =
+        celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
+    let mut names = interfaces.keys().cloned().collect::<fxhash::FxHashSet<_>>();
+    names.extend(
+        veryl_analyzer::symbol_table::get_all()
+            .iter()
+            .map(|symbol| symbol.token.text.to_string()),
+    );
+    Ok(names)
+}
+
 pub(super) fn referenced_sv_components<'a>(
     sources: impl IntoIterator<Item = &'a veryl_parser::veryl_grammar_trait::Veryl>,
 ) -> fxhash::FxHashSet<String> {
@@ -130,15 +144,139 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
     })
 }
 
-fn dimension(left: &sv::ConstExpr, right: &sv::ConstExpr) -> Result<String, ParserError> {
-    let left = const_expr(left)?;
-    let right = const_expr(right)?;
+// Only expressions depending on an overridable interface parameter must
+// survive in the foreign contract. SV package constants and independent
+// constant functions have already been evaluated by their owning analyzer.
+fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bool {
+    fn visit(
+        expr: &sv::ConstExpr,
+        signature: &InterfaceSignature,
+        visited: &mut fxhash::FxHashSet<String>,
+    ) -> bool {
+        use sv::ConstExpr::*;
+        match expr {
+            Ident(name) => {
+                if signature
+                    .parameters
+                    .iter()
+                    .any(|parameter| name == &format!("h${parameter}"))
+                {
+                    return true;
+                }
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                signature
+                    .module
+                    .parameters()
+                    .iter()
+                    .find(|parameter| parameter.name() == name)
+                    .and_then(|parameter| parameter.value())
+                    .is_some_and(|value| visit(value, signature, visited))
+            }
+            Literal(_) => false,
+            Binary { left, right, .. } => {
+                visit(left, signature, visited) || visit(right, signature, visited)
+            }
+            Unary { expr, .. } | Resize { expr, .. } => visit(expr, signature, visited),
+            Select { expr, bit } => {
+                visit(expr, signature, visited) || visit(bit, signature, visited)
+            }
+            Function { args, .. } => args.iter().any(|arg| visit(arg, signature, visited)),
+            Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                visit(condition, signature, visited)
+                    || visit(then_expr, signature, visited)
+                    || visit(else_expr, signature, visited)
+            }
+        }
+    }
+    visit(expr, signature, &mut fxhash::FxHashSet::default())
+}
+
+fn resolved_parameter(parameter: &sv::Parameter) -> Result<String, ParserError> {
+    let value = parameter.resolved_value().ok_or_else(|| {
+        unsupported(format!(
+            "unresolved SV interface constant `{}`",
+            parameter.name()
+        ))
+    })?;
+    let width = parameter.resolved_width().unwrap_or(32);
+    let signed = if parameter.resolved_signed().unwrap_or(false) {
+        "s"
+    } else {
+        ""
+    };
+    let mask = if width < 128 {
+        (1u128 << width) - 1
+    } else {
+        u128::MAX
+    };
+    Ok(format!("{width}'{signed}h{:x}", value as u128 & mask))
+}
+
+fn contract_expr(
+    expr: &sv::ConstExpr,
+    signature: &InterfaceSignature,
+) -> Result<String, ParserError> {
+    let mut constants = fxhash::FxHashMap::default();
+    let mut types = fxhash::FxHashMap::default();
+    for parameter in signature
+        .module
+        .imported_parameters()
+        .iter()
+        .chain(signature.module.parameters())
+    {
+        if signature
+            .parameters
+            .iter()
+            .any(|name| parameter.name() == format!("h${name}"))
+        {
+            continue;
+        }
+        if let Some(value) = parameter.resolved_value() {
+            // Body constants depending on the header retain their declaration
+            // and symbolic reference so overrides still reach member widths.
+            if parameter
+                .value()
+                .is_some_and(|value| depends_on_header(value, signature))
+            {
+                continue;
+            }
+            constants.insert(parameter.name().to_string(), value);
+            types.insert(
+                parameter.name().to_string(),
+                (
+                    parameter.resolved_width().unwrap_or(32),
+                    parameter.resolved_signed().unwrap_or(false),
+                ),
+            );
+        }
+    }
+    let expr = celox_frontend_sv::analyzer_typecheck::substitute_typed_constants(
+        expr.clone(),
+        &constants,
+        &types,
+    );
+    const_expr(&expr)
+}
+
+fn dimension(
+    left: &sv::ConstExpr,
+    right: &sv::ConstExpr,
+    signature: &InterfaceSignature,
+) -> Result<String, ParserError> {
+    let left = contract_expr(left, signature)?;
+    let right = contract_expr(right, signature)?;
     Ok(format!(
         "(if ({left}) >= ({right}) ? ({left}) - ({right}) + 1 : ({right}) - ({left}) + 1)"
     ))
 }
 
-fn veryl_type(ty: &sv::Type) -> Result<String, ParserError> {
+fn veryl_type(ty: &sv::Type, signature: &InterfaceSignature) -> Result<String, ParserError> {
     let mut text = if ty.is_signed() {
         "signed ".to_string()
     } else {
@@ -154,7 +292,7 @@ fn veryl_type(ty: &sv::Type) -> Result<String, ParserError> {
         text.push_str(
             &ty.packed_ranges()
                 .iter()
-                .map(|range| dimension(range.left(), range.right()))
+                .map(|range| dimension(range.left(), range.right(), signature))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", "),
         );
@@ -165,7 +303,7 @@ fn veryl_type(ty: &sv::Type) -> Result<String, ParserError> {
         text.push_str(
             &ty.unpacked_ranges()
                 .iter()
-                .map(|range| dimension(range.left(), range.right()))
+                .map(|range| dimension(range.left(), range.right(), signature))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", "),
         );
@@ -214,7 +352,11 @@ pub(super) fn veryl_interface_contracts(
                 source.push_str(&format!(
                     "param {name}: {} = {},\n",
                     parameter_type(parameter),
-                    const_expr(value)?
+                    if depends_on_header(value, signature) {
+                        contract_expr(value, signature)?
+                    } else {
+                        resolved_parameter(parameter)?
+                    }
                 ));
             }
             source.push(')');
@@ -235,7 +377,11 @@ pub(super) fn veryl_interface_contracts(
                 source.push_str(&format!(
                     "const {name}: {} = {};\n",
                     parameter_type(parameter),
-                    const_expr(value)?
+                    if depends_on_header(value, signature) {
+                        contract_expr(value, signature)?
+                    } else {
+                        resolved_parameter(parameter)?
+                    }
                 ));
             }
         }
@@ -243,7 +389,10 @@ pub(super) fn veryl_interface_contracts(
             let Some(name) = port.name().strip_prefix("h$") else {
                 continue;
             };
-            source.push_str(&format!("var {name}: {};\n", veryl_type(port.r#type())?));
+            source.push_str(&format!(
+                "var {name}: {};\n",
+                veryl_type(port.r#type(), signature)?
+            ));
         }
         for (modport, members) in &signature.modports {
             source.push_str(&format!("modport {modport} {{\n"));
@@ -305,10 +454,11 @@ fn sv_array(ty: &veryl_analyzer::ir::Type) -> String {
 
 /// SV interfaces instantiated in Veryl keep their executable logic in an SV
 /// child. Only the handle's typed member variables belong to the Veryl module.
-pub(super) fn attach_sv_interface_behavior(
+pub(crate) fn attach_sv_interface_behavior(
     ir: &mut veryl_analyzer::ir::Ir,
     signatures: &[InterfaceSignature],
     context: &mut veryl_analyzer::Context,
+    used_names: &mut fxhash::FxHashSet<String>,
 ) -> Result<Vec<String>, ParserError> {
     use veryl_analyzer::{ir::*, symbol::SymbolKind, symbol_table};
     use veryl_parser::{
@@ -321,6 +471,8 @@ pub(super) fn attach_sv_interface_behavior(
         signatures: &[InterfaceSignature],
         context: &mut veryl_analyzer::Context,
         sources: &mut Vec<String>,
+        used_names: &mut fxhash::FxHashSet<String>,
+        next_name: &mut usize,
     ) -> Result<(), ParserError> {
         let mut groups = std::collections::BTreeMap::new();
         for variable in module.variables.values() {
@@ -411,7 +563,7 @@ pub(super) fn attach_sv_interface_behavior(
                 }
                 dimensions.push(count);
             }
-            let name = format!("__celox_sv_interface_{}", sources.len());
+            let name = fresh_name("__celox_sv_interface", used_names, next_name);
             let mut ports = Vec::new();
             let mut connects = Vec::new();
             let token = Token::new(&name, 0, 0, 0, 0, TokenSource::External);
@@ -504,15 +656,23 @@ pub(super) fn attach_sv_interface_behavior(
             if let Declaration::Inst(instance) = declaration
                 && let Component::Module(child) = std::sync::Arc::make_mut(&mut instance.component)
             {
-                attach(child, signatures, context, sources)?;
+                attach(child, signatures, context, sources, used_names, next_name)?;
             }
         }
         Ok(())
     }
     let mut sources = Vec::new();
+    let mut next_name = 0;
     for component in &mut ir.components {
         if let Component::Module(module) = component {
-            attach(module, signatures, context, &mut sources)?;
+            attach(
+                module,
+                signatures,
+                context,
+                &mut sources,
+                used_names,
+                &mut next_name,
+            )?;
         }
     }
     Ok(sources)
@@ -878,21 +1038,16 @@ fn sv_parameters(
     })
 }
 
-pub(super) fn specialize_sv_instances(
+pub(crate) fn specialize_sv_instances(
     ir: &mut veryl_analyzer::ir::Ir,
     sources: &[(&str, &std::path::Path)],
     context: &mut veryl_analyzer::Context,
+    used_names: &mut fxhash::FxHashSet<String>,
 ) -> Result<Vec<celox_frontend_sv::SvModuleRequest>, ParserError> {
     use veryl_analyzer::{ir::*, symbol::SymbolKind, symbol_table};
     use veryl_parser::resource_table;
     let interfaces =
         celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
-    let mut used_names = interfaces.keys().cloned().collect::<fxhash::FxHashSet<_>>();
-    used_names.extend(
-        symbol_table::get_all()
-            .iter()
-            .map(|symbol| symbol.token.text.to_string()),
-    );
     used_names.extend(
         ir.components
             .iter()
@@ -1105,7 +1260,7 @@ pub(super) fn specialize_sv_instances(
                 &interfaces,
                 context,
                 &mut requests,
-                &mut used_names,
+                used_names,
                 &mut next_alias,
             )?;
         }
