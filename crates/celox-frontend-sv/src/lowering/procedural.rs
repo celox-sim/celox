@@ -46,6 +46,8 @@ pub(super) struct ProcModule<'a> {
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
     /// The event expressions some process waits on.
     pub event_watchers: Vec<EventWatcher>,
+    pub combinational: HashSet<String>,
+    pub event_signals: Vec<String>,
     /// The watchers whose expression reads each variable, by index.
     pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
     /// Every event counter declared, for its zero initial value.
@@ -60,7 +62,9 @@ pub(super) struct ProcModule<'a> {
 /// the expression before the store and counts the change, rise and fall it
 /// made after it. A waiter compares the counters with the ones it sampled,
 /// so an event a later store of the same kernel run hides is still seen.
+#[derive(Clone)]
 pub(super) struct EventWatcher {
+    pub private: HashMap<SourceVarId, SourceVarId>,
     pub expr: sv::ir::Expr,
     pub dependencies: Vec<SourceVarId>,
     /// The state shared by every process; a process with private copies of
@@ -81,7 +85,7 @@ pub(super) struct EventCounters {
 /// One word a memory file writes: its bits in the destination, value, and
 /// unknown mask.
 /// Bits of an event counter; the counters wrap, as only equality matters.
-pub const EVENT_COUNTER_WIDTH: usize = 32;
+pub const EVENT_COUNTER_WIDTH: usize = celox_design::PROCESS_EVENT_COUNTER_WIDTH;
 
 /// The counters of a package variable, as `variable@purpose` in the package
 /// and in every module denoting the variable (see
@@ -181,6 +185,30 @@ impl<'a> ProcModule<'a> {
             runtime_errors: HashMap::default(),
             unpacked_bounds,
             event_watchers: Vec::new(),
+            event_signals: module
+                .ff_processes()
+                .iter()
+                .flat_map(|process| process.events())
+                .map(|event| event.signal().to_string())
+                .collect(),
+            combinational: module
+                .assignments()
+                .iter()
+                .map(|assignment| assignment.lhs().to_string())
+                .chain(module.comb_processes().iter().flat_map(|process| {
+                    let mut names = Vec::new();
+                    for stmt in process.body() {
+                        stmt.walk(&mut |stmt| match stmt {
+                            sv::ir::Stmt::Assign { lhs, .. } => names.push(lhs.name().to_string()),
+                            sv::ir::Stmt::AssignConcat { parts, .. } => {
+                                names.extend(parts.iter().map(|part| part.name().to_string()))
+                            }
+                            _ => {}
+                        });
+                    }
+                    names
+                }))
+                .collect(),
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
             static_initial_values: Vec::new(),
@@ -410,24 +438,28 @@ impl<'a> ProcModule<'a> {
                     self.constants,
                     self.parameter_types,
                     &mut arena,
-                    None,
-                    None,
+                    Some(self.var(id).width),
+                    Some(self.expr_signed(init)),
                 )
             })
             .flatten()
-            .and_then(|(node, _)| slt_const(&arena, &mut ConstCache::default(), node));
-        let Some((value, _)) = constant else {
+            .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node));
+        let Some((mut value, mut mask, _)) = constant else {
             return Err(unsupported(format!(
                 "static local `{name}` with an initializer that is not constant"
             )));
         };
         let width = self.var(id).width;
         let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        if !self.var(id).is_4state {
+            value &= &written_mask ^ (&mask & &written_mask);
+            mask = BigUint::default();
+        }
         self.static_initial_values.push(InitialStateValue {
             address: id,
             data: InitialStateData::Packed {
                 value: value & &written_mask,
-                mask: BigUint::default(),
+                mask: mask & &written_mask,
                 written_mask,
             },
         });
@@ -1662,7 +1694,9 @@ pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>
         sv::ir::ConstExpr::Function { args, .. } => {
             args.iter().for_each(|arg| const_idents(arg, names))
         }
-        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_idents(expr, names)
+        }
         sv::ir::ConstExpr::Binary { left, right, .. } => {
             const_idents(left, names);
             const_idents(right, names);
@@ -1675,7 +1709,6 @@ pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>
             const_idents(condition, names);
             const_idents(then_expr, names);
             const_idents(else_expr, names);
-
         }
     }
 }

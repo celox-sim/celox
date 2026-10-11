@@ -406,7 +406,7 @@ fn analyze_package_scope(
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(node.clone(), tree);
-    let variables = match &node {
+    let mut variables = match &node {
         RefNode::PackageDeclaration(package) => package_variables(name, &package.nodes.6, tree)?,
         _ => HashSet::default(),
     };
@@ -425,6 +425,70 @@ fn analyze_package_scope(
         .symbols
         .take()
         .expect("a package analysis keeps the package symbols");
+    // Static subroutine activation storage is package state as well. Copies
+    // imported into different instances must denote the same object (13.3.1).
+    let mut activation = HashSet::default();
+    for subroutine in &module.subroutines {
+        if !subroutine.automatic {
+            activation.extend(subroutine.params.iter().map(|param| param.name.clone()));
+            activation.extend(subroutine.return_var.clone());
+        }
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let Stmt::Local {
+                    name,
+                    r#static: true,
+                    ..
+                } = stmt
+                {
+                    activation.insert(name.clone());
+                }
+            });
+        }
+    }
+    for local in &module.locals {
+        if activation.contains(&local.name) && !imported_locals.contains(&local.name) {
+            let r#type = &local.r#type;
+            let r#type = Type {
+                kind: match r#type.kind() {
+                    crate::ir::TypeKind::Bit => TypeKind::Bit,
+                    crate::ir::TypeKind::Logic => TypeKind::Logic,
+                    crate::ir::TypeKind::Reg => TypeKind::Reg,
+                    crate::ir::TypeKind::Implicit => TypeKind::Implicit,
+                },
+                is_signed: r#type.is_signed(),
+                packed_ranges: r#type
+                    .packed_ranges()
+                    .iter()
+                    .map(|range| {
+                        PackedRange::new(range.left().clone().into(), range.right().clone().into())
+                    })
+                    .collect(),
+                unpacked_ranges: r#type
+                    .unpacked_ranges()
+                    .iter()
+                    .map(|range| {
+                        UnpackedRange::new(
+                            range.left().clone().into(),
+                            range.right().clone().into(),
+                        )
+                    })
+                    .collect(),
+                members: Vec::new(),
+                signed_element_depth: None,
+            };
+            let signal = Signal::new(local.name.clone(), r#type);
+            module.signals.push(signal.clone());
+            symbols.signals.push(signal);
+            variables.insert(local.name.clone());
+        }
+    }
+    module
+        .locals
+        .retain(|local| !variables.contains(&local.name));
+    symbols
+        .locals
+        .retain(|local| !variables.contains(&local.name));
     // The package's variables, and those it imports, are shared objects;
     // the other signals are constants, copied with their initializers.
     let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)
@@ -469,7 +533,7 @@ fn analyze_package_scope(
         .map(|declared| (declared.clone(), qualified(declared)))
         .collect();
     let mut own_locals = HashSet::default();
-    for local in symbols.local_names() {
+    for local in symbols.local_names().into_iter().chain(activation) {
         if !imported_locals.contains(&local) {
             names.insert(local.clone(), qualified(&local));
             own_locals.insert(local);

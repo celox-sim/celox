@@ -592,6 +592,12 @@ fn validate_package_variable_drivers<'a>(
         let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         for (var_id, package, variable) in &module.package_variables {
             let name = &module.variables[var_id].path[0];
+            // A static package activation intentionally has concurrent
+            // procedural users. Its formals/locals are not independent RTL
+            // drivers; ordinary package variables retain the driver checks.
+            if static_activation_storage(&module.source, name) {
+                continue;
+            }
             let local = local_driver_ranges(
                 &module.source,
                 name,
@@ -632,6 +638,35 @@ fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
         drivers[index + 1..]
             .iter()
             .any(|right| net_driver_ranges_overlap(left.1, right.1))
+    })
+}
+
+fn static_activation_storage(module: &sv::ir::Module, name: &str) -> bool {
+    let name = procedural::PACKAGE_EVENT_COUNTERS
+        .iter()
+        .find_map(|purpose| name.strip_suffix(&format!("@{purpose}")))
+        .unwrap_or(name);
+    module.subroutines().iter().any(|subroutine| {
+        if !subroutine.automatic
+            && (subroutine.params.iter().any(|param| param.name == name)
+                || subroutine.return_var.as_deref() == Some(name))
+        {
+            return true;
+        }
+        let mut found = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local {
+                    name: local,
+                    r#static: true,
+                    ..
+                } = stmt
+                {
+                    found |= local == name;
+                }
+            });
+        }
+        found
     })
 }
 
@@ -1552,7 +1587,7 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
-    let (initial_values, processes) = lower_initial_processes(
+    let (initial_values, processes, process_event_counters) = lower_initial_processes(
         module,
         &mut variables,
         &mut name_to_id,
@@ -1632,6 +1667,10 @@ fn lower_module_with_overrides(
         }
     }
 
+    let shared_process_state = name_to_id
+        .iter()
+        .filter_map(|(name, id)| static_activation_storage(module, name).then_some(*id))
+        .collect();
     Ok(LoweredSvModule {
         source: module.clone(),
         implicit_nets_allowed,
@@ -1657,6 +1696,8 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             package_bindings: HashMap::default(),
+            shared_process_state,
+            process_event_counters,
         },
         variables,
         port_order,
@@ -2261,9 +2302,16 @@ fn lower_initial_processes(
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
     package_aliases: &[SourceVarId],
-) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
+) -> Result<
+    (
+        Vec<InitialStateValue<SourceVarId>>,
+        Vec<SymbolicProcess>,
+        Vec<celox_design::ProcessEventCounters<SourceVarId>>,
+    ),
+    sv::AnalyzerError,
+> {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -2306,7 +2354,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new()));
+        return Ok((values, Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -2362,12 +2410,38 @@ fn lower_initial_processes(
     pm.extern_functions = std::mem::take(extern_functions);
     let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
     ff::declare_event_counters(&mut pm, &bodies, package_aliases)?;
+    let process_event_counters = module
+        .ff_processes()
+        .iter()
+        .flat_map(|process| process.events())
+        .filter_map(|event| {
+            let expr = sv::ir::Expr::Ident(event.signal().to_string());
+            let watcher = pm
+                .event_watchers
+                .iter()
+                .find(|watcher| watcher.expr == expr)?;
+            Some(celox_design::ProcessEventCounters {
+                signal: pm.id(event.signal())?,
+                rises: pm.id(&watcher.state.rises)?,
+                falls: pm.id(&watcher.state.falls)?,
+            })
+        })
+        .collect();
+    let activations = bodies
+        .iter()
+        .map(|body| ff::Ff::new(&mut pm).plan_activation(body))
+        .collect::<Vec<_>>();
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|(process, slots)| {
+        .zip(activations)
+        .map(|((process, slots), activation)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(
+                    process.body(),
+                    slots,
+                    activation,
+                )?,
                 slots,
             })
         })
@@ -2390,7 +2464,7 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?))
+    Ok((values, processes?, process_event_counters))
 }
 
 fn lower_comb_processes(

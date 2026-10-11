@@ -802,7 +802,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 init,
                 // Process locals are handled by `keep_static_locals`; task
                 // locals retain their lifetime in IR across inline calls.
-                r#static: self.is_task && !automatic,
+                r#static: !automatic,
             });
         }
         Ok(stmts)
@@ -1932,7 +1932,7 @@ pub(super) fn subroutines_from_module_node_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
-let default_automatic = module_default_automatic(node.clone());
+    let default_automatic = module_default_automatic(node.clone());
     let active = generate::subroutine_items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {

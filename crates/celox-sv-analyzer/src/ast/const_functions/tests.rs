@@ -104,6 +104,7 @@ fn functions() -> ConstantFunctions {
         vec![
             Stmt::Local {
                 name: "low".into(),
+                r#static: false,
                 init: Some(Expr::Select {
                     expr: Box::new(ident("x")),
                     msb: ConstExpr::Literal("7".into()),

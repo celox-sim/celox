@@ -214,6 +214,9 @@ pub struct RuntimeErrorInfo<A> {
 pub enum ProcessStatus {
     /// Resume after the number of time units stored in [`ProcessSlots::delay`].
     Delay,
+    /// A zero delay resumes in the inactive region, before pending register
+    /// updates. A nonzero delay schedules the next timestamp as usual.
+    InactiveDelay,
     /// The process ran to the end of its body.
     Done,
     /// The process requested the end of the simulation.
@@ -235,6 +238,7 @@ impl ProcessStatus {
     pub const fn code(self) -> u8 {
         match self {
             Self::Delay => 1,
+            Self::InactiveDelay => 9,
             Self::Done => 2,
             Self::Finish => 3,
             Self::Wait => 4,
@@ -245,6 +249,7 @@ impl ProcessStatus {
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Delay),
+            9 => Some(Self::InactiveDelay),
             2 => Some(Self::Done),
             3 => Some(Self::Finish),
             4 => Some(Self::Wait),
@@ -287,6 +292,17 @@ pub const PROCESS_STATUS_WIDTH: usize = 8;
 /// Width of [`ProcessSlots::delay`].
 pub const PROCESS_DELAY_WIDTH: usize = 64;
 
+pub const PROCESS_EVENT_COUNTER_WIDTH: usize = 32;
+
+/// Kernel-recorded edges on one event-domain signal. Counters retain
+/// transitions hidden by later blocking stores of the same invocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessEventCounters<A> {
+    pub signal: A,
+    pub rises: A,
+    pub falls: A,
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -307,6 +323,7 @@ pub struct RuntimeSchema<A> {
     pub comb_writes: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    pub process_event_counters: Vec<ProcessEventCounters<A>>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -320,6 +337,7 @@ impl<A> Default for RuntimeSchema<A> {
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
             processes: Vec::new(),
+            process_event_counters: Vec::new(),
         }
     }
 }

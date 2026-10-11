@@ -104,13 +104,27 @@ impl ProcessKernelBuilder {
     /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
     /// a new resume point.
     pub fn delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.delay_with_status(amount, ProcessStatus::Delay)
+    }
+
+    /// A delay whose zero value resumes in the inactive region before NBA
+    /// publication, as SystemVerilog requires (IEEE 1800-2023 4.5).
+    pub fn inactive_delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.delay_with_status(amount, ProcessStatus::InactiveDelay)
+    }
+
+    fn delay_with_status(
+        &mut self,
+        amount: RegisterId,
+        status: ProcessStatus,
+    ) -> Result<(), ProcessKernelError> {
         let point = self.resume_blocks.len();
         if point > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
         }
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
-        self.end(ProcessStatus::Delay);
+        self.end(status);
         let resume = self.builder.new_block();
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);

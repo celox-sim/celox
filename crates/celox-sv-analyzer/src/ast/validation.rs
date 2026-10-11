@@ -75,7 +75,13 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
                     sv_parser::EventControl::EventExpression(_) => {
                         let edge_sensitive = RefNode::ProceduralTimingControl(&timing.nodes.0)
                             .into_iter()
-                            .any(|node| matches!(node, RefNode::EdgeIdentifier(_)));
+                            .filter_map(|node| match node {
+                                RefNode::EventExpressionExpression(item) => {
+                                    Some(item.nodes.0.is_some())
+                                }
+                                _ => None,
+                            })
+                            .all(|edge| edge);
                         if !edge_sensitive
                             || has_timing_control(RefNode::StatementOrNull(&timing.nodes.1))
                             || calls_timed_task(always)
