@@ -220,6 +220,20 @@ fn reject_silently_ignored_constructs_with_dimensions(
             _ => None,
         })
         .collect();
+    let print_statements: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter_map(|child| {
+            let RefNode::SubroutineCallStatement(
+                sv_parser::SubroutineCallStatement::SubroutineCall(statement),
+            ) = child
+            else {
+                return None;
+            };
+            let sv_parser::SubroutineCall::SystemTfCall(call) = &statement.0 else {
+                return None;
+            };
+            Some(&**call)
+        })
+        .collect();
     for child in validation_nodes(node.clone(), is_module) {
         if let RefNode::SystemTfCall(call) = child.clone()
             && !procedural_queries.contains(&call)
@@ -263,6 +277,10 @@ fn reject_silently_ignored_constructs_with_dimensions(
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call) if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| name == "$printtimescale") => {
+                let site = if print_statements.contains(&call) { system_functions::CallSite::Statement(system_functions::Body::Subroutine) } else { system_functions::CallSite::Expression };
+                timescales::print_message(call, syntax_tree, site)?;
+            }
             RefNode::SystemTfCall(call)
                 if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision")) =>
             {

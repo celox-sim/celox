@@ -52,11 +52,18 @@ let mut sim = Simulator::from_sv_sources(
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
 SystemVerilog に対しても、共有の Veryl 適合性スイートを実行しています。
+
+`$printtimescale` は IEEE 1800-2023 20.4.2 の形式で時刻スコープを表示します。
+例: `Time scale of (Top.child) is 100ns / 10ps`。
+引数なしの現在スコープ、design element、`$unit`、`$root` を指定でき、
+`initial`、`always` 系のプロセスとサブルーチンで実行できます。
+現在のモジュールと相対参照には実際のインスタンス階層名を使い、
+package・interface の手続きは宣言元の時間単位と精度を保持します。
 
 ## サポートしていないもの
 

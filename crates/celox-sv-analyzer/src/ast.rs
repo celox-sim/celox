@@ -1643,6 +1643,13 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
     },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
+    },
     /// An integral cast whose width and signedness remain independent of
     /// the enclosing index arithmetic.
     Resize {

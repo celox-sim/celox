@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 13,
     "emission_error": 0,
-    "compile_error": 91,
+    "compile_error": 93,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -996,6 +996,28 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: error: Function celox_suite_tb.dut.g port x is not an input port.\n<case>/source_0.sv:7:      : Function arguments must be input ports.\n<case>/source_0.sv:12: error: Function celox_suite_tb.dut.update port x is not an input port.\n<case>/source_0.sv:12:      : Function arguments must be input ports.\n2 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "system_functions::unpacked_dimensions_accepts_function_result_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_displays_unit_and_global_precision",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

@@ -352,7 +352,7 @@ chapter-20/20.3--realtime.sv	fail
 chapter-20/20.3--stime.sv	fail
 chapter-20/20.3--time.sv	fail
 chapter-20/20.4--printtimescale-hier.sv	fail
-chapter-20/20.4--printtimescale.sv	fail
+chapter-20/20.4--printtimescale.sv	pass
 chapter-20/20.4--timeformat.sv	fail
 chapter-20/20.5--itor.sv	fail
 chapter-20/20.5--real-bits-conv.sv	fail

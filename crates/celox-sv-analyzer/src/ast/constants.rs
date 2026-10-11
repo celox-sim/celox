@@ -244,7 +244,13 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             .cloned()
             .or_else(|| {
                 let value = *const_env.get(&name)?;
-                if const_env.contains_key(&enum_marker(&name)) {
+                // Generate indices carry the same width/signing markers as
+                // enum values. Preserve them instead of creating a literal
+                // such as "-2147483648", whose minus is an expression operator.
+                if const_env.contains_key(&enum_marker(&name))
+                    || (!const_env.contains_key(&parameter_marker(&name))
+                        && const_env.contains_key(&parameter_width_marker(&name)))
+                {
                     let width = const_env
                         .get(&parameter_width_marker(&name))
                         .and_then(|width| usize::try_from(*width).ok())?;
@@ -460,6 +466,32 @@ fn substitute_const_expr_constants_impl(
             ConstExpr::Literal(value.to_string())
         }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            msb: Box::new(substitute_const_expr_constants_impl(
+                *msb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            lsb: Box::new(substitute_const_expr_constants_impl(
+                *lsb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_const_expr_constants_impl(
                 *expr,
@@ -799,12 +831,17 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             op,
             right: Box::new(expr_to_index_const(*right, dimensions)?),
         }),
-        Expr::Select { expr, msb, lsb, .. }
-            if msb == lsb && !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) =>
-        {
-            Some(ConstExpr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+            Some(ConstExpr::SelectRange {
                 expr: Box::new(expr_to_index_const(*expr, dimensions)?),
-                bit: Box::new(msb),
+                msb: Box::new(msb),
+                lsb: Box::new(lsb),
+                signed,
             })
         }
         Expr::Mux {
@@ -966,22 +1003,38 @@ impl IndexBitSource {
                     extend_signed,
                 }
             }
-            Expr::Select { expr, msb, lsb, .. } => {
-                let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-                let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
-                let step = if left >= right { 1 } else { -1 };
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => {
                 match *expr {
-                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => Self::Slice {
-                        part: Box::new(Self::from_expr(expr, dimensions)?),
-                        width,
-                        right,
-                        step,
-                    },
+                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+                        let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                        Self::Slice {
+                            part: Box::new(Self::from_expr(expr, dimensions)?),
+                            width,
+                            right,
+                            step: if left >= right { 1 } else { -1 },
+                        }
+                    }
                     expr => Self::Scalar {
-                        expr: expr_to_index_const(expr, dimensions)?,
+                        // The selected value has [width-1:0] coordinates even
+                        // when its position in an unpacked array is dynamic.
+                        expr: expr_to_index_const(
+                            Expr::Select {
+                                expr: Box::new(expr),
+                                msb,
+                                lsb,
+                                signed,
+                            },
+                            dimensions,
+                        )?,
                         width,
-                        right,
-                        step,
+                        right: 0,
+                        step: 1,
                     },
                 }
             }

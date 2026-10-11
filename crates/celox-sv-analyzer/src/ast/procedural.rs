@@ -269,6 +269,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => self.rename_name(name),
             },
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.rename_const(expr);
+                self.rename_const(msb);
+                self.rename_const(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.rename_const(expr);
                 self.rename_const(bit);
@@ -745,6 +750,16 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     args.as_deref(),
                     system_functions::CallSite::Statement(self.body),
                 )?;
+                if name == "$printtimescale" {
+                    return Ok(vec![Stmt::SystemTask {
+                        name: "$display".into(),
+                        args: vec![SystemTaskArg::Str(timescales::print_message(
+                            system_call,
+                            self.tree,
+                            system_functions::CallSite::Statement(self.body),
+                        )?)],
+                    }]);
+                }
                 if tf.expression {
                     // A system function called as a statement is converted
                     // and checked like the same call in an expression, then
