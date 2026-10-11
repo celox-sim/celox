@@ -27,6 +27,11 @@ pub(crate) struct PlannedLaneKernel<'a> {
     pub(crate) kind: LaneKernelKind,
     units: Vec<&'a LaneUnit<RegionedAbsoluteAddr>>,
     pub(crate) tasks: Vec<LaneTask>,
+    /// Index of an earlier planned kernel with the same units, whose
+    /// compiled tasks this kernel reuses. Events that trigger the same FF
+    /// units, such as a clock and an asynchronous reset of one domain, would
+    /// otherwise compile identical code twice.
+    pub(crate) same_as: Option<usize>,
 }
 
 impl<'a> PlannedLaneKernel<'a> {
@@ -94,8 +99,18 @@ pub(crate) fn plan_lane_kernels(
             ));
         }
     }
-    let mut planned = Vec::new();
+    let mut planned: Vec<PlannedLaneKernel<'_>> = Vec::new();
     for (kind, units) in candidates {
+        if let Some(index) = planned.iter().position(|kernel| kernel.units == units) {
+            let tasks = planned[index].tasks.clone();
+            planned.push(PlannedLaneKernel {
+                kind,
+                units,
+                tasks,
+                same_as: Some(index),
+            });
+            continue;
+        }
         let tasks = celox_sir_opt::parallel::plan_parallel_kernel(
             &units,
             laid_out.layout(),
@@ -118,7 +133,12 @@ pub(crate) fn plan_lane_kernels(
             tasks.iter().map(|task| task.waits.len()).sum::<usize>(),
         );
         if used_lanes.len() > 1 {
-            planned.push(PlannedLaneKernel { kind, units, tasks });
+            planned.push(PlannedLaneKernel {
+                kind,
+                units,
+                tasks,
+                same_as: None,
+            });
         }
     }
     Ok((lanes, planned))

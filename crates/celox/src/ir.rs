@@ -1156,6 +1156,67 @@ impl OptimizedSir {
         addrs
     }
 
+    /// Rank of every state home in the order the per-tick code first
+    /// accesses it.
+    ///
+    /// Lane-partitioned kernels are visited lane by lane, so the homes one
+    /// lane works on are contiguous. The sequential kernels follow, which
+    /// ranks homes only they touch and orders single-threaded programs.
+    pub(crate) fn access_rank(&self) -> HashMap<AbsoluteAddr, u32> {
+        fn visit(
+            unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+            rank: &mut HashMap<AbsoluteAddr, u32>,
+        ) {
+            let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
+            blocks.sort_unstable_by_key(|(id, _)| (**id != unit.entry_block_id, **id));
+            for (_, block) in blocks {
+                for instruction in &block.instructions {
+                    let (first, second) = match instruction {
+                        SIRInstruction::Load(_, address, ..)
+                        | SIRInstruction::Store(address, ..) => (address, None),
+                        SIRInstruction::Commit(source, destination, ..) => {
+                            (source, Some(destination))
+                        }
+                        _ => continue,
+                    };
+                    for address in std::iter::once(first).chain(second) {
+                        let next = u32::try_from(rank.len()).unwrap_or(u32::MAX);
+                        rank.entry(address.absolute_addr()).or_insert(next);
+                    }
+                }
+            }
+        }
+        fn sorted_values<V>(map: &HashMap<AbsoluteAddr, V>) -> impl Iterator<Item = &V> {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.into_iter().map(|key| &map[key])
+        }
+        let mut rank = HashMap::default();
+        if let Some(parallel) = &self.sir.parallel {
+            let units = parallel
+                .eval_comb
+                .iter()
+                .chain(sorted_values(&parallel.eval_apply_ffs).flat_map(|kernel| kernel.units()))
+                .collect::<Vec<_>>();
+            for lane in 0..parallel.lanes {
+                for unit in units.iter().filter(|unit| unit.lane == lane) {
+                    visit(&unit.unit, &mut rank);
+                }
+            }
+        }
+        for unit in self
+            .sir
+            .eval_comb
+            .iter()
+            .chain(sorted_values(&self.sir.eval_apply_ffs).flatten())
+            .chain(sorted_values(&self.sir.eval_only_ffs).flatten())
+            .chain(sorted_values(&self.sir.apply_ffs).flatten())
+        {
+            visit(unit, &mut rank);
+        }
+        rank
+    }
+
     /// Writer lanes of every state home in the lane-partitioned kernels.
     pub(crate) fn lane_writers(&self) -> celox_state_layout::LaneWriters<AbsoluteAddr> {
         let mut writers = celox_state_layout::LaneWriters::default();
