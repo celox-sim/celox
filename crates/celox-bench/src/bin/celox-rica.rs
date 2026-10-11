@@ -53,7 +53,7 @@ struct Cli {
     #[arg(long, default_value_t = 2_000_000)]
     max_cycles: usize,
     /// Execute every ELF this many times on the same compiled model.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     repeat: u32,
     #[arg(long)]
     compile_only: bool,
@@ -502,8 +502,9 @@ impl Mailbox {
         } else if address == self.tohost && mask == 0x0f {
             self.low = data & 0xffff_ffff;
             None
-        } else if address == self.tohost + 4 && mask == 0x0f && data & 0xffff_ffff == 0 {
-            Some(self.low)
+        } else if address == self.tohost + 4 && mask == 0x0f {
+            // The upper word completes a value written as two 32-bit stores.
+            Some(self.low | (data & 0xffff_ffff) << 32)
         } else {
             None
         }

@@ -61,7 +61,7 @@ Environment:
   RICA_CELOX_CARGO_PROFILE
                         cargo profile for the runner (default: release)
   CELOX_RUNNER_BIN      prebuilt runner; set RICA_BUILD_CELOX_RUNNER=0 to skip cargo
-  RICA_ALLOW_UNPINNED   1 to run a checkout whose HEAD is not RICA_REF
+  RICA_ALLOW_UNPINNED   1 to run a checkout that is not a clean RICA_REF
 USAGE
 }
 
@@ -92,9 +92,15 @@ run() {
     local head expected
     head="$(git -C "$RICA_DIR" rev-parse HEAD)"
     expected="$(git -C "$RICA_DIR" rev-parse --verify --quiet "$RICA_REF^{commit}" || true)"
-    if [[ "$head" != "$expected" && "$RICA_ALLOW_UNPINNED" != 1 ]]; then
-        echo "error: $RICA_DIR is at $head, not $RICA_REF; run 'prepare' or set RICA_ALLOW_UNPINNED=1" >&2
-        exit 1
+    if [[ "$RICA_ALLOW_UNPINNED" != 1 ]]; then
+        if [[ "$head" != "$expected" ]]; then
+            echo "error: $RICA_DIR is at $head, not $RICA_REF; run 'prepare' or set RICA_ALLOW_UNPINNED=1" >&2
+            exit 1
+        fi
+        if [[ -n "$(git -C "$RICA_DIR" status --porcelain --untracked-files=no)" ]]; then
+            echo "error: $RICA_DIR has tracked changes; revert them or set RICA_ALLOW_UNPINNED=1" >&2
+            exit 1
+        fi
     fi
     if [[ "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
         (cd "$CELOX_ROOT" && cargo build --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin celox-rica)
