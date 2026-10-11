@@ -33,7 +33,8 @@ let mut sim = Simulator::from_sv_sources(
 
 `Simulator::from_mixed_sources` combines both source lists in one simulation.
 Veryl instantiates an SV module with `$sv::Module`; SV instantiates a Veryl
-module by its name. Numeric module parameters are resolved by the owning
+module by its name. A Veryl module and an SV module may share a name;
+`$sv::Module` selects the SV definition. Numeric module parameters are resolved by the owning
 frontend, including parameters of Veryl children instantiated from SV.
 
 Interfaces and `input` / `output` modports may cross the boundary in either
@@ -44,13 +45,17 @@ Interface parameters, instance arrays and generic SV interface ports are
 bound to the actual interface. Logic inside an SV interface instantiated
 from Veryl runs in the SV frontend.
 
-Declared parameter widths retain dependencies on earlier interface parameters.
+Declared parameter widths retain dependencies on earlier interface parameters,
+including when SV supplies named overrides in a different order.
 Constant functions used by interface defaults are expanded into declaration
 expressions when the native analyzer can represent their bodies that way.
 Header-dependent functions with statement bodies that cannot be expressed in
 the contract, such as loops, produce an unsupported diagnostic. Functions with
 header-dependent formal or return widths also produce an unsupported diagnostic;
-the contract cannot represent those symbolic type conversions yet.
+the contract cannot represent those symbolic type conversions yet. Declaration
+casts whose target size depends on interface parameters and constant functions
+that cannot be lowered symbolically are also rejected instead of retaining a
+value computed from default parameters.
 
 The bridge exchanges declaration contracts and links native symbolic modules;
 it does not require the Veryl-to-SV emitter. Cross-language interface function

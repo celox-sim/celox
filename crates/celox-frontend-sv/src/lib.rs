@@ -30,6 +30,16 @@ pub fn component_references(
     }
     Ok(references)
 }
+pub fn component_names(
+    sources: &[(&str, &std::path::Path)],
+) -> Result<fxhash::FxHashSet<String>, AnalyzerError> {
+    let mut names = fxhash::FxHashSet::default();
+    for (code, path) in sources {
+        names.extend(celox_sv_analyzer::ParsedSource::parse(code, path)?.component_names());
+    }
+    Ok(names)
+}
+
 pub use lowering::{
     FrontendError, prepare_external_hierarchy, prepare_external_hierarchy_with_foreign,
     schedule_sources,

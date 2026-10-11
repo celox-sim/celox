@@ -195,6 +195,7 @@ pub struct InterfaceSignature {
     pub parameters: Vec<String>,
     pub driven: Vec<String>,
     pub has_behavior: bool,
+    pub header_dependent_cast: bool,
     pub time_declarations: String,
 }
 
@@ -247,6 +248,7 @@ pub fn interface_signatures_for(
                 parameters: prototype.parameters,
                 driven: prototype.driven,
                 has_behavior: prototype.has_behavior,
+                header_dependent_cast: prototype.header_dependent_cast,
                 time_declarations: prototype.time_declarations,
             })
         })

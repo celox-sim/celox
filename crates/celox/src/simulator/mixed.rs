@@ -22,9 +22,8 @@ fn fresh_name(prefix: &str, used: &mut fxhash::FxHashSet<String>, next: &mut usi
 pub(super) fn component_names(
     sources: &[(&str, &std::path::Path)],
 ) -> Result<fxhash::FxHashSet<String>, ParserError> {
-    let interfaces =
-        celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
-    let mut names = interfaces.keys().cloned().collect::<fxhash::FxHashSet<_>>();
+    let mut names =
+        celox_frontend_sv::component_names(sources).map_err(crate::parser::sv_analysis_error)?;
     names.extend(
         veryl_analyzer::symbol_table::get_all()
             .iter()
@@ -190,6 +189,9 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
         signature: &InterfaceSignature,
         visited: &mut fxhash::FxHashSet<String>,
     ) -> bool {
+        if name.starts_with('$') {
+            return false;
+        }
         if !visited.insert(name.to_string()) {
             return false;
         }
@@ -199,7 +201,7 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             .iter()
             .find(|function| function.name == name)
         else {
-            return false;
+            return true;
         };
         let mut dependent = subroutine
             .return_type
@@ -553,6 +555,9 @@ pub(super) fn veryl_interface_contracts(
 ) -> Result<String, ParserError> {
     let mut source = String::new();
     for signature in signatures {
+        if signature.header_dependent_cast {
+            return Err(unsupported("header-dependent SV declaration cast size"));
+        }
         source.push_str(&format!("interface {}", signature.name));
         if !signature.parameters.is_empty() {
             source.push_str(" #(\n");
@@ -942,6 +947,8 @@ pub(super) fn sv_declaration_contracts(
     let mut source = String::new();
     let referenced = celox_frontend_sv::component_references(sources)
         .map_err(crate::parser::sv_analysis_error)?;
+    let authored =
+        celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
     let mut needed_interfaces = referenced.clone();
     needed_interfaces.extend(requests.iter().flat_map(|request| {
         request
@@ -952,6 +959,7 @@ pub(super) fn sv_declaration_contracts(
     for component in &ir.components {
         if let Component::Module(module) = component
             && referenced.contains(&module.name.to_string())
+            && !authored.contains_key(&module.name.to_string())
         {
             for (ty, _) in module.port_types.values() {
                 if let TypeKind::Modport(signature, _) = &ty.kind {
@@ -1043,7 +1051,9 @@ pub(super) fn sv_declaration_contracts(
         let Component::Module(module) = component else {
             continue;
         };
-        if !referenced.contains(&module.name.to_string()) {
+        if !referenced.contains(&module.name.to_string())
+            || authored.contains_key(&module.name.to_string())
+        {
             continue;
         }
         if module
@@ -1577,6 +1587,7 @@ pub(crate) fn specialize_foreign_module(
         .ok_or_else(|| unsupported(format!("missing native module `{name}`")))?;
     let mut signature = module.signature.clone();
     let mut modports: fxhash::FxHashMap<_, Signature> = fxhash::FxHashMap::default();
+    let mut interface_values = fxhash::FxHashMap::default();
     for (parameter, value) in parameters {
         let Some((port, parameter)) = parameter.split_once('$') else {
             continue;
@@ -1597,7 +1608,7 @@ pub(crate) fn specialize_foreign_module(
             .or_insert_with(|| interface.as_ref().clone());
         let parameter = resource_table::insert_str(parameter);
         let symbol = symbol_table::get(interface.symbol).unwrap();
-        let property = symbol
+        symbol
             .kind
             .get_parameters()
             .iter()
@@ -1608,29 +1619,83 @@ pub(crate) fn specialize_foreign_module(
                     symbol.token.text
                 ))
             })?;
-        let ty = property
-            .property()
-            .r#type
-            .to_ir_type(context, veryl_analyzer::conv::utils::TypePosition::Variable)
-            .map_err(|_| {
-                unsupported(format!(
-                    "cannot resolve type of interface parameter `{parameter}`"
-                ))
-            })?;
-        let width = ty
-            .total_width()
-            .ok_or_else(|| unsupported("unknown interface parameter width"))?;
-        let mut value =
-            veryl_analyzer::value::Value::from_u128(value.bits, 0, value.width, value.signed)
-                .expand(width, value.signed)
-                .into_owned();
-        value.trunc(width);
-        value.set_signed(ty.signed);
-        interface.parameters.retain(|(name, _)| *name != parameter);
-        interface.add_parameter(parameter, ValueVariant::Numeric(value));
+        interface_values.insert((port, parameter), *value);
     }
-    for (port, interface) in &modports {
+    for (port, interface) in &mut modports {
         let symbol = symbol_table::get(interface.symbol).unwrap();
+        let mut header = veryl_analyzer::Context::default();
+        header.inherit(context);
+        header.push_affiliation(veryl_analyzer::symbol::Affiliation::Interface);
+        header.push_namespace(symbol.inner_namespace());
+        interface.parameters.clear();
+        let resolved = (|| -> Result<(), ParserError> {
+            for parameter in symbol.kind.get_parameters() {
+                let property = parameter.property();
+                let token = property.token.into();
+                let invalid = || {
+                    unsupported(format!(
+                        "cannot resolve interface parameter `{}`",
+                        parameter.name
+                    ))
+                };
+                let ty = property
+                    .r#type
+                    .to_ir_type(
+                        &mut header,
+                        veryl_analyzer::conv::utils::TypePosition::Variable,
+                    )
+                    .map_err(|_| invalid())?;
+                let mut expression =
+                    if let Some(value) = interface_values.get(&(*port, parameter.name)) {
+                        let width = ty.total_width().ok_or_else(invalid)?;
+                        let mut value = veryl_analyzer::value::Value::from_u128(
+                            value.bits,
+                            0,
+                            value.width,
+                            value.signed,
+                        )
+                        .expand(width, value.signed)
+                        .into_owned();
+                        value.trunc(width);
+                        value.set_signed(ty.signed);
+                        let mut comptime = Comptime::create_value(value.clone(), token);
+                        comptime.r#type = ty.clone();
+                        (comptime, Expression::create_value(value, token))
+                    } else {
+                        veryl_analyzer::conv::utils::eval_expr(
+                            &mut header,
+                            Some(ty.clone()),
+                            property.value.as_ref().ok_or_else(invalid)?,
+                            false,
+                        )
+                        .map_err(|_| invalid())?
+                    };
+                interface.add_parameter(parameter.name, expression.0.value.clone());
+                let destination = AssignDestination {
+                    id: VarId::default(),
+                    path: VarPath::new(parameter.name),
+                    index: VarIndex::default(),
+                    select: VarSelect::default(),
+                    comptime: Comptime::from_type(
+                        ty,
+                        veryl_analyzer::symbol::ClockDomain::None,
+                        token,
+                    ),
+                    token,
+                };
+                veryl_analyzer::conv::utils::eval_const_assign(
+                    &mut header,
+                    (&property.kind).into(),
+                    &destination,
+                    &mut expression,
+                )
+                .map_err(|_| invalid())?;
+            }
+            Ok(())
+        })();
+        header.pop_namespace();
+        context.inherit(&mut header);
+        resolved?;
         let overrides = interface
             .parameters
             .iter()
@@ -1747,6 +1812,40 @@ mod tests {
                 "{assignment}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn dependent_cast_sizes_and_missing_symbolic_functions_are_rejected() {
+        for source in [
+            "interface Bus #(parameter W = 8); logic [W'(300)-1:0] req; endinterface",
+            "interface Bus #(parameter W = 8); localparam C = W; logic [C'(300)-1:0] req; endinterface",
+            "interface Bus #(parameter W = 8); typedef logic [W-1:0] word_t; logic [word_t'(300)-1:0] req; endinterface",
+            "interface Bus #(parameter W = 8); function automatic integer count(); return W'(300); endfunction localparam N = count(); logic [N-1:0] req; endinterface",
+            "interface Bus #(parameter W = 8); function automatic integer count(); logic [W-1:0] tmp; return $bits(tmp); endfunction localparam N = count(); logic [N-1:0] req; endinterface",
+        ] {
+            let signatures = celox_frontend_sv::interface_signatures(&[(
+                source,
+                std::path::Path::new("bus.sv"),
+            )])
+            .unwrap();
+            let error = veryl_interface_contracts(&signatures).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("mixed-language interface contract"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_declaration_cast_sizes_remain_supported() {
+        let source = "interface Bus #(parameter W = 8); localparam C = 16; logic [C'(300)-1:0] req; endinterface";
+        let signatures =
+            celox_frontend_sv::interface_signatures(&[(source, std::path::Path::new("bus.sv"))])
+                .unwrap();
+        assert!(!signatures[0].header_dependent_cast);
+        veryl_interface_contracts(&signatures).unwrap();
     }
 
     #[test]

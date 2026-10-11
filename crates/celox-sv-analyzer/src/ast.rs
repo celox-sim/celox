@@ -1117,6 +1117,17 @@ impl Module {
             }
         }
 
+        // A native default value is not evidence of a representable symbolic
+        // body. Keep failed declaration lowerings visible to contract checking.
+        for function in functions.values_mut() {
+            if !declaration_subroutines
+                .iter()
+                .any(|subroutine| subroutine.name == function.name)
+            {
+                function.body = None;
+            }
+        }
+
         Ok(Self {
             name,
             parameters,
@@ -1190,6 +1201,13 @@ impl Module {
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
     }
+}
+
+pub(crate) fn component_identifier(
+    identifier: &sv_parser::InterfaceIdentifier,
+    tree: &SyntaxTree,
+) -> Option<String> {
+    identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
 }
 
 pub(crate) fn generated_time_declarations(

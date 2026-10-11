@@ -693,11 +693,15 @@ pub fn parse_mixed(
         .into_iter()
         .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
         .collect();
-    external_roots.insert(veryl_parser::resource_table::get_str_value(*top).unwrap_or_default());
-    let foreign = celox_frontend_veryl::external_signatures(ir, config)?;
     let top_name = veryl_parser::resource_table::get_str_value(*top).unwrap_or_default();
-    let sv_top_parameters =
-        (!foreign.roots.contains_key(&top_name)).then_some((top_name.as_str(), top_parameters));
+    let native_top = ir.components.iter().any(|component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name.to_string() == top_name));
+    if !native_top {
+        external_roots.insert(top_name.clone());
+    }
+    let mut foreign = celox_frontend_veryl::external_signatures(ir, config)?;
+    let authored = celox_frontend_sv::module_interfaces(sv_sources).map_err(sv_analysis_error)?;
+    foreign.roots.retain(|name, _| !authored.contains_key(name));
+    let sv_top_parameters = (!native_top).then_some((top_name.as_str(), top_parameters));
     let base = ir.clone();
     let mut specializations = Vec::new();
     let mut signatures: fxhash::FxHashMap<
@@ -815,11 +819,22 @@ pub fn parse_mixed(
         );
     };
     ir.components.extend(specializations);
+    let mut native_modules = foreign.roots.keys().cloned().collect::<HashSet<_>>();
+    native_modules.extend(ir.components.iter().filter_map(|component| {
+        if let veryl_analyzer::ir::Component::Module(module) = component
+            && !authored.contains_key(&module.name.to_string())
+        {
+            Some(module.name.to_string())
+        } else {
+            None
+        }
+    }));
     parse_with_external_hierarchy(
         top,
         ir,
         loop_provenance,
         &external,
+        Some(&native_modules),
         config,
         ignored_loops,
         true_loops,
@@ -841,6 +856,7 @@ pub fn parse_with_external_hierarchy(
     ir: &veryl_analyzer::ir::Ir,
     loop_provenance: &loop_provenance::LoopProvenance,
     external: &celox_frontend_core::symbolic::artifact::ExternalHierarchy,
+    native_modules: Option<&HashSet<String>>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -867,13 +883,24 @@ pub fn parse_with_external_hierarchy(
     ),
     ParserError,
 > {
-    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
-        ir,
-        loop_provenance,
-        external,
-        config,
-        top,
-    )?;
+    let symbolic = if let Some(native_modules) = native_modules {
+        celox_frontend_veryl::parse_ir_with_external_hierarchy_and_native_modules(
+            ir,
+            loop_provenance,
+            external,
+            config,
+            top,
+            native_modules,
+        )?
+    } else {
+        celox_frontend_veryl::parse_ir_with_external_hierarchy(
+            ir,
+            loop_provenance,
+            external,
+            config,
+            top,
+        )?
+    };
     if let Some(trace) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {

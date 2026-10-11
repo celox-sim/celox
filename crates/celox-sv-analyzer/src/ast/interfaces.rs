@@ -48,6 +48,9 @@ pub struct InterfacePrototype {
     pub parameters: Vec<String>,
     pub driven: Vec<String>,
     pub has_behavior: bool,
+    /// A declaration cast whose target depends on an overridable header.
+    /// Native IR currently retains only its resolved target width.
+    pub header_dependent_cast: bool,
 }
 
 pub fn interface_prototypes(
@@ -87,11 +90,23 @@ pub fn interface_prototypes(
             apply(file.code, (0, file.code.len()), &edits)
         })
         .collect();
+    let mut used_names = design
+        .modules
+        .keys()
+        .chain(design.interfaces.keys())
+        .cloned()
+        .collect::<HashSet<_>>();
     Ok((
         declarations
             .into_iter()
             .map(|interface| {
-                let probe_name = format!("__celox_interface_{}", interface.name);
+                let prefix = format!("__celox_interface_{}", interface.name);
+                let mut probe_name = prefix.clone();
+                let mut index = 0;
+                while !used_names.insert(probe_name.clone()) {
+                    probe_name = format!("{prefix}_{index}");
+                    index += 1;
+                }
                 let time_declarations = timescales
                     .as_ref()
                     .unwrap()
@@ -112,6 +127,8 @@ pub fn interface_prototypes(
                     interface.captured_members(&interface.function_closure(&behavior_functions));
                 Ok(InterfacePrototype {
                     name: interface.name.clone(),
+                    header_dependent_cast: interface
+                        .header_dependent_cast(&files[interface.file])?,
                     probe_source: format!(
                         "module {}{probe_name}({} h); {time_declarations} endmodule",
                         if interface.automatic {
@@ -895,6 +912,46 @@ struct InterfaceDecl {
 }
 
 impl InterfaceDecl {
+    fn header_dependent_cast(&self, file: &File<'_>) -> Result<bool, AnalyzerError> {
+        let mut spans = self.declaration_spans();
+        spans.extend(
+            self.function_closure(&self.declaration_functions())
+                .iter()
+                .filter_map(|name| self.function(name).map(|function| function.span)),
+        );
+        let mut dependent = self
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<HashSet<_>>();
+        loop {
+            let before = dependent.len();
+            for span in &spans {
+                let names = self.referenced(*span).collect::<Vec<_>>();
+                if names.iter().any(|name| dependent.contains(name)) {
+                    dependent.extend(names);
+                }
+            }
+            if dependent.len() == before {
+                break;
+            }
+        }
+        for node in &file.syntax_tree {
+            let RefNode::CastingType(_) = node else {
+                continue;
+            };
+            let target = file.span(node)?;
+            if spans
+                .iter()
+                .any(|span| span.0 <= target.0 && target.1 <= span.1)
+                && self.referenced(target).any(|name| dependent.contains(name))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn member(&self, name: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.name == name)
     }

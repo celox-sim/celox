@@ -1,6 +1,63 @@
 use super::*;
 
 sv_backends! {
+    fn avoids_authored_interface_names_in_probes(sim) {
+        @setup {
+            let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";
+            let sv = "interface __celox_interface_Bus; logic x; endinterface module __celox_interface_Bus_0; endmodule interface Bus; logic [7:0] req, rsp; assign rsp = req + 1; endinterface";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("bus.sv"))], "Top");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 8u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 9u8.into());
+    }
+
+    fn reserves_authored_interface_names_for_generated_modules(sim) {
+        @setup {
+            let veryl = "module Child #(param K: u32 = 1)(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp + K; }";
+            let sv = "interface __celox_sv_interface_0; logic x; endinterface interface __celox_foreign_Child_0; logic x; endinterface interface Bus; logic [7:0] req, rsp; assign rsp = req + 1; endinterface module Top(input logic [7:0] a, output logic [7:0] y); Child #(.K(3)) child(a,y); endmodule";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 2u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 6u8.into());
+    }
+
+    fn preserves_explicitly_namespaced_same_named_children(sim) {
+        @setup {
+            let veryl = "module Child(a: input logic<8>, y: output logic<8>) { assign y = a + 10; } module Top(a: input logic<8>, y: output logic<8>, native_y: output logic<8>) { inst sv_child: $sv::Child(a,y); inst native_child: Child(a, y: native_y); }";
+            let sv = "module Child(input logic [7:0] a, output logic [7:0] y); assign y = a + 1; endmodule";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 4u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 5u8.into());
+        assert_eq!(sim.get(sim.signal("native_y")), 14u8.into());
+    }
+
+    fn preserves_a_veryl_top_with_an_sv_namesake(sim) {
+        @setup {
+            let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst child: $sv::Child(a,y); }";
+            let sv = "module Top(input logic [7:0] a, output logic [7:0] y); assign y = 0; endmodule module Child(input logic [7:0] a, output logic [7:0] y); assign y = a + 1; endmodule";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 4u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 5u8.into());
+    }
+
+    fn resolves_veryl_interface_parameter_types_after_prior_overrides(sim) {
+        @setup {
+            let veryl = "interface Bus #(param W: u32 = 8, param V: logic<W> = 4) { var req: logic<V>; var rsp: logic<V>; modport slave { req: input, rsp: output, } } module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req; }";
+            let sv = "module Top(input logic [259:0] a, output logic [259:0] y); Bus #(.V(16'd260), .W(16)) bus(); assign bus.req = a; Child child(.bus(bus)); assign y = bus.rsp; endmodule";
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("bus.veryl"))], vec![(sv, Path::new("top.sv"))], "Top");
+        let a = sim.signal("a");
+        let value = (BigUint::from(1u8) << 259usize) + 1u8;
+        sim.modify(|io| io.set_wide(a, value.clone())).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), value);
+    }
+
     fn preserves_sv_interface_constant_range_selection(sim) {
         @setup {
             let veryl = "module Top(y: output logic<9>, wide: output logic<17>) { inst bus: $sv::Bus #(W: 18); inst high: $sv::Bus #(W: 30); assign bus.req = 9'h1ff; assign y = bus.req; assign high.req = 17'h1ffff; assign wide = high.req; }";

@@ -478,6 +478,7 @@ fn analyze(
             &ir,
             &loop_provenance,
             external,
+            None,
             &build_config,
             ignored_loops,
             true_loops,
