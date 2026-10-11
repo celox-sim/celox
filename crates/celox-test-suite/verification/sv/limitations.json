@@ -1058,5 +1058,57 @@
         "system_functions::timescale_queries_resolve_interface_instances_and_ports"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_printtimescale_special_scopes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects standalone $unit and $root operands of $printtimescale, expecting :: and a dotted hierarchy respectively. IEEE 1800-2023 20.4.2 explicitly accepts both special scope operands.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::printtimescale_displays_unit_and_global_precision"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_printtimescale_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 prints the Top caller scale for a package operand of $printtimescale, reports 1ps instead of the declared 10ps precision inside the package procedure, and omits the required parentheses around the design element name. IEEE 1800-2023 20.4.2 selects the queried/current design element and specifies the display format; 3.14.2.3 preserves its declared precision.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::printtimescale_preserves_package_subroutine_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_printtimescale_operands",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::printtimescale_displays_unit_and_global_precision",
+        "system_functions::printtimescale_preserves_package_subroutine_scope"
+      ]
+    }
   }
 ]
