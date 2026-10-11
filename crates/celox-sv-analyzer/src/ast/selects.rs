@@ -133,6 +133,16 @@ fn has_constant_part_selection(node: RefNode<'_>) -> bool {
         .any(|node| matches!(node, RefNode::ConstantRange(_)))
 }
 
+fn has_selection(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|node| match node {
+        RefNode::Select(select) => !select.nodes.1.nodes.0.is_empty() || select.nodes.2.is_some(),
+        RefNode::ConstantSelect(select) => {
+            !select.nodes.1.nodes.0.is_empty() || select.nodes.2.is_some()
+        }
+        _ => false,
+    })
+}
+
 /// Why a select of `name` with constant `indices` and, for a part-select,
 /// `bounds` has no representation.
 fn select_error(
@@ -194,12 +204,15 @@ pub(super) fn bit_select_index(
                 node_source_text(RefNode::Expression(expression), syntax_tree).unwrap_or_default()
             ))
         };
-        if let Some(index) = const_expr_from_expr(expression, syntax_tree)? {
-            return Ok(index);
-        }
-        // Only extend support for constant part-select operands here.
-        if !has_constant_part_selection(RefNode::Expression(expression)) {
-            return Err(index_error());
+        // Nested selections need their declared element width and bounds.
+        // The lightweight parser represents every `A[idx]` as a single bit.
+        if !has_selection(RefNode::Expression(expression)) {
+            if let Some(index) = const_expr_from_expr(expression, syntax_tree)? {
+                return Ok(index);
+            }
+            if !has_constant_part_selection(RefNode::Expression(expression)) {
+                return Err(index_error());
+            }
         }
         let expr = expr_from_expression_with_types(expression, syntax_tree, dimensions)?;
         expr_to_index_const(
@@ -417,12 +430,16 @@ pub(super) fn lvalue_from_constant_select(
                 )
             } else {
                 let node = RefNode::ConstantExpression(&bit_select.nodes.1);
-                // The lightweight parser can drop a constant part-select.
-                if !has_constant_part_selection(node.clone()) {
+                // Preserve the element width and bounds of nested selections,
+                // including unpacked localparams in continuous targets.
+                if !has_selection(node.clone()) && !has_constant_part_selection(node.clone()) {
                     return const_expr_from_ref_node(node, syntax_tree)?
                         .ok_or_else(|| unsupported(format!("index of `{name}`")));
                 }
                 let expr = indexed_constant_expression(node, syntax_tree, packed_dimensions)?;
+                let expr = substitute_indexed_parameter_values(expr, packed_dimensions);
+                let expr =
+                    fold_const_integral_expr_preserving_mask(expr, &packed_dimensions.const_env);
                 expr_to_index_const(
                     expand_expr_calls(
                         expr,
@@ -1945,6 +1962,16 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             }
             Some((width, variable.signed))
         }
+        ConstExpr::SelectRange {
+            msb, lsb, signed, ..
+        } => Some((
+            typecheck::select_range_width(
+                &(**msb).clone().into(),
+                &(**lsb).clone().into(),
+                const_env,
+            )?,
+            *signed,
+        )),
         ConstExpr::Resize { width, signed, .. } => Some((*width, *signed)),
         ConstExpr::Select { .. } => Some((1, false)),
         ConstExpr::Function { .. } => None,

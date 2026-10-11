@@ -57,7 +57,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
-| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -310,6 +310,13 @@ precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
 precision includes all declared precisions and directive precisions, even in
 uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
 require elaborated hierarchy lookup and are currently rejected.
+
+`$printtimescale` displays the selected time scope in the IEEE 1800-2023
+20.4.2 form, for example `Time scale of (Top.child) is 100ns / 10ps`.
+It accepts the current scope, a design-element argument, `$unit`, or `$root`,
+and runs in `initial`, `always` processes and subroutines. Current and relative
+module names use the elaborated instance path. Package and interface copies
+retain their declaration's time unit and precision.
 
 Separate time unit and precision declarations may precede other scope items;
 matching repeats may appear later. Designs mixing explicitly specified or

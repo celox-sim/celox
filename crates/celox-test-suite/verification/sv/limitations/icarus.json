@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 85,
+    "compile_error": 87,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -896,7 +896,10 @@
       "expectation": "Simulation",
       "name": "hierarchy::parameter_patterns_bind_caller_types",
       "phase": "compile",
-      "status": "compile_error"
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     },
     {
       "category": "Hierarchy",
@@ -904,7 +907,10 @@
       "expectation": "Simulation",
       "name": "hierarchy::parameter_patterns_bind_nested_caller_types",
       "phase": "compile",
-      "status": "compile_error"
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     },
     {
       "category": "Hierarchy",
@@ -912,7 +918,10 @@
       "expectation": "Simulation",
       "name": "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context",
       "phase": "compile",
-      "status": "compile_error"
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     },
     {
       "category": "Hierarchy",
@@ -920,7 +929,32 @@
       "expectation": "Simulation",
       "name": "hierarchy::parameter_patterns_keep_unknown_fill",
       "phase": "compile",
-      "status": "compile_error"
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_displays_unit_and_global_precision",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

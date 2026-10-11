@@ -946,3 +946,58 @@ expanded trees; this does not establish linearity for every workload. A referenc
 unresolved root still expands its dependency prefixes, and repeated symbolic
 references can still multiply those live trees. Conservative roots, preliminary
 type queries, scope environments, and consumers of the full map retain costs.
+
+
+## Parameter literals during subroutine discovery
+
+The referenced-value projection still treated a top-level RTL assignment as a
+root while discovering constant functions. With `P_i = next_value(P_previous)`
+and `assign result = P_last`, this expanded all symbolic prefixes before
+`next_value` was installed. A doubling initializer could therefore still grow
+exponentially even though that collector only needed the function declaration.
+
+The argument-name and subroutine-body collectors now request a separate literal
+projection. It omits roots used only in direct continuous assignments, always
+blocks and initial blocks. Declarations are retained, including procedural
+blocks with data/net declarations whose types a function might query. Whole
+explicit generate regions and conditional/loop constructs retain their roots:
+conditions, imported bindings, local parameters and signal types still undergo
+the same elaboration. Package declarations and function/task bodies retain their
+references. The ordinary RTL collectors continue to materialize their own roots.
+
+Regressions compare scope environments, name bindings, shadowing, parameter
+dimensions and required X/Z literals against the ordinary collector. They check
+unchanged generate diagnostics and that an RTL-only unknown value still reaches
+IR with its mask. Incrementing and doubling chains referenced by a top-level
+assignment produce no symbolic literals during cold subroutine discovery at
+16/64/256 parameters. Source-to-IR checks verify every signed 32-bit parameter
+and the final assignment on the default Rust test-thread stack.
+
+The standalone probe now includes that top-level reference and verifies the
+final IR value, width and mask:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --referenced-constant-functions 32 128 256 512
+```
+
+Separate three-sample medians compare master `3d6be079a` with the final
+implementation on the same machine and optimized profile:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 16.192 / 7.051 | 33.749 / 15.389 | 0.191 / 0.084 |
+| 128 | 43.290 / 19.104 | 155.114 / 60.812 | 0.422 / 0.387 |
+| 256 | 66.557 / 26.547 | 342.309 / 120.875 | 1.026 / 0.508 |
+| 512 | 84.892 / 75.537 | 493.798 / 323.556 | 1.038 / 1.518 |
+
+Shared-machine load affects the timings, including the unchanged parser. An
+earlier post-change run measured 215.121 ms for the 512-parameter AST phase;
+these samples are observations rather than timing thresholds or a universal
+speedup. The empty literal environments in the scaling regression directly
+check that discovery no longer stores those symbolic prefixes.
+
+The removed work is specific to subroutine discovery. References in function
+bodies, declarations or generate constructs can still require unresolved
+expression expansion, including repeated symbolic dependencies. This change
+does not establish linear complexity for every source.

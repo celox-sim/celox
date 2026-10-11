@@ -54,6 +54,11 @@ pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bo
 pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
     match value {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => is_unbounded(value, env),
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            contains_unbounded_operand(expr, env)
+                || contains_unbounded_operand(msb, env)
+                || contains_unbounded_operand(lsb, env)
+        }
         ConstExpr::Select { expr, bit } => {
             contains_unbounded_operand(expr, env) || contains_unbounded_operand(bit, env)
         }
@@ -1137,6 +1142,9 @@ pub(super) fn parameter_value_env_for_references(
                             pending.push(name.clone());
                         }
                     }
+                    ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                        expressions.extend([&**expr, &**msb, &**lsb]);
+                    }
                     ConstExpr::Select { expr, bit } => {
                         expressions.push(expr);
                         expressions.push(bit);
@@ -1276,6 +1284,17 @@ fn replace_oob_const_selects_with_unknown(
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
     match expr {
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
+            msb: Box::new(replace_oob_const_selects_with_unknown(*msb, const_env)),
+            lsb: Box::new(replace_oob_const_selects_with_unknown(*lsb, const_env)),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => {
             let expr = replace_oob_const_selects_with_unknown(*expr, const_env);
             let bit = replace_oob_const_selects_with_unknown(*bit, const_env);
@@ -1348,6 +1367,11 @@ fn const_expr_contains_unknown_literal(expr: &ConstExpr) -> bool {
         ConstExpr::Literal(literal) => typecheck::parse_integral_literal(literal)
             .is_some_and(|literal| literal.mask != Default::default()),
         ConstExpr::Ident(_) => false,
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_expr_contains_unknown_literal(expr)
+                || const_expr_contains_unknown_literal(msb)
+                || const_expr_contains_unknown_literal(lsb)
+        }
         ConstExpr::Select { expr, bit } => {
             const_expr_contains_unknown_literal(expr) || const_expr_contains_unknown_literal(bit)
         }
@@ -1374,6 +1398,17 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
     match expr {
         ConstExpr::Literal(value) => Expr::Literal(value),
         ConstExpr::Ident(name) => Expr::Ident(name),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(const_expr_to_expr(*expr)),
+            msb: *msb,
+            lsb: *lsb,
+            signed,
+        },
         ConstExpr::Select { expr, bit } => Expr::Select {
             expr: Box::new(const_expr_to_expr(*expr)),
             msb: (*bit).clone(),
@@ -1458,6 +1493,29 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
             _ => ConstExpr::Ident(name),
         },
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_typed_parameter_literals_with_lookup(
+                *expr,
+                constants,
+                parameter_types,
+            )),
+            msb: Box::new(substitute_typed_parameter_literals_with_lookup(
+                *msb,
+                constants,
+                parameter_types,
+            )),
+            lsb: Box::new(substitute_typed_parameter_literals_with_lookup(
+                *lsb,
+                constants,
+                parameter_types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_typed_parameter_literals_with_lookup(
                 *expr,
@@ -1560,6 +1618,16 @@ pub(super) fn infer_const_expr_type(
             })
         }
         ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::SelectRange {
+            msb, lsb, signed, ..
+        } => Some(ExprType {
+            width: typecheck::select_range_width(
+                &(**msb).clone().into(),
+                &(**lsb).clone().into(),
+                &HashMap::default(),
+            )?,
+            signed: *signed,
+        }),
         ConstExpr::Resize { width, signed, .. } => Some(ExprType {
             width: *width,
             signed: *signed,
