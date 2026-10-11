@@ -75,6 +75,7 @@ fn compile(design: &Value) -> Result<Compiled, String> {
         return Err(format!("frontend diagnostics: {diagnostics:?}"));
     }
     celox_frontend_veryl::lower_interface_captures(&mut ir);
+    celox_frontend_veryl::lower_constant_loops(&mut ir);
     let provenance = loop_sources.match_unrolled(&ir);
     let config = BuildConfig::from(&metadata.build);
     let top = resource_table::insert_str(design["top"].as_str().ok_or("no top")?);
@@ -135,5 +136,38 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile;
+    use serde_json::json;
+
+    #[test]
+    fn static_interleaved_array_initializers_compile_without_false_cycles() {
+        let design = json!({
+            "top": "Top",
+            "four_state": false,
+            "sources": [{
+                "path": "test.veryl",
+                "text": r#"
+                    module Top (
+                        a: input logic<8>, b: input logic<8>,
+                        y: output logic<8> [4], z: output logic<8> [4],
+                    ) {
+                        always_comb {
+                            for i in 0..4 {
+                                y[i] = 0;
+                                z[i] = 0;
+                            }
+                            y[0] = a;
+                            z[0] = b;
+                        }
+                    }
+                "#,
+            }],
+        });
+        assert!(compile(&design).is_ok());
     }
 }
