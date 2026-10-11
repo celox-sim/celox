@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { publishResult } from "./publish-heliodor-bench.mjs";
+import { hostCpu, publishResult } from "./publish-heliodor-bench.mjs";
 
 if (process.env.GITHUB_REF !== "refs/heads/master" ||
     !["schedule", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME)) {
   throw new Error("Benchmark publication requires a scheduled or manual master run");
 }
-const files = process.argv.slice(2);
-if (files.length !== 3) {
-  throw new Error("Usage: publish-bench.mjs <rust.json> <verilator.json> <typescript.json>");
+const positional = [];
+let host;
+const options = process.argv.slice(2);
+for (let index = 0; index < options.length; index += 1) {
+  if (options[index] === "--host") host = options[++index];
+  else positional.push(options[index]);
 }
+if (positional.length !== 3 || !host) {
+  throw new Error(
+    "Usage: publish-bench.mjs <rust.json> <verilator.json> <typescript.json> --host <host.txt>",
+  );
+}
+const files = positional;
 const names = ["Rust Benchmarks", "Verilator Benchmarks", "TypeScript Benchmarks"];
 // Validate every converted artifact before publishing any of this run.
 const samples = files.map(file => {
@@ -37,8 +46,9 @@ const commit = {
   url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/commit/${id}`,
 };
 const date = Date.now();
+const cpu = hostCpu(host);
 for (const [index, benches] of samples.entries()) {
-  publishResult(remote, { commit, date, tool: "customSmallerIsBetter", benches }, {
+  publishResult(remote, { commit, date, cpu, tool: "customSmallerIsBetter", benches }, {
     historyName: names[index],
   });
 }

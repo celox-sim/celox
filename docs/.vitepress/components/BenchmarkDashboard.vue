@@ -27,6 +27,7 @@ ChartJS.register(
 interface BenchEntry {
   commit: { id: string; message: string; timestamp: string; url: string };
   date: number;
+  cpu?: string;
   tool: string;
   benches: {
     name: string;
@@ -68,6 +69,7 @@ interface Series {
     | "heliodor-tiered-aarch64"
     | "heliodor-veryl-tiered-aarch64"
     | "heliodor-veryl-aarch64";
+  cpu: string;
   points: SeriesPoint[];
 }
 
@@ -477,13 +479,18 @@ const allSeries = computed<Series[]>(() => {
         ) {
           benchName = benchName.replace(/_execution$/, "_tiered_execution");
         }
-        const key = `${seriesRuntime}/${benchName}`;
+        // Hosted runners hand out different CPU models between runs, so one
+        // backend is one series per CPU. Merging them would read as a
+        // regression whenever the runner happens to change model.
+        const cpu = entry.cpu ?? "";
+        const key = `${seriesRuntime}/${benchName}/${cpu}`;
         let series = seriesByKey.get(key);
         if (!series) {
           series = {
             key,
             benchName,
             runtime: seriesRuntime,
+            cpu,
             pointsByDate: new Map(),
           };
           seriesByKey.set(key, series);
@@ -503,6 +510,38 @@ const allSeries = computed<Series[]>(() => {
     points: [...pointsByDate.values()].sort((a, b) => a.date - b.date),
   }));
 });
+
+// --- CPU series styles ---
+
+// Line style, not color, separates the CPUs of one backend: color stays
+// reserved for the backend comparison. The most frequent CPU keeps the plain
+// solid line, and results published before CPU recording share the last slot.
+const CPU_DASHES: number[][] = [[], [6, 3], [2, 3], [12, 3, 2, 3], [4, 4]];
+const CPU_UNRECORDED = "";
+
+const cpuStyles = computed(() => {
+  const counts = new Map<string, number>();
+  for (const s of allSeries.value) {
+    counts.set(s.cpu, (counts.get(s.cpu) ?? 0) + s.points.length);
+  }
+  const cpus = [...counts.keys()]
+    .filter((cpu) => cpu !== CPU_UNRECORDED)
+    .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b));
+  return new Map([...cpus, CPU_UNRECORDED].map((cpu, index) => [cpu, index]));
+});
+
+function cpuRank(cpu: string): number {
+  return cpuStyles.value.get(cpu) ?? 0;
+}
+
+function cpuDash(cpu: string): number[] {
+  return CPU_DASHES[cpuRank(cpu) % CPU_DASHES.length];
+}
+
+function seriesLabel(series: Series): string {
+  const runtime = RUNTIME_LABELS[series.runtime] ?? series.runtime;
+  return series.cpu ? `${runtime} · ${series.cpu}` : `${runtime} · CPU not recorded`;
+}
 
 function isPrimaryBench(benchName: string): boolean {
   return PRIMARY_COUNTER_BENCHES.has(benchName)
@@ -551,7 +590,10 @@ const tabData = computed(() => {
       .map(([benchName, series]) => ({
         benchName,
         title: formatChartTitle(benchName),
-        series: series.sort((a, b) => a.runtime.localeCompare(b.runtime)),
+        series: series.sort(
+          (a, b) =>
+            a.runtime.localeCompare(b.runtime) || cpuRank(a.cpu) - cpuRank(b.cpu),
+        ),
       }));
 
     result.set(tab.key, tab.sections(cards));
@@ -587,10 +629,11 @@ function buildChartData(card: ChartCard) {
     const color = RUNTIME_COLORS[s.runtime];
     const dateToValue = new Map(s.points.map((p) => [p.date, p.value]));
     return {
-      label: RUNTIME_LABELS[s.runtime] ?? s.runtime,
+      label: seriesLabel(s),
       data: dates.map((d) => dateToValue.get(d) ?? null),
       borderColor: color,
       backgroundColor: color + "1a",
+      borderDash: cpuDash(s.cpu),
       tension: 0.3,
       pointRadius: 2,
     };
