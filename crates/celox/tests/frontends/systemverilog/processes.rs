@@ -1508,3 +1508,27 @@ fn review_static_initializers_preserve_unknown_masks_and_bit_coercion() {
     assert_eq!(displays(&mut sim), lines(&[(1, "xxxx zzzz 0")]));
     assert_eq!(sim.get(sim.signal("bit_value")), 0u8.into());
 }
+
+#[test]
+fn inactive_batches_preserve_active_combinational_events() {
+    let source = r#"module Top(output bit seen);
+        bit a=0; wire q=a;
+        initial begin @(posedge q); seen=1; end
+        initial begin a=1; #0 a=0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn unrolled_loop_indices_record_hidden_edges() {
+    let source = r#"module Top(output bit seen);
+        integer i=0;
+        initial begin @(posedge i); seen=1; end
+        initial begin #1; for (i=0;i<2;i++); end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}

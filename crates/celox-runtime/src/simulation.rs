@@ -677,17 +677,21 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().clear_triggered_bits();
                 // Inactive-region (#0) continuations run after the active
                 // FF evaluations and before the pending NBA publications.
-                let mut inactive_ran = false;
-                loop {
+                // Drain active evaluations before promoting another inactive
+                // batch, including evaluations a combinational settle woke.
+                let active_ran = self.run_processes(executor, current_time, Vec::new())?;
+                let progressed = if active_ran {
+                    true
+                } else {
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
                     if ready.is_empty() || self.finished {
                         break;
                     }
-                    inactive_ran |= self.run_processes(executor, current_time, ready)?;
-                }
-                if inactive_ran {
+                    self.run_processes(executor, current_time, ready)?
+                };
+                if progressed {
                     let driven = executor.backend().get_triggered_bits();
                     executor.eval_comb()?;
                     if track_stable_edges {
@@ -696,8 +700,7 @@ impl<B: SimBackend> SimulationState<B> {
                     for id in driven.iter() {
                         executor.backend_mut().mark_triggered_bit(id);
                     }
-                }
-                if !inactive_ran {
+                } else {
                     break;
                 }
             }
