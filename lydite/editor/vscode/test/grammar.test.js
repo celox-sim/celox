@@ -110,7 +110,7 @@ samples.design = `design "Counter" {
   /* comments hold checked claims */
   proof {
     forall word: bv<8>;
-    mode shared_query;
+    mode  shared_query;
     target counter_step {
       rhs spec.x';
       lemma step {
@@ -138,12 +138,14 @@ spec Counter(output count: bv<4>) {
     expect count' == value';
   }
   example small {
+    quantifiers {}
     expect positive;
     initial { count = 0u4; }
     trace { advance { inputs { amount = 2u4; } observe { count = 2u4; } } }
   }
   contract {
-    parameter data: mem<8, 8>;
+    parameters { data: mem<8, 8>; }
+    parameter extra: bool;
     pre true;
     invariant s.value == value;
     split { pc = range(s.value, 0, 2); }
@@ -183,9 +185,14 @@ component Counter {
   operation advance { expect n.value == s.value + 1u4; }
   example small {
     expect positive;
-    execution exists;
     initial { value = 0u4; }
     trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }
+  }
+  example quantified {
+    exists amount: bv<4>;
+    execution not_exists;
+    initial { value = 0u4; }
+    trace { add(amount: 3u4) => true; }
   }
 }`;
 
@@ -195,6 +202,8 @@ samples.recovery = `design "Recovery" {
   input half: bv<8
   input whole: bool;
   input forall: bool;
+  input bool: bool;
+  inputs { state: bool; }
   next { x = if forall { i.forall } else { s.x }; }
 }`;
 
@@ -234,8 +243,8 @@ const expectations = [
   ['design', '  /* comments hold checked claims */', ' comments hold checked claims ', 1, 'comment.block.lydite'],
   ['design', '  proof {', 'proof', 1, 'keyword.other.lydite'],
   ['design', '    forall word: bv<8>;', 'forall', 1, 'keyword.other.lydite'],
-  ['design', '    mode shared_query;', 'mode', 1, 'keyword.other.lydite'],
-  ['design', '    mode shared_query;', 'shared_query', 1, 'constant.language.lydite'],
+  ['design', '    mode  shared_query;', 'mode', 1, 'keyword.other.lydite'],
+  ['design', '    mode  shared_query;', 'shared_query', 1, 'constant.language.lydite'],
   ['design', '    target counter_step {', 'counter_step', 1, 'entity.name.section.lydite'],
   ['design', "      rhs spec.x';", 'rhs', 1, 'keyword.other.lydite'],
   ['design', "      rhs spec.x';", "'", 1, 'punctuation.definition.prime.lydite'],
@@ -267,7 +276,9 @@ const expectations = [
   ['specification', '    trace { advance { inputs { amount = 2u4; } observe { count = 2u4; } } }', 'trace', 1, 'keyword.other.lydite'],
   ['specification', '    trace { advance { inputs { amount = 2u4; } observe { count = 2u4; } } }', 'inputs', 1, 'keyword.other.lydite'],
   ['specification', '    trace { advance { inputs { amount = 2u4; } observe { count = 2u4; } } }', 'observe', 1, 'keyword.other.lydite'],
-  ['specification', '    parameter data: mem<8, 8>;', 'parameter', 1, 'storage.modifier.lydite'],
+  ['specification', '    parameters { data: mem<8, 8>; }', 'parameters', 1, 'keyword.other.lydite'],
+  ['specification', '    parameter extra: bool;', 'parameter', 1, 'storage.modifier.lydite'],
+  ['specification', '    quantifiers {}', 'quantifiers', 1, 'keyword.other.lydite'],
   ['specification', '    pre true;', 'pre', 1, 'keyword.other.lydite'],
   ['specification', '    split { pc = range(s.value, 0, 2); }', 'split', 1, 'keyword.other.lydite'],
   ['specification', '    split { pc = range(s.value, 0, 2); }', 'range', 1, 'support.function.builtin.lydite'],
@@ -293,8 +304,12 @@ const expectations = [
   ['expectations', '  operation advance { expect n.value == s.value + 1u4; }', 'expect', 1, 'keyword.other.lydite'],
   ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'observe', 1, 'keyword.other.lydite'],
   ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'no', 1, 'variable.language.namespace.lydite'],
-  ['expectations', '    execution exists;', 'execution', 1, 'keyword.other.lydite'],
-  ['expectations', '    execution exists;', 'exists', 1, 'constant.language.lydite'],
+  ['expectations', '    exists amount: bv<4>;', 'exists', 1, 'keyword.other.lydite'],
+  ['expectations', '    execution not_exists;', 'execution', 1, 'keyword.other.lydite'],
+  ['expectations', '    execution not_exists;', 'not_exists', 1, 'constant.language.lydite'],
+  // A user operation sharing a built-in name is an invocation, not a built-in.
+  ['expectations', '    trace { add(amount: 3u4) => true; }', 'add', 1, 'entity.name.function.lydite'],
+  ['expectations', '    trace { add(amount: 3u4) => true; }', '=>', 1, 'keyword.operator.lydite'],
   // An unfinished type stays local, so later lines keep their scopes.
   ['recovery', '  input half: bv<8', 'bv', 1, 'variable.other.lydite'],
   ['recovery', '  input half: bv<8', '8', 1, 'constant.numeric.integer.lydite'],
@@ -302,6 +317,10 @@ const expectations = [
   ['recovery', '  input whole: bool;', 'bool', 1, 'storage.type.lydite'],
   // Contextual words are variables when used as names, conditions or fields.
   ['recovery', '  input forall: bool;', 'forall', 1, 'variable.other.lydite'],
+  ['recovery', '  input bool: bool;', 'bool', 1, 'variable.other.lydite'],
+  ['recovery', '  input bool: bool;', 'bool', 2, 'storage.type.lydite'],
+  ['recovery', '  inputs { state: bool; }', 'inputs', 1, 'keyword.other.lydite'],
+  ['recovery', '  inputs { state: bool; }', 'state', 1, 'variable.other.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 1, 'variable.other.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 2, 'variable.other.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'i', 1, 'variable.language.namespace.lydite'],
