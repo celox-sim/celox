@@ -37,9 +37,10 @@ struct Scope {
 struct Unit {
     scale: Scale,
     scopes: Vec<Scope>,
+    parents: Vec<Option<usize>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Timescales {
     // Identical preprocessed text has identical scope offsets. Content keys
     // remain valid when ParsedSource values move or their trees are dropped.
@@ -49,12 +50,14 @@ pub(super) struct Timescales {
     precision: Option<i32>,
     instantiated: HashSet<String>,
     roots: Option<HashSet<String>>,
+    specified: [u8; 2],
 }
 
 #[cfg(test)]
 thread_local! {
     static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PARENT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SCOPE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -70,7 +73,6 @@ struct QueryContext {
 struct PreparedTree {
     address: usize,
     unit: Arc<Unit>,
-    local: Option<Timescales>,
 }
 
 pub(super) struct Installed<'a> {
@@ -102,21 +104,19 @@ pub(super) fn install_for_tree(
     tree: &SyntaxTree,
 ) -> Converted<Installed<'_>> {
     let source = key(tree);
-    // Type overrides change the preprocessed text and offsets. Collect that
-    // tree once per analysis; queries keep the original cross-file design.
-    let local = (!design.units.contains_key(source))
-        .then(|| Timescales::collect(&[(tree, Path::new(""))]))
-        .transpose()?;
-    let unit = design
-        .units
-        .get(source)
-        .or_else(|| local.as_ref().and_then(|local| local.units.get(source)))
-        .unwrap()
-        .clone();
+    // Missing sources and type-specialized trees contribute to the same design.
+    // Collect and merge once, before any query or module-body analysis.
+    let (design, unit) = if let Some(unit) = design.units.get(source) {
+        let unit = unit.clone();
+        (design, unit)
+    } else {
+        let design = Arc::new(design.including_tree(tree)?);
+        let unit = design.units[source].clone();
+        (design, unit)
+    };
     let prepared = Some(PreparedTree {
         address: tree as *const SyntaxTree as usize,
         unit,
-        local,
     });
     Ok(install_context(
         QueryContext { design, prepared },
@@ -388,9 +388,15 @@ fn scope_parents(scopes: &[Scope]) -> Vec<Option<usize>> {
 
 fn scope_at(scopes: &[Scope], parents: &[Option<usize>], at: usize) -> Option<usize> {
     let mut candidate = scopes
-        .partition_point(|scope| scope.start <= at)
+        .partition_point(|scope| {
+            #[cfg(test)]
+            SCOPE_CHECKS.with(|count| count.set(count.get() + 1));
+            scope.start <= at
+        })
         .checked_sub(1);
     while let Some(i) = candidate {
+        #[cfg(test)]
+        SCOPE_CHECKS.with(|count| count.set(count.get() + 1));
         if at < scopes[i].end {
             return Some(i);
         }
@@ -400,6 +406,29 @@ fn scope_at(scopes: &[Scope], parents: &[Option<usize>], at: usize) -> Option<us
 }
 
 impl Timescales {
+    fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
+        let local = Self::collect(&[(tree, Path::new(""))])?;
+        let specified = [
+            self.specified[0] | local.specified[0],
+            self.specified[1] | local.specified[1],
+        ];
+        if specified.contains(&3) {
+            return Err(unsupported(
+                "mixed explicit and default time units or precisions across design elements",
+            ));
+        }
+        let mut design = self.clone();
+        design.specified = specified;
+        design.precision = self.precision.into_iter().chain(local.precision).min();
+        design.units.extend(local.units);
+        design.definitions.extend(local.definitions);
+        design.packages.extend(local.packages);
+        design.instantiated.extend(local.instantiated);
+        // Explicit simulator roots remain authoritative; otherwise the merged
+        // instantiation set determines inferred roots across all sources.
+        Ok(design)
+    }
+
     pub(super) fn select_roots(&mut self, roots: &[&str]) {
         self.roots = Some(roots.iter().map(|name| (*name).to_string()).collect());
     }
@@ -591,6 +620,7 @@ impl Timescales {
                 Arc::new(Unit {
                     scale: unit,
                     scopes,
+                    parents,
                 }),
             );
         }
@@ -599,6 +629,7 @@ impl Timescales {
                 "mixed explicit and default time units or precisions across design elements",
             ));
         }
+        design.specified = specified;
         Ok(design)
     }
 
@@ -608,15 +639,11 @@ impl Timescales {
         tree: &SyntaxTree,
     ) -> Converted<i32> {
         let source = key(tree);
-        let local = (!self.units.contains_key(source))
-            .then(|| Self::collect(&[(tree, Path::new(""))]))
+        let extended = (!self.units.contains_key(source))
+            .then(|| self.including_tree(tree))
             .transpose()?;
-        let unit = self
-            .units
-            .get(source)
-            .or_else(|| local.as_ref().and_then(|local| local.units.get(source)))
-            .unwrap();
-        self.query_in_unit(call, tree, unit, local.as_ref())
+        let design = extended.as_ref().unwrap_or(self);
+        design.query_in_unit(call, tree, &design.units[source])
     }
 
     fn query_in_unit(
@@ -624,10 +651,8 @@ impl Timescales {
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
         unit: &Unit,
-        local: Option<&Self>,
     ) -> Converted<i32> {
-        self.query_details(call, tree, unit, local)
-            .map(|(value, _)| value)
+        self.query_details(call, tree, unit).map(|(value, _)| value)
     }
 
     pub(super) fn interface_path_queries<'a>(
@@ -640,7 +665,7 @@ impl Timescales {
             .ok_or_else(|| unsupported("missing interface query time scope"))?;
         // Resolve the content key once for this rewrite, not for each query.
         Ok(move |call: &sv_parser::SystemTfCall| {
-            self.query_details(call, tree, unit, None)
+            self.query_details(call, tree, unit)
                 .map(|(value, interface)| interface.then_some(value))
         })
     }
@@ -650,7 +675,6 @@ impl Timescales {
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
         unit: &Unit,
-        local: Option<&Self>,
     ) -> Converted<(i32, bool)> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
@@ -660,11 +684,7 @@ impl Timescales {
             system_functions::CallSite::Expression,
         )?;
         let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
-        let current = unit
-            .scopes
-            .iter()
-            .filter(|s| s.start <= at && at < s.end)
-            .min_by_key(|s| s.end - s.start);
+        let current = scope_at(&unit.scopes, &unit.parents, at).map(|i| &unit.scopes[i]);
         let mut interface_target = false;
         let scale = if args.as_ref().is_some_and(|args| args.is_empty()) {
             current.map_or(unit.scale, |s| s.scale)
@@ -674,10 +694,7 @@ impl Timescales {
             match tree.get_str_trim(argument).unwrap_or_default().trim() {
                 "$unit" => unit.scale,
                 "$root" => {
-                    let precision = self
-                        .precision
-                        .or_else(|| local.and_then(|local| local.precision))
-                        .unwrap_or(DEFAULT.precision);
+                    let precision = self.precision.unwrap_or(DEFAULT.precision);
                     Scale {
                         unit: precision,
                         precision,
@@ -712,22 +729,14 @@ impl Timescales {
                     {
                         (current.unwrap(), 0)
                     } else if self.is_root(first)
-                        && let Some(root) = self.definitions.get(first).or_else(|| {
-                            unit.scopes
-                                .iter()
-                                .find(|s| s.kind == ScopeKind::Definition && s.name == *first)
-                        })
+                        && let Some(root) = self.definitions.get(first)
                     {
                         // A root instance is part of the hierarchy and takes
                         // precedence over a same-named global package.
                         (root, 1)
                     } else if hierarchy.nodes.0.is_none()
                         && path.len() == 1
-                        && let Some(package) = self.packages.get(first).or_else(|| {
-                            unit.scopes
-                                .iter()
-                                .find(|s| s.kind == ScopeKind::Package && s.name == *first)
-                        })
+                        && let Some(package) = self.packages.get(first)
                     {
                         // Package and definition names have separate global
                         // namespaces (3.13). An instantiated module type with
@@ -737,29 +746,18 @@ impl Timescales {
                         if !self.is_root(first)
                             && (hierarchy.nodes.0.is_some()
                                 || current.is_none_or(|scope| scope.name != *first))
-                            && (self.definitions.contains_key(first)
-                                || unit
-                                    .scopes
-                                    .iter()
-                                    .any(|s| s.kind == ScopeKind::Definition && s.name == *first))
+                            && self.definitions.contains_key(first)
                         {
                             return Err(unsupported(format!(
                                 "timescale query names module type `{first}`, not an instance"
                             )));
                         }
                         (
-                            self.definitions
-                                .get(first)
-                                .or_else(|| {
-                                    unit.scopes.iter().find(|s| {
-                                        s.kind == ScopeKind::Definition && s.name == *first
-                                    })
-                                })
-                                .ok_or_else(|| {
-                                    unsupported(format!(
-                                        "unknown timescale query design element `{first}`"
-                                    ))
-                                })?,
+                            self.definitions.get(first).ok_or_else(|| {
+                                unsupported(format!(
+                                    "unknown timescale query design element `{first}`"
+                                ))
+                            })?,
                             1,
                         )
                     };
@@ -767,17 +765,9 @@ impl Timescales {
                         let module = target.instances.get(part).ok_or_else(|| {
                             unsupported(format!("unknown timescale query design element `{part}`"))
                         })?;
-                        target = self
-                            .definitions
-                            .get(module)
-                            .or_else(|| {
-                                unit.scopes
-                                    .iter()
-                                    .find(|s| s.kind == ScopeKind::Definition && s.name == *module)
-                            })
-                            .ok_or_else(|| {
-                                unsupported(format!("unknown timescale query module `{module}`"))
-                            })?;
+                        target = self.definitions.get(module).ok_or_else(|| {
+                            unsupported(format!("unknown timescale query module `{module}`"))
+                        })?;
                     }
                     interface_target = target.is_interface;
                     target.scale
@@ -827,9 +817,7 @@ pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Conver
         if let Some(prepared) = &context.prepared
             && prepared.address == tree as *const SyntaxTree as usize
         {
-            context
-                .design
-                .query_in_unit(call, tree, &prepared.unit, prepared.local.as_ref())
+            context.design.query_in_unit(call, tree, &prepared.unit)
         } else {
             context.design.query(call, tree)
         }
@@ -839,6 +827,171 @@ pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Conver
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_query_scope_lookup_scales_logarithmically() {
+        let mut code = String::new();
+        for i in 0..1024 {
+            let time = if i % 2 == 0 {
+                "100ns / 1ns"
+            } else {
+                "1us / 100ps"
+            };
+            code.push_str(&format!(
+                "module M{i}(); timeunit {time}; localparam Q=$timeunit(); endmodule\n"
+            ));
+        }
+        let tree = crate::syntax::parse_source(&code, Path::new("many_queries.sv")).unwrap();
+        let design =
+            Arc::new(Timescales::collect(&[(&tree, Path::new("many_queries.sv"))]).unwrap());
+        let _guard = install_for_tree(design, &tree).unwrap();
+        let before = SCOPE_CHECKS.with(|count| count.get());
+        let mut calls = 0;
+        for node in &tree {
+            if let RefNode::SystemTfCall(call) = node {
+                assert_eq!(
+                    query(call, &tree).unwrap(),
+                    if calls % 2 == 0 { -7 } else { -6 }
+                );
+                calls += 1;
+            }
+        }
+        assert_eq!(calls, 1024);
+        let checks = SCOPE_CHECKS.with(|count| count.get()) - before;
+        assert!(
+            checks < 16 * calls,
+            "performed {checks} scope checks for {calls} queries"
+        );
+    }
+
+    #[test]
+    fn queries_after_nested_declarations_keep_the_enclosing_scope() {
+        let code = "module Outer(); timeunit 100ns / 10ps;
+            module Inner(); timeunit 10ns; localparam I=$timeunit(); endmodule
+            localparam O=$timeunit(); endmodule
+            module Sibling(); timeunit 1ns / 1ps; localparam S=$timeunit(); endmodule";
+        let tree = crate::syntax::parse_source(code, Path::new("nested_queries.sv")).unwrap();
+        let design =
+            Arc::new(Timescales::collect(&[(&tree, Path::new("nested_queries.sv"))]).unwrap());
+        let _guard = install_for_tree(design, &tree).unwrap();
+        let values: Vec<_> = tree
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::SystemTfCall(call) => Some(query(call, &tree).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, [-8, -7, -9]);
+    }
+
+    #[test]
+    fn separately_supplied_modules_share_the_package_design_precision() {
+        let packages = crate::analyze_packages(&[(
+            "package P; timeunit 1ns / 1ps; endpackage",
+            Path::new("external.sv"),
+        )])
+        .unwrap();
+        // Reusing Packages must not retain an earlier omitted module's precision.
+        for (precision, expected) in [("1fs", -15), ("100ps", -12)] {
+            let code = format!(
+                "module Top(); timeunit 1ns / {precision}; localparam U=$timeunit($root); localparam P=$timeprecision($root); endmodule"
+            );
+            let ir = crate::analyze_source_module_with_packages(
+                &code,
+                Path::new("omitted.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages,
+            )
+            .unwrap();
+            let values: Vec<_> = ir.modules()[0]
+                .parameters()
+                .iter()
+                .map(|p| p.resolved_value())
+                .collect();
+            assert_eq!(values, [Some(expected), Some(expected)]);
+        }
+    }
+
+    #[test]
+    fn separately_supplied_modules_validate_mixed_defaults_without_queries() {
+        for (package, module) in [
+            (
+                "package P; timeunit 1ns / 1ps; endpackage",
+                "module Top(output logic y); assign y = 0; endmodule",
+            ),
+            (
+                "package P; endpackage",
+                "module Top(output logic y); timeunit 1ns / 1ps; assign y = 0; endmodule",
+            ),
+        ] {
+            let packages = crate::analyze_packages(&[(package, Path::new("external.sv"))]).unwrap();
+            let result = crate::analyze_source_module_with_packages(
+                module,
+                Path::new("omitted.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages,
+            );
+            assert!(result.is_err(), "accepted mixed defaults for {module}");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("mixed explicit and default")
+            );
+        }
+    }
+
+    #[test]
+    fn separately_supplied_modules_update_inferred_roots() {
+        let packages = crate::analyze_packages(&[(
+            "module Child(); timeunit 1ns / 1ps; endmodule",
+            Path::new("external.sv"),
+        )])
+        .unwrap();
+        let code = "module Top(); timeunit 1us / 1ns; Child child(); localparam Q=$timeunit($root.Child); endmodule";
+        assert!(
+            crate::analyze_source_module_with_packages(
+                code,
+                Path::new("omitted.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn separately_supplied_modules_preserve_explicit_roots_and_external_paths() {
+        let external = crate::ParsedSource::parse(
+            "module Child(); timeunit 1ns / 1ps; endmodule module Other(); timeunit 100ns / 10ps; endmodule",
+            Path::new("external.sv"),
+        ).unwrap();
+        let packages =
+            crate::ParsedSource::analyze_packages_with_roots(&[&external], &["Top", "Other"])
+                .unwrap();
+        let source = crate::ParsedSource::parse(
+            "module Top(); timeunit 1us / 1ns; Child child(); localparam U=$timeunit($root.Top.child); localparam P=$timeprecision($root.Other); endmodule",
+            Path::new("omitted.sv"),
+        ).unwrap();
+        let ir = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        let values: Vec<_> = ir.modules()[0]
+            .parameters()
+            .iter()
+            .map(|p| p.resolved_value())
+            .collect();
+        assert_eq!(values, [Some(-9), Some(-11)]);
+    }
+
     #[test]
     fn sibling_scope_collection_uses_linear_parent_checks() {
         let mut code = "timeunit 1ns / 1ps;".to_string();
@@ -945,9 +1098,12 @@ mod tests {
 
     #[test]
     fn default_and_positive_exponents_keep_their_declared_values() {
-        for (prefix, unit, precision, root) in
-            [("", -9, -12, -12), ("timeunit 100s / 10s;", 2, 1, 1)]
-        {
+        // 3.14.3 minimizes declared/directive precisions, not an unused default.
+        for (prefix, unit, precision, root) in [
+            ("", -9, -12, -12),
+            ("timeunit 1ns / 1ns;", -9, -9, -9),
+            ("timeunit 100s / 10s;", 2, 1, 1),
+        ] {
             let code = format!(
                 "module Top(); {prefix} localparam U=$timeunit(); localparam P=$timeprecision(); localparam R=$timeprecision($root); endmodule"
             );
