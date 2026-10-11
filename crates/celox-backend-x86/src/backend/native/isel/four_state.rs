@@ -1085,6 +1085,27 @@ pub(super) fn lower_wide_binary_mask(
                 dst: zero,
                 value: 0,
             });
+            // Extend the mask from the same logical sign position as the
+            // payload. Shifts transport X and Z without normalizing them.
+            let mut lm_chunks = lm_chunks.clone();
+            let sign_fill = if matches!(op, BinaryOp::Sar) {
+                let width = ctx.sir_width(&lhs);
+                // get_wide_mask_chunks pads to the common operand/result width.
+                // SAR must use sign fill above the logical source, not those zeros.
+                lm_chunks.truncate(ISelContext::num_chunks(width));
+                let top = (width - 1) / 64;
+                lm_chunks[top] =
+                    sign_extend_scalar(ctx, block, lm_chunks[top], (width - 1) % 64 + 1);
+                let fill = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::SarImm {
+                    dst: fill,
+                    src: lm_chunks[top],
+                    imm: 63,
+                });
+                fill
+            } else {
+                zero
+            };
             let n_dst = ISelContext::num_chunks(d_width);
             // Get the result value chunks (already computed by lower_wide_binary)
             // The mask should follow the same pattern as the value.
@@ -1148,11 +1169,7 @@ pub(super) fn lower_wide_binary_mask(
                     BinaryOp::Shr | BinaryOp::Sar => {
                         for i in 0..n_dst {
                             let src_i = i + cs;
-                            let cur = lm_chunks.get(src_i).copied().unwrap_or_else(|| {
-                                let z = ctx.alloc_vreg(SpillDesc::remat(0));
-                                block.push(MInst::LoadImm { dst: z, value: 0 });
-                                z
-                            });
+                            let cur = lm_chunks.get(src_i).copied().unwrap_or(sign_fill);
                             if is == 0 {
                                 dst_m_chunks.push((cur, 64));
                             } else {
@@ -1162,11 +1179,7 @@ pub(super) fn lower_wide_binary_mask(
                                     src: cur,
                                     imm: is,
                                 });
-                                let next = lm_chunks.get(src_i + 1).copied().unwrap_or_else(|| {
-                                    let z = ctx.alloc_vreg(SpillDesc::remat(0));
-                                    block.push(MInst::LoadImm { dst: z, value: 0 });
-                                    z
-                                });
+                                let next = lm_chunks.get(src_i + 1).copied().unwrap_or(sign_fill);
                                 let carry = ctx.alloc_vreg(SpillDesc::transient());
                                 block.push(MInst::ShlImm {
                                     dst: carry,
@@ -1180,96 +1193,6 @@ pub(super) fn lower_wide_binary_mask(
                                     rhs: carry,
                                 });
                                 dst_m_chunks.push((merged, 64));
-                            }
-                        }
-
-                        // SAR: if the sign bit is X, sign-extension produces X in upper bits.
-                        // Check if bit (lhs_width-1) in the mask is set.
-                        if matches!(op, BinaryOp::Sar) {
-                            let lhs_w = ctx.sir_width(&lhs);
-                            let sign_chunk = (lhs_w - 1) / 64;
-                            let sign_bit = (lhs_w - 1) % 64;
-                            let sign_mask_chunk =
-                                lm_chunks.get(sign_chunk).copied().unwrap_or_else(|| {
-                                    let z = ctx.alloc_vreg(SpillDesc::remat(0));
-                                    block.push(MInst::LoadImm { dst: z, value: 0 });
-                                    z
-                                });
-                            // Extract sign bit from mask
-                            let sign_x = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::ShrImm {
-                                dst: sign_x,
-                                src: sign_mask_chunk,
-                                imm: sign_bit as u8,
-                            });
-                            let one = ctx.alloc_vreg(SpillDesc::remat(1));
-                            block.push(MInst::LoadImm { dst: one, value: 1 });
-                            let sign_x_bit = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::And {
-                                dst: sign_x_bit,
-                                lhs: sign_x,
-                                rhs: one,
-                            });
-                            let sign_is_x = ctx.alloc_vreg(SpillDesc::transient());
-                            let z_cmp = ctx.alloc_vreg(SpillDesc::remat(0));
-                            block.push(MInst::LoadImm {
-                                dst: z_cmp,
-                                value: 0,
-                            });
-                            block.push(MInst::Cmp {
-                                dst: sign_is_x,
-                                lhs: sign_x_bit,
-                                rhs: z_cmp,
-                                kind: CmpKind::Ne,
-                            });
-
-                            // For chunks above the shifted sign position, OR with all-X if sign is X.
-                            // The sign bit after shift is at position (lhs_width - 1 - shift_amount).
-                            // All bits above this position in the result are sign-extended.
-                            let effective_sign_pos =
-                                lhs_w.saturating_sub(1).saturating_sub(amount as usize);
-                            let all_ones = ctx.alloc_vreg(SpillDesc::remat(u64::MAX));
-                            block.push(MInst::LoadImm {
-                                dst: all_ones,
-                                value: u64::MAX,
-                            });
-                            for (i, chunk) in dst_m_chunks.iter_mut().enumerate() {
-                                let chunk_start = i * 64;
-                                if chunk_start >= effective_sign_pos {
-                                    // Entire chunk is above sign — all X if sign is X
-                                    let new_m = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Select {
-                                        dst: new_m,
-                                        cond: sign_is_x,
-                                        true_val: all_ones,
-                                        false_val: chunk.0,
-                                    });
-                                    chunk.0 = new_m;
-                                } else if chunk_start + 64 > effective_sign_pos {
-                                    // Partial: bits above effective_sign_pos in this chunk
-                                    let bit_in_chunk = effective_sign_pos - chunk_start;
-                                    let upper_mask_val = u64::MAX << bit_in_chunk;
-                                    let upper_mask =
-                                        ctx.alloc_vreg(SpillDesc::remat(upper_mask_val));
-                                    block.push(MInst::LoadImm {
-                                        dst: upper_mask,
-                                        value: upper_mask_val,
-                                    });
-                                    let x_fill = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Select {
-                                        dst: x_fill,
-                                        cond: sign_is_x,
-                                        true_val: upper_mask,
-                                        false_val: z_cmp,
-                                    });
-                                    let new_m = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Or {
-                                        dst: new_m,
-                                        lhs: chunk.0,
-                                        rhs: x_fill,
-                                    });
-                                    chunk.0 = new_m;
-                                }
                             }
                         }
                     }
@@ -1317,6 +1240,7 @@ pub(super) fn lower_wide_binary_mask(
                     lm_chunks.iter().map(|&v| (v, 64usize)).collect();
                 let dir = match op {
                     BinaryOp::Shl => ShiftDir::Left,
+                    BinaryOp::Sar => ShiftDir::ArithRight,
                     _ => ShiftDir::Right,
                 };
                 let shifted_mask_chunks = lower_wide_runtime_shift_chunks(

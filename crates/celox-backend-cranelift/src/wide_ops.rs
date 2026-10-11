@@ -538,6 +538,9 @@ pub(crate) fn emit_wide_sar(
     let all_ones = builder.ins().iconst(types::I64, -1);
     let sign_fill = builder.ins().select(is_negative, all_ones, zero);
 
+    // Fill padding inside the partial top word as well as words beyond it.
+    // Apply the same extension to payload and mask to preserve the sign's X/Z.
+    let extended = sign_extend_wide_chunks(builder, l_chunks, l_width, l_width.div_ceil(64));
     let mut res = Vec::with_capacity(num_chunks);
     for i in 0..num_chunks {
         let mut cur_word = sign_fill;
@@ -546,7 +549,7 @@ pub(crate) fn emit_wide_sar(
         let idx_cur = builder.ins().iadd_imm_s(word_offset_val, i as i64);
         let idx_nxt = builder.ins().iadd_imm_s(idx_cur, 1);
 
-        for (src_i, &src_val) in l_chunks.iter().enumerate() {
+        for (src_i, &src_val) in extended.iter().enumerate() {
             let src_val_i64 = cast_type(builder, src_val, types::I64);
             let is_cur = builder
                 .ins()
@@ -678,6 +681,24 @@ pub fn emit_wide_sar_mem(
     let zero = builder.ins().iconst(types::I64, 0);
     let all_ones = builder.ins().iconst(types::I64, -1);
     let sign_fill = builder.ins().select(is_negative, all_ones, zero);
+
+    // l_addr is the caller's scratch source slot. Normalize its logical top
+    // word and any padding words before dynamic loads can select them.
+    let top_bits = msb_bit_idx + 1;
+    if top_bits < 64 {
+        let low_mask = (1u64 << top_bits) - 1;
+        let low = builder.ins().band_imm_s(msb_chunk, low_mask as i64);
+        let high = builder.ins().band_imm_s(sign_fill, !low_mask as i64);
+        let extended = builder.ins().bor(low, high);
+        builder
+            .ins()
+            .store(MemFlags::new(), extended, l_addr, msb_chunk_offset as i32);
+    }
+    for i in l_width.div_ceil(64)..num_chunks {
+        builder
+            .ins()
+            .store(MemFlags::new(), sign_fill, l_addr, (i * 8) as i32);
+    }
 
     for i in 0..num_chunks {
         let idx_cur = builder.ins().iadd_imm_s(word_offset_val, i as i64);

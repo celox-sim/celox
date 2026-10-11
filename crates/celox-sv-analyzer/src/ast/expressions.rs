@@ -581,8 +581,41 @@ fn expr_from_system_function_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    parameters::reject_unbounded_data_query(
+        call,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        packed_dimensions.scope_types_complete,
+    )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
+        "$isunbounded" => {
+            parameters::isunbounded_call(call, syntax_tree, &packed_dimensions.const_env)?
+                .map(const_expr_to_expr)
+                .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                })
+        }
+        "$dimensions" => dimensions::dimensions_system_function_call_value(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+        .map(|count| Expr::Literal(count.to_string()))
+        .ok_or_else(operand_error),
+        "$left" | "$right" | "$low" | "$high" | "$increment" | "$unpacked_dimensions" => {
+            dimensions::array_query_call(
+                call,
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+                Some(packed_dimensions),
+            )
+            .ok_or_else(operand_error)
+        }
         // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
         "$bits" | "$size" => dimensions::size_system_function_call_type(
             call,
@@ -656,7 +689,9 @@ fn expr_from_system_function_call(
 }
 
 /// The one expression argument of a system function call such as `$clog2(x)`.
-fn single_expression_argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
+pub(super) fn single_expression_argument(
+    call: &sv_parser::SystemTfCall,
+) -> Option<&sv_parser::Expression> {
     let sv_parser::SystemTfCall::ArgExpression(call) = call else {
         return None;
     };
@@ -678,6 +713,23 @@ pub(super) fn expr_from_tf_call(
         syntax_tree,
     )
     .ok_or_else(|| unsupported("subroutine name"))?;
+    // `$unit::x` without arguments parses as a call, but names a parameter
+    // or variable of the compilation unit unless `x` is a subroutine.
+    if call.nodes.2.is_none()
+        && RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0)
+            .into_iter()
+            .any(|node| {
+                matches!(
+                    node,
+                    RefNode::PackageScope(sv_parser::PackageScope::Unit(_))
+                )
+            })
+        && (packed_dimensions.const_env.contains_key(&name)
+            || packed_dimensions.parameter_values.contains_key(&name)
+            || packed_dimensions.get(&name).is_some())
+    {
+        return Ok(Expr::Ident(name));
+    }
     let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
         None => Vec::new(),
         Some(sv_parser::ListOfArguments::Ordered(args)) => {

@@ -1,0 +1,382 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_child_signal_access",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_constant_propagation_across_hierarchy",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_deep_hierarchical_path_resolution",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_dynamic_minus_colon_output_port_rmw",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:17:21: Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)\n                                : ... note: In instance 'Top'\n                                : ... Left-hand data type: 'logic[15:0]' (4-state)\n                                : ... Right-hand data type: 'logic[7:0]$[0:1]' (4-state)\n   17 |     always_comb out = mem;\n      |                     ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:17:21: Operator ASSIGN expects 16 bits on the Assign RHS, but Assign RHS's VARREF 'mem' generates 8 bits.\n                                              : ... note: In instance 'Top'\n   17 |     always_comb out = mem;\n      |                     ^\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_dynamic_step_output_port_rmw",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_flattened_instance_port_connection",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_runtime_multi_observe",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_feedback_with_constant_middle_bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_concat_then_overlap_dynamic_index_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_dual_dynamic_readers_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_dynamic_index_feedback_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_hierarchical_overlapping_partial_write_dynamic_index_runtime",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_function_output_writeback",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_input_port_assignment_width_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_instance_output_concat_advances_each_destination",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "evidence": [
+          "verification/repros/dynamic_output_acceptance.json",
+          "MISMATCH_REVIEW.md#7-dynamic-instance-output-selection-compilation-error"
+        ],
+        "observed_version": "5.052",
+        "reason": "Verilator accepts this nonconstant output-port destination instead of rejecting it. The expected compilation error is retained. No direct upstream decision was found; this exclusion is based on the recorded acceptance and the checked SV rules.",
+        "standard": "IEEE 1800-2023 10.2 Table 10-1 and 23.3.3.2: an output variable connection implies a continuous assignment, whose packed selects must be constant; expect compilation rejection.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_instance_output_dynamic_index_function_output_writeback",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_unpacked_array_slice_input",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_unpacked_array_slice_output",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_multiple_instances_isolation",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_unconnected_child_output_needs_no_parent_glue",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

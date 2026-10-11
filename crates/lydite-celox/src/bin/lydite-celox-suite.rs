@@ -181,8 +181,8 @@ fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.as_slice() == ["--list"] {
-        // The coverage gate hashes each case's text from `source` onward, so
-        // edited cases need a new review.
+        // Hash parsed scripts without comment/position churn; source locations
+        // remain in the run catalogue for diagnostics.
         let listed = cases()
             .map(|c| {
                 let group = c.name.split("::").next().unwrap_or(c.name);
@@ -190,6 +190,7 @@ fn main() {
                     "case": c.name,
                     "expectation": format!("{:?}", c.expectation),
                     "category": format!("{:?}", c.category),
+                    "script_identity": c.script_identity(),
                     "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": c.script().pos.line},
                 })
             })

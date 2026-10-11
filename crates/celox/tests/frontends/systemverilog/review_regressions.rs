@@ -5860,7 +5860,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "static function-local state",
+            "static variable `saved` of subroutine `saved_value` that keeps its value between calls",
             r#"
             module Top(input logic set, value, output logic y);
                 function logic saved_value(input logic do_set, input logic new_value);

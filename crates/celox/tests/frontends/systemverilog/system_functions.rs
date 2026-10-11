@@ -1,6 +1,169 @@
 use super::*;
 
 sv_backends! {
+    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
+    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
+    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
+    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
+    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
+    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
+    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
+    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
+    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
+    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
+    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
+    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
+    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
+    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
+
+    fn dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::dimensions_resolves_procedural_scopes";
+    }
+    fn dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::dimensions_resolves_package_array_constants";
+    }
+    fn dimensions_preserves_one_bit_vectors(sim) {
+        @case "system_functions::dimensions_preserves_one_bit_vectors";
+    }
+    fn dimensions_resolves_imported_function_returns(sim) {
+        @case "system_functions::dimensions_resolves_imported_function_returns";
+    }
+
+    fn dimensions_of_nonarray_handle_types(sim) {
+        @case "system_functions::dimensions_of_nonarray_handle_types";
+    }
+
+    fn dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::dimensions_is_independent_of_unknown_values";
+    }
+
+    fn dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::dimensions_counts_declared_arrays";
+    }
+
+    fn dimensions_preserves_selected_and_expression_types(sim) {
+        @case "system_functions::dimensions_preserves_selected_and_expression_types";
+    }
+
+    fn dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
+    }
+
+    fn array_query_evaluates_dimension_function_once(sim) {
+        @setup {
+            let source = r#"
+                module Top(input int d, output int y);
+                    logic [7:4] mem [2:5];
+                    function automatic int dimension();
+                        $display("dimension");
+                        return d;
+                    endfunction
+                    assign y = $left(mem, dimension());
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("array_query.sv"))], "Top");
+        let d = sim.signal("d");
+        let y = sim.signal("y");
+        for (dimension, expected) in [(1u32, 2u32), (2, 7), (3, 0), (0x0800_0001, 0)] {
+            sim.set(d, dimension);
+            assert_eq!(sim.get(y), expected.into());
+            assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+                message: "dimension".to_string(),
+            }]);
+        }
+    }
+    fn readmem_descending_ranges_and_absolute_addresses(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let hex = dir.path().join("data.hex");
+            let bin = dir.path().join("data.bin");
+            std::fs::write(&hex, "aa @2 bb cc").unwrap();
+            std::fs::write(&bin, "1010 1011 1100").unwrap();
+            let source = format!(r#"
+                module Top(input logic clk, output logic [31:0] initial_words, registered);
+                    logic [7:0] a [3:0];
+                    logic [7:0] b [1:4];
+                    initial $readmemh("{}", a, 3, 1);
+                    assign initial_words = {{a[3], a[2], a[1], 8'h00}};
+                    always_ff @(posedge clk) begin
+                        $readmemb("{}", b, 4, 2);
+                        registered <= {{b[4], b[3], b[2], 8'h00}};
+                    end
+                endmodule
+            "#, hex.display(), bin.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("readmem.sv"))], "Top");
+        let initial_words = sim.signal("initial_words");
+        let registered = sim.signal("registered");
+        let clk = sim.event("clk");
+        assert_eq!(sim.get(initial_words), 0xaabbcc00u32.into());
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(registered), 0x0a0b0c00u32.into());
+    }
+
+    fn readmem_count_mismatch_preserves_unwritten_words(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let short = dir.path().join("short.hex");
+            let long = dir.path().join("long.hex");
+            std::fs::write(&short, "aa").unwrap();
+            std::fs::write(&long, "bb cc dd").unwrap();
+            let source = format!(r#"
+                module Top(output logic [31:0] y, short_y);
+                    logic [7:0] mem [-1:2];
+                    logic [7:0] short_mem [0:3];
+                    always_comb begin
+                        mem[-1] = 8'h11; mem[0] = 8'h22;
+                        mem[1] = 8'h33; mem[2] = 8'h44;
+                        short_mem[0] = 8'h11; short_mem[1] = 8'h22;
+                        short_mem[2] = 8'h33; short_mem[3] = 8'h44;
+                        $readmemh("{}", short_mem, 3, 2);
+                        $readmemh("{}", mem, -1, 0);
+                        y = {{mem[-1], mem[0], mem[1], mem[2]}};
+                        short_y = {{short_mem[0], short_mem[1], short_mem[2], short_mem[3]}};
+                    end
+                endmodule
+            "#, short.display(), long.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("readmem.sv"))], "Top");
+        let y = sim.signal("y");
+        let short_y = sim.signal("short_y");
+        assert_eq!(sim.get(y), 0xbbcc3344u32.into());
+        assert_eq!(sim.get(short_y), 0x112233aau32.into());
+    }
+    fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
+    fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
+    fn array_queries_handle_runtime_dimensions(sim) { @case "system_functions::array_queries_handle_runtime_dimensions"; }
+    fn immediate_cover_handles_unknown_conditions(sim) { @case "system_functions::immediate_cover_handles_unknown_conditions"; }
+    fn immediate_cover_executes_pass_statement(sim) { @case "system_functions::immediate_cover_executes_pass_statement"; }
+
+    fn drain_runtime_events_returns_always_comb_fatal(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic fail, output logic y);
+                    always_comb begin
+                        y = fail;
+                        $display("before");
+                        if (fail) $fatal(1, "boom %0d", fail);
+                        $display("after");
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("fatal.sv"))], "Top");
+
+        let fail = sim.signal("fail");
+        sim.drain_runtime_events();
+        sim.set(fail, 1u8);
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "before".to_string() },
+            celox::RuntimeEvent::AssertFatal { message: "boom 1".to_string() },
+        ]);
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
     fn display_arguments_are_sized_as_ieee_specifies(sim) {
         @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
     }
@@ -58,7 +221,13 @@ sv_backends! {
 
 #[test]
 fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
-    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+    for name in [
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$dimensions",
+    ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
             let source =
@@ -85,6 +254,48 @@ fn build_error(source: &str) -> String {
             .filter(|word| *word != "│")
             .collect::<Vec<_>>()
             .join(" "),
+    }
+}
+
+#[test]
+fn readmem_diagnostics_identify_task_and_requested_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("invalid.mem");
+    for name in ["$readmemh", "$readmemb"] {
+        for (content, expected) in [
+            ("@4", "requested range [3:2]"),
+            ("g", "invalid data token g"),
+        ] {
+            std::fs::write(&file, content).unwrap();
+            let source = format!(
+                r#"module Top(output logic [7:0] y);
+                logic [7:0] mem [0:3]; initial {name}("{}", mem, 3, 2);
+                assign y = mem[2]; endmodule"#,
+                file.display()
+            );
+            let error = build_error(&source);
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("destination depth"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn rejects_stop_and_deferred_cover_instead_of_discarding_their_semantics() {
+    for body in [
+        "initial $stop;",
+        "always_comb begin $stop(0); y = 0; end",
+        "always_ff @(posedge clk) begin $stop; y <= 0; end",
+        "function automatic int f(); $stop; return 1; endfunction initial y = f();",
+    ] {
+        let source = format!("module Top(input logic clk, output logic y); {body} endmodule");
+        assert!(build_error(&source).contains("system task `$stop`"));
+    }
+    for timing in ["#0", "final"] {
+        let source =
+            format!("module Top(output logic y); initial cover {timing} (1) y = 1; endmodule");
+        assert!(build_error(&source).contains("deferred immediate cover"));
     }
 }
 
@@ -181,14 +392,8 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system function `$left`",
-            "module Top(input logic [3:0] a, output logic y);
-                always_comb begin $left(a); y = a[0]; end
-            endmodule",
-        ),
-        (
-            "system function `$left` in an expression",
-            "module Top(input logic [3:0] a, output int y); assign y = $left(a); endmodule",
+            "system task `$stop`",
+            "module Top(output logic y); initial $stop; assign y = 0; endmodule",
         ),
     ];
     for (expected, source) in cases {
@@ -237,6 +442,9 @@ fn value_functions_called_as_statements_check_their_operands() {
         endmodule",
         "module Top(input logic a, output logic y);
             always_comb begin $bits(no_such_signal); y = a; end
+        endmodule",
+        "module Top(input logic a, output logic y);
+            always_comb begin $dimensions(no_such_signal); y = a; end
         endmodule",
     ] {
         build_error(source);
@@ -493,4 +701,38 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
             },
         ]
     );
+}
+
+#[test]
+fn dimensions_rejects_undefined_constant_operands() {
+    for source in [
+        "module Top(output int y); localparam N = $dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+    ] {
+        build_error(source);
+    }
+}
+
+#[test]
+fn dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $dimensions(logic)'(1'b1);",
+        "localparam P = $dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $dimensions(logic); assign y = N'(1'b1);",
+        "localparam N = $dimensions(real); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
+    }
 }

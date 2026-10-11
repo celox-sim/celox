@@ -5,6 +5,11 @@
 //! remain unsupported; inactive branches are not lowered.
 use super::*;
 
+mod dependency_order;
+use dependency_order::DependencyOrder;
+mod scope_views;
+pub(super) use scope_views::ScopeViews;
+
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
 // qualified, and never reach the public analyzer IR.
@@ -26,12 +31,21 @@ pub(super) struct Item<'a> {
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
-    names: HashMap<String, String>,
-    shadowed: HashSet<String>,
+    names: SharedMap<String>,
+    shadowed: Arc<HashSet<String>>,
     scope: String,
 }
 
 impl Item<'_> {
+    pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
+        match self.node {
+            ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(item)) => {
+                Some(&item.nodes.1)
+            }
+            _ => None,
+        }
+    }
+
     /// These declarations have already populated the constant environment;
     /// instance/process/subroutine collectors cannot produce bodies from them.
     pub fn is_parameter_declaration(&self) -> bool {
@@ -65,7 +79,7 @@ impl Item<'_> {
 
     pub fn parameter_literals(&self, inherited: &HashMap<String, Expr>) -> HashMap<String, Expr> {
         let mut literals = inherited.clone();
-        for name in &self.shadowed {
+        for name in self.shadowed.iter() {
             if let Some(value) = inherited.get(name) {
                 literals.insert(format!("{OUTER_BINDING}{name}"), value.clone());
             }
@@ -89,12 +103,16 @@ impl Item<'_> {
         // Ordinary module items keep the module's function bindings. Rewriting
         // every function body for every item costs O(items * function size).
         if !self.shadowed.is_empty() || !self.names.is_empty() {
-            local.functions = Arc::new(self.functions(&dimensions.functions));
-            local.function_return_types =
-                self.function_aliases(dimensions.function_return_types.clone());
+            if !dimensions.functions.is_empty() {
+                local.functions = Arc::new(self.functions(&dimensions.functions));
+            }
+            if !dimensions.function_return_types.is_empty() {
+                local.function_return_types =
+                    self.function_aliases(dimensions.function_return_types.clone());
+            }
         }
         let mut signedness = dimensions.expression_signedness.clone();
-        for name in &self.shadowed {
+        for name in self.shadowed.iter() {
             let protected = format!("{OUTER_BINDING}{name}");
             if let Some(value) = dimensions.get(name) {
                 local.insert(protected.clone(), value.clone());
@@ -102,12 +120,12 @@ impl Item<'_> {
             }
             if let Some(value) = dimensions.const_env.get(name) {
                 local.const_env.insert(protected.clone(), *value);
-                if let Some(ty) = parameter_types_from_const_env(&dimensions.const_env).get(name) {
-                    insert_parameter_type_markers(&mut local.const_env, &protected, *ty);
+                if let Some(ty) = parameter_type_from_const_env(&dimensions.const_env, name) {
+                    insert_parameter_type_markers(&mut local.const_env, &protected, ty);
                 }
             }
         }
-        for name in &self.shadowed {
+        for name in self.shadowed.iter() {
             local.remove(name);
             signedness.remove(name);
         }
@@ -121,7 +139,7 @@ impl Item<'_> {
                 .iter()
                 .map(|(name, dimensions)| (name.clone(), dimensions.signed)),
         );
-        for (name, qualified) in &self.names {
+        for (name, qualified) in self.names.iter() {
             if let Some(value) = dimensions.get(qualified) {
                 local.insert(name.clone(), value.clone());
                 signedness.insert(name.clone(), value.signed);
@@ -148,7 +166,8 @@ impl Item<'_> {
             .shadowed
             .iter()
             .map(|name| (name.clone(), format!("{OUTER_BINDING}{name}")))
-            .collect();
+            .collect::<HashMap<_, _>>()
+            .into();
         for function in functions.values_mut() {
             bindings.qualify_function(function);
         }
@@ -158,12 +177,12 @@ impl Item<'_> {
     fn function_aliases<T: Clone>(&self, mut functions: HashMap<String, T>) -> HashMap<String, T> {
         // Keep definition-site calls to hidden module functions available to the
         // inliner, then expose only the functions visible in this lexical scope.
-        for name in &self.shadowed {
+        for name in self.shadowed.iter() {
             if let Some(function) = functions.remove(name) {
                 functions.insert(format!("{OUTER_BINDING}{name}"), function);
             }
         }
-        for (name, qualified) in &self.names {
+        for (name, qualified) in self.names.iter() {
             if let Some(function) = functions.get(qualified).cloned() {
                 functions.insert(name.clone(), function);
             }
@@ -231,7 +250,7 @@ impl Item<'_> {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.constant(e));
             }
-            ConstExpr::Unary { expr, .. } => self.constant(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => self.constant(expr),
             ConstExpr::Binary { left, right, .. } => {
                 self.constant(left);
                 self.constant(right);
@@ -282,8 +301,8 @@ struct Scope {
     literals: SharedMap<Expr>,
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
-    names: HashMap<String, String>,
-    shadowed: HashSet<String>,
+    names: SharedMap<String>,
+    shadowed: Arc<HashSet<String>>,
 }
 
 struct Elaborator<'a, 'b> {
@@ -309,7 +328,9 @@ pub(super) fn items<'a>(
     };
     let parameters =
         parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
-    let mut literals = parameter_value_env(&parameters, env);
+    let references = parameter_literal_references(node.clone(), tree);
+    let mut literals =
+        parameters::parameter_value_env_for_references(&parameters, env, &references);
     if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
         elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
     }
@@ -343,6 +364,50 @@ pub(super) fn items<'a>(
         }
     }
     Ok(elaborator.items)
+}
+
+/// All references in executable/type-bearing items, including inactive and
+/// nested generate branches. Direct scalar parameter initializers are accounted
+/// for by the dependency closure rather than expanded as independent roots.
+fn parameter_literal_references(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+    let items: Vec<_> = match node {
+        RefNode::PackageDeclaration(package) => package_declarations(package)
+            .map(RefNode::PackageOrGenerateItemDeclaration)
+            .collect(),
+        node => module_non_port_items(node)
+            .into_iter()
+            .map(RefNode::NonPortModuleItem)
+            .collect(),
+    };
+    let mut references = HashSet::default();
+    for node in items {
+        let declaration = match node.clone() {
+            RefNode::PackageOrGenerateItemDeclaration(declaration) => Some(declaration),
+            RefNode::NonPortModuleItem(item) => {
+                declarations::package_or_generate_declaration_from_non_port_item(item)
+            }
+            _ => None,
+        };
+        if declaration.is_some_and(|declaration| matches!(declaration,
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
+                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)))
+            && !node.clone().into_iter().any(|child| matches!(child,
+                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(assignment)))
+        {
+            continue;
+        }
+        references.extend(
+            node.into_iter()
+                .filter(|child| {
+                    matches!(
+                        child,
+                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                    )
+                })
+                .filter_map(|child| identifier_text(child, tree)),
+        );
+    }
+    references
 }
 
 impl<'a> Elaborator<'a, '_> {
@@ -400,7 +465,9 @@ impl<'a> Elaborator<'a, '_> {
                     ))?;
                 }
             }
-            ConstExpr::Unary { expr, .. } => self.expand_constant_calls(expr, scope)?,
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.expand_constant_calls(expr, scope)?
+            }
             ConstExpr::Select { expr, bit } => {
                 self.expand_constant_calls(expr, scope)?;
                 self.expand_constant_calls(bit, scope)?;
@@ -638,7 +705,7 @@ impl<'a> Elaborator<'a, '_> {
                             },
                         );
                         iteration.names.remove(&name);
-                        iteration.shadowed.insert(name.clone());
+                        Arc::make_mut(&mut iteration.shadowed).insert(name.clone());
                         iteration
                             .parameters
                             .retain(|parameter| parameter.name() != name);
@@ -774,13 +841,16 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -841,10 +911,16 @@ impl<'a> Elaborator<'a, '_> {
                 }
                 _ => continue,
             };
-            for child in node.clone() {
-                let RefNode::ParamAssignment(assignment) = child else {
-                    continue;
-                };
+            let assignments: Vec<_> = node
+                .clone()
+                .into_iter()
+                .filter_map(|child| match child {
+                    RefNode::ParamAssignment(assignment) => Some(assignment),
+                    _ => None,
+                })
+                .collect();
+            let single = assignments.len() == 1;
+            for assignment in assignments {
                 let name = parameter_name(RefNode::ParamAssignment(assignment), self.tree)?;
                 if !declared.insert(name.clone()) {
                     return Err(AnalyzerError::Unsupported(format!(
@@ -870,13 +946,16 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -885,23 +964,34 @@ impl<'a> Elaborator<'a, '_> {
                     .parameters
                     .retain(|parameter| parameter.name() != name);
                 scope.names.remove(&name);
-                scope.shadowed.insert(name.clone());
-                pending.push((name, node.clone(), dependencies));
+                Arc::make_mut(&mut scope.shadowed).insert(name.clone());
+                pending.push((name, node.clone(), dependencies, single));
             }
         }
-        // Signal dimensions and localparams can depend on each other. Resolve
-        // both in one dependency order, publishing signal types without values.
-        while !pending.is_empty() || !signal_declarations.is_empty() {
-            let unresolved: HashSet<_> = pending
+        // Signal dimensions and localparams can depend on each other. Preserve
+        // signal-first/source-order priority, but build local dependency edges
+        // once rather than rescanning all unresolved declarations after each bind.
+        let signal_count = signal_declarations.len();
+        let mut order = DependencyOrder::new(
+            signal_declarations
                 .iter()
-                .map(|(name, _, _)| name.clone())
-                .chain(signal_declarations.iter().map(|(name, _, _)| name.clone()))
-                .collect();
-            if let Some(index) = signal_declarations
-                .iter()
-                .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
-            {
-                let (name, item, _) = signal_declarations.remove(index);
+                .map(|(name, _, deps)| (name.as_str(), deps))
+                .chain(
+                    pending
+                        .iter()
+                        .map(|(name, _, deps, _)| (name.as_str(), deps)),
+                ),
+        );
+        let mut signal_declarations: Vec<_> = signal_declarations.into_iter().map(Some).collect();
+        let mut pending: Vec<_> = pending.into_iter().map(Some).collect();
+        while !order.is_complete() {
+            let index = order.pop_ready().ok_or_else(|| {
+                AnalyzerError::Unsupported("cyclic generate-local parameter dependency".to_string())
+            })?;
+            if index < signal_count {
+                let (name, item, _) = signal_declarations[index]
+                    .take()
+                    .expect("ready signal is unbound");
                 let mut signals = Vec::new();
                 signals_from_module_or_generate_item(
                     item,
@@ -911,43 +1001,124 @@ impl<'a> Elaborator<'a, '_> {
                     Some(&name),
                     &mut signals,
                 )?;
+                // Validate before exporting this type: a symbolic bound must
+                // never reach IR resolution with a same-named outer number.
+                for signal in &signals {
+                    let ty = signal.r#type();
+                    for bound in ty
+                        .packed_ranges()
+                        .iter()
+                        .flat_map(|r| [r.left(), r.right()])
+                        .chain(
+                            ty.unpacked_ranges()
+                                .iter()
+                                .flat_map(|r| [r.left(), r.right()]),
+                        )
+                    {
+                        if parameters::contains_unbounded_operand(bound, &scope.env)
+                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                        {
+                            return Err(AnalyzerError::Unsupported(
+                                "numeric use of unbounded parameter in generate signal range"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
                 extend_const_env_with_variable_types(
                     &mut scope.env,
                     signals
                         .iter()
                         .map(|signal| (signal.name(), signal.r#type())),
                 );
-                continue;
+            } else {
+                if pending[index - signal_count]
+                    .as_ref()
+                    .is_some_and(|(_, _, _, single)| *single)
+                {
+                    // Reuse the declaration-order prefix while parameters remain
+                    // consecutive in the original priority order. Signals can
+                    // publish new type metadata; grouped declarations temporarily
+                    // bind siblings. Either ends this run before rebuilding it.
+                    let base = scope.env.clone();
+                    let mut environment =
+                        parameters::ParameterEnvironment::new(&scope.parameters, &base);
+                    let mut types = parameter_types_from_const_env(&base);
+                    let mut next = index;
+                    loop {
+                        let (name, node, _, _) = pending[next - signal_count]
+                            .take()
+                            .expect("ready parameter is unbound");
+                        let inherited_count = scope.parameters.len();
+                        parameters::parameters_from_ref_node_with_environment(
+                            node,
+                            self.tree,
+                            &mut scope.parameters,
+                            true,
+                            &base,
+                            self.aliases,
+                            &HashMap::default(),
+                            &mut environment,
+                        )?;
+                        let parameter = scope
+                            .parameters
+                            .get(inherited_count)
+                            .filter(|parameter| parameter.name() == name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                AnalyzerError::Unsupported(format!(
+                                    "generate-local parameter `{name}`"
+                                ))
+                            })?;
+                        constants::bind_generate_parameter_with_types(
+                            parameter,
+                            &mut scope.env,
+                            &mut scope.literals,
+                            &mut types,
+                        );
+                        order.complete(next);
+                        let Some(ready) = order.peek_ready().filter(|ready| {
+                            *ready >= signal_count
+                                && pending[*ready - signal_count]
+                                    .as_ref()
+                                    .is_some_and(|(_, _, _, single)| *single)
+                        }) else {
+                            break;
+                        };
+                        next = order
+                            .pop_ready()
+                            .expect("the ready frontier was just inspected");
+                        debug_assert_eq!(next, ready);
+                    }
+                    continue;
+                }
+                let (name, node, _, _) = pending[index - signal_count]
+                    .take()
+                    .expect("ready parameter is unbound");
+                // The declaration may contain siblings. Temporarily append all
+                // of them for the existing lowering semantics, then keep only
+                // this scheduled parameter, without cloning the inherited prefix.
+                let inherited_count = scope.parameters.len();
+                parameters_from_ref_node(
+                    node,
+                    self.tree,
+                    &mut scope.parameters,
+                    true,
+                    &scope.env,
+                    self.aliases,
+                    &HashMap::default(),
+                )?;
+                let parameter = scope
+                    .parameters
+                    .drain(inherited_count..)
+                    .find(|parameter| parameter.name() == name)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
+                    })?;
+                scope.parameters.push(parameter.clone());
+                bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
             }
-            let Some(index) = pending
-                .iter()
-                .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
-            else {
-                return Err(AnalyzerError::Unsupported(
-                    "cyclic generate-local parameter dependency".to_string(),
-                ));
-            };
-            let (name, node, _) = pending.remove(index);
-            let mut parameters = scope.parameters.clone();
-            let inherited_count = parameters.len();
-            parameters_from_ref_node(
-                node,
-                self.tree,
-                &mut parameters,
-                true,
-                &scope.env,
-                self.aliases,
-                &HashMap::default(),
-            )?;
-            let parameter = parameters
-                .into_iter()
-                .skip(inherited_count)
-                .find(|parameter| parameter.name() == name)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
-                })?;
-            scope.parameters.push(parameter.clone());
-            bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
+            order.complete(index);
         }
         scope.parameter_dimensions = Arc::new(parameter_packed_dimensions(&scope.parameters));
         Ok(())
@@ -1057,7 +1228,7 @@ impl<'a> Elaborator<'a, '_> {
                                         "duplicate generate-local declaration `{name}`"
                                     )));
                                 }
-                                scope.shadowed.insert(name.clone());
+                                Arc::make_mut(&mut scope.shadowed).insert(name.clone());
                                 scope.names.insert(
                                     name.clone(),
                                     format!("{}.{}", scope.path, scope_component(&name)),
@@ -1080,6 +1251,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     signal.name.clone(),
                     parameter_marker(&signal.name),
+                    parameters::unbounded_parameter_marker(&signal.name),
                     local_parameter_marker(&signal.name),
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),
@@ -1088,7 +1260,7 @@ impl<'a> Elaborator<'a, '_> {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&signal.name);
-                scope.shadowed.insert(signal.name.clone());
+                Arc::make_mut(&mut scope.shadowed).insert(signal.name.clone());
                 scope
                     .parameters
                     .retain(|parameter| parameter.name() != signal.name);
@@ -1235,6 +1407,198 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn consecutive_parameter_runs_bind_each_prefix_once() {
+        for count in [16, 64, 256] {
+            let mut code = String::from("module Top(); if (1) begin : g\n");
+            for index in 0..count {
+                let value = if index + 1 == count {
+                    "1".into()
+                } else {
+                    format!("P{} + 1", index + 1)
+                };
+                use std::fmt::Write;
+                writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
+            }
+            code.push_str("logic [P0-1:0] data; end endmodule");
+            let tree =
+                crate::syntax::parse_source(&code, Path::new("generate_parameter_prefix.sv"))
+                    .unwrap();
+            let node = tree
+                .into_iter()
+                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+                .unwrap();
+            parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
+            let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
+            assert!(
+                bindings <= 3 * count,
+                "{count} parameters rebound {bindings} times"
+            );
+            assert_eq!(active.last().unwrap().env["P0"], count as i128);
+        }
+    }
+
+    #[test]
+    fn signals_interrupt_parameter_runs_before_size_queries_resume() {
+        let source = analyze("module Top(); if (1) begin : g localparam int A=$bits(s0); logic [3:0] s0; localparam int B=A+2; logic [B-1:0] s1; localparam int C=$bits(s1); localparam int D=C+1; logic [D-1:0] s2; end endmodule").unwrap();
+        let ir = crate::analyze::analyze_source(source).unwrap();
+        let signals = ir.modules()[0].signals();
+        assert_eq!(signals.len(), 3);
+        for (signal, width) in signals.iter().zip([4, 6, 7]) {
+            assert_eq!(signal.r#type().resolved_width(), Some(width));
+        }
+    }
+
+    #[test]
+    fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
+        let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
+        insert_parameter_type_markers(
+            &mut base,
+            "pkg::IMPORTED",
+            ExprType {
+                width: 8,
+                signed: true,
+            },
+        );
+        let mut cached_env = base.clone();
+        let mut rebuilt_env = base;
+        let mut cached_literals = HashMap::default();
+        let mut rebuilt_literals = HashMap::default();
+        let mut types = parameter_types_from_const_env(&cached_env);
+        for (name, value, width) in [
+            ("A", ConstExpr::Ident("pkg::IMPORTED".into()), None),
+            ("X", ConstExpr::Literal("8'bx".into()), Some(8)),
+            ("W", ConstExpr::Literal("129'b1".into()), Some(129)),
+            ("Y", ConstExpr::Ident("X".into()), Some(8)),
+            (
+                "Z",
+                ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Ident("A".into())),
+                    op: BinaryOp::Add,
+                    right: Box::new(ConstExpr::Literal("2".into())),
+                },
+                Some(32),
+            ),
+        ] {
+            let parameter = Parameter::new(
+                name.into(),
+                Some(value),
+                width,
+                width.map(|_| false),
+                false,
+                width.is_some(),
+                true,
+            );
+            bind_generate_parameter(parameter.clone(), &mut rebuilt_env, &mut rebuilt_literals);
+            constants::bind_generate_parameter_with_types(
+                parameter,
+                &mut cached_env,
+                &mut cached_literals,
+                &mut types,
+            );
+            assert_eq!(cached_env, rebuilt_env);
+            assert_eq!(cached_literals, rebuilt_literals);
+            assert_eq!(types, parameter_types_from_const_env(&rebuilt_env));
+        }
+    }
+
+    #[test]
+    fn generated_items_share_names_but_keep_mutations_in_their_own_snapshot() {
+        let tree = crate::syntax::parse_source(
+            "module Top(); if (1) begin : g logic x; logic y; end endmodule",
+            Path::new("generate_name_snapshots.sv"),
+        )
+        .unwrap();
+        let node = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(std::ptr::eq(&*active[0].names, &*active[1].names));
+        assert!(Arc::ptr_eq(&active[0].shadowed, &active[1].shadowed));
+        let mut local = active[0].clone();
+        local.names.remove("x");
+        Arc::make_mut(&mut local.shadowed).remove("x");
+        assert_eq!(local.name("x"), "x");
+        for sibling in &active {
+            assert_eq!(sibling.name("x"), "g.x");
+            assert_eq!(sibling.name("y"), "g.y");
+            assert!(sibling.shadowed.contains("x"));
+        }
+    }
+
+    #[test]
+    fn grouped_parameters_keep_only_the_scheduled_sibling_and_mask_outer_values() {
+        for keyword in ["localparam", "parameter"] {
+            let code = format!(
+                r#"
+                module Top #(parameter B=99) (output logic [31:0] y);
+                    if (1) begin : g
+                        {keyword} int A=B+1, B=C+1, C=2;
+                        {keyword} logic [7:0] X='1, Y=X-1;
+                        logic [A-1:0] data;
+                        assign y=A+B+C+X+Y+$bits(data);
+                    end
+                endmodule
+            "#
+            );
+            let tree =
+                crate::syntax::parse_source(&code, Path::new("scheduled_siblings.sv")).unwrap();
+            let node = tree
+                .into_iter()
+                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+                .unwrap();
+            let active = items(
+                node,
+                &tree,
+                &HashMap::from_iter([("B".into(), 99)]),
+                &HashMap::default(),
+            )
+            .unwrap();
+            let assignment = active
+                .iter()
+                .find(|item| {
+                    item.node
+                        .node()
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::ContinuousAssign(_)))
+                })
+                .unwrap();
+            for (name, value) in [("A", 4), ("B", 3), ("C", 2), ("X", 255), ("Y", 254)] {
+                assert_eq!(assignment.env[name], value, "{keyword} {name}");
+            }
+            let ir = crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+            assert_eq!(ir.modules()[0].signals()[0].name(), "g.data");
+            assert_eq!(
+                ir.modules()[0].signals()[0].r#type().resolved_width(),
+                Some(4)
+            );
+        }
+    }
+
+    #[test]
+    fn reports_a_ready_declaration_error_before_a_remaining_cycle() {
+        let error = analyze(
+            r#"
+            module Top();
+                if (1) begin : g
+                    localparam A=B, B=A;
+                    localparam real R=1.0;
+                end
+            endmodule
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported parameter data type"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1436,12 +1800,14 @@ mod tests {
         let outer = FunctionReturnMetadata {
             width: Some(8),
             first_packed_dimension_width: Some(2),
+            dimensions: Some(2),
             signed: false,
             is_2state: false,
         };
         let inner = FunctionReturnMetadata {
             width: Some(4),
             first_packed_dimension_width: Some(4),
+            dimensions: Some(1),
             signed: true,
             is_2state: true,
         };
@@ -1670,6 +2036,138 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("unexpected success: {body}"));
             assert!(error.to_string().contains(expected), "{body}: {error}");
+        }
+    }
+
+    #[test]
+    fn reference_scan_covers_nested_branches_arrays_packages_and_escaped_names() {
+        let code = r#"
+            module Top;
+                localparam UNUSED = missing(ONLY_INITIALIZER);
+                localparam A = 'x;
+                localparam B = A;
+                localparam logic [7:0] ARR [0:0] = '{ARRAY_INPUT};
+                function automatic logic f(); return FUNCTION_INPUT; endfunction
+                generate
+                    if (0) begin : inactive
+                        assign out = INACTIVE_INPUT;
+                    end
+                    for (genvar i = 0; i < LOOP_BOUND; i++) begin : loop_scope
+                        localparam C = NESTED_INPUT;
+                    end
+                endgenerate
+                assign out = \escaped.name ;
+            endmodule
+            package pkg;
+                localparam UNUSED = only_in_initializer;
+                function automatic logic f(); return PACKAGE_INPUT; endfunction
+            endpackage
+        "#;
+        let tree = crate::syntax::parse_source(code, Path::new("literal_references.sv")).unwrap();
+        for node in &tree {
+            if matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            ) {
+                let refs = parameter_literal_references(node, &tree);
+                for name in [
+                    "ARRAY_INPUT",
+                    "FUNCTION_INPUT",
+                    "INACTIVE_INPUT",
+                    "LOOP_BOUND",
+                    "NESTED_INPUT",
+                    "\\escaped.name",
+                ] {
+                    assert!(refs.contains(name), "{name}: {refs:?}");
+                }
+                assert!(!refs.contains("ONLY_INITIALIZER"));
+            } else if matches!(node, RefNode::PackageDeclaration(_)) {
+                let refs = parameter_literal_references(node, &tree);
+                assert!(refs.contains("PACKAGE_INPUT"));
+                assert!(!refs.contains("only_in_initializer"));
+            }
+        }
+    }
+
+    #[test]
+    fn unused_unresolved_chains_do_not_populate_item_literals() {
+        use std::fmt::Write;
+
+        for count in [16, 64, 256] {
+            for doubling in [false, true] {
+                let declaration = if doubling {
+                    // Expanding the previous unresolved value twice at every
+                    // declaration would make the unused expression trees grow
+                    // exponentially before this function is installed.
+                    "function automatic int next_value(input int left, right); return left + right; endfunction\n"
+                } else {
+                    "function automatic int next_value(input int value); return value + 1; endfunction\n"
+                };
+                let mut code = format!("module Top; {declaration}");
+                for i in 0..count {
+                    let arg = match (i, doubling) {
+                        (0, false) => "0".into(),
+                        (0, true) => "1, 1".into(),
+                        (_, false) => format!("P{}", i - 1),
+                        (_, true) => format!("P{0}, P{0}", i - 1),
+                    };
+                    writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
+                }
+                code.push_str("endmodule\n");
+                let tree =
+                    crate::syntax::parse_source(&code, Path::new("unused_chain.sv")).unwrap();
+                let node = (&tree)
+                    .into_iter()
+                    .find(|node| {
+                        matches!(
+                            node,
+                            RefNode::ModuleDeclarationAnsi(_)
+                                | RefNode::ModuleDeclarationNonansi(_)
+                        )
+                    })
+                    .unwrap();
+                let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+                assert!(active.iter().all(|item| item.literals.is_empty()));
+                let ir =
+                    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+                for (i, parameter) in ir.modules()[0].parameters().iter().enumerate() {
+                    let expected = if !doubling {
+                        i as i128 + 1
+                    } else if i >= 31 {
+                        0
+                    } else {
+                        (1u32 << (i + 1)) as i32 as i128
+                    };
+                    assert_eq!(parameter.resolved_value(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn referenced_four_state_dependencies_keep_their_full_values() {
+        let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
+        let tree = crate::syntax::parse_source(code, Path::new("needed_literals.sv")).unwrap();
+        let node = (&tree)
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                )
+            })
+            .unwrap();
+        let env = HashMap::default();
+        let aliases = HashMap::default();
+        let parameters =
+            parameters_from_module_node(node.clone(), &tree, &aliases, &env, &HashMap::default())
+                .unwrap();
+        let full = parameter_value_env(&parameters, &env);
+        let active = items(node, &tree, &env, &aliases).unwrap();
+        for item in active {
+            assert_eq!(item.literals.get("B"), full.get("B"));
+            assert_eq!(item.literals.get("A"), full.get("A"));
+            assert!(!item.literals.contains_key("UNUSED"));
         }
     }
 }

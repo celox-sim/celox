@@ -182,4 +182,4 @@ jobs:
       # Heliodor matrix jobs also publish while measurements run. Retry a
       # rejected push against the latest branch tip and retain every history.
       - name: Publish completed benchmark results
-        run: node scripts/publish-bench.mjs rust-converted.json verilator-converted.json ts-converted.json
+        run: node scripts/publish-bench.mjs rust-converted.json verilator-converted.json ts-converted.json --host artifacts/bench-host/benchmark-host.txt

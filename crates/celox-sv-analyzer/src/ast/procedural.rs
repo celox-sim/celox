@@ -18,9 +18,11 @@ struct Scope {
 
 struct ScopeEntry {
     source: String,
-    unique: String,
+    unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
-    shadowed_constant: Option<i128>,
+    shadowed_constants: Vec<(String, Option<i128>)>,
+    shadowed_literal: Option<String>,
+    shadowed_parameter_value: Option<Expr>,
     shadowed_signedness: Option<bool>,
 }
 
@@ -30,6 +32,14 @@ pub(super) struct BodyState<'a> {
     pub counter: &'a mut usize,
     /// Positional argument names of each subroutine, for named arguments.
     pub subroutine_params: &'a HashMap<String, Vec<String>>,
+    /// The argument directions of each subroutine.
+    pub subroutine_directions: &'a lifetimes::Directions,
+    /// Whether the variables of the scope's subroutines and blocks are
+    /// automatic by default (IEEE 1800-2023 6.21).
+    pub automatic: bool,
+    /// The locals declared with a static lifetime: their unique names and
+    /// types.
+    pub statics: Vec<(String, Type)>,
 }
 
 /// Converts the statements of one procedural body.
@@ -43,6 +53,8 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     local_constants: HashMap<String, String>,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
+    /// Whether the body's variables are automatic by default.
+    automatic: bool,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -98,7 +110,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         body: system_functions::Body,
     ) -> Self {
         let type_aliases = dims.type_aliases.clone();
+        let automatic = state.automatic;
         Self {
+            automatic,
             tree,
             dims: dims.clone(),
             scopes: vec![Scope {
@@ -122,6 +136,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return;
         };
         for entry in scope.entries.into_iter().rev() {
+            for (key, value) in entry.shadowed_constants {
+                if let Some(value) = value {
+                    self.dims.const_env.insert(key, value);
+                } else {
+                    self.dims.const_env.remove(&key);
+                }
+            }
+            match entry.shadowed_literal {
+                Some(value) => {
+                    self.local_constants.insert(entry.source.clone(), value);
+                }
+                None => {
+                    self.local_constants.remove(&entry.source);
+                }
+            }
+            match entry.shadowed_parameter_value {
+                Some(value) => {
+                    self.dims
+                        .parameter_values
+                        .insert(entry.source.clone(), value);
+                }
+                None => {
+                    self.dims.parameter_values.remove(&entry.source);
+                }
+            }
             match entry.shadowed_dimensions {
                 Some(dimensions) => {
                     self.dims.insert(entry.source.clone(), dimensions);
@@ -129,9 +168,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => {
                     self.dims.remove(&entry.source);
                 }
-            }
-            if let Some(value) = entry.shadowed_constant {
-                self.dims.const_env.insert(entry.source.clone(), value);
             }
             let signedness = &mut self.dims.expression_signedness;
             match entry.shadowed_signedness {
@@ -149,12 +185,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
         *self.state.counter += 1;
-        let shadowed_dimensions = self
-            .dims
+        let entry = self.take_binding(source, Some(unique.clone()), r#type.packed_ranges.len());
+        self.dims
             .insert(source.to_string(), dimensions_from_type(&r#type));
-        let shadowed_constant = self.dims.const_env.remove(source);
-        let shadowed_signedness = self
-            .dims
+        self.dims
             .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
         self.state.locals.push(LocalVariable {
@@ -169,25 +203,49 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .last_mut()
             .expect("a body always has a scope")
             .entries
-            .push(ScopeEntry {
-                source: source.to_string(),
-                unique: unique.clone(),
-                shadowed_dimensions,
-                shadowed_constant,
-                shadowed_signedness,
-            });
+            .push(entry);
         unique
     }
 
+    /// Detach every view of a declaration before publishing the shadowing
+    /// binding. Save only keys for this name, without copying a growing scope.
+    fn take_binding(
+        &mut self,
+        source: &str,
+        unique: Option<String>,
+        packed_count: usize,
+    ) -> ScopeEntry {
+        let keys = parameters::binding_keys(source, &self.dims.const_env, packed_count);
+        ScopeEntry {
+            source: source.to_string(),
+            unique,
+            shadowed_constants: keys
+                .into_iter()
+                .map(|key| {
+                    let value = self.dims.const_env.remove(&key);
+                    (key, value)
+                })
+                .collect(),
+            shadowed_literal: self.local_constants.remove(source),
+            shadowed_parameter_value: self.dims.parameter_values.remove(source),
+            shadowed_dimensions: self.dims.remove(source),
+            shadowed_signedness: self.dims.expression_signedness.remove(source),
+        }
+    }
+
     fn lookup(&self, source: &str) -> Option<&str> {
-        self.scopes.iter().rev().find_map(|scope| {
-            scope
+        for scope in self.scopes.iter().rev() {
+            if let Some(entry) = scope
                 .entries
                 .iter()
                 .rev()
                 .find(|entry| entry.source == source)
-                .map(|entry| entry.unique.as_str())
-        })
+            {
+                // A parameter in an inner block also hides an outer variable.
+                return entry.unique.as_deref();
+            }
+        }
+        None
     }
 
     fn rename_name(&self, name: &mut String) {
@@ -218,7 +276,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             ConstExpr::Function { args, .. } => {
                 args.iter_mut().for_each(|arg| self.rename_const(arg));
             }
-            ConstExpr::Unary { expr, .. } => self.rename_const(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.rename_const(expr)
+            }
             ConstExpr::Binary { left, right, .. } => {
                 self.rename_const(left);
                 self.rename_const(right);
@@ -585,6 +645,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => None,
             };
             let name = self.declare(signal.name(), signal.r#type().clone());
+            let automatic = match &variable.nodes.2 {
+                Some(sv_parser::Lifetime::Automatic(_)) => true,
+                Some(sv_parser::Lifetime::Static(_)) => false,
+                None => self.automatic,
+            };
+            if !automatic {
+                let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
+                self.state.statics.push((name.clone(), r#type));
+            }
             stmts.push(Stmt::Local { name, init });
         }
         Ok(stmts)
@@ -602,19 +671,50 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &self.type_aliases,
             &HashMap::default(),
         )?;
+        let mut types = parameter_types_from_const_env(&self.dims.const_env);
         for parameter in &parameters {
-            let types = parameter_types_from_const_env(&self.dims.const_env);
-            let value = parameter
-                .resolved_value(&self.dims.const_env, &types)
-                .ok_or_else(|| unsupported("local parameter whose value is not constant"))?;
-            let literal = match parameter.resolved_type(&types) {
-                Some(r#type) => format_typed_parameter_literal(value, r#type.width, r#type.signed),
-                None => value.to_string(),
+            let name = parameter.name();
+            let entry = self.take_binding(name, None, parameter.packed_ranges.len());
+            types.remove(name);
+            if !parameters::bind_parameter(
+                &mut self.dims.const_env,
+                &mut types,
+                &mut self.dims.parameter_values,
+                parameter,
+            ) {
+                return Err(unsupported("local parameter whose value is not constant"));
+            }
+            let literal = if let Some(value) = self.dims.const_env.get(name).copied() {
+                match types.get(name) {
+                    Some(ty) => format_typed_parameter_literal(value, ty.width, ty.signed),
+                    None => value.to_string(),
+                }
+            } else if let Some(Expr::Literal(value)) = self.dims.parameter_values.get(name) {
+                value.clone()
+            } else {
+                return Err(unsupported("local parameter whose value is not constant"));
             };
             self.local_constants
-                .insert(parameter.name().to_string(), literal);
+                .insert(name.to_string(), literal.clone());
+            self.dims
+                .parameter_values
+                .insert(name.to_string(), Expr::Literal(literal));
+            if let Some(dimensions) =
+                parameter_packed_dimensions(std::slice::from_ref(parameter)).remove(name)
+            {
+                self.dims.insert(name.to_string(), dimensions);
+            }
+            if let Some(ty) = types.get(name) {
+                self.dims
+                    .expression_signedness
+                    .insert(name.to_string(), ty.signed);
+            }
+            self.scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
         }
-        extend_const_env_with_parameters(&mut self.dims.const_env, &parameters);
         Ok(Vec::new())
     }
 
@@ -1195,33 +1295,34 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let sv_parser::ProceduralAssertionStatement::Immediate(assertion) = assertion else {
             return Err(unsupported("concurrent assertion"));
         };
-        let (keyword, expr, action, is_cover) = match &**assertion {
+        let (keyword, expr, action) = match &**assertion {
             sv_parser::ImmediateAssertionStatement::Simple(assertion) => match &**assertion {
                 sv_parser::SimpleImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2), false)
+                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
                 }
                 sv_parser::SimpleImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.1.nodes.1, None, true)
+                    return Ok(vec![Stmt::If {
+                        condition: procedural_truth_condition(self.expr(&stmt.nodes.1.nodes.1)?),
+                        then_body: self.statement_or_null(&stmt.nodes.2)?,
+                        else_body: Vec::new(),
+                    }]);
                 }
             },
             sv_parser::ImmediateAssertionStatement::Deferred(assertion) => match &**assertion {
                 sv_parser::DeferredImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
                 sv_parser::DeferredImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3), false)
+                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
                 }
-                sv_parser::DeferredImmediateAssertionStatement::Cover(stmt) => {
-                    ("cover", &stmt.nodes.2.nodes.1, None, true)
+                sv_parser::DeferredImmediateAssertionStatement::Cover(_) => {
+                    return Err(unsupported("deferred immediate cover"));
                 }
             },
         };
-        if is_cover {
-            return Ok(Vec::new());
-        }
         let condition = procedural_truth_condition(self.expr(expr)?);
         let (pass, fail) = match action {
             Some(sv_parser::ActionBlock::StatementOrNull(stmt)) => {
@@ -1392,6 +1493,7 @@ pub(super) fn subroutine_param_declarations<'t>(
 /// The syntax of one function or task body.
 struct SubroutineSyntax<'t> {
     name: String,
+    lifetime: Option<&'t sv_parser::Lifetime>,
     is_task: bool,
     return_type: Option<&'t sv_parser::FunctionDataTypeOrImplicit>,
     ports: Option<&'t sv_parser::TfPortList>,
@@ -1415,6 +1517,7 @@ fn function_syntax<'t>(
     Some(match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
+            lifetime: declaration.nodes.1.as_ref(),
             is_task: false,
             return_type: Some(&body.nodes.0),
             ports: body.nodes.3.nodes.1.as_ref(),
@@ -1424,6 +1527,7 @@ fn function_syntax<'t>(
         },
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
+            lifetime: declaration.nodes.1.as_ref(),
             is_task: false,
             return_type: Some(&body.nodes.0),
             ports: None,
@@ -1457,6 +1561,7 @@ fn task_syntax<'t>(
     Some(match &declaration.nodes.2 {
         sv_parser::TaskBodyDeclaration::WithPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
+            lifetime: declaration.nodes.1.as_ref(),
             is_task: true,
             return_type: None,
             ports: body.nodes.2.nodes.1.as_ref(),
@@ -1466,6 +1571,7 @@ fn task_syntax<'t>(
         },
         sv_parser::TaskBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
             name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
+            lifetime: declaration.nodes.1.as_ref(),
             is_task: true,
             return_type: None,
             ports: None,
@@ -1484,6 +1590,57 @@ fn task_syntax<'t>(
     })
 }
 
+/// Declared shape of formals and body locals, before statement lowering.
+pub(super) fn subroutine_declared_dimensions(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Option<VariablePackedDimensions> {
+    let syntax = match node {
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        _ => None,
+    }?;
+    let params =
+        subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    let mut dimensions: VariablePackedDimensions = params
+        .into_iter()
+        .map(|(name, _, ty, _)| (name, dimensions_from_type(&ty)))
+        .collect();
+    dimensions.extend(function_local_packed_dimensions_from_block_item_iter(
+        syntax.block_items,
+        tree,
+        env,
+        aliases,
+    )?);
+    Some(dimensions)
+}
+
+/// Formal shapes are needed to type assignment-pattern call arguments,
+/// even when a type query deliberately leaves the subroutine body unexpanded.
+pub(super) fn subroutine_declared_parameter_shapes(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Option<(String, Vec<VariableDimensions>)> {
+    let syntax = match node {
+        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
+        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
+        _ => None,
+    }?;
+    let params =
+        subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    Some((
+        syntax.name,
+        params
+            .into_iter()
+            .map(|(_, _, ty, _)| dimensions_from_type(&ty))
+            .collect(),
+    ))
+}
+
 /// The argument names of every function and task in the active generate
 /// items, in declaration order, keyed by their (qualified) names.
 pub(super) fn subroutine_argument_names(
@@ -1495,11 +1652,13 @@ pub(super) fn subroutine_argument_names(
     (
         HashMap<String, Vec<String>>,
         HashMap<String, Vec<VariableDimensions>>,
+        lifetimes::Directions,
     ),
     AnalyzerError,
 > {
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
+    let mut directions = HashMap::default();
     for item in generate::items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
@@ -1524,6 +1683,10 @@ pub(super) fn subroutine_argument_names(
                     dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
                 })
                 .collect();
+            let param_directions: Vec<ParamDirection> =
+                params.iter().map(|(_, direction, ..)| *direction).collect();
+            directions.insert(syntax.name.clone(), param_directions.clone());
+            directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
             names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
@@ -1531,7 +1694,7 @@ pub(super) fn subroutine_argument_names(
             shapes.insert(qualified, param_shapes);
         }
     }
-    Ok((names, shapes))
+    Ok((names, shapes, directions))
 }
 
 /// Every function and task of the active generate items, with statement
@@ -1569,12 +1732,12 @@ pub(super) fn subroutines_from_module_node_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1584,6 +1747,7 @@ pub(super) fn subroutines_from_module_node_with(
             let Some(syntax) = syntax else {
                 continue;
             };
+            let (item_dimensions, literals) = views.get(item);
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
@@ -1611,10 +1775,16 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 let mut builder = BodyBuilder::new(
                     tree,
-                    &item_dimensions,
+                    item_dimensions,
                     state,
                     system_functions::Body::Subroutine,
                 );
+                builder.automatic = match syntax.lifetime {
+                    Some(sv_parser::Lifetime::Automatic(_)) => true,
+                    Some(sv_parser::Lifetime::Static(_)) => false,
+                    None => builder.automatic,
+                };
+                let first_static = builder.state.statics.len();
                 builder.push_scope();
                 let mut lowered_params = Vec::new();
                 for (source, direction, r#type, default) in params {
@@ -1642,6 +1812,13 @@ pub(super) fn subroutines_from_module_node_with(
                     body.extend(builder.statement(stmt)?);
                 }
                 builder.pop_scope();
+                let statics: HashSet<String> = builder
+                    .state
+                    .statics
+                    .split_off(first_static)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
                 if return_var.is_some() {
                     let mut expressionless = false;
                     for stmt in &body {
@@ -1662,8 +1839,8 @@ pub(super) fn subroutines_from_module_node_with(
                     body,
                 };
                 for stmt in &mut subroutine.body {
-                    qualify_stmt(&item, stmt);
-                    substitute_stmt_constants(stmt, &item.env, &literals);
+                    qualify_stmt(item, stmt);
+                    substitute_stmt_constants(stmt, &item.env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {
@@ -1671,9 +1848,20 @@ pub(super) fn subroutines_from_module_node_with(
                         *default = substitute_expr_constants_with_parameter_literals(
                             default.clone(),
                             &item.env,
-                            &literals,
+                            literals,
                         );
                     }
+                }
+                lifetimes::check_subroutine_statics(
+                    &subroutine,
+                    &statics,
+                    builder.state.subroutine_directions,
+                )?;
+                if !builder.automatic {
+                    lifetimes::check_static_result(
+                        &subroutine,
+                        builder.state.subroutine_directions,
+                    )?;
                 }
                 Ok(subroutine)
             })();
@@ -1748,16 +1936,20 @@ pub(super) fn initial_processes_from_module_node(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
-    for item in generate::items(node, tree, const_env, &type_aliases)? {
+    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         if item.is_parameter_declaration() {
             continue;
         }
-        let item_dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
         if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
             item.node.declaration()
             && let sv_parser::DataDeclaration::Variable(variable) = &**data
         {
+            if !variable.nodes.4.nodes.0.contents().into_iter().any(|assignment| matches!(assignment, sv_parser::VariableDeclAssignment::Variable(assignment) if assignment.nodes.2.is_some())) {
+                continue;
+            }
+            let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
             for assignment in variable.nodes.4.nodes.0.contents() {
                 let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
@@ -1768,17 +1960,17 @@ pub(super) fn initial_processes_from_module_node(
                 };
                 let name = identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), tree)
                     .ok_or_else(|| unsupported("variable declaration initializer"))?;
-                if let Some(target) = selected_unpacked_shape(&name, 0, &item_dimensions) {
+                if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     check_unpacked_array_assignment(
                         expr,
                         &target,
                         || format!("initializer of `{name}`"),
                         tree,
-                        &item_dimensions,
+                        item_dimensions,
                     )?;
                 }
                 let lhs = LValue::Ident(name);
-                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, &item_dimensions)?;
+                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, item_dimensions)?;
                 body.push(Stmt::Assign {
                     lhs,
                     rhs,
@@ -1786,8 +1978,8 @@ pub(super) fn initial_processes_from_module_node(
                 });
             }
             for stmt in &mut body {
-                substitute_stmt_constants(stmt, &item.env, &literals);
-                qualify_stmt(&item, stmt);
+                substitute_stmt_constants(stmt, &item.env, literals);
+                qualify_stmt(item, stmt);
                 substitute_stmt_constants(stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
@@ -1806,16 +1998,17 @@ pub(super) fn initial_processes_from_module_node(
         let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
             continue;
         };
+        let (item_dimensions, literals) = views.get(item);
         let mut builder = BodyBuilder::new(
             tree,
-            &item_dimensions,
+            item_dimensions,
             state,
             system_functions::Body::Initial,
         );
         let mut body = builder.statement_or_null(&initial.nodes.1)?;
         for stmt in &mut body {
-            substitute_stmt_constants(stmt, &item.env, &literals);
-            qualify_stmt(&item, stmt);
+            substitute_stmt_constants(stmt, &item.env, literals);
+            qualify_stmt(item, stmt);
             substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {

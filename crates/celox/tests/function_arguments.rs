@@ -61,11 +61,15 @@ fn test_comb_nested_output_copyout_stops_at_early_return(sim) {
 }
 
 fn test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements(sim) {
+    // Veryl 0.22.0's simulator copies the whole formal into each concatenated actual instead of
+    // splitting it.
     @ignore_on(veryl);
     @case "function_arguments::test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements";
 }
 
 fn test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff(sim) {
+    // Veryl 0.22.0 rejects the always_ff half (function_output_in_always_ff), and its simulator
+    // ignores the formal's sign in the comb copy-out.
     @omit_sv;
     @ignore_on(veryl);
     @case "function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff";
@@ -137,6 +141,8 @@ fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
 }
 
 fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
+    // Veryl rejects function outputs in always_ff (function_output_in_always_ff); this is a
+    // Celox extension.
     @omit_sv;
     @ignore_on(veryl);
     @case "function_arguments::test_ff_output_copyout_to_dynamic_slice_preserves_other_bits";

@@ -1,0 +1,530 @@
+{
+  "base_commit": "18201dead24182c669f7a115df82aa78032d8466",
+  "branch": "fix/partial-word-arithmetic-shift",
+  "specification": [
+    "IEEE 1800-2023 11.4.10 Shift operators: a signed arithmetic right shift repeats the logical sign bit, including X/Z; an X/Z count makes the result unknown.",
+    "IEEE 1800-2023 11.8.1 Rules for expression types: expression signedness follows operand/context rules; the count is unsigned and does not determine shift signedness."
+  ],
+  "overlap_with_1157": {
+    "evidence_commit": "f7b3cb00e",
+    "shared_change": "x86 four_state.rs runtime SAR mask selects ShiftDir::ArithRight",
+    "scope": "No array query tables or other #1063 implementation changes are imported."
+  },
+  "minimal_source": "module Top(input logic signed [64:0] a, input logic [31:0] n, output logic signed [64:0] y); assign y = a >>> n; endmodule",
+  "minimal_observation": {
+    "n": 1,
+    "backends_checked": [
+      "native (x86_64)",
+      "native_parallel (x86_64)",
+      "cranelift",
+      "cranelift_parallel",
+      "wasm",
+      "interpreter",
+      "native (AArch64 via QEMU)",
+      "native_parallel (AArch64 via QEMU)"
+    ],
+    "sign_z": {
+      "input_payload": "0x5",
+      "input_mask": "0x10000000000000000",
+      "before": {
+        "payload": "0x2",
+        "mask": "0x8000000000000000"
+      },
+      "after": {
+        "payload": "0x2",
+        "mask": "0x18000000000000000"
+      }
+    },
+    "sign_x": {
+      "input_payload": "0x10000000000000005",
+      "input_mask": "0x10000000000000000",
+      "before": {
+        "payload": "0x8000000000000002",
+        "mask": "0x8000000000000000"
+      },
+      "after": {
+        "payload": "0x18000000000000002",
+        "mask": "0x18000000000000000"
+      }
+    }
+  },
+  "causes": {
+    "cranelift_and_wasm": "Out-of-range words used the logical sign, but the partial top source word was not sign-extended before word selection/carry. Cranelift register and memory paths both needed normalization.",
+    "x86": "The value path used physical bit 63 without first extending the logical sign of a partial word. Runtime masks also selected logical right shift; narrow SAR masks needed logical-width sign extension.",
+    "interpreter": "The wide SAR implementation intentionally copied the compiled whole-word fill behavior, leaving partial-word padding clear.",
+    "scalar_counts": "Cranelift/WASM machine shifts wrapped large counts; scalar SAR now saturates its count to the physical sign-fill distance in both planes.",
+    "arm64": "Confirmed on QEMU: the 65-bit X/Z native and parallel baselines lose the sign fill. Extend logical top words in constant/runtime payload and mask paths, select arithmetic runtime mask shifts, and extend narrow scalar masks. Preserve the ARM-specific unknown-count handling."
+  },
+  "portable_cases": {
+    "veryl_group": "partial_word_shift",
+    "systemverilog_cases": [
+      "operators::partial_word_shift_sign_z_65",
+      "operators::partial_word_shift_sign_x_65"
+    ],
+    "widths": [
+      63,
+      64,
+      65,
+      95,
+      127,
+      128,
+      129,
+      193,
+      257
+    ],
+    "runtime_counts": [
+      0,
+      1,
+      2,
+      31,
+      62,
+      63,
+      64,
+      65,
+      126,
+      127,
+      128,
+      129,
+      "width-1",
+      "width",
+      "width+1",
+      "0xffffffff"
+    ],
+    "constant_counts": [
+      1,
+      64,
+      "width",
+      "0xffffffff"
+    ],
+    "states": "Known zero/one and Z/X signs; lower unknown bits; two/four-state mode; temporary padding checked in wider concatenation consumers. Only the oracle clamps counts with min(shift,width).",
+    "count_widths": [
+      32,
+      129,
+      257
+    ]
+  },
+  "validation": {
+    "environment": "nix develop, locked Cargo dependencies, default mbx-managed target/",
+    "new_celox_cases": {
+      "veryl_backend_variants_passed": 48,
+      "sv_backend_variants_passed": 10,
+      "ignored": 0
+    },
+    "existing_behavior": {
+      "integration_binaries": 13,
+      "passed": 1788,
+      "existing_ignored_retained": 10,
+      "targets": [
+        "cast_width_four_state",
+        "concat_operators",
+        "four_state",
+        "native_shift_boundaries",
+        "operators",
+        "parameterized_ops",
+        "shift_bug_test",
+        "shift_signedness",
+        "unknown_shift_counts",
+        "wide_context_width",
+        "wide_data",
+        "wide_operators",
+        "wide_shift_mem"
+      ]
+    },
+    "unit_tests": {
+      "celox": 92,
+      "celox-backend-cranelift": 14,
+      "celox-backend-wasm": 5,
+      "celox-backend-x86": 605,
+      "celox-test-suite": 12
+    },
+    "format": "cargo fmt --all -- --check passed",
+    "lint": "cargo clippy --locked -p celox-backend-cranelift -p celox-backend-x86 -p celox-backend-wasm -p celox -p celox-test-suite --all-targets --features celox/systemverilog,celox-test-suite/icarus,celox-test-suite/verilator -- -D warnings passed",
+    "napi": {
+      "build": "nix develop --command pnpm --filter @celox-sim/celox-napi build:debug -- --locked",
+      "direct_regression": "288 value/mask assertions passed for 65-bit signed SAR with O0/O1/O2, threads=1/4, signs 0/1/Z/X, and counts 0/1/63/64/65/0xffffffff.",
+      "js_integration": "pnpm --filter @celox-sim/celox exec vitest run src/e2e.test.ts src/napi-shared-memory-lifetime.test.ts: 108 passed in 2 files."
+    },
+    "commands": [
+      "cargo test --locked -p celox --features systemverilog --test partial_word_shift -- --nocapture (five original cases: 40 passed); after adding the runtime-only case, cargo test --locked -p celox --features systemverilog --test partial_word_shift two_state_runtime_matrix -- --nocapture (8 passed)",
+      "cargo test --locked -p celox --features systemverilog --test systemverilog partial_word_shift -- --nocapture",
+      "cargo test --locked -p celox --features systemverilog --test shift_signedness --test shift_bug_test --test wide_shift_mem --test wide_operators --test wide_context_width --test wide_data --test four_state --test operators --test concat_operators --test parameterized_ops --test native_shift_boundaries --test unknown_shift_counts --test cast_width_four_state",
+      "cargo test --locked -p celox-backend-x86 -p celox-backend-cranelift -p celox-backend-wasm -p celox-test-suite -p celox --features celox/systemverilog --lib (celox and Cranelift passed; old WASM expectation failed). After correcting that expectation, cargo test --locked -p celox-backend-x86 -p celox-backend-wasm -p celox-test-suite --lib passed",
+      "cargo run --locked -p celox-test-suite --features icarus,verilator --bin verify-icarus -- --filter partial_word_shift:: --jobs 2; the appended runtime-only case was additionally run with --filter partial_word_shift::two_state_runtime_matrix",
+      "cargo run --locked -p celox-test-suite --features icarus,verilator --bin verify-verilator -- --filter partial_word_shift:: --jobs 2; also run with Verilator -O0. The appended runtime-only case was additionally run on default Verilator with --filter partial_word_shift::two_state_runtime_matrix",
+      "cargo run --locked -p celox-test-suite --features icarus,verilator --bin verify-sv-icarus -- --filter partial_word_shift --jobs 2",
+      "cargo run --locked -p celox-test-suite --features icarus,verilator --bin verify-sv-verilator -- --filter partial_word_shift --jobs 2"
+    ],
+    "scope": "Initial x86_64 validation before review. The subsequent ARM64 execution and wider-count coverage are recorded under review_validation.",
+    "resolved_testbench_build_issue": "The first Verilator build timed out at 120 seconds because variable left shifts widened generated oracle arithmetic to 4096 bits. Explicit width/sign/full-mask literals and bitwise fill selection reduced it to 384 bits; default and -O0 builds then completed. All stimuli/assertions were retained."
+  },
+  "external_results": {
+    "icarus-veryl": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 0,
+        "passed": 5,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 0
+      },
+      "cases": [
+        {
+          "name": "partial_word_shift::four_state_matrix",
+          "status": "passed",
+          "detail": ""
+        },
+        {
+          "name": "partial_word_shift::sar_padding_does_not_escape",
+          "status": "passed",
+          "detail": ""
+        },
+        {
+          "name": "partial_word_shift::sign_x_65",
+          "status": "passed",
+          "detail": ""
+        },
+        {
+          "name": "partial_word_shift::sign_z_65",
+          "status": "passed",
+          "detail": ""
+        },
+        {
+          "name": "partial_word_shift::two_state_matrix",
+          "status": "passed",
+          "detail": ""
+        }
+      ]
+    },
+    "icarus-runtime": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 0,
+        "passed": 1,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 0
+      },
+      "cases": [
+        {
+          "name": "partial_word_shift::two_state_runtime_matrix",
+          "status": "passed",
+          "detail": ""
+        }
+      ]
+    },
+    "icarus-sv": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 0,
+        "passed": 2,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 0
+      },
+      "cases": [
+        {
+          "name": "operators::partial_word_shift_sign_x_65",
+          "status": "passed",
+          "detail": ""
+        },
+        {
+          "name": "operators::partial_word_shift_sign_z_65",
+          "status": "passed",
+          "detail": ""
+        }
+      ]
+    },
+    "verilator-veryl": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 1,
+        "passed": 0,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 4
+      },
+      "cases": [
+        {
+          "name": "partial_word_shift::four_state_matrix",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sar_padding_does_not_escape",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sign_x_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sign_z_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::two_state_matrix",
+          "status": "mismatch",
+          "detail": "partial_word_shift::two_state_matrix at 168:11: assert_eq c63_64: expected 0x7fffffffffffffff, got 0x0 (constant SAR width=63, count=64)"
+        }
+      ]
+    },
+    "verilator-runtime": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 0,
+        "passed": 1,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 0
+      },
+      "cases": [
+        {
+          "name": "partial_word_shift::two_state_runtime_matrix",
+          "status": "passed",
+          "detail": ""
+        }
+      ]
+    },
+    "verilator-sv": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 0,
+        "passed": 0,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 2
+      },
+      "cases": [
+        {
+          "name": "operators::partial_word_shift_sign_x_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "operators::partial_word_shift_sign_z_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        }
+      ]
+    },
+    "verilator-O0-veryl": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 0,
+        "mismatch": 1,
+        "passed": 0,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 4
+      },
+      "cases": [
+        {
+          "name": "partial_word_shift::four_state_matrix",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sar_padding_does_not_escape",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sign_x_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::sign_z_65",
+          "status": "unsupported",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "partial_word_shift::two_state_matrix",
+          "status": "mismatch",
+          "detail": "partial_word_shift::two_state_matrix at 168:11: assert_eq c63_64: expected 0x7fffffffffffffff, got 0x0 (constant SAR width=63, count=64)"
+        }
+      ]
+    }
+  },
+  "external_limitation": {
+    "status": "unresolved external-tool mismatch, retained without an exclusion",
+    "tool": "Verilator 5.052",
+    "case": "partial_word_shift::two_state_matrix",
+    "stimulus": "63-bit signed a=0x4000000000000005, constant count=64",
+    "expected": "0x7fffffffffffffff",
+    "observed": "0x0",
+    "generated_cpp": "VL_EXTENDS_QI(63,1,(CData)(a63 >> 63)) reads physical bit 63; the logical sign is bit 62.",
+    "additional_check": "Also fails with Verilator -O0. The separate runtime-only matrix passes unchanged on the default Verilator configuration. Four-state unsupported results are never counted as passes."
+  },
+  "review_validation": {
+    "base_merge": "911903723 (master changes merged without importing #1063 or #1157)",
+    "environment": "nix develop, locked dependencies, default mbx-managed target/. AArch64 cross tools use the locked Nix inputs; execution uses QEMU 11.1.0 with cortex-a53.",
+    "baselines": {
+      "arm64_minimal": "The unchanged ARM64 production sources reproduce both recorded 65-bit X/Z payload/mask failures in native and native_parallel: four failed assertions. Fixed production sources were restored byte for byte after the baseline run; their seven-case native/parallel suite had already passed.",
+      "arm64_scalar": "Direct SIR width=63, runtime count=1: payload=7674133765039325226; mask=4593671619917905920 instead of 9205357638345293824.",
+      "x86_padded_mask": "Direct SIR lhs=65, count width=129, destination width=65, runtime count=64, Z sign: payload=0; mask=0xffffffffffffffff instead of 0x1ffffffffffffffff. The HDL builder normally narrows counts, so the backend regression constructs SIR directly."
+    },
+    "new_celox_cases": {
+      "host_veryl_backend_variants_passed": 56,
+      "host_sv_backend_variants_passed": 10,
+      "arm64_native_and_parallel_passed": 14,
+      "new_ignored": 0
+    },
+    "host_unit_tests": {
+      "celox": 92,
+      "celox-backend-arm64": 43,
+      "celox-backend-cranelift": 14,
+      "celox-backend-wasm": 5,
+      "celox-backend-x86": 606,
+      "celox-test-suite": 24
+    },
+    "arm64_execution": {
+      "unit_tests_passed": 88,
+      "new_shared_cases_passed": 14,
+      "existing_language_cases_passed": 261,
+      "existing_language_binaries": [
+        "four_state",
+        "shift_signedness",
+        "unknown_shift_counts",
+        "wide_operators",
+        "wide_shift_mem"
+      ],
+      "direct_sir_regression": "180 width/result/count/constant combinations, known 0/1 and X/Z signs, unknown counts; actual generated code executed in QEMU."
+    },
+    "host_existing_behavior": {
+      "integration_binaries": 13,
+      "passed": 1788,
+      "existing_ignored_retained": 10
+    },
+    "metadata_tests": "16 Rust adapter/report/script-identity tests and seven external report-gate script tests passed. Historical reports may omit newly passing cases; the live daily gate still requires every catalogue case and exact reviewed failures.",
+    "format": "cargo fmt --all -- --check passed",
+    "lint": "cargo clippy --locked -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-x86 -p celox-backend-wasm -p celox -p celox-test-suite --all-targets --features celox/systemverilog,celox-test-suite/icarus,celox-test-suite/verilator -- -D warnings passed",
+    "napi": "Fresh debug build; 288 value/mask checks across O0/O1/O2 and threads=1/4; 108 JS integration tests passed.",
+    "external_results": {
+      "icarus-veryl": {
+        "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "counts": {
+          "compile_error": 0,
+          "emission_error": 0,
+          "ignored": 0,
+          "mismatch": 0,
+          "passed": 7,
+          "rejected": 0,
+          "runtime_error": 0,
+          "unexpected_accept": 0,
+          "unsupported": 0
+        },
+        "run_counts": {
+          "fresh": 7,
+          "reused": 0
+        }
+      },
+      "verilator-veryl": {
+        "version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "counts": {
+          "compile_error": 0,
+          "emission_error": 0,
+          "ignored": 0,
+          "mismatch": 1,
+          "passed": 1,
+          "rejected": 0,
+          "runtime_error": 0,
+          "unexpected_accept": 0,
+          "unsupported": 5
+        },
+        "run_counts": {
+          "fresh": 7,
+          "reused": 0
+        }
+      },
+      "icarus-sv": {
+        "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "counts": {
+          "compile_error": 0,
+          "emission_error": 0,
+          "ignored": 0,
+          "mismatch": 0,
+          "passed": 2,
+          "rejected": 0,
+          "runtime_error": 0,
+          "unexpected_accept": 0,
+          "unsupported": 0
+        },
+        "run_counts": {
+          "fresh": 2,
+          "reused": 0
+        }
+      },
+      "verilator-sv": {
+        "version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "counts": {
+          "compile_error": 0,
+          "emission_error": 0,
+          "ignored": 0,
+          "mismatch": 0,
+          "passed": 0,
+          "rejected": 0,
+          "runtime_error": 0,
+          "unexpected_accept": 0,
+          "unsupported": 2
+        },
+        "run_counts": {
+          "fresh": 2,
+          "reused": 0
+        }
+      }
+    },
+    "verilator_failure_gate": "A fresh seven-case report retained one mismatch, one pass and five four-state unsupported cases. check-external-suite-report.mjs accepted the exact tool/version/case/diagnostic baseline. Only the reviewed mismatch row was added to verification/verilator.json; no exclusion or passing-row refresh was added.",
+    "proof": {
+      "new_cases_observation_verified": 7,
+      "new_case_reads": 2274,
+      "new_wide_count_reads": 136,
+      "new_wide_count_queries_replayed": 3978,
+      "unit_tests_passed": 21,
+      "coverage_contract": "720/744 actual passes, 24 unchanged exceptions, 709 observation-verified cases. Rechecked complete query/identity audits using unchanged evidence from CI run 38019679108 plus the newly executed wider-count case. Existing contract rows and exceptions are unchanged."
+    },
+    "commands": [
+      "cargo test --locked -p celox-backend-x86 -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-wasm -p celox-test-suite -p celox --features celox/systemverilog,celox-test-suite/icarus,celox-test-suite/verilator --lib",
+      "cargo test --locked -p celox --features systemverilog --test partial_word_shift",
+      "cargo test --locked -p celox --features systemverilog --test systemverilog partial_word_shift",
+      "cargo test --locked -p celox-test-suite --features icarus,verilator --test external_adapter --test retained_reports --test script_identity",
+      "cargo test --target aarch64-unknown-linux-gnu --locked -p celox-backend-arm64 --lib (cross toolchain and QEMU runner)",
+      "cargo test --target aarch64-unknown-linux-gnu --locked -p celox --features systemverilog --test partial_word_shift native (cross toolchain and QEMU runner)",
+      "verify-icarus / verify-verilator --fresh --filter partial_word_shift:: --output target/partial-word-shift-review/<tool> --jobs 2",
+      "verify-sv-icarus / verify-sv-verilator --filter partial_word_shift --output target/partial-word-shift-review/<tool>-sv --jobs 2",
+      "node scripts/check-external-suite-report.mjs <fresh-results> crates/celox-test-suite/verification/verilator.json <live-catalogue> 1 veryl",
+      "lydite-celox-suite target/partial-word-shift-review/proof-wide-counts partial_word_shift::four_state_wide_counts; coverage.collect validates its audits; replay_audit.py replays every saved query",
+      "coverage.py --raw target/partial-word-shift-review/proof-combined/raw --raw-exit 1 --out target/partial-word-shift-review/proof-combined/coverage"
+    ]
+  }
+}

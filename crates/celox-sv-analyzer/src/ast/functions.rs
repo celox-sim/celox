@@ -12,20 +12,20 @@ pub(super) fn functions_from_module_node(
     let type_aliases =
         type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
     let active = generate::items(node.clone(), syntax_tree, const_env, &type_aliases)?;
+    let mut views = generate::ScopeViews::new(packed_dimensions);
     for (item, child) in active
         .iter()
         .flat_map(|item| item.node.node().into_iter().map(move |child| (item, child)))
     {
         if let RefNode::TaskDeclaration(declaration) = child {
-            let task_dimensions = item.dimensions(packed_dimensions);
+            let task_dimensions = views.dimensions(item);
             let const_env = &item.env;
             let statements = match &declaration.nodes.2 {
                 sv_parser::TaskBodyDeclaration::WithPort(body) => &body.nodes.5,
                 sv_parser::TaskBodyDeclaration::WithoutPort(body) => &body.nodes.4,
             };
             let expression_form = statements.iter().all(|statement| {
-                validate_function_statement_or_null(statement, syntax_tree, &task_dimensions)
-                    .is_ok()
+                validate_function_statement_or_null(statement, syntax_tree, task_dimensions).is_ok()
             });
             let task = expression_form
                 .then(|| {
@@ -34,7 +34,7 @@ pub(super) fn functions_from_module_node(
                         syntax_tree,
                         const_env,
                         &type_aliases,
-                        &task_dimensions,
+                        task_dimensions,
                     )
                 })
                 .flatten()
@@ -63,8 +63,8 @@ pub(super) fn functions_from_module_node(
         };
         let mut literals = item.literals.clone();
         let const_env = &item.env;
-        let function_dimensions = item.dimensions(packed_dimensions);
-        let packed_dimensions = &function_dimensions;
+        let function_dimensions = views.dimensions(item);
+        let packed_dimensions = function_dimensions;
         // The expression form of a body is only used where calls are still
         // inlined (port connections). Statement bodies are lowered from the
         // subroutine IR, so a body without an expression form keeps its
@@ -546,6 +546,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -624,6 +630,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -716,6 +728,7 @@ pub(super) fn task_from_declaration(
         outputs,
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })
@@ -895,6 +908,22 @@ pub(super) fn function_return_type(
             )
         }
     }
+}
+
+/// The declared return shape is needed by `$dimensions`, before call inlining.
+pub(super) fn function_return_dimensions(
+    node: &sv_parser::FunctionDataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<usize> {
+    function_type_from_ref_node(
+        RefNode::FunctionDataTypeOrImplicit(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .map(|ty| ty.unpacked_ranges().len() + ty.packed_ranges().len())
 }
 
 pub(super) fn function_return_first_packed_dimension_width(
@@ -1897,6 +1926,12 @@ fn function_signature_from_declaration(
         outputs: Vec::new(),
         return_width: return_type.map(|r#type| r#type.width),
         return_first_packed_dimension_width,
+        return_dimensions: function_return_dimensions(
+            return_node,
+            syntax_tree,
+            const_env,
+            type_aliases,
+        ),
         return_signed: return_type.is_some_and(|r#type| r#type.signed),
         return_is_2state: function_return_is_2state(return_node, syntax_tree, type_aliases),
     })
@@ -1932,6 +1967,7 @@ fn task_signature_from_declaration(
         outputs: Vec::new(),
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })

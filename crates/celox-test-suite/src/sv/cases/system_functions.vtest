@@ -486,3 +486,805 @@ a=0a b=00a
 a=0a  10
 0a|
 "#))
+
+; IEEE 1800-2023 11.7: signing casts retain the operand width and bits.
+(case signed_casts_in_parameters
+  (four_state)
+  (source "signed_parameters.sv" #"
+    module Top(output logic [31:0] signed_value, unsigned_value, nested,
+               output logic [15:0] unknown, output logic [7:0] generated);
+      localparam int P = $signed(8'hff);
+      localparam U = $unsigned(8'shff);
+      localparam N = $signed($unsigned(8'sh80));
+      localparam logic signed [15:0] X = $signed(8'bx001_0101);
+      assign signed_value = P;
+      assign unsigned_value = U;
+      assign nested = N;
+      assign unknown = X;
+      if (P == -1 && U == 255 && N == -128 && $bits(U) == 8) begin
+        assign generated = 8'ha5;
+      end else begin
+        assign generated = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signed_value 0xffffffff)
+  (assert_eq unsigned_value 255)
+  (assert_eq nested 0xffffff80)
+  (assert_eq unknown (fourstate 0xff95 0xff80))
+  (assert_eq generated 0xa5))
+
+; IEEE 1800-2023 20.7: unpacked dimensions precede packed dimensions,
+; bounds retain declaration direction, and integer return values are signed.
+(case array_queries_preserve_bounds_and_dimensions
+  (source "array_queries.sv" #"
+    module Top(output logic [31:0] result, selected, shadowed, parameter_value);
+      typedef logic [0:3][3:0] word_t;
+      word_t mem [-2:1][8:6];
+      localparam logic [9:6] BOUND = 0;
+      localparam int BL = $left(BOUND);
+      localparam int P = $left(mem) + $right(mem, 2) + $low(word_t, 2)
+                       + $high(word_t) + $dimensions(mem) + $unpacked_dimensions(mem);
+      function automatic int query(input logic [11:8] mem);
+        return $left(mem) + $right(mem) + $dimensions(mem);
+      endfunction
+      assign result = $left(mem) + $right(mem, 2) + $low(mem, 3)
+                    + $high(mem, 4) + $dimensions(mem) + $unpacked_dimensions(mem)
+                    + $increment(mem) + $increment(mem, 2) + $increment(word_t)
+                    + $dimensions(int) + $left(int) + $unpacked_dimensions(int);
+      assign selected = $left(mem[0]) + $right(mem[0][7]) + $dimensions(mem[0][7]);
+      assign shadowed = query(0);
+      assign parameter_value = P + BL + $left(BOUND[8:7]);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 44)
+  (assert_eq selected 13)
+  (assert_eq shadowed 20)
+  (assert_eq parameter_value 23))
+
+(case array_queries_handle_runtime_dimensions
+  (four_state)
+  (source "runtime_queries.sv" #"
+    module Top(input logic [31:0] dimension, output integer l, r, lo, hi, inc);
+      logic [7:4] mem [2:5];
+      assign l = $left(mem, dimension);
+      assign r = $right(mem, dimension);
+      assign lo = $low(mem, dimension);
+      assign hi = $high(mem, dimension);
+      assign inc = $increment(mem, dimension);
+    endmodule
+  "#)
+  (top Top)
+  (for (d l r lo hi inc) (list (1 2 5 2 5 0xffffffff) (2 7 4 4 7 1))
+    (modify (set dimension d))
+    (assert_eq l l) (assert_eq r r) (assert_eq lo lo) (assert_eq hi hi) (assert_eq inc inc))
+  (for d (list 0 3 0x08000001 0xffffffff (fourstate 0xffffffff 0xffffffff))
+    (modify (set dimension d))
+    (expand name (l r lo hi inc)
+      (assert_eq {name} (fourstate 0xffffffff 0xffffffff)))))
+
+; IEEE 1800-2023 16.3: cover executes its pass action only for true.
+(case immediate_cover_executes_pass_statement
+  (source "cover_action.sv" #"
+    module Top(input bit clk, input logic condition, output logic [7:0] comb, registered);
+      always_comb begin
+        comb = 0;
+        cover (condition) comb = 8'ha5;
+      end
+      always_ff @(posedge clk) begin
+        registered <= 0;
+        cover (condition) registered <= 8'h5a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (condition c r) (list (0 0 0) (1 0xa5 0x5a) (0 0 0) (1 0xa5 0x5a))
+    (modify (set condition condition))
+    (tick clk)
+    (assert_eq comb c)
+    (assert_eq registered r)))
+
+(case immediate_cover_handles_unknown_conditions
+  (four_state)
+  (source "cover_action.sv" #"
+    module Top(input bit clk, input logic condition, output logic [7:0] comb, registered);
+      always_comb begin
+        comb = 0;
+        cover (condition) comb = 8'ha5;
+      end
+      always_ff @(posedge clk) begin
+        registered <= 0;
+        cover (condition) registered <= 8'h5a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (condition c r) (list ((fourstate 1 1) 0 0) ((fourstate 0 1) 0 0))
+    (modify (set condition condition))
+    (tick clk)
+    (assert_eq comb c)
+    (assert_eq registered r)))
+
+; IEEE 1800-2023 20.7: count packed and unpacked dimensions, with the
+; predefined integer types treated as one packed dimension.
+(case dimensions_counts_declared_arrays
+  (source "dimensions_arrays.sv" #"
+    module Top(output int scalar, vector, matrix, mixed, atom, one_bit);
+        logic s;
+        logic [7:0] v;
+        logic [1:0][3:0] p;
+        logic [1:0][3:0] a [2:4][0:5];
+        integer i;
+        logic [0:0] b;
+        assign scalar = $dimensions(s);
+        assign vector = $dimensions(v);
+        assign matrix = $dimensions(p);
+        assign mixed = $dimensions(a);
+        assign atom = $dimensions(i);
+        assign one_bit = $dimensions(b);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq scalar 0)
+  (assert_eq vector 1)
+  (assert_eq matrix 2)
+  (assert_eq mixed 4)
+  (assert_eq atom 1)
+  (assert_eq one_bit 1))
+
+(case dimensions_preserves_selected_and_expression_types
+  (source "dimensions_expressions.sv" #"
+    module Top(input logic [1:0][3:0] a, input logic index,
+               output int whole, element, scalar, slice, part, unpacked,
+               output int sum, literal_value, string_value, member, member_element,
+               output int returned, negated, complemented, shifted, output logic [63:0] inverted,
+               output logic negative, output int registered, input logic clk);
+        logic [1:0][3:0] memory [0:1][0:2];
+        typedef struct packed { logic [1:0][3:0] pair; logic flag; } record_t;
+        record_t record_value;
+        function automatic logic [1:0][3:0] identity(input logic [7:0] v);
+            $display("operand must not run");
+            return v;
+        endfunction
+        assign whole = $dimensions((a));
+        assign element = $dimensions(a[index]);
+        assign scalar = $dimensions(a[index][0]);
+        assign slice = $dimensions(a[1:0]);
+        assign part = $dimensions(a[0][3:1]);
+        assign unpacked = $dimensions(memory[index]);
+        assign sum = $dimensions(a + a);
+        assign literal_value = $dimensions(32'd7);
+        assign string_value = $dimensions("hello");
+        assign member = $dimensions(record_value.pair);
+        assign member_element = $dimensions(record_value.pair[0]);
+        assign returned = $dimensions(identity(a));
+        assign negated = $dimensions(-a);
+        assign complemented = $dimensions(~a);
+        assign shifted = $dimensions(a << 1);
+        assign inverted = ~$dimensions(a);
+        assign negative = ($dimensions(a) - 3) < 0;
+        always_ff @(posedge clk) registered <= $dimensions(a);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x5a 0xff)
+    (modify (set a value) (set index (& value 1)))
+    (tick clk)
+    (assert_eq whole 2)
+    (assert_eq element 1)
+    (assert_eq scalar 0)
+    (assert_eq slice 2)
+    (assert_eq part 1)
+    (assert_eq unpacked 3)
+    (assert_eq sum 1)
+    (assert_eq literal_value 1)
+    (assert_eq string_value 1)
+    (assert_eq member 2)
+    (assert_eq member_element 1)
+    (assert_eq returned 2)
+    (assert_eq negated 2)
+    (assert_eq complemented 2)
+    (assert_eq shifted 2)
+    (assert_eq inverted (trunc 64 (~ 2)))
+    (assert_eq negative 1)
+    (assert_eq registered 2)
+    (expect_output "")))
+
+(case dimensions_resolves_types_and_constant_scopes
+  (source "dimensions_types.sv" #"
+    module Child #(parameter type T = logic [1:0][3:0])
+                  (output int result, output logic [$dimensions(T):0] bits_value);
+        localparam N = $dimensions(T);
+        assign result = N;
+        assign bits_value = '1;
+    endmodule
+    module Top(output int direct_type, alias_type, unpacked_type, atom_type,
+               output int original, overridden, scoped, local_shape, cast_shape,
+               output logic [2:0] original_bits, output logic [1:0] overridden_bits,
+               output logic [7:0] generated, output int result_bits, one_bit_parameter, scalar_parameter,
+               output int string_type, real_type, real_literal);
+        typedef logic [1:0][3:0] pair_t;
+        typedef pair_t memory_t [0:2][0:3];
+        typedef logic [1:0][2:0][3:0] local_t;
+        localparam pair_t P = '0;
+        localparam logic [0:0] SINGLE = '0;
+        localparam logic SCALAR = '0;
+        localparam N = $dimensions(P);
+        assign direct_type = $dimensions(logic [1:0][2:0][3:0]);
+        assign alias_type = $dimensions(pair_t);
+        assign unpacked_type = $dimensions(memory_t);
+        assign atom_type = $dimensions(longint);
+        assign cast_shape = $dimensions(pair_t'(8'h5a));
+        assign result_bits = $bits($dimensions(P));
+        assign one_bit_parameter = $dimensions(SINGLE);
+        assign scalar_parameter = $dimensions(SCALAR);
+        assign string_type = $dimensions(string);
+        assign real_type = $dimensions(real);
+        assign real_literal = $dimensions(3.14);
+        Child a(.result(original), .bits_value(original_bits));
+        Child #(.T(int)) b(.result(overridden), .bits_value(overridden_bits));
+        if (N == 2 && $dimensions(P[0]) == 1) begin : g
+            local_t x;
+            localparam C = $dimensions(x);
+            assign scoped = C;
+            assign generated = $dimensions(x)'('1);
+        end else begin
+            assign scoped = -1;
+            assign generated = 0;
+        end
+        logic [7:0] x;
+        function automatic int query(input logic [1:0][3:0] x);
+            logic [1:0][2:0][3:0] local_value;
+            return $dimensions(x) * 10 + $dimensions(local_value);
+        endfunction
+        assign local_shape = query(8'h00);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_type 3)
+  (assert_eq alias_type 2)
+  (assert_eq unpacked_type 4)
+  (assert_eq atom_type 1)
+  (assert_eq original 2)
+  (assert_eq overridden 1)
+  (assert_eq scoped 3)
+  (assert_eq local_shape 23)
+  (assert_eq cast_shape 2)
+  (assert_eq original_bits 7)
+  (assert_eq overridden_bits 3)
+  (assert_eq generated 7)
+  (assert_eq result_bits 32)
+  (assert_eq one_bit_parameter 1)
+  (assert_eq scalar_parameter 0)
+  (assert_eq string_type 1)
+  (assert_eq real_type 0)
+  (assert_eq real_literal 0))
+
+(case dimensions_is_independent_of_unknown_values
+  (four_state)
+  (source "dimensions_four_state.sv" #"
+    module Top(input logic [1:0][3:0] a, output int runtime_value, parameter_value,
+               output int scalar_value, output logic [31:0] generated);
+        localparam logic [1:0][3:0] P = 8'b10xz_11xz;
+        localparam N = $dimensions(P);
+        assign runtime_value = $dimensions(a);
+        assign parameter_value = N;
+        assign scalar_value = $dimensions(a[0][0]);
+        if (N == 2) assign generated = 32'h1234;
+        else assign generated = 0;
+    endmodule
+  "#)
+  (top Top)
+  (for (value mask) (list (0 255) (255 255) (0xa5 0x5a))
+    (modify (set a (fourstate value mask)))
+    (assert_eq runtime_value (fourstate 2 0))
+    (assert_eq parameter_value (fourstate 2 0))
+    (assert_eq scalar_value (fourstate 0 0))
+    (assert_eq generated (fourstate 0x1234 0))))
+
+; A chandle is neither an array nor equivalent to an integral bit vector
+; (IEEE 1800-2023 20.7), so its dimension count is zero.
+(case dimensions_of_nonarray_handle_types
+  (source "dimensions_handle.sv" #"
+    module Top(output int result);
+        assign result = $dimensions(chandle);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 0))
+
+; IEEE 1800-2023 20.7: queries use the operand's lexical declaration.
+(case dimensions_resolves_procedural_scopes
+  (source "unpacked_scopes.sv" #"
+    module Top(output int task_value, legacy_value, block_value, nested_value, initial_value);
+      logic [7:0] x [0:1][0:2];
+      task automatic query(input logic [7:0] x [0:1], output int result);
+        logic [7:0] local_array [0:1][0:2][0:3];
+        result = $dimensions(x) * 10 + $dimensions(local_array);
+      endtask
+      task automatic legacy;
+        input logic [7:0] x [0:1];
+        output int result;
+        result = $dimensions(x);
+      endtask
+      function automatic int nested();
+        logic [7:0] x [0:1];
+        begin : inner
+          logic [7:0] x [0:1][0:2][0:3];
+          return $dimensions(x);
+        end
+      endfunction
+      logic [7:0] argument [0:1];
+      always_comb begin
+        logic [7:0] block_array [0:1][0:2][0:3][0:4];
+        query(argument, task_value);
+        legacy(argument, legacy_value);
+        block_value = $dimensions(block_array);
+        nested_value = nested();
+      end
+      initial begin
+        logic [7:0] x [0:1][0:2][0:3][0:4][0:5];
+        initial_value = $dimensions(x);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq task_value 24)
+  (assert_eq legacy_value 2)
+  (assert_eq block_value 5)
+  (assert_eq nested_value 4)
+  (assert_eq initial_value 6))
+
+(case dimensions_resolves_package_array_constants
+  (source "unpacked_package.sv" #"
+    package data_pkg;
+      localparam logic [7:0] A [0:1] = '{8'h12, 8'h34};
+      localparam int N = $dimensions(A);
+      localparam int ELEMENT = $dimensions(A[0]);
+    endpackage
+    module Top(output int whole, element);
+      import data_pkg::*;
+      assign whole = N;
+      assign element = ELEMENT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq whole 2)
+  (assert_eq element 1))
+
+(case dimensions_preserves_one_bit_vectors
+  (source "one_bit_dimensions.sv" #"
+    module Top(input logic s, output int literal_rank, concat_rank, repeat_rank, fill_rank,
+               output int parameter_rank, signed_parameter_rank, scalar_rank, declared_vector_rank,
+               output int bit_cast_rank, size_cast_rank);
+      typedef bit scalar_t;
+      localparam P = 1'b0;
+      localparam signed S = 1'b0;
+      localparam logic SCALAR = 1'b0;
+      localparam logic [0:0] VECTOR = 1'b0;
+      assign literal_rank = $dimensions(1'b0);
+      assign concat_rank = $dimensions({s});
+      assign repeat_rank = $dimensions({1{s}});
+      assign fill_rank = $dimensions('0);
+      assign parameter_rank = $dimensions(P);
+      assign signed_parameter_rank = $dimensions(S);
+      assign scalar_rank = $dimensions(SCALAR);
+      assign declared_vector_rank = $dimensions(VECTOR);
+      assign bit_cast_rank = $dimensions(scalar_t'(s));
+      assign size_cast_rank = $dimensions(1'(s));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1)
+    (modify (set s value))
+    (assert_eq literal_rank 1)
+    (assert_eq concat_rank 1)
+    (assert_eq repeat_rank 1)
+    (assert_eq fill_rank 1)
+    (assert_eq parameter_rank 1)
+    (assert_eq signed_parameter_rank 1)
+    (assert_eq scalar_rank 0)
+    (assert_eq declared_vector_rank 1)
+    (assert_eq bit_cast_rank 0)
+    (assert_eq size_cast_rank 1)))
+
+(case dimensions_resolves_imported_function_returns
+  (source "imported_dimensions.sv" #"
+    package shapes;
+      function automatic logic [1:0][3:0] f();
+        $display("must not execute");
+        return 0;
+      endfunction
+    endpackage
+    module Child(output int local_rank);
+      import shapes::*;
+      function automatic logic [7:0] f(); return 0; endfunction
+      localparam N = $dimensions(f());
+      assign local_rank = N;
+    endmodule
+    module Top(output int imported_rank, qualified_rank, local_rank);
+      import shapes::*;
+      localparam N = $dimensions(f());
+      localparam Q = $dimensions(shapes::f());
+      assign imported_rank = N;
+      assign qualified_rank = Q;
+      Child child(local_rank);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq imported_rank 2)
+  (assert_eq qualified_rank 2)
+  (assert_eq local_rank 1)
+  (expect_output ""))
+(case dimensions_resolves_preceding_block_declarations
+  (source "preceding_dimensions.sv" #"
+    module Top(output int first_rank, second_rank, width_value);
+      always_comb begin
+        logic [7:0] a [0:1];
+        logic [$dimensions(a):0] b;
+        logic [7:0] c [0:$dimensions(a)];
+        first_rank = $dimensions(a);
+        second_rank = $dimensions(c);
+        width_value = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq first_rank 2)
+  (assert_eq second_rank 2)
+  (assert_eq width_value 3))
+
+
+(case dimensions_types_function_pattern_arguments
+  (source "dimension_patterns.sv" #"
+    module Top(output int constant_rank, runtime_rank);
+      function automatic logic [7:0] f(input logic [7:0] a [0:1]);
+        $display("must not execute");
+        return a[0];
+      endfunction
+      localparam N = $dimensions(f('{8'h1, 8'h2}));
+      assign constant_rank = N;
+      assign runtime_rank = $dimensions(f('{8'h3, 8'h4}));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 1)
+  (assert_eq runtime_rank 1)
+  (expect_output ""))
+
+; IEEE 1800-2023 6.24.1: signing casts produce a single packed [n-1:0]
+; vector; $signed/$unsigned have the same results (also 11.7).
+(case dimensions_signing_conversions_are_vectors
+  (source "signing_dimensions.sv" #"
+    module Top(input logic s, input logic [1:0][3:0] p,
+               output int scalar_rank, packed_rank, signed_scalar, unsigned_scalar,
+               output int cast_signed_scalar, cast_unsigned_scalar, signed_packed, cast_signed_packed);
+      assign scalar_rank = $dimensions(s);
+      assign packed_rank = $dimensions(p);
+      assign signed_scalar = $dimensions($signed(s));
+      assign unsigned_scalar = $dimensions($unsigned(s));
+      assign cast_signed_scalar = $dimensions(signed'(s));
+      assign cast_unsigned_scalar = $dimensions(unsigned'(s));
+      assign signed_packed = $dimensions($signed(p));
+      assign cast_signed_packed = $dimensions(signed'(p));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set s 1) (set p 0x5a))
+  (assert_eq scalar_rank 0)
+  (assert_eq packed_rank 2)
+  (assert_eq signed_scalar 1)
+  (assert_eq unsigned_scalar 1)
+  (assert_eq cast_signed_scalar 1)
+  (assert_eq cast_unsigned_scalar 1)
+  (assert_eq signed_packed 1)
+  (assert_eq cast_signed_packed 1))
+
+(case dimensions_resolves_procedural_parameters_and_indices
+  (source "procedural_dimensions.sv" #"
+    module Top(output int local_parameter, for_index, foreach_index);
+      logic [7:0] a [0:1];
+      always_comb begin
+        localparam logic [0:0] P = 0;
+        local_parameter = $dimensions(P);
+        for_index = 0;
+        for (int i = 0; i < 1; i++) for_index = $dimensions(i);
+        foreach_index = 0;
+        foreach (a[j]) foreach_index = $dimensions(j);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_parameter 1)
+  (assert_eq for_index 1)
+  (assert_eq foreach_index 1))
+
+(case isunbounded_preserves_parameter_values_and_result_type
+  (source "isunbounded.sv" #"
+    module Top(output logic [7:0] flags, output logic [63:0] wide,
+               output int result_bits, output logic [7:0] inverted,
+               output logic [7:0] generated);
+      parameter int U = $;
+      parameter UNTYPED = $;
+      localparam int ALIAS = U;
+      localparam int FINITE = -1;
+      localparam logic [127:0] LARGE = '1;
+      localparam logic [7:0] X = 'x;
+      localparam logic [7:0] Z = 'z;
+      localparam Q = $isunbounded(U);
+      assign flags = {$isunbounded(U), $isunbounded(UNTYPED), $isunbounded(ALIAS),
+                      $isunbounded(FINITE), $isunbounded(LARGE),
+                      $isunbounded(X), $isunbounded(Z), $isunbounded(Q)};
+      assign wide = $isunbounded(U);
+      assign result_bits = $bits(Q);
+      assign inverted = ~$isunbounded(U);
+      if ($isunbounded(U)) begin : selected
+        assign generated = 8'h5a;
+      end else begin
+        assign generated = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq flags 0xe0)
+  (assert_eq wide 1)
+  (assert_eq result_bits 1)
+  (assert_eq inverted 0xfe)
+  (assert_eq generated 0x5a))
+
+(case isunbounded_handles_overrides_and_forwarding
+  (source "isunbounded_overrides.sv" #"
+    module Child #(parameter int LIMIT = $, parameter int COPY = LIMIT)
+                 (output logic [1:0] result);
+      assign result = {$isunbounded(LIMIT), $isunbounded(COPY)};
+    endmodule
+    module Top(output logic [1:0] defaults, finite, explicit_dollar, forwarded);
+      parameter int U = $;
+      Child a(.result(defaults));
+      Child #(.LIMIT(7)) b(.result(finite));
+      Child #(.LIMIT($)) c(.result(explicit_dollar));
+      Child #(.LIMIT(U)) d(.result(forwarded));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq defaults 3)
+  (assert_eq finite 0)
+  (assert_eq explicit_dollar 3)
+  (assert_eq forwarded 3))
+
+(case isunbounded_resolves_package_and_local_parameters
+  (source "isunbounded_scopes.sv" #"
+    package Limits;
+      parameter int U = $;
+      parameter int F = 42;
+      localparam bit Q = $isunbounded(U);
+    endpackage
+    module Top(input logic clk, output logic [3:0] flags,
+               output logic [1:0] local_flags, registered);
+      import Limits::*;
+      assign flags = {$isunbounded(Limits::U), $isunbounded(U),
+                      $isunbounded(Limits::F), Q};
+      always_comb begin
+        localparam int LOCAL_U = $;
+        localparam int LOCAL_F = 10;
+        local_flags = {$isunbounded(LOCAL_U), $isunbounded(LOCAL_F)};
+        $isunbounded(LOCAL_U);
+      end
+      always_ff @(posedge clk) begin
+        localparam int LOCAL_U = $;
+        registered <= {$isunbounded(LOCAL_U), $isunbounded(F)};
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq flags 0xd)
+  (assert_eq local_flags 2)
+  (tick clk)
+  (assert_eq registered 2))
+
+(case isunbounded_preserves_lexical_scopes_and_short_circuits
+  (source "isunbounded_scopes_generate.sv" #"
+    module Top(output logic [2:0] local_flags, output logic [1:0] generated,
+               output logic function_result);
+      parameter int U = $;
+      always_comb begin
+        local_flags[2] = $isunbounded(U);
+        begin
+          localparam int U = 7;
+          local_flags[1] = $isunbounded(U);
+        end
+        local_flags[0] = $isunbounded(U);
+      end
+      if (!$isunbounded(U) && U == 0) begin
+        assign generated[1] = 0;
+      end else begin
+        assign generated[1] = 1;
+      end
+      if (1) begin : g
+        localparam int U = 5;
+        assign generated[0] = $isunbounded(U);
+      end
+      function automatic bit query();
+        localparam int INNER = $;
+        return $isunbounded(INNER);
+      endfunction
+      assign function_result = query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_flags 5)
+  (assert_eq generated 2)
+  (assert_eq function_result 1))
+
+(case isunbounded_reports_bounded_parameters
+  (source "isunbounded_bounded.sv" #"
+    module Child #(parameter int P = -1) (output logic y);
+      assign y = $isunbounded(P);
+    endmodule
+    module Top(output logic [1:0] result, output logic [7:0] constant_value,
+               output int nested_bits);
+      parameter int P = -1;
+      localparam Q = $isunbounded(P);
+      Child #(.P(Q)) c(.y(result[1]));
+      assign result[0] = $isunbounded(Q);
+      assign constant_value = Q;
+      assign nested_bits = $bits($isunbounded(P));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 0)
+  (assert_eq constant_value 0)
+  (assert_eq nested_bits 1))
+
+(case isunbounded_reports_bounded_array_parameters
+  (source "isunbounded_array.sv" #"
+    package P;
+      localparam logic [7:0] ARRAY [0:1] = '{8'd1, 8'd2};
+    endpackage
+    module Top(output logic [1:0] result);
+      localparam logic [7:0] ARRAY [0:1] = '{8'd3, 8'd4};
+      localparam QUERY = $isunbounded(ARRAY);
+      assign result = {QUERY, $isunbounded(P::ARRAY)};
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq result 0))
+
+(case isunbounded_binds_procedural_aliases_in_declaration_order
+  (source "isunbounded_aliases.sv" #"
+    module Top(input logic clk, output logic [2:0] comb, registered, initialized,
+               output logic [2:0] via_function);
+      function automatic logic [2:0] query();
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        return {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      endfunction
+      initial begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        initialized = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_comb begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        comb = {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      always_ff @(posedge clk) begin
+        localparam int U = $, COPY = U, AGAIN = COPY;
+        registered <= {$isunbounded(U), $isunbounded(COPY), $isunbounded(AGAIN)};
+      end
+      assign via_function = query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (expand name (comb initialized via_function)
+    (assert_eq {name} 7))
+  (tick clk)
+  (assert_eq registered 7))
+
+(case isunbounded_restores_procedural_parameter_bindings
+  (source "isunbounded_restore.sv" #"
+    module Top(output logic [7:0] value, output logic [3:0] flags,
+               output int width, rank, left_bound);
+      parameter logic [7:0] P = 8'h27;
+      always_comb begin
+        flags[3] = $isunbounded(P);
+        begin
+          localparam logic P = $;
+          flags[2] = $isunbounded(P);
+          begin
+            localparam logic [1:0] P = 2'd1;
+            flags[1] = $isunbounded(P);
+          end
+          flags[0] = $isunbounded(P);
+        end
+        value = P;
+        width = $bits(P);
+        rank = $dimensions(P);
+        left_bound = $left(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq value 0x27)
+  (assert_eq flags 5)
+  (assert_eq width 8)
+  (assert_eq rank 1)
+  (assert_eq left_bound 7))
+
+(case isunbounded_restores_procedural_parameter_type_metadata
+  (source "isunbounded_restore_type.sv" #"
+    module Top(output int inner_bits, outer_bits, inner_rank, outer_rank);
+      parameter logic [2:0][1:0] P = 6'h27;
+      always_comb begin
+        begin
+          localparam logic P = 1'b1;
+          inner_bits = $bits(P);
+          inner_rank = $dimensions(P);
+        end
+        outer_bits = $bits(P);
+        outer_rank = $dimensions(P);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq inner_bits 1)
+  (assert_eq inner_rank 0)
+  (assert_eq outer_bits 6)
+  (assert_eq outer_rank 2))
+
+(case isunbounded_restores_shadowed_function_arguments
+  (source "isunbounded_restore_argument.sv" #"
+    module Top(input logic [7:0] data, output logic [8:0] y);
+      function automatic logic [8:0] query(input logic [7:0] P);
+        bit q;
+        begin
+          localparam logic P = $;
+          q = $isunbounded(P);
+        end
+        return {q, P};
+      endfunction
+      assign y = query(data);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 0x27 0x80 0xff)
+    (modify (set data value))
+    (assert_eq y (+ 0x100 value))))
+
+(case isunbounded_generate_guards_preserve_short_circuit_bounds
+  (source "isunbounded_guarded_bounds.sv" #"
+    module Top(output int and_bits, or_bits);
+      parameter int P = 7;
+      if (1) begin : g
+        localparam int P = $;
+        logic [(!$isunbounded(P) && P == 0):0] a;
+        logic [($isunbounded(P) || P == 0):0] b;
+        assign and_bits = $bits(a);
+        assign or_bits = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq and_bits 1)
+  (assert_eq or_bits 2))

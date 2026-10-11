@@ -217,37 +217,31 @@ impl<'a> ProcModule<'a> {
         let finish = finish.unwrap_or(high);
         if start < low || start > high || finish < low || finish > high {
             return Err(sv::AnalyzerError::MemoryFile(format!(
-                "address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
+                "{name}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
             )));
         }
-        let (Ok(first_index), Ok(end)) = (
-            usize::try_from(start),
-            usize::try_from(start.max(finish) + 1),
-        ) else {
-            return Err(unsupported(format!(
-                "`{name}` destination with negative indices"
-            )));
-        };
         let content = std::fs::read_to_string(unescape(filename)).map_err(|error| {
-            sv::AnalyzerError::MemoryFile(format!("failed to read {filename}: {error}"))
+            sv::AnalyzerError::MemoryFile(format!("{name}: failed to read {filename}: {error}"))
         })?;
-        // Words load from the start address; address directives are offsets
-        // from it.
-        let writes = celox_frontend_core::memory_file::parse_memory_write_runs(
+        let parsed = celox_frontend_core::memory_file::parse_memory_range(
             &content,
             radix,
             element_width,
-            first_index,
-            end,
+            start,
+            finish,
         )
-        .map_err(|error| sv::AnalyzerError::MemoryFile(error.message))?;
+        .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
+        if let Some(warning) = parsed.warning {
+            tracing::warn!(task = name, file = filename, "{warning}");
+        }
+        let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
         for run in writes.runs {
             let value = BigUint::from_bytes_le(&run.value_bytes);
             let mask = BigUint::from_bytes_le(&run.mask_bytes);
             for k in 0..run.bit_width / element_width {
-                let index = (run.bit_offset / element_width + k) as i128;
+                let index = start.min(finish) + (run.bit_offset / element_width + k) as i128;
                 let position = usize::try_from(index.abs_diff(left)).unwrap_or(usize::MAX);
                 let shift = k * element_width;
                 let mut word_value = (&value >> shift) & &word_mask;
@@ -564,7 +558,7 @@ pub(super) enum SystemTaskKind {
     /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
     /// variants (`d` otherwise).
     Print(RuntimeEventKind, char),
-    /// `$finish` and `$stop`.
+    /// `$finish`.
     Finish,
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
     Message,
@@ -580,7 +574,7 @@ pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
         "$write" | "$writeb" | "$writeh" | "$writeo" => {
             SystemTaskKind::Print(RuntimeEventKind::Write, print_radix(name))
         }
-        "$finish" | "$stop" => SystemTaskKind::Finish,
+        "$finish" => SystemTaskKind::Finish,
         "$error" | "$warning" | "$info" => SystemTaskKind::Message,
         "$fatal" => SystemTaskKind::Fatal,
         _ => return None,
@@ -1524,7 +1518,9 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
             sv::ir::ConstExpr::Function { args, .. } => {
                 args.iter().for_each(|arg| const_idents(arg, names))
             }
-            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+            sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+                const_idents(expr, names)
+            }
             sv::ir::ConstExpr::Binary { left, right, .. } => {
                 const_idents(left, names);
                 const_idents(right, names);
@@ -1595,7 +1591,9 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
         ConstExpr::Function { name, args, .. } => {
             is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
         }
-        ConstExpr::Unary { expr, .. } => const_calls(expr, is_callee),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_calls(expr, is_callee)
+        }
         ConstExpr::Binary { left, right, .. } => {
             const_calls(left, is_callee) || const_calls(right, is_callee)
         }
@@ -1621,7 +1619,9 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
                 const_contains(expr, part) || const_contains(bit, part)
             }
             ConstExpr::Function { args, .. } => args.iter().any(|arg| const_contains(arg, part)),
-            ConstExpr::Unary { expr, .. } => const_contains(expr, part),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                const_contains(expr, part)
+            }
             ConstExpr::Binary { left, right, .. } => {
                 const_contains(left, part) || const_contains(right, part)
             }
@@ -1662,7 +1662,9 @@ fn shared_calls<'e>(
         ConstExpr::Function { args, .. } => args
             .iter()
             .for_each(|arg| shared_calls(arg, other, is_callee, shared)),
-        ConstExpr::Unary { expr, .. } => shared_calls(expr, other, is_callee, shared),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            shared_calls(expr, other, is_callee, shared)
+        }
         ConstExpr::Binary { left, right, .. } => {
             shared_calls(left, other, is_callee, shared);
             shared_calls(right, other, is_callee, shared);
@@ -1877,7 +1879,9 @@ fn collect_const_calls(
             collect_const_calls(expr, calls);
             collect_const_calls(bit, calls);
         }
-        ConstExpr::Unary { expr, .. } => collect_const_calls(expr, calls),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            collect_const_calls(expr, calls)
+        }
         ConstExpr::Binary { left, right, .. } => {
             collect_const_calls(left, calls);
             collect_const_calls(right, calls);

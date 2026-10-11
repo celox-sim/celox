@@ -287,60 +287,79 @@ which only reads declarations (after expanding interfaces) for this purpose. Its
 in [`verification/sv/limitations.json`](verification/sv/limitations.json). Compiler diagnostics are not suppressed and emitted SV is not
 rewritten to fit a simulator.
 
+Local verification reuses unchanged successful results by default. Select the
+cases affected by executable source, stimulus or assertion changes:
+
 ```sh
-cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
-  --jobs 8 --output /tmp/veryl-suite-verilator \
-  --report crates/celox-test-suite/verification/verilator.json
-cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
-  --jobs 8 --output /tmp/veryl-suite-icarus \
-  --report crates/celox-test-suite/verification/icarus.json
-python3 crates/celox-test-suite/scripts/summarize.py
+cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- \
+  --filter operators::test_bitwise_operations
+cargo run --locked -p celox-test-suite --features icarus --bin verify-icarus -- \
+  --filter operators::test_bitwise_operations
 
-# Reuse unchanged successful cases; new, changed and failed cases run again.
-# The first run in an output directory establishes the baseline.
-cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
-  --incremental --jobs 8 --report crates/celox-test-suite/verification/verilator.json
-cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
-  --incremental --jobs 8 --report crates/celox-test-suite/verification/icarus.json
-
-# Reproduce one case; omit --report to preserve the complete retained report:
-cargo run -p celox-test-suite --features icarus --bin verify-icarus -- \
-  --filter four_state::test_four_state_initial_and_set --jobs 1
+# Intentionally execute a case again:
+cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- \
+  --fresh --filter operators::test_bitwise_operations
 
 # Recheck an ignored discrepancy against its unchanged assertions:
-cargo run -p celox-test-suite --features verilator --bin verify-verilator -- \
+cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- \
   --include-ignored --filter signed_divrem::signed_divrem_i64 --jobs 1
 
 # Verify the adapters themselves (requires both tools):
-cargo test -p celox-test-suite --all-features --test oracles -- --ignored
+cargo test --locked -p celox-test-suite --all-features --test oracles -- --ignored
 ```
 
-`--incremental` is available on all four Veryl/SystemVerilog runners. Its baseline
-is `<output>/results.json` (`target/<suite>-<tool>` by default). Only unchanged
-`passed` and `rejected` results are reused; previous failures are retried, and
-ignored/unsupported cases are classified again. Deleted cases disappear from
-the next report. Reuse does not require old simulator build directories.
+All four Veryl/SystemVerilog runners write their complete per-run results to
+`<output>/results.json` (`target/<suite>-<tool>` by default). They also store
+successful per-case JSON in `$XDG_CACHE_HOME/celox/external-verification`, or
+`~/.cache/celox/external-verification` when XDG_CACHE_HOME is unset. This cache
+is shared across worktrees; build artifacts remain under each workspace's
+`target/`. `--cache PATH` selects a different result cache. It contains only
+small result records and can be deleted to discard prior evidence.
+
+Only unchanged `passed` and `rejected` results are reused; previous failures
+are retried, and ignored/unsupported cases are classified again. Deleted cases
+disappear from the next report. Reuse does not require old simulator build
+directories. `--incremental` remains accepted for compatibility; `--fresh`
+disables reuse. Daily CI explicitly uses `--fresh`.
 
 Each fingerprint covers HDL sources (including resolved standard library
 parts), stimulus, assertions, parameters, state mode, and the reviewed tool
-exclusion. Moving a case in its script does not invalidate it. Changes to the
+exclusion. Script comments, whitespace and diagnostic positions do not change
+its identity; embedded HDL source strings remain verbatim. Changes to the
 compiled verifier, resolved dependency versions/features, local dependency
 sources, workspace manifests/lockfile, tools, compiler flags, or
 `--include-ignored` invalidate reuse. If tool/dependency identification is
-incomplete, the runner verifies the selection afresh. A malformed baseline
-report is an error, not evidence of a pass.
+incomplete, the runner verifies the selection afresh. A malformed worktree
+report is an error; a damaged shared cache record is ignored and reverified.
 
 `results.json` retains the original status and `verified_at_unix` for reused
 cases, marks them with `reused: true`, and counts fresh/reused results
 separately in `run_counts`. This distinguishes previous evidence from assertions
-executed in this invocation. The `--report` copy omits these, the fingerprints
-and the status counts, so a retained report changes only where results change
-and branches that add different cases merge without conflicts.
+executed in this invocation. A filtered run replaces only its local report;
+it does not erase other cases from the shared cache.
 
-`--filter` and `--exclude-stronger-than-sv` still limit the report to the
-selected cases; omit them when refreshing a complete report. Use a separate
-`--output` and report for a filtered run to preserve an existing full baseline.
-Omit `--incremental` to force a fresh run. Daily CI does so intentionally.
+Routine validation should omit `--report` and leave checked-in evidence alone.
+Adding a passing case does not require regenerating retained reports: the daily
+gate checks the live catalogue. When deliberately updating reviewed failure
+evidence, run the full selection with `--fresh --report PATH`, inspect the
+changed failures, then update summaries with `scripts/summarize.py`. The retained
+copy omits timestamps, fingerprints, reuse markers and aggregate counts.
+`PATH` is a schema-4 index containing tool/suite metadata and `case_files`;
+case results live next to it in `<path-stem>/<group>.json`. For example,
+`--report verification/icarus.json` writes `verification/icarus/counter.json`
+for the `counter` test group. Groups match the `.vtest` definitions, so updating
+one group leaves other groups untouched. Report filenames remain unrestricted:
+names without `.json` or with characters outside ASCII letters, digits, `_`,
+and `-` in their stem use a sibling `.report-<filename-hash>/` directory instead.
+This keeps extensionless indexes separate from their group files. Readers use
+the relative paths in `case_files`, so renaming the index leaves it readable.
+The index lists the exact selection;
+a filtered update replaces that selection and removes previously referenced
+group files that are no longer selected. Missing files, duplicate cases, and
+cases stored under the wrong group are errors. Historical baseline and focused
+reproduction reports retain their original single-file format.
+`--filter` and `--exclude-stronger-than-sv` produce partial reports; omit them
+when updating complete retained evidence.
 
 Normal verification excludes the reviewed limitations. The retained Veryl
 reports contain eleven Icarus compilation failures and one Verilator compilation
@@ -430,13 +449,15 @@ Icarus uses `-g2012 -gstrict-expr-width` (see its
 
 Each output folder retains Veryl sources, emitted `.sv`, build/runtime logs,
 protocol transcripts, full panic diagnostics, and per-case results. The runner
-also writes `results.json`. `--report` writes a portable copy with tool versions,
-counts, every case, and bounded diagnostics, independently of disposable build
-caches. Report schema 2 adds `ignored`, optional per-case `known_issue`, and the
-top-level `include_ignored` setting. New reports use schema 3, adding per-case
+also writes `results.json`. `--report` writes a portable index and group files
+with tool versions, every selected case, and bounded diagnostics, independently
+of disposable build caches. Report schema 2 adds `ignored`, optional per-case
+`known_issue`, and the
+top-level `include_ignored` setting. Per-run reports use schema 3, adding per-case
 `tags`, `tag_reasons`, and `stronger_than_sv`, and the top-level
-`exclude_stronger_than_sv` setting. All statuses retain the case metadata,
-including ignored cases. Historical retained reports remain at their original
+`exclude_stronger_than_sv` setting. Retained reports use the schema-4 group index
+described above. All statuses retain the case metadata, including ignored cases.
+Historical retained reports remain at their original
 schema and do not gain retroactive tags. Ignored cases write their result and reason
 only; any other files already in their artifact directory are from an earlier
 execution. Multiple designs in one case receive separate artifact folders.

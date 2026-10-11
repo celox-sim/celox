@@ -50,7 +50,7 @@ pub enum ParserError {
         detail: String,
         source_location: Option<SourceLocation>,
     },
-    #[error("Invalid $readmemh input: {detail}")]
+    #[error("Invalid memory file input: {detail}")]
     MemoryFile {
         detail: String,
         source_location: Option<SourceLocation>,

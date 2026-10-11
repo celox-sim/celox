@@ -194,13 +194,8 @@ impl VerylSimAdapter {
     }
 
     pub fn event(&mut self, port: &str) -> VerylEventRef {
-        let ev = self
-            .sim
-            .get_clock(port)
-            .unwrap_or_else(|| panic!("event '{port}' not found in veryl-simulator"));
-        let idx = self.events.len();
-        self.events.push(ev);
-        VerylEventRef(idx)
+        self.try_event(port)
+            .unwrap_or_else(|_| panic!("event '{port}' not found in veryl-simulator"))
     }
 
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
@@ -321,8 +316,11 @@ impl VerylSimAdapter {
     }
 
     pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, AddrLookupError> {
+        // A reset port is a reset event: stepping it as a clock event never
+        // runs the `if_reset` branches.
         self.sim
-            .get_clock(port)
+            .get_reset(port)
+            .or_else(|| self.sim.get_clock(port))
             .map(|ev| {
                 let idx = self.events.len();
                 self.events.push(ev);

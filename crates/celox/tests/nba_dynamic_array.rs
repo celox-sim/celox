@@ -82,6 +82,8 @@ all_backends! {
 // Verilator 5.052, and the Veryl reference simulator all apply `grid[0][3]`
 // to another element.
 fn test_out_of_range_inner_index_of_dynamic_ff_write_is_ignored(sim) {
+    // Veryl 0.22.0's simulator applies an out-of-range inner index to another element; Veryl
+    // master no longer does.
     @ignore_on(veryl);
     @setup {
         let source = r#"
@@ -154,6 +156,7 @@ all_backends! {
 // 5.052 and the Veryl reference simulator ignore the whole write, so this
 // stays out of the shared suite.
 fn test_descending_part_select_below_bit_zero_keeps_in_range_bits(sim) {
+    // Veryl 0.22.0's simulator drops the whole write of a `-:` select that runs below bit 0.
     @ignore_on(veryl);
     @setup {
         let source = r#"
@@ -216,6 +219,8 @@ all_backends! {
 // like any X, reads 0. The Veryl reference simulator applies `grid[0][3]` to
 // another element.
 fn test_out_of_range_dynamic_comb_access_two_state(sim) {
+    // Veryl 0.22.0's simulator reads an existing element through an out-of-range inner index,
+    // and drops a `-:` write below bit 0.
     @ignore_on(veryl);
     @setup {
         let source = r#"
@@ -365,10 +370,8 @@ fn test_loop_variable_range_keeps_needed_checks(sim) {
 all_backends! {
 // Functions read their array arguments through the same checks, in
 // combinational and sequential code: an invalid index reads X. Icarus 13.0
-// does not support unpacked-array function formals, and the Veryl reference
-// simulator reads an existing element.
+// does not support unpacked-array function formals.
 fn test_out_of_range_dynamic_read_in_function_is_unknown(sim) {
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -418,6 +421,8 @@ all_backends! {
 // so a read must still redirect its address instead of loading far outside
 // the array.
 fn test_negative_signed_index_reads_and_writes_nothing(sim) {
+    // Veryl 0.22.0's simulator reads an element through a negative signed index; Veryl master
+    // no longer does.
     @ignore_on(veryl);
     @setup {
         let source = r#"
@@ -488,7 +493,6 @@ all_backends! {
 // An out-of-range read is X, which a two-state simulation reads as 0 also
 // when it is the data side of a wildcard comparison.
 fn test_out_of_range_read_compares_as_zero_in_two_state_wildcard(sim) {
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -521,6 +525,7 @@ all_backends! {
 // is an always_ff local or a function argument held in a register
 // (IEEE 1800-2023 7.4.6).
 fn test_invalid_reads_agree_across_paths_in_four_state(sim) {
+    // Veryl 0.22.0's simulator returns X instead of 0 for an invalid read of a 2-state array.
     @ignore_on(veryl);
     @setup {
         let source = r#"

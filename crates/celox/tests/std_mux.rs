@@ -14,6 +14,8 @@ all_backends! {
     // Build-only smoke test: binary demux also depends on selector_pkg compile-time
     // width resolution through `calc_select_width`.
     fn test_demux_build_smoke(sim) {
+        // Veryl connects the array variable to the packed-array port of `$std::demux` without a
+        // conversion; veryl-simulator rejects it (UnsupportedDescription).
         @ignore_on(veryl);
         @case "std_mux::test_demux_build_smoke";
     }

@@ -1,5 +1,5 @@
-import copy,functools,gzip,json,pathlib,tempfile,unittest
-from coverage import GateError,case_texts,collect as collect_cases,compare,indexed
+import copy,gzip,json,pathlib,tempfile,unittest
+from coverage import GateError,source_identity,collect as collect_cases,compare,indexed
 BLOCKED=['blocked::one','blocked::two']
 EXCEPTIONS={name:{'kind':'veryl_language_restriction','reason':'restricted','panic':'compile error'} for name in BLOCKED}
 class CoverageTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class CoverageTests(unittest.TestCase):
    for i,name in enumerate(names):
     blocked=name in BLOCKED;rejected=2<=i<10;smoke=10<=i<13;reads=0 if blocked or rejected or smoke else 1
     expectation='CompilationError' if rejected else 'Simulation'
-    listed.append({'case':name,'expectation':expectation,'category':'Test','source':{'file':'src/cases/test.vtest','line':i+1}})
+    listed.append({'case':name,'expectation':expectation,'category':'Test','script_identity':f'script {name}','source':{'file':'src/cases/test.vtest','line':i+1}})
     rows.append({'case':name,'status':'failed' if blocked else 'passed','expectation':expectation,'errors':[],'panic':'compile error' if blocked else None,'designs':1})
     d=raw/name.replace('::','__')/'design-1';d.mkdir(parents=True)
     diag={'stage':'analyzer','diagnostics':[{'code':'InvalidForRange','kind':'NegativeBound'}],'detail':'diagnostic'} if blocked or rejected else None
@@ -25,7 +25,7 @@ class CoverageTests(unittest.TestCase):
      (d/'proof').mkdir();qs=[query,dict(query,query=1,solver_result='unsat',purpose='sample x'),final] if reads else [dict(final,query=0)]
      with gzip.open(d/'proof/proof-audit.json.gz','wt') as f:json.dump(qs,f)
    suite=raw/'suite';(suite/'src/cases').mkdir(parents=True);(suite/'src/cases/test.vtest').write_text(''.join(f'(case {n})\n' for n in names))
-   collect=functools.partial(collect_cases,suite_root=suite)
+   collect=collect_cases
    summary=raw/'summary.json';summary.write_text(json.dumps(rows));baseline,_=collect(raw,listed,EXCEPTIONS,1)
    for label,exceptions in [('unknown_case',dict(EXCEPTIONS,missing={'kind':'veryl_language_restriction','reason':'r','panic':'p'})),('no_reason',{**EXCEPTIONS,BLOCKED[0]:dict(EXCEPTIONS[BLOCKED[0]],reason='')}),('bad_kind',{**EXCEPTIONS,BLOCKED[0]:dict(EXCEPTIONS[BLOCKED[0]],kind='flaky')}),('changed_failure',{**EXCEPTIONS,BLOCKED[0]:dict(EXCEPTIONS[BLOCKED[0]],panic='other error')})]:
     with self.subTest(label=label),self.assertRaises(GateError):collect(raw,listed,exceptions,1)
@@ -45,16 +45,15 @@ class CoverageTests(unittest.TestCase):
    record['diagnostic']['diagnostics'][0]['kind']='NegativeBound';record['design_sha256']='legal-source-mutation';block.write_text(json.dumps(record))
    actual,_=collect(raw,listed,EXCEPTIONS,1)
    with self.assertRaises(GateError):compare(actual,baseline)
-  # An edited case changes only its own identity.
-  with tempfile.TemporaryDirectory() as temp:
-   suite=pathlib.Path(temp);(suite/'src').mkdir()
-   listed=[{'case':f'g::c{i}','source':{'file':'src/g.vtest','line':line}} for i,line in enumerate([1,3])]
-   (suite/'src/g.vtest').write_text('(case c0)\n; note\n(case c1)\n')
-   before=case_texts(listed,suite)
-   (suite/'src/g.vtest').write_text('(case c0 edited)\n; note\n(case c1)\n')
-   after=case_texts(listed,suite)
-   self.assertNotEqual(before[('src/g.vtest',1)],after[('src/g.vtest',1)])
-   self.assertEqual(before[('src/g.vtest',3)],after[('src/g.vtest',3)])
+ def test_script_identity_ignores_locations_but_detects_edits(self):
+  meta={'case':'g::c','source':{'file':'src/g.vtest','line':1},'script_identity':'parsed source/stimulus/assertions'}
+  before=source_identity(meta)
+  moved=copy.deepcopy(meta);moved['source']['line']=100
+  self.assertEqual(before,source_identity(moved))
+  moved['script_identity']+=' edited assertion'
+  self.assertNotEqual(before,source_identity(moved))
+  moved['script_identity']=''
+  with self.assertRaises(GateError):source_identity(moved)
  def test_celox_unsupported_exception_is_typed_and_exact(self):
   final={'query':0,'solver_result':'sat','original_formula_validated':True,'kind':'bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate','encoded_extra':True,'context':{}}
   panic='compile u::case: lower: Unsupported { issue: 1 }'
@@ -62,7 +61,7 @@ class CoverageTests(unittest.TestCase):
    raw=pathlib.Path(temp);listed=[];rows=[]
    for i,name in enumerate(['ok::case','u::case']):
     unsupported=name=='u::case'
-    listed.append({'case':name,'expectation':'Simulation','category':'Test','source':{'file':'src/cases/test.vtest','line':i+1}})
+    listed.append({'case':name,'expectation':'Simulation','category':'Test','script_identity':f'script {name}','source':{'file':'src/cases/test.vtest','line':i+1}})
     rows.append({'case':name,'status':'failed' if unsupported else 'passed','expectation':'Simulation','errors':[],'panic':panic if unsupported else None,'designs':1})
     d=raw/name.replace('::','__')/'design-1';d.mkdir(parents=True)
     record={'status':'failed' if unsupported else 'passed','compilation_rejected':False,'frontend_unsupported':unsupported,'error':'lower: Unsupported { issue: 1 }' if unsupported else None,'reads':0,'operations':0,'commands':2,'design_sha256':'source','protocol_sha256':'flow','diagnostic':{'stage':'lower','detail':'lower: Unsupported { issue: 1 }'} if unsupported else None,'negative_control':None}
@@ -71,7 +70,7 @@ class CoverageTests(unittest.TestCase):
      (d/'proof').mkdir()
      with gzip.open(d/'proof/proof-audit.json.gz','wt') as f:json.dump([final],f)
    suite=raw/'suite';(suite/'src/cases').mkdir(parents=True);(suite/'src/cases/test.vtest').write_text('(case ok::case)\n(case u::case)\n')
-   collect=functools.partial(collect_cases,suite_root=suite);(raw/'summary.json').write_text(json.dumps(rows))
+   collect=collect_cases;(raw/'summary.json').write_text(json.dumps(rows))
    accepted={'u::case':{'kind':'celox_unsupported','reason':'not lowered yet','panic':panic}}
    actual,counts=collect(raw,listed,accepted,1)
    self.assertEqual([c['disposition'] for c in actual['cases']],['smoke_only','celox_unsupported'])

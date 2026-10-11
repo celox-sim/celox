@@ -11,21 +11,25 @@ fn test_four_state_and_or(sim) {
 }
 
 fn test_four_state_initial_and_set(sim) {
+    // Veryl 0.22.0's simulator gives an uninitialized 2-state variable X instead of 0.
     @ignore_on(veryl);
     @case "four_state::test_four_state_initial_and_set";
 }
 
 fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
+    // Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
     @ignore_on(veryl);
     @case "four_state::test_ff_struct_logic_to_bit_coercion_clears_mask";
 }
 
 fn test_four_state_mixing(sim) {
+    // Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
     @ignore_on(veryl);
     @case "four_state::test_four_state_mixing";
 }
 
 fn test_four_state_mixing_propagation(sim) {
+    // Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
     @ignore_on(veryl);
     @case "four_state::test_four_state_mixing_propagation";
 }

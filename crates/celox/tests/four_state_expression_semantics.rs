@@ -143,6 +143,8 @@ module Top (
     }
 
     fn wide_ternary_unknown_condition_merges_every_arm_chunk(sim) {
+        // Veryl 0.22.0's simulator picks the false arm for an X/Z condition instead of merging
+        // the arms (IEEE 1800-2023 11.4.11).
         @ignore_on(veryl);
         @case "four_state_expression_semantics::wide_ternary_unknown_condition_merges_every_arm_chunk";
     }

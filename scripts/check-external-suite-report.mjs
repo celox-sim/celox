@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { readVerificationReport } from "./read-verification-report.mjs";
 
 const statuses = [
   "passed",
@@ -191,11 +191,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
         suite,
       "usage: check-external-suite-report.mjs REPORT BASELINE CATALOGUE EXIT_STATUS SUITE",
     );
-    const read = (path) => JSON.parse(readFileSync(path, "utf8"));
     const result = checkExternalSuiteReport(
-      read(reportPath),
-      read(baselinePath),
-      read(cataloguePath),
+      readVerificationReport(reportPath),
+      readVerificationReport(baselinePath),
+      readVerificationReport(cataloguePath),
       Number(status),
       suite,
     );

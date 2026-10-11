@@ -486,6 +486,7 @@ pub(crate) fn project_module_with_ids(
                 .map(|(reset, clock)| (ids[reset], ids[clock]))
                 .collect(),
             processes: Vec::new(),
+            package_bindings: HashMap::default(),
         },
         ids,
     ))

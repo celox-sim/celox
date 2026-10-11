@@ -740,8 +740,6 @@ module Top (
   (assert_eq q_output 1))
 
 (case test_comb_loop_bound_output_call_writes_back_once
-  ; Veryl simulator 0.20.2 accepts this program but drops the output
-  ; argument writeback from the runtime loop-bound expression.
   (source "test.veryl" #"
 module Top (
     d: input logic<8>,

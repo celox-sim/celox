@@ -20,11 +20,15 @@ fn test_concatenated_destination_in_function_body(sim) {
 }
 
 fn test_nested_output_to_concat_and_dynamic_local(sim) {
+    // Veryl 0.22.0's simulator ignores concatenation offsets and dynamic selects when copying
+    // an output out.
     @ignore_on(veryl);
     @case "function_bodies::test_nested_output_to_concat_and_dynamic_local";
 }
 
 fn test_path_without_return_yields_unknown(sim) {
+    // Veryl 0.22.0's simulator keeps the previous call's return value on a path without
+    // `return` instead of X.
     @ignore_on(veryl);
     @case "function_bodies::test_path_without_return_yields_unknown";
 }

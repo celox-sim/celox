@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**713 actual passes / 737** and 24 recorded exceptions. The raw test executable
+**720 actual passes / 744** and 24 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 713 passes comprise 702 observation-checked cases, three smoke-only cases and
+The 720 passes comprise 709 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.
@@ -87,9 +87,13 @@ jobs/tests may separately use external solvers; they are not this path.
 ## Coverage and audit contract
 
 `coverage-manifest.json` pins every case, expectation/category, source
-location and a hash of its script text, actual design/protocol identity, read/operation counts, and exact
+file and a hash of its parsed script, actual design/protocol identity, read/operation counts, and exact
 compiler-rejection disposition. It contains hashes and counts, not expected
-hardware output tables. Protocol hashes may indirectly reflect read-dependent
+hardware output tables. Script comments, whitespace and diagnostic positions
+are omitted from the identity; HDL source strings remain verbatim. Source line
+numbers stay in the per-run catalogue for diagnostics. Thus moving an unrelated
+case or editing a script comment does not rewrite the reviewed manifest.
+Protocol hashes may indirectly reflect read-dependent
 stimuli; they are execution-coverage drift guards requiring review, not independent
 specification oracles. They are never fed into Backend constraints and never
 replace suite assertions. Every invocation checks the exact suite case set, duplicate
@@ -123,7 +127,7 @@ source rejection; a compiler crash or empty diagnostic never qualifies.
 
 ### Updating the contract
 
-Adding, editing or removing a suite case, or changing what the frontend accepts,
+Adding, editing executable content or removing a suite case, or changing what the frontend accepts,
 changes the contract. Rerun the gate, then review the candidate before adopting
 it:
 

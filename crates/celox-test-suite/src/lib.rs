@@ -173,6 +173,37 @@ impl TestCase {
         self.script
     }
 
+    /// The parsed script without diagnostic positions or script comments.
+    /// HDL source strings remain verbatim. Useful for per-case drift checks.
+    pub fn script_identity(&self) -> String {
+        fn clear(stmt: &mut script::ast::Stmt) {
+            use script::ast::StmtKind;
+            stmt.pos.line = 0;
+            stmt.pos.column = 0;
+            match &mut stmt.kind {
+                StmtKind::Modify(body) | StmtKind::Block(body) | StmtKind::For(_, _, body) => {
+                    for stmt in body {
+                        clear(stmt);
+                    }
+                }
+                StmtKind::If(_, yes, no) => {
+                    clear(yes);
+                    if let Some(no) = no {
+                        clear(no);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut script = self.script.clone();
+        script.pos.line = 0;
+        script.pos.column = 0;
+        for stmt in &mut script.body {
+            clear(stmt);
+        }
+        format!("{script:?}")
+    }
+
     /// The design this case compiles.
     pub fn design(&self) -> Design {
         self.script.design(self.std_resolver)

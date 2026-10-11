@@ -112,6 +112,9 @@ pub struct FrontendLookup {
     pub state_to_source: HashMap<StateAddr, SourceAddr>,
     /// Event aliases projected to the canonical runtime event domain.
     pub event_aliases: HashMap<StateAddr, StateAddr>,
+    /// Instances that hold the variables of a package, outside the hierarchy.
+    /// Their variables are named `p::v`.
+    pub package_instances: HashSet<InstanceId>,
 }
 
 impl fmt::Debug for FrontendLookup {
@@ -190,14 +193,17 @@ impl FrontendLookup {
             .find(|info| info.id == address.var_id)
             .map(|info| &info.path);
 
-        let mut result = Vec::new();
+        let mut instance = Vec::new();
         if let Some(instance_path) = instance_path {
-            result.extend(self.instance_path_segments(instance_path));
+            instance.extend(self.instance_path_segments(instance_path));
         }
-        if let Some(variable_path) = variable_path {
-            result.extend(variable_path.iter().cloned());
+        let variable = variable_path.map(|path| path.join(".")).unwrap_or_default();
+        // The instance of package `p` is named `p::`.
+        if self.package_instances.contains(&address.instance_id) {
+            return format!("{}{variable}", instance.join("."));
         }
-        result.join(".")
+        instance.extend((!variable.is_empty()).then_some(variable));
+        instance.join(".")
     }
 
     pub fn get_state_path(&self, address: &StateAddr) -> String {

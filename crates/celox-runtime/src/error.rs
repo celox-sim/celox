@@ -69,3 +69,30 @@ impl std::fmt::Display for SimulatorErrorCode {
 }
 
 impl std::error::Error for SimulatorErrorCode {}
+/// Generated combinational fatal captures use negative status codes. Positive
+/// statuses belong to loop/runtime errors; zero means success. Keep the range
+/// bounded by the event site's u32 ID so internal failures such as a panicked
+/// lane (`i64::MIN`) cannot be mistaken for an assertion.
+pub fn comb_fatal_code(site_id: u32) -> i64 {
+    -1 - i64::from(site_id)
+}
+
+/// Decode the site of a generated combinational fatal status.
+pub fn comb_fatal_site(code: i64) -> Option<u32> {
+    u32::try_from(code.checked_neg()?.checked_sub(1)?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fatal_statuses_are_disjoint_from_success_loops_and_internal_failures() {
+        for site in [0, 1, 2, 1999, 2000, u32::MAX] {
+            assert_eq!(comb_fatal_site(comb_fatal_code(site)), Some(site));
+        }
+        for code in [0, 1, 2, 1999, 2000, i64::MIN, -1 - i64::from(u32::MAX) - 1] {
+            assert_eq!(comb_fatal_site(code), None);
+        }
+    }
+}

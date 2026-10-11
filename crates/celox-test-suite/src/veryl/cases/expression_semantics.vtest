@@ -131,9 +131,6 @@ module Top (
     (assert_eq {prefix}_unsigned_minus_div 127)))
 
 (case signed_type_cast_keeps_comparison_operands_signed
-  ; Veryl simulator 0.20.2 loses the signed result of the same-width
-  ; `as i8` while lowering this comparison. `~a` itself is not the
-  ; failure: comparing it with a signed variable works there.
   (source "test.veryl" #"
 module Top (
     clk: input clock,

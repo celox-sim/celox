@@ -61,17 +61,17 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  mov eax,[qword gs:28h]
-  0x00000019  mov edx,[gs:2Ch]
-  0x00000021  add eax,edx
-  0x00000023  mov edx,eax
-  0x00000025  and edx,1
-  0x00000028  mov [gs:30h],edx
-  0x00000030  mov edx,2
-  0x00000035  or eax,edx
-  0x00000037  mov [qword gs:34h],eax
-  0x00000041  xor eax,eax
-  0x00000043  jmp short 0000000000000045h
-  0x00000045  movq r11,xmm15
-  0x0000004a  wrgsbase r11
-  0x0000004f  ret
+  0x0000000f  mov eax,[gs:28h]
+  0x00000018  mov edx,[gs:2Ch]
+  0x00000020  add eax,edx
+  0x00000022  mov edx,eax
+  0x00000024  and edx,1
+  0x00000027  mov [gs:30h],edx
+  0x0000002f  mov edx,2
+  0x00000034  or eax,edx
+  0x00000036  mov [gs:34h],eax
+  0x0000003f  xor eax,eax
+  0x00000041  jmp short 0000000000000043h
+  0x00000043  movq r11,xmm15
+  0x00000048  wrgsbase r11
+  0x0000004d  ret
