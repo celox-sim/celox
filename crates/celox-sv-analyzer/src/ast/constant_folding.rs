@@ -245,7 +245,12 @@ fn eval_const_integral_expr_preserving_mask(
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     match expr {
-        Expr::Select { expr, msb, lsb, .. } => {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
             let operand =
                 eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
             let msb = eval_ast_const_expr(msb, const_env)?;
@@ -269,7 +274,7 @@ fn eval_const_integral_expr_preserving_mask(
             }
             Some(typecheck::IntegralLiteral {
                 width,
-                signed: false,
+                signed: *signed,
                 value,
                 mask,
             })

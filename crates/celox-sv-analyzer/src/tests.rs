@@ -862,6 +862,73 @@ fn preserves_unknown_out_of_range_constant_parameter_elements() {
 }
 
 #[test]
+fn preserves_overhanging_constant_parameter_part_selects() {
+    for (declaration, selection, expected) in [
+        ("logic [7:0] W = 8'hab", "W[8:5]", "4'bx101"),
+        ("logic [7:0] W = 8'hab", "W[2:-1]", "4'b011x"),
+        ("logic [7:0] W = 8'hab", "W[6 +: 4]", "4'bxx10"),
+        ("logic [7:0] W = 8'hab", "W[1 -: 4]", "4'b11xx"),
+        ("logic [7:0] W = 8'hab", "W[12:9]", "4'bxxxx"),
+        ("logic [11:4] W = 8'hab", "W[12:9]", "4'bx101"),
+        ("logic [4:11] W = 8'hab", "W[3:6]", "4'bx101"),
+        ("logic [1:0][7:4] W = 8'hab", "W[0][8:5]", "4'bx101"),
+        ("logic [1:0][7:4] W = 8'hab", "W[0][6 +: 4]", "4'bxx10"),
+        ("logic [1:0][7:4] W = 8'hab", "W[2][7:4]", "4'bxxxx"),
+        ("logic [1:0][7:4] W = 8'hab", "W[2:1]", "8'bxxxx1010"),
+    ] {
+        let source = format!(
+            "module Top; parameter {declaration}; localparam N = {selection}; \
+             localparam SAME = N === {expected}; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("overhanging_parameter_select.sv"))
+            .unwrap_or_else(|error| panic!("{selection}: {error}"));
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), None, "{selection}");
+        let expected_width = expected
+            .split('\'')
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(
+            parameters[1].resolved_width(),
+            Some(expected_width),
+            "{selection}"
+        );
+        assert_eq!(parameters[1].resolved_signed(), Some(false), "{selection}");
+        assert_eq!(parameters[2].resolved_value(), Some(1), "{selection}");
+    }
+}
+
+#[test]
+fn preserves_signed_named_constant_parameter_elements() {
+    let source = "module Top; typedef logic signed [3:0] nibble_t; \
+        parameter nibble_t [1:0][1:0] W = '1; localparam N = W[0][0]; \
+        localparam SUM = W[0][0] + 1; localparam PART = W[0][0][3:0]; endmodule";
+    let ir = analyze_source(source, Path::new("signed_parameter_elements.sv")).unwrap();
+    let parameters = ir.modules()[0].parameters();
+    assert_eq!(parameters[1].resolved_value(), Some(-1));
+    assert_eq!(parameters[1].resolved_width(), Some(4));
+    assert_eq!(parameters[1].resolved_signed(), Some(true));
+    assert_eq!(parameters[2].resolved_value(), Some(0));
+    assert_eq!(parameters[3].resolved_value(), Some(15));
+    assert_eq!(parameters[3].resolved_signed(), Some(false));
+}
+
+#[test]
+fn resolves_dependent_four_state_generate_imports() {
+    let source = "package p; parameter Q = 8'hxa; \
+        parameter P = Q; endpackage \
+        module Top(output logic [3:0] y); if (1) begin : imported \
+        import p::P; localparam N = P[3:0]; assign y = N; end endmodule";
+    let ir = analyze_source(source, Path::new("dependent_generate_import.sv")).unwrap();
+    assert_eq!(
+        ir.modules()[0].assignments()[0].rhs(),
+        &crate::ir::Expr::Literal("4'd10".into())
+    );
+}
+
+#[test]
 fn rejects_unrepresentable_constant_parameter_selections() {
     for selection in ["W[MISSING:0]", "W[0][3:0]", "W[0][1]"] {
         let source = format!(

@@ -466,39 +466,13 @@ pub(super) fn lvalue_from_constant_select(
     }
 
     if let Some(range) = &select.nodes.2 {
-        let bound = |expression| {
-            if packed_dimensions.constant_indexed_base
-                || has_indexed_selection(RefNode::ConstantExpression(expression))
-            {
-                indexed_select_base(
-                    RefNode::ConstantExpression(expression),
-                    syntax_tree,
-                    packed_dimensions,
-                )
-            } else {
-                const_expr_from_ref_node(RefNode::ConstantExpression(expression), syntax_tree)?
-                    .ok_or_else(|| unsupported(format!("part-select bound of `{name}`")))
-            }
-        };
-        let (mut msb, mut lsb) = match &range.nodes.1 {
-            sv_parser::ConstantPartSelectRange::ConstantRange(range) => {
-                (bound(&range.nodes.0)?, bound(&range.nodes.2)?)
-            }
-            sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => {
-                indexed_select_bounds(
-                    indexed_select_base(
-                        RefNode::ConstantExpression(&range.nodes.0),
-                        syntax_tree,
-                        packed_dimensions,
-                    )?,
-                    &range.nodes.1,
-                    &range.nodes.2,
-                    syntax_tree,
-                    (Some(&name), indices.len()),
-                    packed_dimensions,
-                )?
-            }
-        };
+        let (mut msb, mut lsb) = constant_part_select_bounds(
+            &range.nodes.1,
+            &name,
+            indices.len(),
+            syntax_tree,
+            packed_dimensions,
+        )?;
         let (array_slice_width, array_slice_reversed) =
             unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
                 .map_or((None, false), |(width, reversed)| (Some(width), reversed));
@@ -1737,6 +1711,46 @@ pub(super) fn selected_parameter_initializer(
     ))
 }
 
+fn constant_part_select_bounds(
+    range: &sv_parser::ConstantPartSelectRange,
+    name: &str,
+    index_count: usize,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<(ConstExpr, ConstExpr)> {
+    let bound = |expression: &sv_parser::ConstantExpression| {
+        if dimensions.constant_indexed_base
+            || has_indexed_selection(RefNode::ConstantExpression(expression))
+        {
+            indexed_select_base(
+                RefNode::ConstantExpression(expression),
+                syntax_tree,
+                dimensions,
+            )
+        } else {
+            const_expr_from_ref_node(RefNode::ConstantExpression(expression), syntax_tree)?
+                .ok_or_else(|| unsupported(format!("part-select bound of `{name}`")))
+        }
+    };
+    match range {
+        sv_parser::ConstantPartSelectRange::ConstantRange(range) => {
+            Ok((bound(&range.nodes.0)?, bound(&range.nodes.2)?))
+        }
+        sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => indexed_select_bounds(
+            indexed_select_base(
+                RefNode::ConstantExpression(&range.nodes.0),
+                syntax_tree,
+                dimensions,
+            )?,
+            &range.nodes.1,
+            &range.nodes.2,
+            syntax_tree,
+            (Some(name), index_count),
+            dimensions,
+        ),
+    }
+}
+
 fn indexed_constant_expression(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -1802,6 +1816,64 @@ fn indexed_constant_expression(
                     syntax_tree,
                 )
                 .ok_or_else(|| unsupported("parameter name"))?;
+                if let Some(range) = &parameter.nodes.1.nodes.2
+                    && let Some(variable) = dimensions.get(&name)
+                    && variable.unpacked.is_empty()
+                    && !variable.packed.is_empty()
+                {
+                    let index_count = parameter.nodes.1.nodes.1.nodes.0.len();
+                    let dimension = variable.packed.get(index_count).ok_or_else(|| {
+                        unsupported(format!("part-select of `{name}` with invalid packed rank"))
+                    })?;
+                    // Slice the selected element before applying the final
+                    // range. Overhanging inner indices must yield X rather
+                    // than address bits in a neighboring packed element.
+                    let mut element_primary = (*primary).clone();
+                    if let sv_parser::ConstantPrimary::PsParameter(element) = &mut element_primary {
+                        element.nodes.1.nodes.2 = None;
+                    }
+                    let element = convert(RefNode::ConstantPrimary(&element_primary))?;
+                    let (msb, lsb) = constant_part_select_bounds(
+                        &range.nodes.1,
+                        &name,
+                        index_count,
+                        syntax_tree,
+                        dimensions,
+                    )?;
+                    let mut msb = packed_index_offset(dimension, msb);
+                    let mut lsb = packed_index_offset(dimension, lsb);
+                    let stride = product_expr(
+                        &variable.packed[index_count + 1..]
+                            .iter()
+                            .map(|dimension| dimension.width.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    if !is_one(&stride) {
+                        msb = add_expr(
+                            ConstExpr::Binary {
+                                left: Box::new(msb),
+                                op: BinaryOp::Mul,
+                                right: Box::new(stride.clone()),
+                            },
+                            ConstExpr::Binary {
+                                left: Box::new(stride.clone()),
+                                op: BinaryOp::Sub,
+                                right: Box::new(ConstExpr::Literal("1".into())),
+                            },
+                        );
+                        lsb = ConstExpr::Binary {
+                            left: Box::new(lsb),
+                            op: BinaryOp::Mul,
+                            right: Box::new(stride),
+                        };
+                    }
+                    return Ok(Expr::Select {
+                        expr: Box::new(element),
+                        msb,
+                        lsb,
+                        signed: false,
+                    });
+                }
                 // A valid-rank packed element selection outside its declared
                 // range yields X (zero for two-state values), with the width
                 // of the remaining dimensions (IEEE 1800-2023 11.5.1).

@@ -249,6 +249,8 @@
     endpackage
     package other;
       parameter logic [7:0] D = 8'hcd;
+      parameter Q = 8'hxa;
+      parameter P = Q;
     endpackage
     module Child #(parameter N = cfg::D[7:4])(output logic [3:0] value);
       assign value = N;
@@ -259,7 +261,8 @@
       localparam N = D[3:0];
       assign value = N;
     endmodule
-    module Top(output int down, up, qualified, header, shadow, known_low, width, generated);
+    module Top(output int down, up, qualified, header, shadow, known_low, width,
+               generated, generated_dependency);
       import cfg::*;
       localparam DOWN = D[7:4];
       localparam UP = U[8:11];
@@ -278,6 +281,11 @@
         localparam N = D[7:4];
         assign generated = N;
       end
+      if (1) begin : dependent_import
+        import other::P;
+        localparam N = P[3:0];
+        assign generated_dependency = N;
+      end
     endmodule
   "#)
   (top Top)
@@ -288,6 +296,33 @@
   (assert_eq shadow 11)
   (assert_eq known_low 10)
   (assert_eq generated 12)
+  (assert_eq generated_dependency 10)
+  (assert_eq width 4))
+
+(case constant_parameter_initializers_preserve_overhanging_parts
+  ; These comparisons require the X bits specified by IEEE 1800-2023
+  ; 11.5.1, including partially out-of-range indexed part-selects.
+  (four_state)
+  (source "overhanging_parameter_selections.sv" #"
+    module Top(output logic [6:0] checks, output int width);
+      parameter logic [7:0] W = 8'hab;
+      parameter logic [11:4] D = 8'hab;
+      parameter logic [4:11] U = 8'hab;
+      localparam ABOVE = W[8:5];
+      localparam BELOW = W[2:-1];
+      localparam PLUS = W[6 +: 4];
+      localparam MINUS = W[1 -: 4];
+      localparam OUTSIDE = W[12:9];
+      localparam OFFSET = D[12:9];
+      localparam UP = U[3:6];
+      assign checks = {ABOVE === 4'bx101, BELOW === 4'b011x,
+        PLUS === 4'bxx10, MINUS === 4'b11xx, OUTSIDE === 4'bxxxx,
+        OFFSET === 4'bx101, UP === 4'bx101};
+      assign width = $bits(ABOVE);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 127)
   (assert_eq width 4))
 
 (case constant_parameter_initializers_shape_ports_and_generate
@@ -503,7 +538,10 @@
                     output logic [7:0] size_width, bits_width,
                     output int packed_down, packed_up, outer_down, outer_up,
                         selected_bit, selected_width, invalid_width,
-                    output logic [2:0] invalid_is_x);
+                        signed_value, signed_sum, unsigned_part,
+                    output logic [2:0] invalid_is_x, output logic [1:0] overhang_checks);
+                    typedef logic signed [3:0] nibble_t;
+                    parameter nibble_t [1:0][1:0] SIGNED = '1;
                     assign size_base = data[$size(P[0]) +: 4];
                     assign bits_base = data[$bits(P[0]) +: 4];
                     assign offset_base = data[$size(OFFSET[1]) +: 4];
@@ -525,6 +563,11 @@
                     localparam INVALID_INNER = OFFSET[1][8];
                     localparam INVALID_ELEMENT = OFFSET[3];
                     localparam INVALID_WIDTH = $bits(INVALID_OUTER);
+                    localparam SIGNED_VALUE = SIGNED[0][0];
+                    localparam SIGNED_SUM = SIGNED[0][0] + 1;
+                    localparam UNSIGNED_PART = SIGNED[0][0][3:0];
+                    localparam INNER_OVERHANG = OFFSET[1][8:5];
+                    localparam OUTER_OVERHANG = OFFSET[3:2];
                     assign packed_down = PACKED_DOWN;
                     assign packed_up = PACKED_UP;
                     assign outer_down = OUTER_DOWN;
@@ -534,6 +577,11 @@
                     assign invalid_is_x = {INVALID_OUTER === 1'bx,
                         INVALID_INNER === 1'bx, INVALID_ELEMENT === 4'bxxxx};
                     assign invalid_width = INVALID_WIDTH;
+                    assign signed_value = SIGNED_VALUE;
+                    assign signed_sum = SIGNED_SUM;
+                    assign unsigned_part = UNSIGNED_PART;
+                    assign overhang_checks = {INNER_OVERHANG === 4'bx101,
+                        OUTER_OVERHANG === 8'bxxxx1010};
                 endmodule
             "#)
   (top Top)
@@ -551,7 +599,11 @@
   (assert_eq selected_bit 1)
   (assert_eq selected_width 4)
   (assert_eq invalid_is_x 7)
-  (assert_eq invalid_width 1))
+  (assert_eq invalid_width 1)
+  (assert_eq signed_value (trunc 32 -1))
+  (assert_eq signed_sum 0)
+  (assert_eq unsigned_part 15)
+  (assert_eq overhang_checks 3))
 
 (case indexed_widths_accept_replication_concatenations
   (source "indexed_replication_widths.sv" #"
