@@ -57,6 +57,7 @@ impl LayoutSource<AbsoluteAddr> for OptimizedSir {
             num_events: self.num_events(),
             runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
             lane_writers: self.lane_writers(),
+            access_rank: self.access_rank(),
         }
     }
 }
