@@ -1,0 +1,212 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "lydite",
+  "scopeName": "source.lydite",
+  "fileTypes": [".lyd"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#reserved" },
+    { "include": "#document-kind" },
+    { "include": "#declaration-modifiers" },
+    { "include": "#sections" },
+    { "include": "#quantifiers" },
+    { "include": "#modes" },
+    { "include": "#types" },
+    { "include": "#builtin-operations" },
+    { "include": "#namespaces" },
+    { "include": "#calls" },
+    { "include": "#named-blocks" },
+    { "include": "#frame-variables" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "match": "(//)(.*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.lydite" },
+            "2": { "name": "comment.line.double-slash.lydite" }
+          }
+        },
+        {
+          "name": "comment.block.lydite",
+          "begin": "/\\*",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.lydite" }
+          },
+          "end": "\\*/",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.lydite" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "match": "(\")((?:[^\"\\\\]|\\\\.)*)(\")",
+          "captures": {
+            "1": { "name": "punctuation.definition.string.begin.lydite" },
+            "2": {
+              "name": "string.quoted.double.lydite",
+              "patterns": [
+                { "match": "\\\\.", "name": "constant.character.escape.lydite" }
+              ]
+            },
+            "3": { "name": "punctuation.definition.string.end.lydite" }
+          }
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "match": "\\b[0-9]+u[0-9]+\\b", "name": "constant.numeric.bv.lydite" },
+        { "match": "\\b[0-9]+\\b", "name": "constant.numeric.integer.lydite" }
+      ]
+    },
+    "reserved": {
+      "patterns": [
+        { "match": "\\b(if|else|use)\\b", "name": "keyword.control.lydite" },
+        { "match": "\\b(true|false)\\b", "name": "constant.language.lydite" }
+      ]
+    },
+    "document-kind": {
+      "patterns": [
+        {
+          "match": "^\\s*(design|specification|lemmas)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.document.lydite" }
+          }
+        }
+      ]
+    },
+    "declaration-modifiers": {
+      "patterns": [
+        {
+          "match": "(?:^|(?<=[{};(,]))\\s*(input|output|state|parameter|observation)\\b(?=\\s+[A-Za-z_])",
+          "captures": {
+            "1": { "name": "storage.modifier.lydite" }
+          }
+        }
+      ]
+    },
+    "sections": {
+      "patterns": [
+        {
+          "match": "(?:^|(?<=[{};]))\\s*(accept|all|any|assume|bind|binding|bound|can_step|cases|claim|commit|component|components|composition|compositions|context|contract|cover_depth|depends|enabled|endpoints|ensure|example|examples|expect|execution|expectation|from|guard|hold_when|implementation|impl|initial|init|inputs|instances|invariant|lemma|let|members|mode|next|no_comb_path|observe|observations|operation|operations|outputs|parameter|partition|partitioning|pending|post|postcondition|pre|precondition|progress|proof|rank|reset|reset_input|responses|result|rhs|spec|specs|split|state|states|steps|structure|target|terminal|to|trace|wires)\\b(?!\\s*=(?!=))",
+          "captures": {
+            "1": { "name": "keyword.other.lydite" }
+          }
+        }
+      ]
+    },
+    "quantifiers": {
+      "patterns": [
+        { "match": "\\b(forall|exists|not_exists)\\b", "name": "keyword.other.lydite" }
+      ]
+    },
+    "modes": {
+      "patterns": [
+        {
+          "match": "\\b(positive|negative|independent_lemmas|shared_query)\\b",
+          "name": "constant.language.lydite"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "match": "\\bbool\\b", "name": "storage.type.lydite" },
+        {
+          "begin": "\\b(bv|mem)\\s*(<)",
+          "beginCaptures": {
+            "1": { "name": "storage.type.lydite" },
+            "2": { "name": "punctuation.definition.typeparameters.begin.lydite" }
+          },
+          "end": "(>)",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.typeparameters.end.lydite" }
+          },
+          "patterns": [
+            { "include": "#numbers" },
+            { "match": ",", "name": "punctuation.separator.lydite" }
+          ]
+        }
+      ]
+    },
+    "builtin-operations": {
+      "patterns": [
+        {
+          "match": "\\b(actions|add|and|band|bnot|bor|bv|bxor|compose|concat|const_mem|eq|extract|implies|ite|lshr|mul|ne|not|or|range|read|sext|shl|sle|slt|sub|ule|ult|write|xor|zext)\\b(?=\\s*\\()",
+          "name": "support.function.builtin.lydite"
+        }
+      ]
+    },
+    "namespaces": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)",
+          "captures": {
+            "1": { "name": "variable.language.namespace.lydite" },
+            "2": { "name": "punctuation.separator.namespace.lydite" }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()",
+          "name": "entity.name.function.lydite"
+        }
+      ]
+    },
+    "named-blocks": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\{)",
+          "name": "entity.name.section.lydite"
+        }
+      ]
+    },
+    "frame-variables": {
+      "patterns": [
+        { "match": "\\b(pre|goal|lhs|rhs)\\b", "name": "variable.language.lydite" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "=>|&&|\\|\\||==|!=|<=|>=|<<|>>|[+\\-*&|^~!<>=]",
+          "name": "keyword.operator.lydite"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "match": "\\{", "name": "punctuation.section.block.begin.lydite" },
+        { "match": "\\}", "name": "punctuation.section.block.end.lydite" },
+        { "match": "\\(", "name": "punctuation.section.parens.begin.lydite" },
+        { "match": "\\)", "name": "punctuation.section.parens.end.lydite" },
+        { "match": "\\[", "name": "punctuation.section.brackets.begin.lydite" },
+        { "match": "\\]", "name": "punctuation.section.brackets.end.lydite" },
+        { "match": ";", "name": "punctuation.terminator.statement.lydite" },
+        { "match": ",", "name": "punctuation.separator.lydite" },
+        { "match": ":", "name": "punctuation.separator.key-value.lydite" },
+        { "match": "'", "name": "punctuation.definition.prime.lydite" }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\b",
+          "name": "variable.other.lydite"
+        }
+      ]
+    }
+  }
+}
