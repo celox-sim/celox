@@ -242,6 +242,11 @@ impl Item<'_> {
         match expr {
             ConstExpr::Ident(name) => *name = self.name(name),
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.constant(expr);
+                self.constant(msb);
+                self.constant(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.constant(expr);
                 self.constant(bit);
@@ -250,7 +255,7 @@ impl Item<'_> {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.constant(e));
             }
-            ConstExpr::Unary { expr, .. } => self.constant(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => self.constant(expr),
             ConstExpr::Binary { left, right, .. } => {
                 self.constant(left);
                 self.constant(right);
@@ -319,6 +324,33 @@ pub(super) fn items<'a>(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
+    items_with_literal_use(node, tree, env, aliases, LiteralUse::All)
+}
+
+/// Elaborate the same scopes and diagnostics, retaining module parameter
+/// literals needed by subroutines, declarations and generate constructs.
+pub(super) fn subroutine_items<'a>(
+    node: RefNode<'a>,
+    tree: &'a SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Result<Vec<Item<'a>>, AnalyzerError> {
+    items_with_literal_use(node, tree, env, aliases, LiteralUse::Subroutines)
+}
+
+#[derive(Clone, Copy)]
+enum LiteralUse {
+    All,
+    Subroutines,
+}
+
+fn items_with_literal_use<'a>(
+    node: RefNode<'a>,
+    tree: &'a SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    literal_use: LiteralUse,
+) -> Result<Vec<Item<'a>>, AnalyzerError> {
     let mut elaborator = Elaborator {
         tree,
         aliases,
@@ -328,7 +360,9 @@ pub(super) fn items<'a>(
     };
     let parameters =
         parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
-    let mut literals = parameter_value_env(&parameters, env);
+    let references = parameter_literal_references(node.clone(), tree, literal_use);
+    let mut literals =
+        parameters::parameter_value_env_for_references(&parameters, env, &references);
     if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
         elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
     }
@@ -362,6 +396,79 @@ pub(super) fn items<'a>(
         }
     }
     Ok(elaborator.items)
+}
+
+/// All references in executable/type-bearing items, including inactive and
+/// nested generate branches. Direct scalar parameter initializers are accounted
+/// for by the dependency closure rather than expanded as independent roots.
+fn parameter_literal_references(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    literal_use: LiteralUse,
+) -> HashSet<String> {
+    let items: Vec<_> = match node {
+        RefNode::PackageDeclaration(package) => package_declarations(package)
+            .map(RefNode::PackageOrGenerateItemDeclaration)
+            .collect(),
+        node => module_non_port_items(node)
+            .into_iter()
+            .map(RefNode::NonPortModuleItem)
+            .collect(),
+    };
+    let mut references = HashSet::default();
+    for node in items {
+        // Top-level RTL bodies do not contribute to subroutine discovery.
+        // Keep declarations (including signal types queried by functions) and
+        // whole generate constructs, whose conditions, imports and local
+        // declarations participate in elaboration for every collector. Keep
+        // procedural declarations too, as type queries can name their scopes.
+        if matches!(literal_use, LiteralUse::Subroutines)
+            && let RefNode::NonPortModuleItem(sv_parser::NonPortModuleItem::ModuleOrGenerateItem(
+                item,
+            )) = &node
+            && let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item
+            && matches!(
+                item.nodes.1,
+                sv_parser::ModuleCommonItem::ContinuousAssign(_)
+                    | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
+                    | sv_parser::ModuleCommonItem::InitialConstruct(_)
+            )
+            && !node.clone().into_iter().any(|child| {
+                matches!(
+                    child,
+                    RefNode::DataDeclaration(_) | RefNode::NetDeclaration(_)
+                )
+            })
+        {
+            continue;
+        }
+        let declaration = match node.clone() {
+            RefNode::PackageOrGenerateItemDeclaration(declaration) => Some(declaration),
+            RefNode::NonPortModuleItem(item) => {
+                declarations::package_or_generate_declaration_from_non_port_item(item)
+            }
+            _ => None,
+        };
+        if declaration.is_some_and(|declaration| matches!(declaration,
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
+                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)))
+            && !node.clone().into_iter().any(|child| matches!(child,
+                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(assignment)))
+        {
+            continue;
+        }
+        references.extend(
+            node.into_iter()
+                .filter(|child| {
+                    matches!(
+                        child,
+                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                    )
+                })
+                .filter_map(|child| identifier_text(child, tree)),
+        );
+    }
+    references
 }
 
 impl<'a> Elaborator<'a, '_> {
@@ -419,7 +526,14 @@ impl<'a> Elaborator<'a, '_> {
                     ))?;
                 }
             }
-            ConstExpr::Unary { expr, .. } => self.expand_constant_calls(expr, scope)?,
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.expand_constant_calls(expr, scope)?
+            }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.expand_constant_calls(expr, scope)?;
+                self.expand_constant_calls(msb, scope)?;
+                self.expand_constant_calls(lsb, scope)?;
+            }
             ConstExpr::Select { expr, bit } => {
                 self.expand_constant_calls(expr, scope)?;
                 self.expand_constant_calls(bit, scope)?;
@@ -647,6 +761,11 @@ impl<'a> Elaborator<'a, '_> {
                         // signed 32-bit type, including after every loop update.
                         value = i128::from(value as i32);
                         let mut iteration = scope.clone();
+                        // Replace the entire inherited binding, including packed
+                        // bounds and rank, before installing the signed int genvar.
+                        for marker in parameters::binding_keys(&name, &iteration.env, 0) {
+                            iteration.env.remove(&marker);
+                        }
                         iteration.env.insert(name.clone(), value);
                         insert_parameter_type_markers(
                             &mut iteration.env,
@@ -656,6 +775,7 @@ impl<'a> Elaborator<'a, '_> {
                                 signed: true,
                             },
                         );
+                        iteration.env.insert(parameter_rank_marker(&name), 1);
                         iteration.names.remove(&name);
                         Arc::make_mut(&mut iteration.shadowed).insert(name.clone());
                         iteration
@@ -793,6 +913,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
@@ -897,6 +1018,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
@@ -951,6 +1073,30 @@ impl<'a> Elaborator<'a, '_> {
                     Some(&name),
                     &mut signals,
                 )?;
+                // Validate before exporting this type: a symbolic bound must
+                // never reach IR resolution with a same-named outer number.
+                for signal in &signals {
+                    let ty = signal.r#type();
+                    for bound in ty
+                        .packed_ranges()
+                        .iter()
+                        .flat_map(|r| [r.left(), r.right()])
+                        .chain(
+                            ty.unpacked_ranges()
+                                .iter()
+                                .flat_map(|r| [r.left(), r.right()]),
+                        )
+                    {
+                        if parameters::contains_unbounded_operand(bound, &scope.env)
+                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                        {
+                            return Err(AnalyzerError::Unsupported(
+                                "numeric use of unbounded parameter in generate signal range"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
                 extend_const_env_with_variable_types(
                     &mut scope.env,
                     signals
@@ -1097,10 +1243,32 @@ impl<'a> Elaborator<'a, '_> {
             sv_parser::GenerateBlock::GenerateItem(item) => vec![item],
             sv_parser::GenerateBlock::Multiple(block) => block.nodes.3.iter().collect(),
         };
+        // The names the block's imports bind to another declaration than its
+        // module does (see `imports::resolve_imports`), before the block's
+        // declarations are evaluated with them.
+        let imported = scope::imported();
+        if let Some(bindings) = imported
+            .generate_imports
+            .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
+        {
+            for (name, target) in bindings {
+                bind_import(&mut scope, name, target);
+            }
+        }
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
-        if let Some((genvar, _)) = index {
+        if let Some((genvar, value)) = index {
             declared.insert(genvar.to_string());
+            // The implicit localparam in each loop body (IEEE 1800-2023 27.4)
+            // must override inherited literals during expression substitution.
+            // Mark it as a bounded value parameter for queries such as $isunbounded.
+            scope
+                .env
+                .insert(parameters::unbounded_parameter_marker(genvar), 0);
+            scope.literals.insert(
+                genvar.to_string(),
+                Expr::Literal(format_typed_parameter_literal(value, 32, true)),
+            );
         }
         self.constants_and_signal_types(&children, &mut scope, &mut declared)?;
         for item in &children {
@@ -1187,6 +1355,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     signal.name.clone(),
                     parameter_marker(&signal.name),
+                    parameters::unbounded_parameter_marker(&signal.name),
                     local_parameter_marker(&signal.name),
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),
@@ -1211,6 +1380,41 @@ impl<'a> Elaborator<'a, '_> {
         }
         Ok(())
     }
+}
+
+/// Make `name` in `scope` denote the package item `target`, as an import of
+/// the generate block does.
+fn bind_import(scope: &mut Scope, name: &str, target: &str) {
+    Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
+    scope.names.insert(name.to_string(), target.to_string());
+    // The constant value and type markers of the item, under the name.
+    let names = |key: &str| -> Option<String> {
+        if key == target {
+            return Some(name.to_string());
+        }
+        let (prefix, marked) = scope::split_marker(key)?;
+        (marked == target).then(|| format!("{prefix}{name}"))
+    };
+    scope.env.retain(|key, _| {
+        key != name && scope::split_marker(key).is_none_or(|(_, marked)| marked != name)
+    });
+    let constants: Vec<(String, i128)> = scope
+        .env
+        .iter()
+        .filter_map(|(key, value)| Some((names(key)?, *value)))
+        .collect();
+    scope.env.extend(constants);
+    match scope.literals.get(target).cloned() {
+        Some(value) => {
+            scope.literals.insert(name.to_string(), value);
+        }
+        None => {
+            scope.literals.remove(name);
+        }
+    }
+    scope
+        .parameters
+        .retain(|parameter| parameter.name() != name);
 }
 
 // Bootstrap only module-scope functions; collecting the full function map would
@@ -1790,6 +1994,73 @@ mod tests {
     }
 
     #[test]
+    fn genvar_scopes_discard_all_inherited_packed_bounds() {
+        let tree = crate::syntax::parse_source(
+            "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
+            Path::new("genvar_packed_bounds.sv"),
+        ).unwrap();
+        let node = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let parameters = parameters_from_module_node(
+            node.clone(),
+            &tree,
+            &HashMap::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        let mut env = HashMap::default();
+        extend_const_env_with_parameters(&mut env, &parameters);
+        assert_eq!(env[&parameter_dimensions_marker("i")], 2);
+        let active = items(node, &tree, &env, &HashMap::default()).unwrap();
+        let iterations: Vec<_> = active
+            .iter()
+            .filter(|item| !item.scope.is_empty())
+            .collect();
+        assert_eq!(iterations.len(), 2);
+        for (value, item) in iterations.iter().enumerate() {
+            assert_eq!(item.env["i"], value as i128);
+            assert_eq!(item.env[&parameter_width_marker("i")], 32);
+            assert_eq!(item.env[&parameter_signed_marker("i")], 1);
+            assert_eq!(item.env[&parameter_rank_marker("i")], 1);
+            assert_eq!(item.env[&parameters::unbounded_parameter_marker("i")], 0);
+            assert!(!item.env.contains_key(&parameter_dimensions_marker("i")));
+            assert!(!item.parameter_dimensions.contains_key("i"));
+            for dimension in 0..2 {
+                for bound in ["left", "right"] {
+                    assert!(
+                        !item
+                            .env
+                            .contains_key(&parameter_dimension_marker("i", dimension, bound))
+                    );
+                }
+            }
+        }
+        assert_eq!(env[&parameter_dimension_marker("i", 0, "left")], 2);
+        assert_eq!(env[&parameter_dimension_marker("i", 1, "right")], 0);
+    }
+
+    #[test]
+    fn folds_shadowing_genvars_in_nested_selects() {
+        let source = analyze(
+            "module Top #(parameter logic [7:0] i=9)(output logic [2:0] y); for (genvar i=-1; i<2; i++) begin : g if (1) assign y[i+1]=i; end endmodule",
+        ).unwrap();
+        assert_eq!(source.modules()[0].assignments().len(), 3);
+        for (index, assignment) in source.modules()[0].assignments().iter().enumerate() {
+            let LValue::Select { lsb, .. } = &assignment.lhs else {
+                panic!("{assignment:?}")
+            };
+            assert_eq!(
+                eval_ast_const_expr(lsb, &HashMap::default()),
+                Some(index as i128),
+                "{assignment:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reserves_genvar_in_its_own_block_but_allows_nested_shadowing() {
         for declaration in ["logic i;", "wire i;", "localparam i = 2;"] {
             let source = format!(
@@ -1971,6 +2242,350 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("unexpected success: {body}"));
             assert!(error.to_string().contains(expected), "{body}: {error}");
+        }
+    }
+
+    #[test]
+    fn reference_scan_covers_nested_branches_arrays_packages_and_escaped_names() {
+        let code = r#"
+            module Top;
+                localparam UNUSED = missing(ONLY_INITIALIZER);
+                localparam A = 'x;
+                localparam B = A;
+                localparam logic [7:0] ARR [0:0] = '{ARRAY_INPUT};
+                function automatic logic f(); return FUNCTION_INPUT; endfunction
+                generate
+                    if (0) begin : inactive
+                        assign out = INACTIVE_INPUT;
+                    end
+                    for (genvar i = 0; i < LOOP_BOUND; i++) begin : loop_scope
+                        localparam C = NESTED_INPUT;
+                    end
+                endgenerate
+                assign out = \escaped.name ;
+            endmodule
+            package pkg;
+                localparam UNUSED = only_in_initializer;
+                function automatic logic f(); return PACKAGE_INPUT; endfunction
+            endpackage
+        "#;
+        let tree = crate::syntax::parse_source(code, Path::new("literal_references.sv")).unwrap();
+        for node in &tree {
+            if matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            ) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
+                for name in [
+                    "ARRAY_INPUT",
+                    "FUNCTION_INPUT",
+                    "INACTIVE_INPUT",
+                    "LOOP_BOUND",
+                    "NESTED_INPUT",
+                    "\\escaped.name",
+                ] {
+                    assert!(refs.contains(name), "{name}: {refs:?}");
+                }
+                assert!(!refs.contains("ONLY_INITIALIZER"));
+            } else if matches!(node, RefNode::PackageDeclaration(_)) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
+                assert!(refs.contains("PACKAGE_INPUT"));
+                assert!(!refs.contains("only_in_initializer"));
+            }
+        }
+    }
+
+    #[test]
+    fn unused_unresolved_chains_do_not_populate_item_literals() {
+        use std::fmt::Write;
+
+        for count in [16, 64, 256] {
+            for doubling in [false, true] {
+                let declaration = if doubling {
+                    // Expanding the previous unresolved value twice at every
+                    // declaration would make the unused expression trees grow
+                    // exponentially before this function is installed.
+                    "function automatic int next_value(input int left, right); return left + right; endfunction\n"
+                } else {
+                    "function automatic int next_value(input int value); return value + 1; endfunction\n"
+                };
+                let mut code = format!("module Top; {declaration}");
+                for i in 0..count {
+                    let arg = match (i, doubling) {
+                        (0, false) => "0".into(),
+                        (0, true) => "1, 1".into(),
+                        (_, false) => format!("P{}", i - 1),
+                        (_, true) => format!("P{0}, P{0}", i - 1),
+                    };
+                    writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
+                }
+                code.push_str("endmodule\n");
+                let tree =
+                    crate::syntax::parse_source(&code, Path::new("unused_chain.sv")).unwrap();
+                let node = (&tree)
+                    .into_iter()
+                    .find(|node| {
+                        matches!(
+                            node,
+                            RefNode::ModuleDeclarationAnsi(_)
+                                | RefNode::ModuleDeclarationNonansi(_)
+                        )
+                    })
+                    .unwrap();
+                let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+                assert!(active.iter().all(|item| item.literals.is_empty()));
+                let ir =
+                    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+                for (i, parameter) in ir.modules()[0].parameters().iter().enumerate() {
+                    let expected = if !doubling {
+                        i as i128 + 1
+                    } else if i >= 31 {
+                        0
+                    } else {
+                        (1u32 << (i + 1)) as i32 as i128
+                    };
+                    assert_eq!(parameter.resolved_value(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn referenced_four_state_dependencies_keep_their_full_values() {
+        let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
+        let tree = crate::syntax::parse_source(code, Path::new("needed_literals.sv")).unwrap();
+        let node = (&tree)
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                )
+            })
+            .unwrap();
+        let env = HashMap::default();
+        let aliases = HashMap::default();
+        let parameters =
+            parameters_from_module_node(node.clone(), &tree, &aliases, &env, &HashMap::default())
+                .unwrap();
+        let full = parameter_value_env(&parameters, &env);
+        let active = items(node, &tree, &env, &aliases).unwrap();
+        for item in active {
+            assert_eq!(item.literals.get("B"), full.get("B"));
+            assert_eq!(item.literals.get("A"), full.get("A"));
+            assert!(!item.literals.contains_key("UNUSED"));
+        }
+    }
+
+    #[test]
+    fn subroutine_reference_scan_excludes_rtl_only_bindings() {
+        let code = r#"
+            module Top;
+                localparam INITIALIZER = ONLY_INITIALIZER;
+                function automatic logic f(); return FUNCTION_INPUT; endfunction
+                task t(input logic [TASK_WIDTH-1:0] value); endtask
+                assign out = RTL_INPUT;
+                always_comb out = ALWAYS_INPUT;
+                initial out = INITIAL_INPUT;
+                initial begin : named logic [PROCEDURAL_WIDTH-1:0] local_signal; end
+                logic [RTL_WIDTH-1:0] signal;
+                if (CONDITION) begin : g
+                    localparam P = LOCAL_INPUT;
+                    logic [SIGNAL_WIDTH-1:0] x;
+                    assign x = GENERATE_INPUT;
+                end
+                generate
+                    assign other = REGION_INPUT;
+                endgenerate
+            endmodule
+            package pkg;
+                localparam INITIALIZER = ONLY_INITIALIZER;
+                function automatic logic f(); return PACKAGE_INPUT; endfunction
+            endpackage
+        "#;
+        let tree =
+            crate::syntax::parse_source(code, Path::new("subroutine_references.sv")).unwrap();
+        for node in &tree {
+            if matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            ) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+                for name in [
+                    "FUNCTION_INPUT",
+                    "TASK_WIDTH",
+                    "RTL_WIDTH",
+                    "PROCEDURAL_WIDTH",
+                    "CONDITION",
+                    "LOCAL_INPUT",
+                    "SIGNAL_WIDTH",
+                    "GENERATE_INPUT",
+                    "REGION_INPUT",
+                ] {
+                    assert!(refs.contains(name), "{name}: {refs:?}");
+                }
+                for name in [
+                    "ONLY_INITIALIZER",
+                    "RTL_INPUT",
+                    "ALWAYS_INPUT",
+                    "INITIAL_INPUT",
+                ] {
+                    assert!(!refs.contains(name), "{name}: {refs:?}");
+                }
+            } else if matches!(node, RefNode::PackageDeclaration(_)) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+                assert!(refs.contains("PACKAGE_INPUT"));
+                assert!(!refs.contains("ONLY_INITIALIZER"));
+            }
+        }
+    }
+
+    #[test]
+    fn subroutine_literals_preserve_functions_tasks_and_generate_scopes() {
+        let code = r#"
+            module Top(output logic [7:0] out);
+                localparam logic [7:0] A = 8'bxz010101;
+                localparam logic [7:0] B = A;
+                localparam logic [7:0] RTL_ONLY = 'x;
+                function automatic logic [7:0] f(); return B; endfunction
+                task t(output logic [7:0] result); result = A; endtask
+                if (1) begin : g
+                    localparam logic [7:0] C = B;
+                    logic [7:0] x;
+                    assign x = C;
+                end
+                assign out = RTL_ONLY;
+            endmodule
+        "#;
+        let tree = crate::syntax::parse_source(code, Path::new("subroutine_literals.sv")).unwrap();
+        let node = (&tree)
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let env = HashMap::default();
+        let aliases = HashMap::default();
+        let full = items(node.clone(), &tree, &env, &aliases).unwrap();
+        let projected = subroutine_items(node, &tree, &env, &aliases).unwrap();
+        assert_eq!(projected.len(), full.len());
+        for (full, projected) in full.iter().zip(&projected) {
+            assert_eq!(projected.env, full.env);
+            assert_eq!(projected.names, full.names);
+            assert_eq!(projected.shadowed, full.shadowed);
+            assert_eq!(projected.parameter_dimensions, full.parameter_dimensions);
+            assert_eq!(projected.scope, full.scope);
+            for name in ["A", "B", "C"] {
+                assert_eq!(projected.literals.get(name), full.literals.get(name));
+            }
+            assert!(!projected.literals.contains_key("RTL_ONLY"));
+            assert!(full.literals.contains_key("RTL_ONLY"));
+        }
+        // The emitted RTL still uses the ordinary collector's complete roots.
+        let ir = crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+        let crate::ir::Expr::Literal(value) = ir.modules()[0].assignments().last().unwrap().rhs()
+        else {
+            panic!("RTL-only four-state parameter must remain a literal")
+        };
+        let value = typecheck::parse_integral_literal(value).unwrap();
+        assert_eq!(value.width, 8);
+        assert_eq!(value.mask, 255u32.into());
+    }
+
+    #[test]
+    fn rtl_referenced_unresolved_chains_do_not_expand_during_subroutine_discovery() {
+        use std::fmt::Write;
+
+        for count in [16, 64, 256] {
+            for doubling in [false, true] {
+                let declaration = if doubling {
+                    "function automatic int next_value(input int left, right); return left + right; endfunction\n"
+                } else {
+                    "function automatic int next_value(input int value); return value + 1; endfunction\n"
+                };
+                let mut code = format!("module Top(output int result); {declaration}");
+                for i in 0..count {
+                    let arg = match (i, doubling) {
+                        (0, false) => "0".into(),
+                        (0, true) => "1, 1".into(),
+                        (_, false) => format!("P{}", i - 1),
+                        (_, true) => format!("P{0}, P{0}", i - 1),
+                    };
+                    writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
+                }
+                writeln!(code, "assign result = P{}; endmodule", count - 1).unwrap();
+                let tree = crate::syntax::parse_source(&code, Path::new("rtl_chain.sv")).unwrap();
+                let node = (&tree)
+                    .into_iter()
+                    .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+                    .unwrap();
+                let active =
+                    subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+                        .unwrap();
+                assert!(active.iter().all(|item| item.literals.is_empty()));
+                let ir =
+                    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+                let parameters = ir.modules()[0].parameters();
+                assert_eq!(parameters.len(), count);
+                for (i, parameter) in parameters.iter().enumerate() {
+                    let expected = if !doubling {
+                        i as i128 + 1
+                    } else if i >= 31 {
+                        0
+                    } else {
+                        (1u32 << (i + 1)) as i32 as i128
+                    };
+                    assert_eq!(parameter.resolved_value(), Some(expected));
+                }
+                let crate::ir::Expr::Literal(value) = ir.modules()[0].assignments()[0].rhs() else {
+                    panic!("resolved chain must reach RTL as a literal")
+                };
+                let value = typecheck::parse_integral_literal(value).unwrap();
+                assert_eq!(
+                    value.value,
+                    if doubling {
+                        if count >= 32 { 0 } else { 1u32 << count }
+                    } else {
+                        count as u32
+                    }
+                    .into()
+                );
+                assert_eq!(value.mask, 0u32.into());
+                assert_eq!(value.width, 32);
+            }
+        }
+    }
+
+    #[test]
+    fn subroutine_projection_preserves_generate_diagnostics() {
+        for body in [
+            "if (UNKNOWN) begin : g logic x; end",
+            "if (1) begin : g typedef logic T; T x; end",
+            "for (genvar i=0; i<1; i++) begin : g function logic f(); return 0; endfunction end",
+            "if (1) begin : g localparam P=Q; localparam Q=P; end",
+        ] {
+            let code = format!("module Top; {body} endmodule");
+            let tree =
+                crate::syntax::parse_source(&code, Path::new("subroutine_diagnostics.sv")).unwrap();
+            let node = (&tree)
+                .into_iter()
+                .find(|node| {
+                    matches!(
+                        node,
+                        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                    )
+                })
+                .unwrap();
+            let full = items(
+                node.clone(),
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+            )
+            .err()
+            .expect(body);
+            let projected = subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+                .err()
+                .expect(body);
+            assert_eq!(projected.to_string(), full.to_string(), "{body}");
         }
     }
 }

@@ -289,6 +289,7 @@ pub(super) fn optimize_with_options(
         &apply_passes,
         &options,
     );
+    super::parallel::publish_parallel_ff_directly(program);
 
     super::late::optimize_late_comb(program, opt, &options, &unpacked_element_widths);
     super::parallel::optimize_late_parallel_comb(program, opt, &options);

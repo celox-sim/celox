@@ -13,6 +13,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     ops::{Deref, DerefMut},
+    path::Path,
     sync::Arc,
 };
 
@@ -46,6 +47,7 @@ pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
 mod scope;
@@ -53,6 +55,7 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -76,7 +79,7 @@ use constant_folding::{
 use constants::{
     binary_op_from_symbol, bind_generate_parameter, const_expr_from_constant_param_with_env,
     const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
-    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_lvalue_const,
+    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_index_const,
     left_associate_expr_binary, next_genvar_value, primary_literal_text,
     substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
     substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
@@ -211,7 +214,8 @@ impl Source {
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -220,6 +224,7 @@ impl Source {
                         RefNode::ModuleDeclarationAnsi(module),
                         syntax_tree,
                         &packages,
+                        packages.unit(Path::new("")),
                     )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         module,
@@ -271,9 +276,10 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let index = module_index::ModuleIndex::new(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
         Self::from_indexed_syntax_module(
             syntax_tree,
+            Path::new(""),
             &index,
             module_name,
             parameter_overrides,
@@ -282,15 +288,19 @@ impl Source {
         )
     }
 
-    /// `packages` are the packages the module may use, from any source.
+    /// `packages` are the packages the module may use, from any source, and
+    /// the compilation units of the sources; `path` names the source of
+    /// `syntax_tree`.
     pub(crate) fn from_indexed_syntax_module(
         syntax_tree: &SyntaxTree,
+        path: &Path,
         index: &module_index::ModuleIndex,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -300,7 +310,12 @@ impl Source {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
-                    let imported = imports::imported_symbols(node.clone(), syntax_tree, packages)?;
+                    let imported = imports::imported_symbols(
+                        node.clone(),
+                        syntax_tree,
+                        packages,
+                        packages.unit(path),
+                    )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -509,6 +524,19 @@ impl Module {
         )));
         extend_const_env_with_parameters(&mut const_env, &parameters);
 
+        let mut array_parameters = array_parameters::array_parameters_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for parameter in &array_parameters {
+            const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+
         match reject_silently_ignored_constructs(
             node.clone(),
             syntax_tree,
@@ -562,6 +590,12 @@ impl Module {
                 extend_const_env_with_parameters(&mut const_env, &parameters);
                 type_aliases =
                     type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+                array_parameters = array_parameters::array_parameters_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &type_aliases,
+                )?;
                 reject_silently_ignored_constructs(
                     node.clone(),
                     syntax_tree,
@@ -599,12 +633,6 @@ impl Module {
         }
         let mut signals =
             signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
-        let array_parameters = array_parameters::array_parameters_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
         signals.extend(
             array_parameters
                 .iter()
@@ -999,6 +1027,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.
@@ -1199,6 +1228,12 @@ impl Parameter {
     ) -> Option<Expr> {
         #[cfg(test)]
         parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
+        if self
+            .value()
+            .is_some_and(|value| parameters::is_unbounded(value, constants))
+        {
+            return Some(Expr::Literal("$".into()));
+        }
         // A previous elaboration pass may have left this declaration's numeric
         // value in the environment. Evaluate its initializer, not that value.
         let evaluation_constants = if constants.contains_key(self.name()) {
@@ -1616,6 +1651,20 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
     },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
+    },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
+        signed: bool,
+    },
     Function {
         name: String,
         args: Vec<ConstExpr>,
@@ -1656,7 +1705,7 @@ pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
 impl ConstExpr {
     /// A call of `name`; a user subroutine call gets a site of its own.
     fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        let site = (!name.starts_with('$'))
+        let site = (!system_functions::is_system_name(&name))
             .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
         ConstExpr::Function { name, args, site }
     }

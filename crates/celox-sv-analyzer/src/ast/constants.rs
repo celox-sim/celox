@@ -100,6 +100,18 @@ pub(super) fn bind_generate_parameter_with_types(
     parameter_literals: &mut HashMap<String, Expr>,
     parameter_types: &mut HashMap<String, ExprType>,
 ) {
+    let unbounded = parameter
+        .value()
+        .is_some_and(|value| parameters::is_unbounded(value, const_env));
+    if unbounded {
+        const_env.remove(parameter.name());
+        const_env.remove(&parameter_marker(parameter.name()));
+        const_env.remove(&local_parameter_marker(parameter.name()));
+    }
+    const_env.insert(
+        parameters::unbounded_parameter_marker(parameter.name()),
+        i128::from(unbounded),
+    );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
         parameter.resolved_value_and_literal(const_env, parameter_types, parameter_literals);
@@ -232,7 +244,13 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             .cloned()
             .or_else(|| {
                 let value = *const_env.get(&name)?;
-                if const_env.contains_key(&enum_marker(&name)) {
+                // Generate indices carry the same width/signing markers as
+                // enum values. Preserve them instead of creating a literal
+                // such as "-2147483648", whose minus is an expression operator.
+                if const_env.contains_key(&enum_marker(&name))
+                    || (!const_env.contains_key(&parameter_marker(&name))
+                        && const_env.contains_key(&parameter_width_marker(&name)))
+                {
                     let width = const_env
                         .get(&parameter_width_marker(&name))
                         .and_then(|width| usize::try_from(*width).ok())?;
@@ -448,6 +466,32 @@ fn substitute_const_expr_constants_impl(
             ConstExpr::Literal(value.to_string())
         }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            msb: Box::new(substitute_const_expr_constants_impl(
+                *msb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            lsb: Box::new(substitute_const_expr_constants_impl(
+                *lsb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_const_expr_constants_impl(
                 *expr,
@@ -476,6 +520,20 @@ fn substitute_const_expr_constants_impl(
                     )
                 })
                 .collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            width,
+            signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
@@ -584,6 +642,7 @@ fn const_expr_from_primary(
     syntax_tree: &SyntaxTree,
 ) -> Converted<Option<ConstExpr>> {
     match primary {
+        sv_parser::Primary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         sv_parser::Primary::PrimaryLiteral(_) => Ok(primary_literal_text(
             RefNode::Primary(primary),
             syntax_tree,
@@ -745,77 +804,312 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
     }
 }
 
-pub(super) fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
+pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> Option<ConstExpr> {
     match expr {
         Expr::Resize {
             expr,
             width,
             signed,
         } => {
-            let expr = expr_to_lvalue_const(*expr)?;
             if width == 0 {
-                return Some(ConstExpr::Literal("0".to_string()));
+                return Some(ConstExpr::Literal("0".into()));
             }
-            if width == 1 && !signed {
-                return Some(ConstExpr::Select {
-                    expr: Box::new(expr),
-                    bit: Box::new(ConstExpr::Literal("0".to_string())),
-                });
-            }
-            let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
-            let truncated = ConstExpr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::BitAnd,
-                right: Box::new(ConstExpr::Literal(format!("{width}'h{mask:x}"))),
-            };
-            if signed {
-                Some(ConstExpr::Mux {
-                    condition: Box::new(ConstExpr::Select {
-                        expr: Box::new(truncated.clone()),
-                        bit: Box::new(ConstExpr::Literal((width - 1).to_string())),
-                    }),
-                    // Every negative packed index is out of range. A stable
-                    // positive sentinel preserves that selection behavior
-                    // without requiring a signed-resize node in ConstExpr.
-                    then_expr: Box::new(ConstExpr::Literal(i128::MAX.to_string())),
-                    else_expr: Box::new(truncated),
-                })
-            } else {
-                Some(truncated)
-            }
+            Some(ConstExpr::Resize {
+                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                width,
+                signed,
+            })
         }
         Expr::Ident(name) => Some(ConstExpr::Ident(name)),
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_lvalue_const(*expr)?),
+            expr: Box::new(expr_to_index_const(*expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_lvalue_const(*left)?),
+            left: Box::new(expr_to_index_const(*left, dimensions)?),
             op,
-            right: Box::new(expr_to_lvalue_const(*right)?),
+            right: Box::new(expr_to_index_const(*right, dimensions)?),
         }),
-        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
-            expr: Box::new(expr_to_lvalue_const(*expr)?),
-            bit: Box::new(msb),
-        }),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+            Some(ConstExpr::SelectRange {
+                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                msb: Box::new(msb),
+                lsb: Box::new(lsb),
+                signed,
+            })
+        }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_lvalue_const(*condition)?),
-            then_expr: Box::new(expr_to_lvalue_const(*then_expr)?),
-            else_expr: Box::new(expr_to_lvalue_const(*else_expr)?),
+            condition: Box::new(expr_to_index_const(*condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
         }),
         Expr::Call { name, args } => Some(ConstExpr::call(
             name,
             args.into_iter()
-                .map(expr_to_lvalue_const)
+                .map(|arg| expr_to_index_const(arg, dimensions))
                 .collect::<Option<_>>()?,
         )),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed: false,
+        } => {
+            let msb = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+            let width = usize::try_from(msb.abs_diff(lsb).checked_add(1)?).ok()?;
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                return None;
+            }
+            // Concatenations have [n-1:0] coordinates. Resolve just the
+            // selected bits in their operands, retaining each operand's range.
+            let positions = (0..width).map(|offset| {
+                if msb >= lsb {
+                    lsb + offset as i128
+                } else {
+                    lsb - offset as i128
+                }
+            });
+            let bits = match *expr {
+                expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+                    // Extracting only some operands must not discard calls
+                    // with effects. Pure calls have already been expanded.
+                    if inlining::calls_subroutine(&expr) {
+                        return None;
+                    }
+                    let source = IndexBitSource::from_expr(expr, dimensions)?;
+                    positions
+                        .map(|bit| source.bit(bit))
+                        .collect::<Option<_>>()?
+                }
+                expr => {
+                    let expr = expr_to_index_const(expr, dimensions)?;
+                    positions
+                        .map(|bit| ConstExpr::Select {
+                            expr: Box::new(expr.clone()),
+                            bit: Box::new(const_expr_from_i128(bit)),
+                        })
+                        .collect()
+                }
+            };
+            assemble_index_bits(bits)
+        }
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => {
             None
+        }
+    }
+}
+
+/// Assemble single bits at their own unsigned result width. A balanced tree
+/// keeps the recursion bounded for wider slices.
+fn assemble_index_bits(bits: Vec<ConstExpr>) -> Option<ConstExpr> {
+    let width = bits.len();
+    let mut bits = bits
+        .into_iter()
+        .enumerate()
+        .map(|(offset, bit)| ConstExpr::Binary {
+            left: Box::new(bit),
+            op: BinaryOp::Shl,
+            right: Box::new(ConstExpr::Literal(offset.to_string())),
+        })
+        .collect::<Vec<_>>();
+    while bits.len() > 1 {
+        let mut remaining = bits.into_iter();
+        bits = std::iter::from_fn(|| {
+            let left = remaining.next()?;
+            Some(match remaining.next() {
+                Some(right) => ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::BitOr,
+                    right: Box::new(right),
+                },
+                None => left,
+            })
+        })
+        .collect();
+    }
+    Some(ConstExpr::Binary {
+        left: Box::new(ConstExpr::Literal(format!("{width}'b0"))),
+        op: BinaryOp::BitOr,
+        right: Box::new(bits.pop()?),
+    })
+}
+
+/// A concatenation operand prepared once, so copied bits retain call sites
+/// and replications do not expand their complete bit vectors.
+enum IndexBitSource {
+    Scalar {
+        expr: ConstExpr,
+        width: usize,
+        right: i128,
+        step: i128,
+    },
+    Concat {
+        parts: Vec<Self>,
+        width: usize,
+    },
+    Repeat {
+        part: Box<Self>,
+        width: usize,
+    },
+    Slice {
+        part: Box<Self>,
+        width: usize,
+        right: i128,
+        step: i128,
+    },
+    Resize {
+        part: Box<Self>,
+        width: usize,
+        extend_signed: bool,
+    },
+}
+
+impl IndexBitSource {
+    fn from_expr(expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
+        let width = expr_static_width(&expr, dimensions)?;
+        Some(match expr {
+            Expr::Concat(parts) => Self::Concat {
+                parts: parts
+                    .into_iter()
+                    .map(|part| Self::from_expr(part, dimensions))
+                    .collect::<Option<_>>()?,
+                width,
+            },
+            Expr::RepeatConcat { parts, .. } => Self::Repeat {
+                part: Box::new(Self::from_expr(Expr::Concat(parts), dimensions)?),
+                width,
+            },
+            Expr::Resize { expr, .. } => {
+                let extend_signed = expr_signedness_with_return_types(
+                    &expr,
+                    &dimensions.expression_signedness,
+                    &dimensions.functions,
+                    &dimensions.function_return_types,
+                )?;
+                Self::Resize {
+                    part: Box::new(Self::from_expr(*expr, dimensions)?),
+                    width,
+                    extend_signed,
+                }
+            }
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => {
+                match *expr {
+                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+                        let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                        Self::Slice {
+                            part: Box::new(Self::from_expr(expr, dimensions)?),
+                            width,
+                            right,
+                            step: if left >= right { 1 } else { -1 },
+                        }
+                    }
+                    expr => Self::Scalar {
+                        // The selected value has [width-1:0] coordinates even
+                        // when its position in an unpacked array is dynamic.
+                        expr: expr_to_index_const(
+                            Expr::Select {
+                                expr: Box::new(expr),
+                                msb,
+                                lsb,
+                                signed,
+                            },
+                            dimensions,
+                        )?,
+                        width,
+                        right: 0,
+                        step: 1,
+                    },
+                }
+            }
+            expr => {
+                let (right, step) = if let Expr::Ident(name) = &expr
+                    && let Some(variable) = dimensions.get(name)
+                    && variable.packed.len() == 1
+                    && !variable.packed[0].normalize_single
+                {
+                    let range = &variable.packed[0];
+                    let left = eval_ast_const_expr(&range.left, &dimensions.const_env)?;
+                    let right = eval_ast_const_expr(&range.right, &dimensions.const_env)?;
+                    (right, if left >= right { 1 } else { -1 })
+                } else {
+                    (0, 1)
+                };
+                Self::Scalar {
+                    expr: expr_to_index_const(expr, dimensions)?,
+                    width,
+                    right,
+                    step,
+                }
+            }
+        })
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Self::Scalar { width, .. }
+            | Self::Concat { width, .. }
+            | Self::Repeat { width, .. }
+            | Self::Slice { width, .. }
+            | Self::Resize { width, .. } => *width,
+        }
+    }
+
+    fn bit(&self, bit: i128) -> Option<ConstExpr> {
+        let Some(mut offset) = usize::try_from(bit).ok().filter(|bit| *bit < self.width()) else {
+            return Some(ConstExpr::Literal("1'bx".into()));
+        };
+        match self {
+            Self::Scalar {
+                expr, right, step, ..
+            } => Some(ConstExpr::Select {
+                expr: Box::new(expr.clone()),
+                bit: Box::new(const_expr_from_i128(
+                    right.checked_add(step.checked_mul(bit)?)?,
+                )),
+            }),
+            Self::Concat { parts, .. } => {
+                for part in parts.iter().rev() {
+                    if offset < part.width() {
+                        return part.bit(offset as i128);
+                    }
+                    offset -= part.width();
+                }
+                None
+            }
+            Self::Repeat { part, .. } => part.bit((offset % part.width()) as i128),
+            Self::Slice {
+                part, right, step, ..
+            } => part.bit(right.checked_add(step.checked_mul(bit)?)?),
+            Self::Resize {
+                part,
+                extend_signed,
+                ..
+            } => {
+                if offset < part.width() {
+                    part.bit(bit)
+                } else if *extend_signed && part.width() > 0 {
+                    part.bit((part.width() - 1) as i128)
+                } else {
+                    Some(ConstExpr::Literal("1'b0".into()))
+                }
+            }
         }
     }
 }
@@ -838,6 +1132,7 @@ pub(super) fn const_expr_from_constant_param_with_env(
             }
             sv_parser::ConstantMintypmaxExpression::Ternary(_) => Ok(None),
         },
+        sv_parser::ConstantParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
         _ => Ok(None),
     }
 }
@@ -853,7 +1148,8 @@ pub(super) fn const_expr_from_param_expression(
             }
             sv_parser::MintypmaxExpression::Ternary(_) => Ok(None),
         },
-        sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => Ok(None),
+        sv_parser::ParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
+        sv_parser::ParamExpression::DataType(_) => Ok(None),
     }
 }
 
@@ -927,6 +1223,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
             sv_parser::ConstantExpression::Inside(_) => Ok(None),
         },
         RefNode::ConstantPrimary(primary) => match primary {
+            sv_parser::ConstantPrimary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
             sv_parser::ConstantPrimary::PrimaryLiteral(_) => {
                 Ok(primary_literal_text(node, syntax_tree).map(ConstExpr::Literal))
             }
@@ -963,6 +1260,29 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if matches!(name, "$timeunit" | "$timeprecision") {
+                        return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
+                            i128::from(timescales::query(system_call, syntax_tree)?),
+                            32,
+                            true,
+                        ))));
+                    }
+                    parameters::reject_unbounded_data_query(
+                        system_call,
+                        syntax_tree,
+                        const_env,
+                        false,
+                    )?;
+                    if name == "$isunbounded" {
+                        // Imported aliases may not be bound in preliminary
+                        // collection. Retain the query for later resolution,
+                        // including its one-bit type for dependent queries.
+                        return const_expr_from_function_subroutine_call(
+                            &call.nodes.0,
+                            syntax_tree,
+                            const_env,
+                        );
+                    }
                     if name == "$dimensions"
                         && let Some(count) = dimensions::dimensions_system_function_call_value(
                             system_call,
@@ -993,10 +1313,20 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         .and_then(expr_to_const));
                     }
                 }
-                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
+                if let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0
+                    && tf_call.nodes.2.is_some()
                 {
-                    let dimensions =
-                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    // Plain scalar operands do not read declaration metadata
+                    // while lowering. Their types are substituted later during
+                    // parameter evaluation; avoid copying the whole environment
+                    // for every initializer in a growing declaration prefix.
+                    let dimensions = if call_arguments_are_context_free(tf_call) {
+                        PackedDimensions::default()
+                    } else {
+                        #[cfg(test)]
+                        CALL_CONTEXT_COPIES.with(|count| count.set(count.get() + 1));
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases)
+                    };
                     return Ok(expr_from_function_subroutine_call(
                         &call.nodes.0,
                         syntax_tree,
@@ -1099,6 +1429,69 @@ fn const_expr_from_constant_expression_ternary_with_env(
     }))
 }
 
+/// These operands follow only expression-lowering branches that do not read
+/// `PackedDimensions`. Keep selections, casts, system calls, and patterns on
+/// the contextual path so their ranges, aliases, and parameter types survive.
+fn call_arguments_are_context_free(call: &sv_parser::TfCall) -> bool {
+    let Some(paren) = &call.nodes.2 else {
+        return false;
+    };
+    let sv_parser::ListOfArguments::Ordered(args) = &paren.nodes.1 else {
+        return false;
+    };
+    let args = args.nodes.0.contents();
+    // The parser represents `f()` as one omitted argument.
+    if args.len() == 1 && args[0].is_none() {
+        return true;
+    }
+    args.iter()
+        .all(|arg| arg.as_ref().is_some_and(context_free_expression))
+}
+
+fn context_free_expression(expr: &sv_parser::Expression) -> bool {
+    match expr {
+        sv_parser::Expression::Primary(primary) => context_free_primary(primary),
+        sv_parser::Expression::Unary(unary) => context_free_primary(&unary.nodes.2),
+        sv_parser::Expression::Binary(binary) => {
+            context_free_expression(&binary.nodes.0) && context_free_expression(&binary.nodes.3)
+        }
+        _ => false,
+    }
+}
+
+fn context_free_primary(primary: &sv_parser::Primary) -> bool {
+    match primary {
+        sv_parser::Primary::PrimaryLiteral(_) => true,
+        sv_parser::Primary::Hierarchical(primary) => {
+            let select = &primary.nodes.2;
+            select.nodes.0.is_none()
+                && select.nodes.1.nodes.0.is_empty()
+                && select.nodes.2.is_none()
+                && !packed_structs::has_member_access(
+                    RefNode::HierarchicalIdentifier(&primary.nodes.1),
+                    RefNode::Select(select),
+                )
+        }
+        sv_parser::Primary::MintypmaxExpression(primary) => match &primary.nodes.0.nodes.1 {
+            sv_parser::MintypmaxExpression::Expression(expr) => context_free_expression(expr),
+            sv_parser::MintypmaxExpression::Ternary(_) => false,
+        },
+        sv_parser::Primary::FunctionSubroutineCall(call) => match &call.nodes.0 {
+            sv_parser::SubroutineCall::TfCall(call) => call_arguments_are_context_free(call),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALL_CONTEXT_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests;
+
 fn const_select_expr(
     base: ConstExpr,
     select: &sv_parser::ConstantSelect,
@@ -1163,6 +1556,23 @@ fn const_expr_from_function_subroutine_call(
                     .and_then(expr_to_const),
             );
         }
+        // `$unit::x` names an item of the compilation unit.
+        sv_parser::SubroutineCall::TfCall(tf_call)
+            if RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0)
+                .into_iter()
+                .any(|node| {
+                    matches!(
+                        node,
+                        RefNode::PackageScope(sv_parser::PackageScope::Unit(_))
+                    )
+                }) =>
+        {
+            return Ok(reference_name(
+                RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
+                syntax_tree,
+            )
+            .map(ConstExpr::Ident));
+        }
         _ => return Ok(None),
     };
     let (name, args) = some!(system_tf_call_parts(system_call, syntax_tree));
@@ -1171,6 +1581,16 @@ fn const_expr_from_function_subroutine_call(
         args.as_deref(),
         system_functions::CallSite::Expression,
     )?;
+    if name == "$isunbounded" {
+        if let Some(value) = parameters::isunbounded_call(system_call, syntax_tree, const_env)? {
+            return Ok(Some(value));
+        }
+        let argument = expressions::single_expression_argument(system_call).unwrap();
+        return Ok(Some(ConstExpr::call(
+            name.into(),
+            vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
+        )));
+    }
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };

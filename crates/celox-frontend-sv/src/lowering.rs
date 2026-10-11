@@ -173,9 +173,10 @@ impl LoweredSvModuleKey {
 
 fn analyze_sources(
     sources: &[(&str, &Path)],
+    roots: &[&str],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     // Interfaces are expanded into the modules that use them first.
-    let elaborated = sv::elaborate_interfaces(sources)?;
+    let elaborated = sv::elaborate_interfaces_with_roots(sources, roots)?;
     let elaborated_sources: Vec<(&str, &Path)>;
     let sources = match &elaborated {
         Some(codes) => {
@@ -205,7 +206,9 @@ fn analyze_sources(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
+    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages_with_roots(
+        &parsed, roots,
+    )?);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -899,7 +902,8 @@ pub fn prepare_external_hierarchy(
     root_names: &HashSet<String>,
     four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let roots: Vec<_> = root_names.iter().map(String::as_str).collect();
+    let analyzed = analyze_sources(sources, &roots)?;
     let mut names = root_names
         .iter()
         .filter(|&name| analyzed.contains_key(name))
@@ -1063,7 +1067,7 @@ pub fn schedule_sources(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let analyzed = analyze_sources(sources, &[top])?;
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -1712,12 +1716,14 @@ fn evaluated_parameter_overrides(
         let Some(value) = parameter.value.as_ref() else {
             continue;
         };
-        sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "non-integer module parameter override `{}`",
-                parameter.name
-            ))
-        })?;
+        if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
+            sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "non-integer module parameter override `{}`",
+                    parameter.name
+                ))
+            })?;
+        }
         evaluated.insert(parameter.name.clone(), value.clone());
     }
     Ok(evaluated)
@@ -1756,13 +1762,20 @@ fn const_expr_references_identifier(expr: &sv::ir::ConstExpr) -> bool {
     match expr {
         sv::ir::ConstExpr::Ident(_) => true,
         sv::ir::ConstExpr::Literal(_) => false,
+        sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_expr_references_identifier(expr)
+                || const_expr_references_identifier(msb)
+                || const_expr_references_identifier(lsb)
+        }
         sv::ir::ConstExpr::Select { expr, bit } => {
             const_expr_references_identifier(expr) || const_expr_references_identifier(bit)
         }
         sv::ir::ConstExpr::Function { args, .. } => {
             args.iter().any(const_expr_references_identifier)
         }
-        sv::ir::ConstExpr::Unary { expr, .. } => const_expr_references_identifier(expr),
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_expr_references_identifier(expr)
+        }
         sv::ir::ConstExpr::Binary { left, right, .. } => {
             const_expr_references_identifier(left) || const_expr_references_identifier(right)
         }
@@ -5282,11 +5295,31 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
     Some(match expr {
         sv::ir::ConstExpr::Literal(value) => sv::ir::Expr::Literal(value.clone()),
         sv::ir::ConstExpr::Ident(name) => sv::ir::Expr::Ident(name.clone()),
+        sv::ir::ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => sv::ir::Expr::Select {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            msb: (**msb).clone(),
+            lsb: (**lsb).clone(),
+            signed: *signed,
+        },
         sv::ir::ConstExpr::Select { expr, bit } => sv::ir::Expr::Select {
             expr: Box::new(expr_from_const_expr(expr)?),
             msb: (**bit).clone(),
             lsb: (**bit).clone(),
             signed: false,
+        },
+        sv::ir::ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => sv::ir::Expr::Resize {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            width: *width,
+            signed: *signed,
         },
         sv::ir::ConstExpr::Function { .. } => return None,
         sv::ir::ConstExpr::Unary { op, expr } => sv::ir::Expr::Unary {

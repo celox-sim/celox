@@ -1,6 +1,193 @@
 use super::*;
 
 sv_backends! {
+    fn printtimescale_displays_unit_and_global_precision(sim) { @case "system_functions::printtimescale_displays_unit_and_global_precision"; }
+    fn printtimescale_preserves_package_subroutine_scope(sim) { @case "system_functions::printtimescale_preserves_package_subroutine_scope"; }
+
+    fn printtimescale_qualifies_current_and_relative_module_instances(sim) {
+        @setup { let source = r#"
+            module Child(input logic clk, input logic enabled);
+              timeunit 100ns / 10ps;
+              always_ff @(posedge clk) if (enabled) $printtimescale;
+            endmodule
+            module Top(input logic clk, input logic enabled);
+              timeunit 1ns / 1ps;
+              Child first(clk, enabled);
+              Child second(clk, enabled);
+              always_ff @(posedge clk) if (enabled) begin
+                $printtimescale();
+                $printtimescale(first);
+                $printtimescale($root.Top.second);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("printtimescale.sv"))], "Top");
+        sim.set(sim.signal("enabled"), 1u8);
+        sim.tick(sim.event("clk")).unwrap();
+        let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect::<Vec<_>>();
+        messages.sort();
+        assert_eq!(messages, [
+            "Time scale of (Top) is 1ns / 1ps",
+            "Time scale of (Top.first) is 100ns / 10ps",
+            "Time scale of (Top.first) is 100ns / 10ps",
+            "Time scale of (Top.second) is 100ns / 10ps",
+            "Time scale of (Top.second) is 100ns / 10ps",
+        ]);
+    }
+
+    fn printtimescale_resolves_interfaces_before_flattening(sim) {
+        @setup { let source = r#"
+            interface I;
+              timeunit 100ns / 10ps;
+              function automatic int show(input int data); $printtimescale; return data; endfunction
+            endinterface
+            module Child; timeunit 1us / 1ns; I nested(); endmodule
+            module Top(input logic clk, input int data, output int q);
+              timeunit 1ns / 1ps;
+              I info(); Child child();
+              always_ff @(posedge clk) begin
+                $printtimescale(info);
+                $printtimescale(child.nested);
+                q <= info.show(data);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("printtimescale.sv"))], "Top");
+        sim.set(sim.signal("data"), 7u32);
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 7u32.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.child.nested) is 100ns / 10ps".into() },
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
+        ]);
+    }
+
+    fn printtimescale_keeps_generic_interface_bindings_separate(sim) {
+        @setup { let source = r#"
+            interface I;
+              timeunit 1ns / 1ps;
+              function automatic int show(input int v); $printtimescale; return v; endfunction
+            endinterface
+            interface J;
+              timeunit 100ns / 10ps;
+              function automatic int show(input int v); $printtimescale; return v; endfunction
+            endinterface
+            module Reader(interface info, input logic clk, input int data, output int q);
+              timeunit 1us / 1ns;
+              always_ff @(posedge clk) begin $printtimescale(info); q <= info.show(data); end
+            endmodule
+            module Top(input logic clk, input int data, output int i_q, j_q);
+              timeunit 1us / 1ns;
+              I i(); J j(); Reader r_i(i, clk, data, i_q); Reader r_j(j, clk, data, j_q);
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("interface_prints.sv"))], "Top");
+        sim.set(sim.signal("data"), 7u32);
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.get(sim.signal("i_q")), 7u32.into());
+        assert_eq!(sim.get(sim.signal("j_q")), 7u32.into());
+        let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect::<Vec<_>>();
+        messages.sort();
+        assert_eq!(messages, [
+            "Time scale of (Top.r_i.info) is 1ns / 1ps",
+            "Time scale of (Top.r_i.info) is 1ns / 1ps",
+            "Time scale of (Top.r_j.info) is 100ns / 10ps",
+            "Time scale of (Top.r_j.info) is 100ns / 10ps",
+        ]);
+    }
+    fn timescale_queries_resolve_hierarchical_interface_instances(sim) { @case "system_functions::timescale_queries_resolve_hierarchical_interface_instances"; }
+    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
+    fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
+    fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
+    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
+    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
+    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
+
+    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
+    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
+
+    fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
+        @setup {
+            let source = r#"
+                package P;
+                    timeunit 100ps / 10fs;
+                    function automatic int root_precision(); return $timeprecision($root.Top); endfunction
+                endpackage
+                interface I;
+                    timeunit 100ns / 10ps;
+                    function automatic int root_unit(); return $timeunit($root.Top); endfunction
+                endinterface
+                module Child(output logic ok);
+                    timeunit 1us / 1ns;
+                    assign ok = ($timeunit($root.Top) == -9) && ($timeprecision($root.Top) == -12)
+                        && ($timeunit(Top) == -9) && ($timeprecision(Top) == -12)
+                        && (P::root_precision() == -12);
+                endmodule
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    logic child_ok;
+                    I info();
+                    Child child(.ok(child_ok));
+                    assign ok = child_ok && (info.root_unit() == -9);
+                endmodule
+                module Harness(); timeunit 1ms / 1us; Top unused_top(); endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("selected_root.sv"))], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
+        @setup {
+            let source = r#"
+                timeunit 10ns / 1ps;
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    Child child();
+                    assign ok = ($timeunit() == -9) && ($timeprecision() == -12)
+                        && ($timeunit(child) == -6) && ($timeprecision(child) == -7)
+                        && ($timeunit(Top.child) == -6) && ($timeprecision($root.Top.child) == -7)
+                        && ($timeunit($unit) == -8) && ($timeprecision($root) == -15);
+                endmodule
+            "#;
+            let child = "module Child(); timeunit 1us / 100ns; endmodule";
+            let unused = "module Unused(); timeunit 1fs / 1fs; endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![
+            (source, Path::new("top.sv")),
+            (child, Path::new("child.sv")),
+            (unused, Path::new("unused.sv")),
+        ], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
+    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
+    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
+    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
+    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
+    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
+
+    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
+    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
+    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
+    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
+    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
+    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
+    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
+    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
+    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
+    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
     fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
     fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
     fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
@@ -247,6 +434,127 @@ fn build_error(source: &str) -> String {
 }
 
 #[test]
+fn printtimescale_rejects_invalid_operands_and_value_contexts() {
+    for item in [
+        "$printtimescale(missing);",
+        "$printtimescale($root.P);",
+        "$printtimescale(1);",
+        "$printtimescale(,);",
+        "$printtimescale(Top, Top);",
+        "void'($printtimescale());",
+        "y = $bits($printtimescale());",
+        "y = $printtimescale();",
+    ] {
+        let source = format!(
+            "package P; timeunit 1ns / 1ps; endpackage module Top(output int y); timeunit 1ns / 1ps; always_comb begin y = 0; {item} end endmodule"
+        );
+        build_error(&source);
+    }
+    build_error(
+        "module Top(output int y); localparam UNUSED=$bits($printtimescale()); assign y=0; endmodule",
+    );
+    let error = build_error(
+        "interface I; function automatic int show(); $printtimescale; return 0; endfunction initial $display(\"%0d\", show()); endinterface module Top(output logic y); I info[2](); assign y=0; endmodule",
+    );
+    assert!(
+        error.contains("uses its instance scope in `$printtimescale`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn printtimescale_runs_in_initial_blocks_with_all_time_magnitudes() {
+    for (declaration, expected) in [
+        ("timeunit 100s / 10s;", "100s / 10s"),
+        ("timeunit 1ms / 100us;", "1ms / 100us"),
+        ("timeunit 10ns / 1ps;", "10ns / 1ps"),
+        ("timeunit 100ps / 10fs;", "100ps / 10fs"),
+        ("", "1ns / 1ps"),
+    ] {
+        let source = format!(
+            "module Top(output logic y); {declaration} initial $printtimescale; assign y=0; endmodule"
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: format!("Time scale of (Top) is {expected}")
+            }]
+        );
+    }
+}
+
+#[test]
+fn printtimescale_initial_instances_and_interface_arrays_keep_their_names() {
+    let source = r#"
+        interface I;
+          timeunit 100ns / 10ps;
+          initial begin $printtimescale; $printtimescale($root); end
+        endinterface
+        module Child; timeunit 1us / 1ns; initial $printtimescale(); endmodule
+        module Top(output logic y);
+          timeunit 1ns / 1ps;
+          I info[2:1](); Child children[2:1]();
+          assign y=0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    let mut messages = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect::<Vec<_>>();
+    messages.sort();
+    assert_eq!(
+        messages,
+        [
+            "Time scale of ($root) is 1ps / 1ps",
+            "Time scale of ($root) is 1ps / 1ps",
+            "Time scale of (Top.children[1]) is 1us / 1ns",
+            "Time scale of (Top.children[2]) is 1us / 1ns",
+            "Time scale of (Top.info[1]) is 100ns / 10ps",
+            "Time scale of (Top.info[2]) is 100ns / 10ps",
+        ]
+    );
+}
+
+#[test]
+fn printtimescale_interface_arrays_preserve_integer_boundary_indices() {
+    for (range, indices) in [
+        ("-2147483647:-2147483648", vec![i32::MIN, i32::MIN + 1]),
+        ("2147483646:2147483647", vec![i32::MAX - 1, i32::MAX]),
+        ("-2147483648:-2147483648", vec![i32::MIN]),
+        ("2147483647:2147483647", vec![i32::MAX]),
+    ] {
+        let source = format!(
+            "interface I; timeunit 100ns / 10ps; initial $printtimescale; endinterface module Top(output logic y); timeunit 1ns / 1ps; I items[{range}](); assign y=0; endmodule"
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        let mut messages = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Display { message } => message,
+                event => panic!("unexpected event: {event:?}"),
+            })
+            .collect::<Vec<_>>();
+        messages.sort();
+        let mut expected = indices
+            .into_iter()
+            .map(|index| format!("Time scale of (Top.items[{index}]) is 100ns / 10ps"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(messages, expected, "range [{range}]");
+    }
+}
+
+#[test]
 fn readmem_diagnostics_identify_task_and_requested_range() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("invalid.mem");
@@ -388,6 +696,28 @@ fn reports_where_a_known_system_function_is_not_supported() {
     for (expected, source) in cases {
         let error = build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+#[test]
+fn timescale_queries_reject_packages_beneath_root() {
+    for function in ["$timeunit", "$timeprecision"] {
+        for item in [
+            format!("assign y = {function}($root.P);"),
+            format!("always_comb begin {function}($root.P); y = 0; end"),
+            format!("always_comb begin void'({function}($root.P)); y = 0; end"),
+            format!("assign y = $bits({function}($root.P));"),
+            format!("localparam UNUSED = {function}($root.P); assign y = 0;"),
+        ] {
+            let source = format!(
+                "package P; timeunit 100ns / 10ps; endpackage module Top(output int y); timeunit 1ns / 1ps; {item} endmodule"
+            );
+            let error = build_error(&source);
+            assert!(
+                error.contains("unknown timescale query design element `P`"),
+                "{item}: {error}"
+            );
+        }
     }
 }
 

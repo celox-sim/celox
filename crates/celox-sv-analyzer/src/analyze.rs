@@ -40,6 +40,15 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 &parameter_types,
                 &parameter_literals,
             );
+            // Deferred queries must see the same symbolic binding during
+            // AST-to-IR publication as during declaration collection.
+            constants.insert(
+                ast::unbounded_parameter_marker(parameter.name()),
+                i128::from(matches!(
+                    &literal,
+                    Some(ast::Expr::Literal(value)) if value == "$"
+                )),
+            );
             if let Some(literal) = literal {
                 parameter_literals.insert(parameter.name().to_string(), literal);
             }

@@ -381,7 +381,44 @@ fn reject_silently_ignored_constructs_with_dimensions(
             _ => None,
         })
         .collect();
+    let print_statements: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter_map(|child| {
+            let RefNode::SubroutineCallStatement(
+                sv_parser::SubroutineCallStatement::SubroutineCall(statement),
+            ) = child
+            else {
+                return None;
+            };
+            let sv_parser::SubroutineCall::SystemTfCall(call) = &statement.0 else {
+                return None;
+            };
+            Some(&**call)
+        })
+        .collect();
     for child in validation_nodes(node.clone(), is_module) {
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && !procedural_queries.contains(&call)
+        {
+            parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
+        }
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && system_tf_call_parts(call, syntax_tree)
+                .is_some_and(|(name, _)| name == "$isunbounded")
+        {
+            let (name, args) = system_tf_call_parts(call, syntax_tree).unwrap();
+            system_functions::check_call(
+                name,
+                args.as_deref(),
+                system_functions::CallSite::Expression,
+            )?;
+            let value = parameters::isunbounded_call(call, syntax_tree, const_env)?;
+            if value.is_none() && !procedural_queries.contains(&call) {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                });
+            }
+        }
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
@@ -401,6 +438,15 @@ fn reject_silently_ignored_constructs_with_dimensions(
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call) if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| name == "$printtimescale") => {
+                let site = if print_statements.contains(&call) { system_functions::CallSite::Statement(system_functions::Body::Subroutine) } else { system_functions::CallSite::Expression };
+                timescales::print_message(call, syntax_tree, site)?;
+            }
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision")) =>
+            {
+                timescales::query(call, syntax_tree)?;
+            }
             RefNode::SystemTfCall(call)
                 if system_tf_call_parts(call, syntax_tree)
                     .is_some_and(|(name, _)| name == "$dimensions")
@@ -637,12 +683,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 }
             }
             // Package scopes and imports resolve through the imported
-            // packages; compilation-unit declarations are not analyzed.
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
-                return Err(AnalyzerError::Unsupported(
-                    "compilation-unit scope reference `$unit::`".to_string(),
-                ));
-            }
+            // packages and the compilation unit.
             RefNode::ParamAssignment(parameter)
                 if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
                     matches!(

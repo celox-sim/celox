@@ -52,12 +52,19 @@ let mut sim = Simulator::from_sv_sources(
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
 SystemVerilog に対しても、共有の Veryl 適合性スイートを実行しています。
+
+`$printtimescale` は IEEE 1800-2023 20.4.2 の形式で時刻スコープを表示します。
+例: `Time scale of (Top.child) is 100ns / 10ps`。
+引数なしの現在スコープ、design element、`$unit`、`$root` を指定でき、
+`initial`、`always` 系のプロセスとサブルーチンで実行できます。
+現在のモジュールと相対参照には実際のインスタンス階層名を使い、
+package・interface の手続きは宣言元の時間単位と精度を保持します。
 
 ## サポートしていないもの
 
@@ -99,6 +106,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 ## 知っておくべき挙動
 
+- **上限なしのパラメータ。** `$isunbounded(P)` は、値パラメータが `$` の場合に1、それ以外では0を1ビットの符号なし値として返します。`$` は別のパラメータへの代入やインスタンスのパラメータ上書きでも保持されます（IEEE 1800-2023 6.20.7、20.6.3）。
 - **インスタンス配列の要素。** 要素は宣言どおりの添字で参照します。`Child u[3:2](...)` の
   `u[3]` には `child_signal(&[("u", 3)], "y")` や `dut.u[3]` で届き、添字は
   `InstanceHierarchy::index` にも入ります。負の境界を持つ配列は拒否します。
@@ -110,16 +118,23 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   の規則で解決します。`p::x` は package `p` の項目を指すため、複数の package、または package と
   モジュールに同名の項目があっても衝突しません。`import p::x;` で見えるのは `x` だけです。
   `import p::*;` では、スコープ自身の宣言が package の同名の項目を隠し、2 つの wildcard import
-  の package が宣言する名前は、参照したときだけエラーになります。package の関数の中の名前は
+  の package が宣言する名前は、参照したときだけエラーになります。generate ブロック内の import は、そのブロック
+  （と内側のブロック）でだけ名前を見えるようにし、モジュール自身の宣言や import より優先されます。package の関数の中の名前は
   package の中で解決します。package の変数は、それを使うすべてのモジュール（Veryl からインスタンス化した
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
   モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、定数でない package 変数の初期化子、
-  package の net、コンパイル単位（`$unit`）の宣言は未対応です
-  （[#1146](https://github.com/celox-sim/celox/issues/1146)）。`export` 宣言（26.6）は、import
+  package の net は未対応です（[#1146](https://github.com/celox-sim/celox/issues/1146)）。`export` 宣言（26.6）は、import
   した宣言をその package を import する側から見えるようにします。`export p::*;` が export するのは
   package が `p` から実際に import した名前だけです。export を経由した import は元の宣言を指すため、
   2 つの経路で同じ宣言を import しても曖昧になりません。`q::x` は `q` が `x` として export する宣言も指します。
+- **コンパイル単位。** ソースファイルはそれぞれ独立したコンパイル単位です（IEEE 1800-2023 3.12.1）。
+  モジュールや package の外にあるパラメータ、型、サブルーチン、変数、import は、そのファイルのモジュールを
+  囲むスコープ `$unit` になります。モジュールからは、自身の宣言と import の次に、それより前に宣言された
+  コンパイル単位の項目と import、およびコンパイル単位のすべてのサブルーチンが見えます。`$unit::x` は
+  コンパイル単位の項目 `x` を指します。コンパイル単位の変数は、そのファイルのモジュールが共有する 1 つの
+  オブジェクトで、package 変数と同じく `$unit::v` という名前になります。これを宣言できるソースファイルは
+  1 つだけです。コンパイル単位での DPI import は未対応です。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
 - **変数の寿命**は IEEE 1800-2023 6.21 に従います。プロセスのブロック、関数、タスクの中で宣言した
@@ -160,3 +175,27 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 - テストベンチ用のモジュール（クロックや `$finish` のスケジューリングを伴う `initial`
   ブロック、階層代入）と interface は、シミュレーション可能な SystemVerilog モジュールとして
   出力されません。
+
+`$timeunit` と `$timeprecision` は秒を基準とする指数を32ビットの符号付き整数で
+返します（IEEE 1800-2023 20.4.1）。現在の時間スコープ、`$unit`、`$root`、
+別ファイルを含むスカラーのモジュールインスタンス階層を解決します。
+`timeunit`、`timeprecision`、先行する `timescale`、`resetall` の優先順位は
+3.14.2.3に従い、デフォルトは1 ns / 1 psです。グローバル精度には、
+インスタンス化されていない定義も含め、すべての精度宣言とディレクティブの精度を
+使用します（3.14.3）。インスタンス配列の選択とgenerate階層は、展開後の階層検索が
+必要なため、現在は未対応として診断します。
+
+時間単位と精度は、他のスコープ項目より前で別々に宣言でき、同じ値の宣言は
+後でも繰り返せます。明示指定・継承による設定とデフォルトがデザイン内で混在する
+場合は診断します（3.14.2.3）。モジュール定義とパッケージは、同名でもそれぞれの
+時間単位と精度を保持します（3.13）。同名のモジュールがインスタンス化されていても、
+パッケージ名による問い合わせを解決します。ルートを含む階層インスタンスが見つかった
+場合は、同名パッケージより優先します。シミュレータのルート検索は選択したトップと
+到達可能な階層を使用し、未使用module内のインスタンス化で選択したルートを隠しません。
+時間リテラルの整数・固定小数点表記では、
+先頭ゼロを含めた数値を解釈します。interfaceの関数は、展開でモジュールに
+コピーされた後も、宣言元の時間スコープとコンパイル単位を使用します。
+スカラーのinterfaceインスタンス・ポートへの問い合わせは、展開前にバインドされた
+interface型から解決します。generic interfaceポートとgenerate内のローカルハンドルも
+対象です。`child.info`のように子module内のinterfaceインスタンスを指定する
+スカラー階層も、インスタンスが展開で消える前に解決します。

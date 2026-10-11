@@ -1402,10 +1402,15 @@ pub(super) fn parameter_type_from_const_env(
     const_env: &HashMap<String, i128>,
     name: &str,
 ) -> Option<ExprType> {
-    let width = usize::try_from(*const_env.get(&parameter_width_marker(name))?).ok()?;
-    let signed = const_env
-        .get(&parameter_signed_marker(name))
-        .is_some_and(|signed| *signed != 0);
+    parameter_type_from_lookup(name, &|marker| const_env.get(marker).copied())
+}
+
+pub(super) fn parameter_type_from_lookup(
+    name: &str,
+    lookup: &impl Fn(&str) -> Option<i128>,
+) -> Option<ExprType> {
+    let width = usize::try_from(lookup(&parameter_width_marker(name))?).ok()?;
+    let signed = lookup(&parameter_signed_marker(name)).is_some_and(|signed| signed != 0);
     Some(ExprType { width, signed })
 }
 
