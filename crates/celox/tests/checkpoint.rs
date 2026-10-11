@@ -67,8 +67,6 @@ macro_rules! outputs_now {
 all_backends! {
     fn restore_replays_the_same_cycles(sim) {
         @omit_veryl;
-        // SV frontend rejects a part-select used as an index: "select index `c[1:0]`" (#88).
-        @ignore_on(sv);
         @build Simulator::builder(DESIGN, "Top");
         run_cycles!(sim, 0..5);
         let checkpoint = sim.checkpoint().unwrap();

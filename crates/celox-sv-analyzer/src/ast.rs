@@ -78,7 +78,7 @@ use constant_folding::{
 use constants::{
     binary_op_from_symbol, bind_generate_parameter, const_expr_from_constant_param_with_env,
     const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
-    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_lvalue_const,
+    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_index_const,
     left_associate_expr_binary, next_genvar_value, primary_literal_text,
     substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
     substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
