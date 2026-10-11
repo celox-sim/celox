@@ -407,3 +407,42 @@
     (modify (set x value))
     (assert_eq y (trunc 8 (* value 10)))
     (assert_eq s 10)))
+
+(case runs_interface_array_processes_at_integer_boundaries
+  (source "interface_array_boundaries.sv" #"
+        interface Cell;
+            logic [7:0] value;
+            logic [7:0] result;
+            assign result = value + 8'd1;
+        endinterface
+        module Top(input logic [7:0] x,
+                   output logic [7:0] low0, low1, high0, high1, lone_low, lone_high);
+            localparam int LO = -2147483647 - 1;
+            localparam int HI = 2147483647;
+            Cell down[LO+1:LO]();
+            Cell up[HI-1:HI]();
+            Cell single_low[LO:LO]();
+            Cell single_high[HI:HI]();
+            assign down[LO].value = x;
+            assign down[LO+1].value = x + 8'd1;
+            assign up[HI-1].value = x + 8'd2;
+            assign up[HI].value = x + 8'd3;
+            assign single_low[LO].value = x + 8'd4;
+            assign single_high[HI].value = x + 8'd5;
+            assign low0 = down[LO].result;
+            assign low1 = down[LO+1].result;
+            assign high0 = up[HI-1].result;
+            assign high1 = up[HI].result;
+            assign lone_low = single_low[LO].result;
+            assign lone_high = single_high[HI].result;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xff)
+    (modify (set x value))
+    (assert_eq low0 (trunc 8 (+ value 1)))
+    (assert_eq low1 (trunc 8 (+ value 2)))
+    (assert_eq high0 (trunc 8 (+ value 3)))
+    (assert_eq high1 (trunc 8 (+ value 4)))
+    (assert_eq lone_low (trunc 8 (+ value 5)))
+    (assert_eq lone_high (trunc 8 (+ value 6)))))

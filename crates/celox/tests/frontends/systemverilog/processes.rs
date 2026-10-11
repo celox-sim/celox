@@ -1105,6 +1105,128 @@ fn package_lifetime_decides_the_activations_of_an_imported_timed_task() {
     assert_eq!(displays(&mut sim), lines(&[(1, "put 4"), (1, "put 4")]));
 }
 
+/// A suspended procedural block uses its enclosing module's lifetime,
+/// including when the same declaration is entered again by a loop.
+#[test]
+fn timed_block_locals_follow_the_module_lifetime() {
+    for (lifetime, expected) in [
+        ("static", lines(&[(1, "1"), (2, "2"), (3, "3")])),
+        ("automatic", lines(&[(1, "1"), (2, "1"), (3, "1")])),
+    ] {
+        for declaration in ["bit [7:0] count;", "logic [7:0] count = 0;"] {
+            let source = format!(
+                "module {lifetime} Top;
+                   initial begin
+                     repeat (3) begin
+                       {declaration}
+                       #1; count++; $display(\"%0d\", count);
+                     end
+                     $finish;
+                   end
+                 endmodule"
+            );
+            for four_state in [false, true] {
+                let mut sim = if four_state {
+                    four_state_simulation(&source)
+                } else {
+                    simulation(&source)
+                };
+                assert_eq!(
+                    displays(&mut sim),
+                    expected,
+                    "{source}, four_state={four_state}"
+                );
+            }
+        }
+    }
+}
+
+/// Tasks keep static storage even when their own body has no suspension:
+/// a timed caller can invoke them repeatedly, in modules and packages.
+#[test]
+fn timed_callers_preserve_static_locals_of_untimed_tasks() {
+    for parent in ["module", "package"] {
+        for lifetime in ["static", "automatic"] {
+            let tasks = r#"
+                task count;
+                    static bit [7:0] n = 0;
+                    n++;
+                    $display("%0d", n);
+                endtask
+                task later;
+                    #1; count();
+                endtask
+            "#;
+            let calls = "initial begin later(); later(); $finish; end";
+            let source = if parent == "module" {
+                format!("module {lifetime} Top; {tasks} {calls} endmodule")
+            } else {
+                format!(
+                    "package {lifetime} p; {tasks} endpackage
+                     module Top; import p::*; {calls} endmodule"
+                )
+            };
+            assert_eq!(
+                displays(&mut simulation(&source)),
+                lines(&[(1, "1"), (2, "2")]),
+                "{parent} {lifetime}"
+            );
+        }
+    }
+}
+
+/// Timing operands count as reads of a local's previous entry value, even
+/// when ordinary statements overwrite that local before reading it.
+#[test]
+fn static_locals_read_only_by_timing_controls_keep_their_values() {
+    let delay = r#"
+        module Top;
+            initial begin
+                repeat (2) begin
+                    bit [7:0] pause;
+                    #pause; pause = 2; $display("done");
+                end
+                $finish;
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(delay)),
+        lines(&[(0, "done"), (2, "done")])
+    );
+
+    let wait = r#"
+        module Top;
+            bit trigger;
+            initial begin #1; trigger = 1; #2; $finish; end
+            initial repeat (2) begin
+                bit ready;
+                wait (ready || trigger);
+                ready = 1; trigger = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(wait)),
+        lines(&[(1, "done"), (1, "done")])
+    );
+
+    let event = r#"
+        module Top;
+            bit pulse;
+            initial begin
+                #1; pulse = 1; #1; pulse = 0; #1; pulse = 1; #1; $finish;
+            end
+            initial repeat (2) begin
+                static bit enabled = 1;
+                @(enabled && pulse);
+                enabled = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(displays(&mut simulation(event)), lines(&[(1, "done")]));
+}
+
 /// A task a package exports is classified like a local one: an
 /// edge-sensitive `always` calling an imported task with timing controls is
 /// a process.
@@ -1203,4 +1325,210 @@ fn settle_resumes_the_processes_a_host_write_wakes() {
     sim.settle().unwrap();
     assert_eq!(sim.get(seen), 2u8.into());
     assert_eq!(sim.time(), 0);
+}
+
+#[test]
+fn review_rejects_impure_wait_conditions_and_static_event_locals() {
+    let source = r#"module Top(input bit go);
+        function automatic bit ready(); $display("poll"); return go; endfunction
+        initial wait (ready());
+    endmodule"#;
+    assert!(build_error(source).contains("wait condition calling side-effecting"));
+    for lifetime in ["", "automatic"] {
+        let source = format!(
+            r#"module Top(input bit go);
+            function {lifetime} bit observe(input bit v);
+                static int count = 0; count++; return v;
+            endfunction
+            initial @(observe(go));
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("event expression calling") || error.contains("static variable"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn review_static_initializers_use_assignment_width() {
+    let source = r#"module Top(output bit [15:0] a, b);
+        task automatic sample();
+            static bit [15:0] signed_value = 8'shff;
+            static bit [15:0] filled_value = '1;
+            #1; a = signed_value; b = filled_value;
+        endtask
+        initial sample();
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 65535u16.into());
+    assert_eq!(sim.get(sim.signal("b")), 65535u16.into());
+}
+
+#[test]
+fn review_timed_process_locals_keep_default_static_lifetime() {
+    let source = r#"module Top(output bit [7:0] y);
+        always begin bit [7:0] n; #1; n++; y = n; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+}
+
+#[test]
+fn review_static_tasks_keep_automatic_locals_per_activation() {
+    let source = r#"module Top(output bit [7:0] a, b);
+        task static copy(input bit [7:0] value, output bit [7:0] result);
+            automatic bit [7:0] saved; saved = value; #1; result = saved;
+        endtask
+        initial copy(1, a);
+        initial copy(2, b);
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u8.into());
+}
+
+#[test]
+fn review_shared_stores_update_private_event_watchers() {
+    let source = r#"module Top(output bit a, b);
+        bit global_value;
+        task automatic watch(input bit formal, output bit result);
+            @(formal ^ global_value); result = 1;
+        endtask
+        initial watch(0, a);
+        initial watch(1, b);
+        initial begin #1; global_value = 1; global_value = 0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+}
+
+#[test]
+fn review_static_package_tasks_share_activation_across_instances() {
+    let source = r#"package p;
+        task static copy(input bit [7:0] value, output bit [7:0] result);
+            #1; result = value;
+        endtask
+    endpackage
+    module Child #(parameter int VALUE = 1)(output bit [7:0] y);
+        initial p::copy(VALUE, y);
+    endmodule
+    module Top(output bit [7:0] a, b);
+        Child #(1) first(a); Child #(2) second(b);
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 2u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u8.into());
+}
+
+#[test]
+fn review_transient_clock_pulses_trigger_ff_domains() {
+    let source = r#"module Top(output bit q);
+        bit clk;
+        always_ff @(posedge clk) q <= 1;
+        initial begin #1; clk = 1; clk = 0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn review_zero_delay_continuations_run_before_nba() {
+    let source = r#"module Top(output bit q, observed);
+        bit clk;
+        always_ff @(posedge clk) q <= 1;
+        initial begin @(posedge clk); #0; observed = q; end
+        initial begin #1; clk = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+}
+
+#[test]
+fn review_simultaneous_domains_publish_before_waking_waiters() {
+    let source = r#"module Top(output bit q, r, observed);
+        bit clk1, clk2;
+        always_ff @(posedge clk1) q <= 1;
+        always_ff @(posedge clk2) r <= 1;
+        initial begin @(posedge q); observed = r; end
+        initial begin #1; {clk1, clk2} = 2'b11; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("observed")), 1u8.into());
+}
+
+#[test]
+fn review_mixed_edge_and_level_lists_run_as_processes() {
+    let source = r#"module Top(input bit clk, reset, output bit y);
+        always @(posedge clk or reset) y = reset;
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    let reset = sim.signal("reset");
+    sim.modify(|sim| sim.set(reset, 1u8)).unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn review_unknown_delays_are_zero_and_negative_delays_are_unsigned_time() {
+    let source = r#"module Top(output bit done);
+        logic [3:0] delay_value = 4'b001x;
+        initial begin #1; #delay_value; done = 1; end
+    endmodule"#;
+    let mut sim = four_state_simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    let source = r#"module Top(output bit done);
+        initial begin #1; #(4'b001x); done = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    let source = r#"module Top(output bit done);
+        initial begin #(-1); done = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.step().unwrap(), Some(u64::MAX));
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+}
+
+#[test]
+fn review_rejects_composite_events_with_unobservable_comb_transients() {
+    let source = r#"module Top(input bit a, output bit seen);
+        wire q, r; assign q = a; assign r = q;
+        initial begin @(q ^ r); seen = 1; end
+    endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("event expression reading multiple combinationally driven variables")
+    );
+}
+
+#[test]
+fn review_static_initializers_preserve_unknown_masks_and_bit_coercion() {
+    let source = r#"module Top(output logic [15:0] x_value, z_value, output bit bit_value);
+        task automatic sample();
+            static logic [15:0] x_local = 'x;
+            static logic [15:0] z_local = 'z;
+            static bit bit_local = 'x + 1;
+            #1; x_value = x_local; z_value = z_local; bit_value = bit_local;
+        endtask
+        initial begin sample(); $display("%h %h %0d", x_value, z_value, bit_value); end
+    endmodule"#;
+    let mut sim = four_state_simulation(source);
+    assert_eq!(displays(&mut sim), lines(&[(1, "xxxx zzzz 0")]));
+    assert_eq!(sim.get(sim.signal("bit_value")), 0u8.into());
 }

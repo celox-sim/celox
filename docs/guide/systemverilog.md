@@ -50,15 +50,15 @@ synthesis and is tested at the design level.
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state, calls a system task or uses timing controls, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
-| Timing controls | `#delay` with an integer literal, parameter, variable or parenthesized expression; `@(posedge x)`, `@(negedge x)`, `@(x)` and lists joined by `or` or `,`; `wait (condition)`; in `initial` blocks, `always` processes with timing controls (`always #5 clk = ~clk;`, `always @(a or b) ...`, an edge-sensitive body with timing inside, also through the tasks it calls), and tasks they call. A delay counts simulation time units; `timescale` is not applied. A process woken by an edge runs before the registers of that edge update, so it reads their previous values; one woken by a register update runs before the registers of the next cascaded update. An event expression may call functions without effects besides their results; an event on a package variable is the variable itself (`@(p::a)`, `@(posedge p::a)`), not a larger expression |
+| Timing controls | `#delay` with an integer literal, parameter, variable or parenthesized expression; `@(posedge x)`, `@(negedge x)`, `@(x)` and lists joined by `or` or `,`; `wait (condition)`; in `initial` blocks, `always` processes with timing controls (`always #5 clk = ~clk;`, `always @(a or b) ...`, an edge-sensitive body with timing inside, also through the tasks it calls), and tasks they call. A delay counts simulation time units; `timescale` is not applied. A process woken by an edge runs before the registers of that edge update, so it reads their previous values; one woken by a register update runs before the registers of the next cascaded update. Event expressions and `wait` conditions may call functions without effects besides their results; writes to static locals count as effects. Events combining multiple combinationally driven variables are rejected because their propagation transients are not preserved; an event on a package variable is the variable itself (`@(p::a)`, `@(posedge p::a)`), not a larger expression |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined, so a task with timing controls may be called from a process; an `automatic` task (its own keyword or the module's or package's default lifetime) gives each activation its own arguments and locals, a static task shares them, as IEEE 1800-2023 13.3.1 says. A `static` local, and a local of a static task without a lifetime keyword, keeps its value between calls; its initializer runs once, before time zero, and must be constant (6.21: a local with an initializer in a static task needs an explicit `static` or `automatic` lifetime). Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
-| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -211,14 +211,28 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
+  An import in a generate block makes names visible in that block (and the
+  blocks inside it), ahead of the module's own declarations and imports.
   A package variable is one object shared by every module that uses it,
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
   variable are rejected, counting every instance of a module that writes it.
   A package variable cannot be a clock or reset yet, and its initializer must
-  be constant. Package nets,
-  `export` declarations and compilation-unit (`$unit`) declarations are not
-  supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
+  be constant. `export` declarations (26.6) make imported declarations
+  visible to the importers of a package: `export p::*;` exports only the
+  names the package actually imports from `p`, and an import through an
+  export denotes the original declaration, so importing it along two paths
+  is not ambiguous; `q::x` names the declaration `q` exports as `x`. Package
+  nets are not supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
+- **Compilation units.** Each source file is a compilation unit of its own
+  (IEEE 1800-2023 3.12.1). Its parameters, types, subroutines, variables and
+  imports outside any module or package form the scope `$unit`, which
+  encloses the modules of the file: a module sees the unit's items and
+  imports declared before it, and every subroutine of the unit, after its own
+  declarations and imports. `$unit::x` names the unit's item `x`. A
+  compilation-unit variable is one object shared by the modules of the file,
+  named `$unit::v` like a package variable; only one source file may declare
+  them. DPI imports at compilation-unit scope are not supported.
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An
@@ -230,9 +244,29 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   interface it is connected to, as `M$I`.
 - **Block-local variables** of an `always_comb` become signals of the module; a
   name that clashes with another signal is rejected.
+- **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
+  procedural block, function or task is static unless it, its subroutine or
+  its module (`module automatic`) is declared `automatic`. A static local of a
+  block keeps its value from one execution of the block to the next, and its
+  initializer runs once at time zero: in `always_ff`, `int count; count++;`
+  counts. An automatic local is initialized on every entry. A static local
+  whose value on entry is never read, because every path writes it before
+  reading it, behaves the same either way. Because a static local keeps its
+  value, a local of `always_comb` that only some paths write is a latch, and
+  is rejected like any other latch. Task locals keep their static storage across calls, including suspensions.
+  A static local of an expression-expanded function that keeps its value
+  between calls is not supported, nor is a static local
+  whose initializer is not constant; declare them `automatic`. The result of
+  a static function is static too, so one with a path that does not assign
+  it (other than a `case` whose items cover every value of a two-state
+  argument) is
+  rejected as well. An interface
+  whose default lifetime (`interface automatic`) differs from that of the
+  module it is used in is rejected.
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.
+- **Unbounded parameters.** `$isunbounded(P)` returns a one-bit unsigned result: 1 for a value parameter assigned `$`, otherwise 0. The symbolic value survives parameter aliases and instance overrides (IEEE 1800-2023 6.20.7, 20.6.3).
 - **System functions called as statements**, such as `$countones(f(a));`, are
   checked and evaluated like the same call in an expression, and their value
   is discarded. `$bits` and `$size` do not evaluate their operand.
@@ -269,3 +303,36 @@ The cases that remain excluded fall into these groups:
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
   hierarchical assignments) are not emitted as simulatable SystemVerilog
   modules.
+
+`$timeunit` and `$timeprecision` return a signed 32-bit exponent in seconds
+(IEEE 1800-2023 20.4.1). They resolve the current time scope, `$unit`, `$root`,
+and scalar module instance paths across source files. `timeunit`,
+`timeprecision`, preceding `timescale` directives, and `resetall` follow the
+precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
+precision includes all declared precisions and directive precisions, even in
+uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
+require elaborated hierarchy lookup and are currently rejected.
+
+`$printtimescale` displays the selected time scope in the IEEE 1800-2023
+20.4.2 form, for example `Time scale of (Top.child) is 100ns / 10ps`.
+It accepts the current scope, a design-element argument, `$unit`, or `$root`,
+and runs in `initial`, `always` processes and subroutines. Current and relative
+module names use the elaborated instance path. Package and interface copies
+retain their declaration's time unit and precision.
+
+Separate time unit and precision declarations may precede other scope items;
+matching repeats may appear later. Designs mixing explicitly specified or
+inherited scales with implementation defaults are rejected (3.14.2.3).
+Module definitions and packages retain independent scales even when their names
+coincide (3.13). A bare package query remains available when a same-named
+module is instantiated; visible hierarchy instances, including roots, take
+precedence over a namesake package. Simulator root lookup uses the selected
+top and reachable hierarchy; instantiations in unused supplied modules do not
+hide the selected root. Leading zeros in integer or fixed-point
+time magnitudes do not change their numeric value. Interface functions retain
+their declaration's time scope and compilation unit when copied into modules
+during elaboration. Queries of scalar interface instances and ports are
+resolved using their bound interface type before flattening, including generic
+interface ports and handles declared within a generate block. Scalar paths to
+interface instances inside child modules, such as `child.info`, are resolved
+before those instances are flattened away.

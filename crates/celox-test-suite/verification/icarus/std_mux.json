@@ -1,0 +1,38 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_mux::test_demux_build_smoke",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 requires an array index on data_arr and fails elaboration of the mux input port. Verilator also reports a port-shape problem on this fixture; no conformance verdict is assigned.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-array-input"
+        ],
+        "id": "icarus_array_input",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 requires an array index on data_arr and fails elaboration of the mux input port. Verilator also reports a port-shape problem on this fixture; no conformance verdict is assigned.",
+        "upstream": []
+      },
+      "name": "std_mux::test_mux_build_smoke",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

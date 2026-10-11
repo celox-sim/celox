@@ -53,4 +53,32 @@ sv_backends! {
     fn unknown_delays_and_conditions_count_as_zero_and_false(sim) {
         @case "timing::unknown_delays_and_conditions_count_as_zero_and_false";
     }
+
+    fn host_inputs_are_staged_before_time_zero_initial_blocks(sim) {
+        @case "timing::host_inputs_are_staged_before_time_zero_initial_blocks";
+    }
+
+    fn eval_starts_due_time_zero_processes(sim) {
+        @case "timing::eval_starts_due_time_zero_processes";
+    }
+
+    fn direct_reads_settle_waiting_processes(sim) {
+        @case "timing::direct_reads_settle_waiting_processes";
+    }
+
+    fn output_reads_settle_waiting_processes(sim) {
+        @case "timing::output_reads_settle_waiting_processes";
+    }
+
+    fn run_until_drains_target_time_before_later_writes(sim) {
+        @case "timing::run_until_drains_target_time_before_later_writes";
+    }
+
+    fn repeated_settles_do_not_advance_design_time(sim) {
+        @case "timing::repeated_settles_do_not_advance_design_time";
+    }
+
+    fn run_to_finish_has_no_simulated_time_deadline(sim) {
+        @case "timing::run_to_finish_has_no_simulated_time_deadline";
+    }
 }

@@ -250,12 +250,19 @@ error.
 A case whose design has processes with delays or event controls, or a clock
 it generates itself, advances time with `run_until` and `run_to_finish` and
 checks the design's output with `expect_output`. Design delays count time
-units; the generated testbench for an external simulator sets a time scale of
-1 ns with 1 ps precision and settles in 1 ps steps, so its checks after
-`run_until` observe everything the design did at that time. Only checks may
-follow `run_to_finish`; they run in a `final` block, which sees the script's
-top-level bindings. A design that does not finish within the generated
-testbench's guard fails `run_to_finish` instead of passing the checks.
+units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
+and `timeprecision` declarations are rejected consistently by the Celox and
+external adapters. `tick` cannot be mixed with timed operations.
+
+Reads, output collection and `eval` settle processes due at the current
+timestamp without advancing time. External scripted adapters use an Icarus
+read/write synchronization callback or a Verilator clocking event sampled in
+the observed region. Initial blocks start after pre-run input writes settle.
+`run_until` drains its target timestamp before subsequent writes. Only checks
+may follow `run_to_finish`; they run in a `final` block that sees the script's
+top-level bindings. There is no simulated-time deadline: final checks require
+that the script reached the operation and that the design called `$finish`.
+Event exhaustion before explicit completion fails the case.
 
 For an invalid design, write `(expect reject)` and no statements.
 `TestCase::expectation` lets consumers select these separately. For additional
@@ -364,6 +371,20 @@ gate checks the live catalogue. When deliberately updating reviewed failure
 evidence, run the full selection with `--fresh --report PATH`, inspect the
 changed failures, then update summaries with `scripts/summarize.py`. The retained
 copy omits timestamps, fingerprints, reuse markers and aggregate counts.
+`PATH` is a schema-4 index containing tool/suite metadata and `case_files`;
+case results live next to it in `<path-stem>/<group>.json`. For example,
+`--report verification/icarus.json` writes `verification/icarus/counter.json`
+for the `counter` test group. Groups match the `.vtest` definitions, so updating
+one group leaves other groups untouched. Report filenames remain unrestricted:
+names without `.json` or with characters outside ASCII letters, digits, `_`,
+and `-` in their stem use a sibling `.report-<filename-hash>/` directory instead.
+This keeps extensionless indexes separate from their group files. Readers use
+the relative paths in `case_files`, so renaming the index leaves it readable.
+The index lists the exact selection;
+a filtered update replaces that selection and removes previously referenced
+group files that are no longer selected. Missing files, duplicate cases, and
+cases stored under the wrong group are errors. Historical baseline and focused
+reproduction reports retain their original single-file format.
 `--filter` and `--exclude-stronger-than-sv` produce partial reports; omit them
 when updating complete retained evidence.
 
@@ -455,13 +476,15 @@ Icarus uses `-g2012 -gstrict-expr-width` (see its
 
 Each output folder retains Veryl sources, emitted `.sv`, build/runtime logs,
 protocol transcripts, full panic diagnostics, and per-case results. The runner
-also writes `results.json`. `--report` writes a portable copy with tool versions,
-counts, every case, and bounded diagnostics, independently of disposable build
-caches. Report schema 2 adds `ignored`, optional per-case `known_issue`, and the
-top-level `include_ignored` setting. New reports use schema 3, adding per-case
+also writes `results.json`. `--report` writes a portable index and group files
+with tool versions, every selected case, and bounded diagnostics, independently
+of disposable build caches. Report schema 2 adds `ignored`, optional per-case
+`known_issue`, and the
+top-level `include_ignored` setting. Per-run reports use schema 3, adding per-case
 `tags`, `tag_reasons`, and `stronger_than_sv`, and the top-level
-`exclude_stronger_than_sv` setting. All statuses retain the case metadata,
-including ignored cases. Historical retained reports remain at their original
+`exclude_stronger_than_sv` setting. Retained reports use the schema-4 group index
+described above. All statuses retain the case metadata, including ignored cases.
+Historical retained reports remain at their original
 schema and do not gain retroactive tags. Ignored cases write their result and reason
 only; any other files already in their artifact directory are from an earlier
 execution. Multiple designs in one case receive separate artifact folders.

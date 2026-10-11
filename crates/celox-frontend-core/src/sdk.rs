@@ -1393,6 +1393,8 @@ pub fn lower_frontend_artifact(
         reset_clock_map,
         processes,
         package_bindings: HashMap::default(),
+        shared_process_state: HashSet::default(),
+        process_event_counters: Vec::new(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

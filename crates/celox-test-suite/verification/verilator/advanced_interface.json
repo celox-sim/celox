@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_interface_bidirectional",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_interface_wide_signal",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_multiple_interface_instances",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Veryl emits shortint unsigned'(1) for the generic u16 cast; Verilator rejects the emitted type-cast syntax. This is not a numerical mismatch.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-type-cast-syntax"
+        ],
+        "id": "sv_type_cast_syntax",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Veryl emits shortint unsigned'(1) for the generic u16 cast; Verilator rejects the emitted type-cast syntax. This is not a numerical mismatch.",
+        "upstream": []
+      },
+      "name": "advanced_interface::test_transitive_generics",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "advanced_interface::test_transitive_generics_two_level",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

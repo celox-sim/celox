@@ -39,6 +39,9 @@ pub(super) struct ScopeSymbols {
     pub initial_processes: Vec<InitialProcess>,
     /// The names imports make visible, and the qualified names they denote.
     pub aliases: HashMap<String, String>,
+    /// The names the imports of a generate block bind there to another
+    /// declaration than outside it, by the source offset of the block.
+    pub generate_imports: HashMap<usize, HashMap<String, String>>,
 }
 
 thread_local! {
@@ -103,17 +106,20 @@ pub(super) fn imported() -> Arc<ScopeSymbols> {
 
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
-fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 9] = [
+pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
+    const FIXED: [&str; 12] = [
         "__parameter::local::",
+        "__parameter::unbounded::",
         "__parameter::width::",
         "__parameter::signed_element::",
         "__parameter::signed::",
         "__parameter::dimensions::",
+        "__parameter::rank::",
         "__enum::",
         "__variable::bits::",
         "__variable::size::",
         "__variable::signed::",
+        "__variable::dimensions::",
     ];
     for prefix in FIXED {
         if let Some(name) = key.strip_prefix(prefix) {
@@ -489,6 +495,7 @@ impl ScopeSymbols {
                 })
                 .collect(),
             aliases: HashMap::default(),
+            generate_imports: HashMap::default(),
         }
     }
 }
@@ -537,6 +544,17 @@ impl Renamer<'_> {
         match expr {
             ConstExpr::Ident(name) => ConstExpr::Ident(self.name(&name)),
             ConstExpr::Literal(value) => ConstExpr::Literal(value),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.const_expr(*expr)),
+                msb: Box::new(self.const_expr(*msb)),
+                lsb: Box::new(self.const_expr(*lsb)),
+                signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.const_expr(*expr)),
                 bit: Box::new(self.const_expr(*bit)),
@@ -545,6 +563,15 @@ impl Renamer<'_> {
                 name: self.name(&name),
                 args: args.into_iter().map(|arg| self.const_expr(arg)).collect(),
                 site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.const_expr(*expr)),
+                width,
+                signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op,

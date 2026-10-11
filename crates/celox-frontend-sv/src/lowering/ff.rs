@@ -17,6 +17,10 @@ use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
 
 type Addr = RegionedVarAddr;
+pub(super) type Activation = (
+    HashMap<SourceVarId, SourceVarId>,
+    HashMap<usize, EventCounters>,
+);
 
 struct LoopBlocks {
     break_block: BlockId,
@@ -539,9 +543,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .collect::<Result<_, _>>()?,
                 site: *site,
             },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                msb: Box::new(self.hoist_const(msb, calls)?),
+                lsb: Box::new(self.hoist_const(lsb, calls)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(expr, calls)?),
                 bit: Box::new(self.hoist_const(bit, calls)?),
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                width: *width,
+                signed: *signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
@@ -660,6 +684,30 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store_raw(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                signed,
+            } if matches!(&**base, ConstExpr::Ident(name) if self.m.id(name).is_some()) => {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let msb = self.freeze_const(msb, copies)?;
+                let lsb = self.freeze_const(lsb, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                };
+                let value = self.eval(&read, None)?;
+                let width = self.b.register(&value).width();
+                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                self.store(temp, SIROffset::Static(0), width, value)?;
+                ConstExpr::Ident(temp_name)
+            }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
             {
                 let ConstExpr::Ident(name) = &**base else {
@@ -679,6 +727,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                msb: Box::new(self.freeze_const(msb, copies)?),
+                lsb: Box::new(self.freeze_const(lsb, copies)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.freeze_const(expr, copies)?),
                 bit: Box::new(self.freeze_const(bit, copies)?),
@@ -690,6 +749,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|arg| self.freeze_const(arg, copies))
                     .collect::<Result<_, _>>()?,
                 site: *site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                width: *width,
+                signed: *signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
@@ -958,6 +1026,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let watchers = if self.kernel.is_some() && !self.recording_events {
             let variable = self.aliases.get(&id).copied().unwrap_or(id);
+            let variable = self.private.get(&variable).copied().unwrap_or(variable);
             self.m
                 .watchers_by_var
                 .get(&variable)
@@ -986,12 +1055,22 @@ impl<'p, 'a> Ff<'p, 'a> {
         width: usize,
         value: RegisterId,
     ) -> Result<(), sv::AnalyzerError> {
-        // The expressions before the store, then the store, then the
-        // events the store made.
+        let previous = self.snapshot_watchers(watchers)?;
+        self.store_raw(id, offset, width, value);
+        self.count_watchers(watchers, previous)
+    }
+
+    fn snapshot_watchers(&mut self, watchers: &[usize]) -> Result<Vec<String>, sv::AnalyzerError> {
         let mut previous = Vec::with_capacity(watchers.len());
         for &index in watchers {
             let expr = self.m.event_watchers[index].expr.clone();
-            let value = self.eval(&expr, None)?;
+            let private = std::mem::replace(
+                &mut self.private,
+                self.m.event_watchers[index].private.clone(),
+            );
+            let result = self.eval(&expr, None);
+            self.private = private;
+            let value = result?;
             let (width, four_state) = match *self.b.register(&value) {
                 RegisterType::Logic { width } => (width, true),
                 RegisterType::Bit { width, .. } => (width, false),
@@ -1000,10 +1079,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.store_raw(slot, SIROffset::Static(0), width, value);
             previous.push(name);
         }
-        self.store_raw(id, offset, width, value);
+        Ok(previous)
+    }
+
+    fn count_watchers(
+        &mut self,
+        watchers: &[usize],
+        previous: Vec<String>,
+    ) -> Result<(), sv::AnalyzerError> {
         for (&index, previous) in watchers.iter().zip(previous) {
+            let private = std::mem::replace(
+                &mut self.private,
+                self.m.event_watchers[index].private.clone(),
+            );
             let expr = self.m.event_watchers[index].expr.clone();
-            let counters = self.watcher_counters(index);
+            let counters = self.m.event_watchers[index].state.clone();
             for (edge, counter) in [
                 (sv::ir::EventEdge::Any, &counters.changes),
                 (sv::ir::EventEdge::Pos, &counters.rises),
@@ -1020,8 +1110,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                         signed: false,
                     }),
                 };
-                self.assign(&sv::ir::LValue::Ident(counter.clone()), &next)?;
+                let result = self.assign(&sv::ir::LValue::Ident(counter.clone()), &next);
+                if let Err(error) = result {
+                    self.private = private;
+                    return Err(error);
+                }
             }
+            self.private = private;
         }
         Ok(())
     }
@@ -1043,14 +1138,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         width: usize,
         four_state: bool,
     ) -> (SourceVarId, String) {
-        if let Some(previous) = self.watcher_counters(index).previous {
+        if let Some(previous) = self.m.event_watchers[index].state.previous.clone() {
             return previous;
         }
         let previous = self.m.temp("event_previous", width, false, four_state);
-        let state = match self.private_watchers.get_mut(&index) {
-            Some(state) => state,
-            None => &mut self.m.event_watchers[index].state,
-        };
+        let state = &mut self.m.event_watchers[index].state;
         state.previous = Some(previous.clone());
         previous
     }
@@ -1679,9 +1771,67 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::Stmt::Delay(amount) => {
                 self.require_process("delay")?;
                 let signed = self.expr_signed(amount);
-                let amount = self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?;
-                let amount = self.two_state(amount);
-                self.with_kernel(|kernel| kernel.delay(amount))
+                // IEEE 1800-2023 9.4.1: any unknown bit makes the whole
+                // delay zero; negative delays retain the unsigned time value.
+                let mut arena = SLTNodeArena::new();
+                let constant_unknown = !self.m.calls(amount)
+                    && lower_expr_with_context(
+                        amount,
+                        self.m.variables,
+                        self.m.name_to_id,
+                        self.m.constants,
+                        self.m.parameter_types,
+                        &mut arena,
+                        Some(PROCESS_DELAY_WIDTH),
+                        Some(signed),
+                    )
+                    .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node))
+                    .is_some_and(|(_, mask, _)| !mask.is_zero());
+                let delay = if constant_unknown {
+                    let zero = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                    zero
+                } else {
+                    self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?
+                };
+                let amount = if matches!(self.b.register(&delay), RegisterType::Logic { .. }) {
+                    let known = self.b.alloc_bit(1, false);
+                    let reduced = self.b.alloc_logic(1);
+                    self.b
+                        .emit(SIRInstruction::Unary(reduced, UnaryOp::Xor, delay));
+                    let zero = self.b.alloc_bit(1, false);
+                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                    // A reduction containing X/Z is unequal to both known bits.
+                    let is_zero = self.b.alloc_bit(1, false);
+                    let is_one = self.b.alloc_bit(1, false);
+                    self.b.emit(SIRInstruction::Binary(
+                        is_zero,
+                        reduced,
+                        BinaryOp::EqCase,
+                        zero,
+                    ));
+                    let one = self.b.alloc_bit(1, false);
+                    self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+                    self.b.emit(SIRInstruction::Binary(
+                        is_one,
+                        reduced,
+                        BinaryOp::EqCase,
+                        one,
+                    ));
+                    self.b
+                        .emit(SIRInstruction::Binary(known, is_zero, BinaryOp::Or, is_one));
+                    let value = self.two_state(delay);
+                    let no_delay = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+                    self.b
+                        .emit(SIRInstruction::Imm(no_delay, SIRValue::new(0u8)));
+                    let amount = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+                    self.b
+                        .emit(SIRInstruction::Mux(amount, known, value, no_delay));
+                    amount
+                } else {
+                    delay
+                };
+                self.with_kernel(|kernel| kernel.inactive_delay(amount))
                     .map_err(kernel_error)?;
                 Ok(true)
             }
@@ -1692,6 +1842,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Wait(condition) => {
                 self.require_process("wait statement")?;
+                if let Some(callee) = impure_callee(self.m, condition) {
+                    return Err(unsupported(format!(
+                        "wait condition calling side-effecting subroutine `{callee}`"
+                    )));
+                }
                 let (truth, constant) = self.eval_truth(condition)?;
                 if constant == Some(true) {
                     return Ok(true);
@@ -2471,6 +2626,7 @@ impl Ff<'_, '_> {
         mut self,
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
+        activation: Activation,
     ) -> Result<ExecutionUnit<Addr>, sv::AnalyzerError> {
         // A nonblocking update would take effect in a later region of the
         // time step, after the process has run on.
@@ -2479,7 +2635,8 @@ impl Ff<'_, '_> {
                 "nonblocking assignment in a process that runs with timing",
             ));
         }
-        self.privatize_timed_subroutines(body);
+        self.private = activation.0;
+        self.private_watchers = activation.1;
         let mut kernel = ProcessKernelBuilder::new(slots);
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
@@ -2521,6 +2678,11 @@ impl Ff<'_, '_> {
     /// subroutine it calls that suspends (a task with timing controls, or
     /// one calling such a task): the activations of concurrent processes
     /// would otherwise share them across a suspension.
+    pub fn plan_activation(mut self, body: &[sv::ir::Stmt]) -> Activation {
+        self.privatize_timed_subroutines(body);
+        (self.private, self.private_watchers)
+    }
+
     fn privatize_timed_subroutines(&mut self, body: &[sv::ir::Stmt]) {
         let mut reachable = Vec::new();
         self.collect_calls(body, &mut reachable);
@@ -2559,11 +2721,10 @@ impl Ff<'_, '_> {
             };
             // A static subroutine shares its formals and locals between
             // activations, as IEEE 1800-2023 13.3.1 says.
-            if !subroutine.automatic {
-                continue;
+            if subroutine.automatic {
+                names.extend(subroutine.params.iter().map(|param| param.name.clone()));
+                names.extend(subroutine.return_var.clone());
             }
-            names.extend(subroutine.params.iter().map(|param| param.name.clone()));
-            names.extend(subroutine.return_var.clone());
             // A `static` local is shared by the activations even of an
             // automatic subroutine (IEEE 1800-2023 6.21).
             for stmt in &subroutine.body {
@@ -2595,13 +2756,25 @@ impl Ff<'_, '_> {
         // A watcher reading a private copy counts this process's events on
         // its own counters.
         for index in 0..self.m.event_watchers.len() {
-            if self.m.event_watchers[index]
-                .dependencies
-                .iter()
-                .any(|dependency| self.private.contains_key(dependency))
+            if self.m.event_watchers[index].private.is_empty()
+                && self.m.event_watchers[index]
+                    .dependencies
+                    .iter()
+                    .any(|dependency| self.private.contains_key(dependency))
             {
                 let counters = self.m.new_event_counters();
-                self.private_watchers.insert(index, counters);
+                self.private_watchers.insert(index, counters.clone());
+                let mut watcher = self.m.event_watchers[index].clone();
+                watcher.state = counters;
+                watcher.private = self.private.clone();
+                for id in &mut watcher.dependencies {
+                    *id = self.private.get(id).copied().unwrap_or(*id);
+                }
+                let replica = self.m.event_watchers.len();
+                for id in &watcher.dependencies {
+                    self.m.watchers_by_var.entry(*id).or_default().push(replica);
+                }
+                self.m.event_watchers.push(watcher);
             }
         }
     }
@@ -2649,6 +2822,7 @@ pub fn declare_event_counters(
         let index = pm.event_watchers.len();
         pm.watchers_by_var.entry(id).or_default().push(index);
         pm.event_watchers.push(EventWatcher {
+            private: HashMap::default(),
             expr: sv::ir::Expr::Ident(name.clone()),
             dependencies: vec![id],
             state: EventCounters {
@@ -2684,10 +2858,26 @@ pub fn declare_event_counters(
             });
         }
     }
+    for signal in &pm.event_signals {
+        let expr = sv::ir::Expr::Ident(signal.clone());
+        if !exprs.contains(&expr) {
+            exprs.push(expr);
+        }
+    }
     for expr in exprs {
         let mut names = HashSet::default();
         expr_idents(&expr, &mut names);
         subroutine_reads(pm, &expr, &mut names);
+        if names
+            .iter()
+            .filter(|name| pm.combinational.contains(*name))
+            .count()
+            > 1
+        {
+            return Err(unsupported(
+                "event expression reading multiple combinationally driven variables",
+            ));
+        }
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
         let dependencies: Vec<SourceVarId> = names.iter().filter_map(|name| pm.id(name)).collect();
@@ -2712,6 +2902,7 @@ pub fn declare_event_counters(
         }
         let state = pm.new_event_counters();
         pm.event_watchers.push(EventWatcher {
+            private: HashMap::default(),
             expr,
             dependencies,
             state,
@@ -2742,7 +2933,12 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
         own.extend(subroutine.return_var.clone());
         for stmt in &subroutine.body {
             stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                if let sv::ir::Stmt::Local {
+                    name,
+                    r#static: false,
+                    ..
+                } = stmt
+                {
                     own.insert(name.clone());
                 }
                 stmt_reads(stmt, &mut reads);
@@ -2796,7 +2992,12 @@ fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
             .collect();
         for stmt in &subroutine.body {
             stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                if let sv::ir::Stmt::Local {
+                    name,
+                    r#static: false,
+                    ..
+                } = stmt
+                {
                     own.insert(name.clone());
                 }
             });
@@ -2955,6 +3156,26 @@ fn substitute_overlay_const(
             None => expr.clone(),
         },
         ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(
+                if matches!(&**expr, ConstExpr::Ident(_))
+                    && (const_expr_references_identifier(msb)
+                        || const_expr_references_identifier(lsb))
+                {
+                    (**expr).clone()
+                } else {
+                    go(expr)
+                },
+            ),
+            msb: Box::new(go(msb)),
+            lsb: Box::new(go(lsb)),
+            signed: *signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),
@@ -2963,6 +3184,15 @@ fn substitute_overlay_const(
             name: name.clone(),
             site: *site,
             args: args.iter().map(go).collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(go(expr)),
+            width: *width,
+            signed: *signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op: *op,

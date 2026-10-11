@@ -929,3 +929,392 @@
       (assert_eq q (bit value p) "q")
       (tick clk)
       (assert_eq q_ff (bit value p) "q_ff"))))
+
+(case nested_array_indices_preserve_elements_and_ranges
+  ; The inner selection is an entire element, including in an assignment
+  ; target and in a sequential read. Use nonzero descending unpacked bounds.
+  (source "nested_array_indices.sv" #"
+    module Top(input logic clk, input logic [7:0] idx, data,
+               output logic [7:0] nested, arithmetic, packed_index, q, w1, w3);
+        logic [7:0] map [2:1];
+        logic [7:0] mem [4];
+        logic [7:0] written [4];
+        logic [0:7] packed_value;
+        assign packed_value = 8'h30;
+        always_comb begin
+            map[2] = data;
+            map[1] = 3;
+            mem[0] = 0;
+            mem[1] = 11;
+            mem[2] = 22;
+            mem[3] = 33;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            written[map[idx]] = 8'h5a;
+        end
+        assign nested = mem[map[idx]];
+        assign arithmetic = mem[map[idx] + 8'd1];
+        assign packed_index = mem[packed_value[0:3]];
+        assign w1 = written[1];
+        assign w3 = written[3];
+        always_ff @(posedge clk) q <= mem[map[idx]];
+    endmodule
+  "#)
+  (top Top)
+  (for (index value mapped) (list (1 1 3) (2 1 1) (2 2 2) (1 2 3))
+    (modify (set idx index) (set data value))
+    (assert_eq nested (* mapped 11))
+    (assert_eq packed_index 33)
+    (assert_eq w1 (? (== mapped 1) 0x5a 0))
+    (assert_eq w3 (? (== mapped 3) 0x5a 0))
+    (if (< mapped 3) (assert_eq arithmetic (* (+ mapped 1) 11)))
+    (tick clk)
+    (assert_eq q (* mapped 11))))
+
+(case nested_array_indices_preserve_invalid_reads_and_writes
+  ; Invalid or unknown inner and outer indices read X and write nothing
+  ; (IEEE 1800-2023 7.4.5).
+  (four_state)
+  (source "nested_invalid_array_indices.sv" #"
+    module Top(input logic clk, input logic [7:0] idx, data,
+               output logic [7:0] nested, q, w1, w3);
+        logic [7:0] map [2];
+        logic [7:0] mem [4];
+        logic [7:0] written [4];
+        always_comb begin
+            map[0] = data;
+            map[1] = 3;
+            mem[0] = 0;
+            mem[1] = 11;
+            mem[2] = 22;
+            mem[3] = 33;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            written[map[idx]] = 8'h5a;
+        end
+        assign nested = mem[map[idx]];
+        assign w1 = written[1];
+        assign w3 = written[3];
+        always_ff @(posedge clk) q <= mem[map[idx]];
+    endmodule
+  "#)
+  (top Top)
+  (for (index value) (list (0 1) (1 1) (0 4) (2 1) (255 1)
+                            ((fourstate 0xff 0xff) 1)
+                            (0 (fourstate 0xff 0xff))
+                            (0 (fourstate 0 0xff)))
+    (modify (set idx index) (set data value))
+    (let valid (&& (== (xmask index) 0) (== (xmask value) 0)
+                   (< index 2) (|| (== index 1) (< value 4))))
+    (let mapped (? (== index 1) 3 value))
+    (let expected (? valid (* mapped 11) (fourstate 0xff 0xff)))
+    (assert_eq nested expected)
+    (assert_eq w1 (? (&& valid (== mapped 1)) 0x5a 0))
+    (assert_eq w3 (? (&& valid (== mapped 3)) 0x5a 0))
+    (tick clk)
+    (assert_eq q expected)))
+
+(case nested_array_indices_freeze_concat_targets
+  ; Keep the index values from the assignment when later blocking writes
+  ; change the map, in both combinational and sequential processes.
+  (source "nested_array_concat_targets.sv" #"
+    module Top(input logic clk, input logic [7:0] data,
+               output logic [7:0] w1, w2, w3, q1, q2, q3);
+        logic [7:0] map [2];
+        logic [7:0] written [4];
+        logic [7:0] ff_map [2];
+        logic [7:0] ff_written [4];
+        always_comb begin
+            map[0] = data;
+            map[1] = 3;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            {written[map[0]], written[map[1]]} = 16'h5a3c;
+            map[0] = 2;
+        end
+        assign w1 = written[1];
+        assign w2 = written[2];
+        assign w3 = written[3];
+        always_ff @(posedge clk) begin
+            ff_map[0] = data;
+            ff_map[1] = 3;
+            ff_written[0] = 0;
+            ff_written[1] = 0;
+            ff_written[2] = 0;
+            ff_written[3] = 0;
+            {ff_written[ff_map[0]], ff_written[ff_map[1]]} = 16'h5a3c;
+            ff_map[0] = 2;
+            q1 <= ff_written[1];
+            q2 <= ff_written[2];
+            q3 <= ff_written[3];
+        end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 1 2 1 2)
+    (modify (set data value))
+    (assert_eq w1 (? (== value 1) 0x5a 0))
+    (assert_eq w2 (? (== value 2) 0x5a 0))
+    (assert_eq w3 0x3c)
+    (tick clk)
+    (assert_eq q1 (? (== value 1) 0x5a 0))
+    (assert_eq q2 (? (== value 2) 0x5a 0))
+    (assert_eq q3 0x3c)))
+
+(case nested_array_indices_preserve_cast_widths
+  ; Preserve signed 2-bit arithmetic and cast widths when the operand
+  ; is a dynamically selected unpacked array element.
+  (source "nested_array_cast_indices.sv" #"
+    module Top(input logic clk, input logic idx, input logic signed [7:0] data,
+               output logic [7:0] direct, wrapped, q,
+               output logic [31:0] contents);
+        logic signed [7:0] map [2];
+        logic [7:0] mem [-2:1];
+        logic [7:0] written [-2:1];
+        always_comb begin
+            map[0] = data;
+            map[1] = ~data;
+            mem[-2] = 8'h10;
+            mem[-1] = 8'h20;
+            mem[0] = 8'h30;
+            mem[1] = 8'h40;
+            written[-2] = 0;
+            written[-1] = 0;
+            written[0] = 0;
+            written[1] = 0;
+            written[signed'(map[idx][1:0])] = 8'h5a;
+        end
+        assign direct = mem[signed'(map[idx][1:0])];
+        assign wrapped = mem[2'(map[idx]) + 2'sd1];
+        assign contents = {written[1], written[0], written[-1], written[-2]};
+        always_ff @(posedge clk) q <= mem[int'(signed'(map[idx][1:0]))];
+    endmodule
+  "#)
+  (top Top)
+  (let by_index 0x20104030)
+  (for value (list 0 1 2 3 0x81 0xa6 0xff)
+    (for index (range 0 2)
+      (modify (set idx index) (set data value))
+      (let bits (& (? index (~ value) value) 3))
+      (let expected (& (>> by_index (* bits 8)) 255))
+      (assert_eq direct expected)
+      (assert_eq wrapped (& (>> by_index (* (& (+ bits 1) 3) 8)) 255))
+      (assert_eq contents (<< 0x5a (* (& (+ bits 2) 3) 8)))
+      (tick clk)
+      (assert_eq q expected))))
+
+(case constant_part_select_indices_read_and_write_unpacked_arrays
+  ; IEEE 1800-2023 11.5.1, 11.8.1: a constant part-select is an unsigned,
+  ; self-determined expression, including when the source vector is signed.
+  (source "constant_part_select_indices.sv" #"
+                module Top(input logic clk, input logic signed [7:0] c,
+                           input logic [0:7] ascending, input logic [7:0] d,
+                           output logic [7:0] direct, upper, up, wrapped,
+                           output logic nested, output logic [3:0] written);
+                    localparam int LOW = 0;
+                    logic [7:0] mem [4];
+                    always_ff @(posedge clk) mem[c[LOW+1:LOW]] <= d;
+                    assign direct = mem[c[1:0]];
+                    assign upper = mem[c[5:4]];
+                    assign up = mem[ascending[2:3]];
+                    assign wrapped = mem[c[1:0] + 2'd1];
+                    assign nested = mem[c[3:2]][c[1:0]];
+                    always_comb begin
+                        written = '0;
+                        written[c[1:0]] = 1'b1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for (index value) (list (0 0x81) (1 0x12) (2 0x24) (3 0x48))
+    (modify (set c (+ 0xf0 index)) (set d value))
+    (tick clk)
+    (assert_eq direct value))
+  (for value (list 0 1 2 3 0x1b 0x27 0x39 0xc6 0xff)
+    (modify (set c value) (set ascending value))
+    (let index (& value 3))
+    (let upper_index (& (>> value 4) 3))
+    (let nested_index (& (>> value 2) 3))
+    (let stored 0x48241281)
+    (assert_eq direct (& (>> stored (* index 8)) 255))
+    (assert_eq upper (& (>> stored (* upper_index 8)) 255))
+    (assert_eq up (& (>> stored (* upper_index 8)) 255))
+    (assert_eq wrapped (& (>> stored (* (& (+ index 1) 3) 8)) 255))
+    (assert_eq nested (bit (& (>> stored (* nested_index 8)) 255) index))
+    (assert_eq written (<< 1 index))))
+
+(case constant_part_select_indices_preserve_selected_unknowns
+  (four_state)
+  (source "constant_part_select_unknown_indices.sv" #"
+                module Top(input logic clk, input logic [7:0] c, input logic [7:0] d,
+                           output logic [7:0] direct, first,
+                           output logic [31:0] contents);
+                    logic [7:0] mem [4];
+                    always_ff @(posedge clk) mem[c[1:0]] <= d;
+                    assign direct = mem[c[1:0]];
+                    assign first = mem[0];
+                    assign contents = {mem[3], mem[2], mem[1], mem[0]};
+                endmodule
+            "#)
+  (top Top)
+  (for (index value) (list (0 0x5a) (1 0x11) (2 0x22) (3 0x44))
+    (modify (set c index) (set d value))
+    (tick clk))
+  (modify (set c 0))
+  (assert_eq first 0x5a)
+  ; Unknown bits outside the part-select have no effect on the index.
+  (modify (set c (fourstate 0xfc 0xfc)) (set d 0xa5))
+  (assert_eq direct 0x5a)
+  (tick clk)
+  (assert_eq direct 0xa5)
+  (assert_eq first 0xa5)
+  ; An X or Z inside the part-select makes the index invalid: reads
+  ; return X, and a write leaves every element unchanged.
+  (for unknown (list (fourstate 1 1) (fourstate 0 1))
+    (modify (set c unknown) (set d 0x33))
+    (assert_eq direct (fourstate 0xff 0xff))
+    (tick clk)
+    (assert_eq first 0xa5)
+    (assert_eq contents 0x442211a5))
+  (modify (set c 0))
+  (assert_eq direct 0xa5))
+
+(case constant_part_select_indices_in_continuous_targets
+  (source "constant_part_select_net_indices.sv" #"
+                module Top(input logic [7:0] d, input logic [7:0] c,
+                           output logic [7:0] y, output wire [3:0] bits);
+                    localparam logic [7:0] P = 8'ha2;
+                    wire [7:0] mem [4];
+                    assign mem[P[1:0]] = d;
+                    assign mem[0] = 8'h10;
+                    assign mem[1] = 8'h21;
+                    assign mem[3] = 8'h43;
+                    assign y = mem[c[1:0]];
+                    assign bits[P[1:0]] = d[0];
+                    assign bits[1:0] = 2'b01;
+                    assign bits[3] = 1'b1;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x34 0xab)
+    (modify (set d value))
+    (assert_eq bits (| 9 (<< (& value 1) 2)))
+    (for (index expected) (list (0 0x10) (1 0x21) (2 value) (3 0x43))
+      (modify (set c (+ 0xf0 index)))
+      (assert_eq y expected))))
+
+(case constant_part_select_indices_of_concatenations
+  ; IEEE 1800-2023 11.4.12: concatenation selections use [n-1:0]
+  ; coordinates, independently of their operands' declared ranges.
+  (source "concatenation_slice_indices.sv" #"
+                module Top(input logic clk, input logic [7:0] c,
+                           input logic [0:7] ascending, input logic [11:4] shifted,
+                           output logic [7:0] joined, repeated, crossing, nested, up, offset, single,
+                           output logic [3:0] written, registered);
+                    logic [7:0] mem [4];
+                    always_comb begin
+                        mem[0] = 8'h12;
+                        mem[1] = 8'h34;
+                        mem[2] = 8'h56;
+                        mem[3] = 8'h78;
+                        written = '0;
+                        written[{2'b00, c}[1:0]] = 1'b1;
+                    end
+                    always_ff @(posedge clk) begin
+                        registered <= '0;
+                        registered[{2{c}}[9:8]] <= 1'b1;
+                    end
+                    assign joined = mem[{2'b00, c}[1:0]];
+                    assign repeated = mem[{2{c}}[9:8]];
+                    assign crossing = mem[{c[0], c[7:1]}[7:6]];
+                    assign nested = mem[{1'b0, {2{c[1:0]}}}[3:2]];
+                    assign up = mem[{2'b00, ascending}[1:0]];
+                    assign offset = mem[{2'b00, shifted}[1:0]];
+                    assign single = mem[{c}[1:1]];
+                endmodule
+            "#)
+  (top Top)
+  (let stored 0x78563412)
+  (for value (list 0 1 2 3 0x81 0x42 0xa5 0xff)
+    (modify (set c value) (set ascending value) (set shifted value))
+    (let index (& value 3))
+    (let expected (& (>> stored (* index 8)) 255))
+    (expand name (joined repeated nested up offset)
+      (assert_eq {name} expected))
+    (let cross (| (<< (& value 1) 1) (& (>> value 7) 1)))
+    (assert_eq crossing (& (>> stored (* cross 8)) 255))
+    (assert_eq single (& (>> stored (* (& (>> value 1) 1) 8)) 255))
+    (assert_eq written (<< 1 index))
+    (tick clk)
+    (assert_eq registered (<< 1 index))))
+
+(case signed_indices_access_clocked_negative_range_arrays
+  ; IEEE 1800-2023 7.4.2: unpacked array ranges can have negative indices.
+  (source "clocked_negative_array.sv" #"
+    module Top(input logic clk, input logic signed [1:0] c,
+               input logic [7:0] d, output logic [7:0] direct, wrapped,
+               output logic [31:0] contents);
+      logic [7:0] mem [-2:1];
+      always_ff @(posedge clk) mem[c] <= d;
+      assign direct = mem[c];
+      assign wrapped = mem[c + 2'sd1];
+      assign contents = {mem[1], mem[0], mem[-1], mem[-2]};
+    endmodule
+  "#)
+  (top Top)
+  (for (bits value expected)
+       (list (2 0x22 0x00000022) (3 0x33 0x00003322)
+             (0 0x44 0x00443322) (1 0x55 0x55443322))
+    (modify (set c bits) (set d value))
+    (tick clk)
+    (assert_eq direct value)
+    (assert_eq contents expected))
+  (let by_index 0x33225544)
+  (for bits (range 0 4)
+    (modify (set c bits))
+    (assert_eq direct (& (>> by_index (* bits 8)) 255))
+    (let next (& (+ bits 1) 3))
+    (assert_eq wrapped (& (>> by_index (* next 8)) 255))))
+
+(case constant_part_select_indices_of_signed_slices
+  ; IEEE 1800-2023 7.4.2: negative unpacked indices are valid when
+  ; they lie inside the declared range. Preserve cast widths in arithmetic.
+  (source "signed_slice_indices.sv" #"
+                module Top(input logic clk, input logic [7:0] c, input logic [7:0] d,
+                           output logic [7:0] direct, casted, wrapped, widened, registered,
+                           output logic [31:0] contents);
+                    logic [7:0] mem [-2:1];
+                    always_comb begin
+                        mem[-2] = 8'h10;
+                        mem[-1] = 8'h20;
+                        mem[0] = 8'h30;
+                        mem[1] = 8'h40;
+                        mem[$signed(c[1:0])] = d;
+                    end
+                    assign direct = mem[$signed(c[1:0])];
+                    assign casted = mem[signed'(c[1:0])];
+                    assign widened = mem[int'(signed'(c[1:0]))];
+                    assign wrapped = mem[$signed(c[1:0]) + 2'sd1];
+                    assign contents = {mem[1], mem[0], mem[-1], mem[-2]};
+                    always_ff @(posedge clk) registered <= mem[$signed(c[1:0])];
+                endmodule
+            "#)
+  (top Top)
+  (let initial 0x40302010)
+  (let by_index 0x20104030)
+  (for (bits value) (list (2 0x22) (3 0x33) (0 0x44) (1 0x55) (2 0xab) (1 0xcd))
+    (modify (set c (+ 0xc0 bits)) (set d value))
+    (expand name (direct casted widened)
+      (assert_eq {name} value))
+    (let offset (* (& (+ bits 2) 3) 8))
+    (assert_eq contents (| (& initial (~ (<< 255 offset))) (<< value offset)))
+    (let next (& (+ bits 1) 3))
+    (assert_eq wrapped (& (>> by_index (* next 8)) 255))
+    (tick clk)
+    (assert_eq registered value)))

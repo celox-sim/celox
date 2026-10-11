@@ -8,16 +8,13 @@
 //! starts with `@suite assert` and ends the run with `$fatal`; success reaches
 //! `$finish` (after `$celox_suite_finish` under Icarus).
 //!
-//! The timing follows the process adapters: a write takes effect at the next
-//! settle, which advances time by one step; a tick drives the event port to
-//! its inactive and then its active level, settling after each, and restores
-//! a level that was neither. The testbench counts time in picoseconds while
-//! the design's time unit is a nanosecond (see the staged time scale), so
-//! the steps stay inside one script time unit: `run_until` reaches the
-//! script's time exactly, and the settle before the next read runs after
-//! everything the design does at that time. After `run_to_finish` the
-//! testbench only keeps the simulation alive; the checks that follow run in
-//! a `final` block, when the design has called `$finish`.
+//! Untimed cases use one-step settling between driver operations. Timed
+//! cases synchronize with the scheduler without advancing time: Icarus uses
+//! a read/write callback and Verilator a clocking event in the observed
+//! region. Their initial blocks start after pre-run inputs settle.
+//! `run_until` drains its target timestamp before the next script operation.
+//! After `run_to_finish`, read-only final checks require both reaching that
+//! operation and explicit design completion; event exhaustion is a failure.
 
 use super::ast::{Actual, Expr, Op, RUN_UNTIL_LIMIT, ScriptCase, Sequence, Stmt, StmtKind, Value};
 use super::sexpr::Pos;
@@ -96,10 +93,6 @@ const OUTPUT_MARKER: &str = "@suite output ";
 /// the whole script has run.
 const END_MARKER: &str = "@suite end";
 
-/// Picoseconds after the script's last statement at which a design that
-/// `run_to_finish` waits for is judged never to finish.
-const RUN_TO_FINISH_GUARD: u64 = 1_000_000_000;
-
 fn hex_encode(text: &str) -> String {
     text.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -119,10 +112,24 @@ fn is_finish_notice(line: &str) -> bool {
     {
         return located(location);
     }
-    if let Some((location, rest)) = line.split_once(": $finish called at ") {
+    if let Some((location, rest)) = icarus_finish_notice(line) {
         return located(location) && rest.ends_with(')');
     }
     false
+}
+
+fn icarus_finish_notice(line: &str) -> Option<(&str, &str)> {
+    let (location, rest) = line.split_once(": $finish")?;
+    let rest = if let Some(rest) = rest.strip_prefix('(') {
+        let (argument, rest) = rest.split_once(')')?;
+        if argument.parse::<u8>().ok()? > 2 {
+            return None;
+        }
+        rest
+    } else {
+        rest
+    };
+    Some((location, rest.strip_prefix(" called at ")?))
 }
 
 /// Whether `line` is a simulator's notice of a `$finish` in one of the
@@ -143,7 +150,7 @@ fn is_source_finish_notice(line: &str, sources: &[String]) -> bool {
 fn notice_file(line: &str) -> Option<&str> {
     let location = match line.strip_prefix("- ") {
         Some(rest) => rest.strip_suffix(": Verilog $finish")?,
-        None => line.split_once(": $finish called at ")?.0,
+        None => icarus_finish_notice(line)?.0,
     };
     Some(location.rsplit_once(':')?.0)
 }
@@ -896,6 +903,7 @@ impl Generator<'_> {
                 self.settle_for(&[time]);
                 let time = self.expr(time);
                 self.require_known(&time, pos, "time");
+                self.line("settle_now();");
                 // The time is scaled to picoseconds in a 64-bit time.
                 self.line(format!(
                     "if ({time} < 0 || {time} > {}'sd{RUN_UNTIL_LIMIT}) begin",
@@ -908,8 +916,8 @@ impl Generator<'_> {
                 let temp = self.temp();
                 self.line("begin");
                 self.indent += 1;
-                self.line(format!("longint {temp};"));
-                self.line(format!("{temp} = longint'({time}) * 1000;"));
+                self.line(format!("time {temp};"));
+                self.line(format!("{temp} = time'({time}) * 1000;"));
                 // The settle steps stay inside the current time unit.
                 self.line(format!("if ({temp} / 1000 < $time / 1000) begin"));
                 self.indent += 1;
@@ -921,7 +929,7 @@ impl Generator<'_> {
                 self.indent -= 1;
                 self.line("end");
                 self.line(format!("if ({temp} > $time) #({temp} - $time);"));
-                self.line("settled = 0;");
+                self.line("settle_now();");
                 self.indent -= 1;
                 self.line("end");
             }
@@ -973,22 +981,9 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     let (before_finish, after_finish) = case.split_at_finish();
     generator.block_at(before_finish, true)?;
     if after_finish.is_some() {
-        // The design must end the simulation. A simulation that runs out
-        // of events would otherwise run the final block as a pass, so one
-        // late event stays pending; when it comes, the run fails instead.
-        let pos = case
-            .body
-            .iter()
-            .find(|stmt| stmt.kind == StmtKind::RunToFinish)
-            .map(|stmt| stmt.pos)
-            .expect("a split at run_to_finish has the statement");
-        generator.line(format!("#{RUN_TO_FINISH_GUARD};"));
-        generator.line("suite_unfinished = 1;");
-        generator.fail(
-            pos,
-            "run_to_finish: the design did not finish the simulation",
-            &[],
-        );
+        generator.line("suite_reached_finish = 1;");
+        generator.line("settle_now();");
+        generator.line("wait (1'b0);");
     }
     let body = std::mem::take(&mut generator.out);
     let final_checks = match after_finish {
@@ -1045,9 +1040,8 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     for declaration in &declarations {
         let _ = writeln!(out, "  {declaration}");
     }
-    // Whether the guard of `run_to_finish` ended the run: the final checks
-    // are then skipped.
-    let _ = writeln!(out, "  logic suite_unfinished = 1'b0;");
+    // Final checks run only when the script reached the finish operation.
+    let _ = writeln!(out, "  bit suite_reached_finish = 0;");
     // Two-state runs zero every variable at start-up, so "settled" must
     // mean 1: zero and X both ask for a settle before the first read.
     let _ = writeln!(out, "  logic settled;");
@@ -1097,15 +1091,55 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         Some(checks) => {
             // The design ends the simulation; the checks run in its wake.
             out.push_str("  end\n\n  final begin\n");
-            out.push_str("    if (!suite_unfinished)\n");
+            out.push_str(
+                "    if (!suite_reached_finish || !celox_suite_timed_control::finished) begin\n",
+            );
+            out.push_str("      $display(\"@suite assert run_to_finish was not reached or the design did not finish\");\n    end else begin\n");
             out.push_str(&checks);
             out.push_str(&end);
-            out.push_str("  end\nendmodule\n");
+            out.push_str("    end\n  end\nendmodule\n");
         }
         None => {
             out.push_str(&end);
             out.push_str("    $finish;\n  end\nendmodule\n");
         }
+    }
+    if case.is_timed() {
+        out = out.replace(
+            "  timeprecision 1ps;",
+            "  timeprecision 1ps;\n  import celox_suite_timed_control::*;",
+        );
+        out = out.replace(
+            "  task automatic settle_now;\n    #1;\n    settled = 1;\n  endtask",
+            r#"  bit suite_progress = 0;
+`ifndef CELOX_SUITE_ICARUS
+  clocking suite_settled @(suite_progress);
+    input #0 progress = suite_progress;
+  endclocking
+`endif
+  task automatic settle_queues;
+`ifdef CELOX_SUITE_ICARUS
+    suite_progress = 0;
+    $celox_suite_settle(suite_progress);
+    wait (suite_progress);
+`else
+    suite_progress <= ~suite_progress;
+    @(suite_settled);
+`endif
+  endtask
+  task automatic settle_now;
+    if (!celox_suite_timed_control::started) begin
+      settle_queues();
+      celox_suite_start_design();
+    end
+    settle_queues();
+    settled = 1;
+  endtask"#,
+        );
+        out = out.replace(
+            "  initial begin\n",
+            "  initial begin\n    settle_queues();\n",
+        );
     }
     Ok(out)
 }
@@ -1121,6 +1155,13 @@ mod tests {
         assert_eq!(design_output(icarus, &sources), "done\n");
         let verilator = "done\n- /tmp/case/source_0.sv:19: Verilog $finish\n";
         assert_eq!(design_output(verilator, &sources), "done\n");
+        assert_eq!(
+            design_output(
+                "done\n/tmp/case/source_0.sv:17: $finish(1) called at 18000 (1ps)\n",
+                &sources
+            ),
+            "done\n"
+        );
         assert_eq!(
             design_output("a: $finish called at x\n", &sources),
             "a: $finish called at x\n"
@@ -1140,12 +1181,9 @@ mod tests {
         .unwrap();
         assert!(text.contains("  logic signed [127:0] v_expected;\n"));
         assert!(text.contains("v_expected = t1;"));
-        assert!(text.contains("final begin\n    if (!suite_unfinished)\n"));
-        // The design must finish: a late event fails the run instead of
-        // letting an exhausted event queue pass the final checks.
-        assert!(text.contains("#1000000000;\n"));
-        assert!(text.contains("suite_unfinished = 1;"));
-        assert!(text.contains("run_to_finish: the design did not finish the simulation"));
+        assert!(text.contains("final begin\n    if (!suite_reached_finish || !celox_suite_timed_control::finished) begin\n"));
+        assert!(text.contains("suite_reached_finish = 1;"));
+        assert!(text.contains("run_to_finish was not reached or the design did not finish"));
         assert!(!text.contains("forever #"));
     }
 

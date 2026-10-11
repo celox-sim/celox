@@ -13,6 +13,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     ops::{Deref, DerefMut},
+    path::Path,
     sync::Arc,
 };
 
@@ -41,10 +42,12 @@ mod imports;
 mod inlining;
 mod instances;
 pub mod interfaces;
+mod lifetimes;
 pub(crate) mod module_index;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
 mod scope;
@@ -52,6 +55,7 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -75,7 +79,7 @@ use constant_folding::{
 use constants::{
     binary_op_from_symbol, bind_generate_parameter, const_expr_from_constant_param_with_env,
     const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
-    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_lvalue_const,
+    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_index_const,
     left_associate_expr_binary, next_genvar_value, primary_literal_text,
     substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
     substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
@@ -95,10 +99,11 @@ use dimensions::{
     function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
-    parameter_signed_element_marker, parameter_signed_marker, parameter_type_from_const_env,
-    parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
-    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
-    variable_size_function_width, variable_size_marker,
+    parameter_rank_marker, parameter_signed_element_marker, parameter_signed_marker,
+    parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
+    size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
+    variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
+    variable_size_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -108,10 +113,10 @@ use expressions::{
 use ff_process::ff_processes_from_module_node;
 use functions::{
     function_from_declaration, function_local_packed_dimensions_from_block_item_iter,
-    function_local_packed_dimensions_from_block_items,
+    function_local_packed_dimensions_from_block_items, function_return_dimensions,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
     function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
-    procedural_truth_condition, tf_item_params, tf_params,
+    procedural_truth_condition,
 };
 use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
@@ -209,7 +214,8 @@ impl Source {
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -218,6 +224,7 @@ impl Source {
                         RefNode::ModuleDeclarationAnsi(module),
                         syntax_tree,
                         &packages,
+                        packages.unit(Path::new("")),
                     )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         module,
@@ -269,9 +276,10 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let index = module_index::ModuleIndex::new(syntax_tree)?;
-        let packages = packages::Packages::analyze(&[syntax_tree])?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
         Self::from_indexed_syntax_module(
             syntax_tree,
+            Path::new(""),
             &index,
             module_name,
             parameter_overrides,
@@ -280,15 +288,19 @@ impl Source {
         )
     }
 
-    /// `packages` are the packages the module may use, from any source.
+    /// `packages` are the packages the module may use, from any source, and
+    /// the compilation units of the sources; `path` names the source of
+    /// `syntax_tree`.
     pub(crate) fn from_indexed_syntax_module(
         syntax_tree: &SyntaxTree,
+        path: &Path,
         index: &module_index::ModuleIndex,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -298,7 +310,12 @@ impl Source {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
-                    let imported = imports::imported_symbols(node.clone(), syntax_tree, packages)?;
+                    let imported = imports::imported_symbols(
+                        node.clone(),
+                        syntax_tree,
+                        packages,
+                        packages.unit(path),
+                    )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -507,6 +524,19 @@ impl Module {
         )));
         extend_const_env_with_parameters(&mut const_env, &parameters);
 
+        let mut array_parameters = array_parameters::array_parameters_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for parameter in &array_parameters {
+            const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+
         match reject_silently_ignored_constructs(
             node.clone(),
             syntax_tree,
@@ -560,6 +590,12 @@ impl Module {
                 extend_const_env_with_parameters(&mut const_env, &parameters);
                 type_aliases =
                     type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+                array_parameters = array_parameters::array_parameters_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &type_aliases,
+                )?;
                 reject_silently_ignored_constructs(
                     node.clone(),
                     syntax_tree,
@@ -597,12 +633,6 @@ impl Module {
         }
         let mut signals =
             signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
-        let array_parameters = array_parameters::array_parameters_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
         signals.extend(
             array_parameters
                 .iter()
@@ -643,12 +673,13 @@ impl Module {
         ));
         // Instance connections may call subroutines, of the module or of the
         // packages it uses, with untyped assignment patterns.
-        let (mut subroutine_params, mut subroutine_shapes) = procedural::subroutine_argument_names(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
+        let (mut subroutine_params, mut subroutine_shapes, mut subroutine_directions) =
+            procedural::subroutine_argument_names(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+            )?;
         for (name, params) in &imported.subroutine_params {
             subroutine_params
                 .entry(name.clone())
@@ -658,6 +689,26 @@ impl Module {
             subroutine_shapes
                 .entry(name.clone())
                 .or_insert_with(|| shapes.clone());
+        }
+        // The subroutines of the packages the module uses, by their qualified
+        // names and by the names its imports give them.
+        for subroutine in &imported.subroutines {
+            subroutine_directions
+                .entry(subroutine.name.clone())
+                .or_insert_with(|| {
+                    subroutine
+                        .params
+                        .iter()
+                        .map(|param| param.direction)
+                        .collect()
+                });
+        }
+        for (name, target) in &imported.aliases {
+            if let Some(directions) = subroutine_directions.get(target).cloned() {
+                subroutine_directions
+                    .entry(name.clone())
+                    .or_insert(directions);
+            }
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         let mut instances = instances_from_module_node(
@@ -746,6 +797,7 @@ impl Module {
                     FunctionReturnMetadata {
                         width: function.return_width,
                         first_packed_dimension_width: function.return_first_packed_dimension_width,
+                        dimensions: function.return_dimensions,
                         signed: function.return_signed,
                         is_2state: function.return_is_2state,
                     },
@@ -767,6 +819,7 @@ impl Module {
                         width: Some(r#type.width()),
                         first_packed_dimension_width: (r#type.width() > 1)
                             .then_some(r#type.width()),
+                        dimensions: Some(usize::from(r#type.width() > 1)),
                         signed: r#type.is_signed(),
                         is_2state: !r#type.is_4state(),
                     },
@@ -796,6 +849,9 @@ impl Module {
             locals: &mut locals,
             counter: &mut local_counter,
             subroutine_params: &subroutine_params,
+            subroutine_directions: &subroutine_directions,
+            automatic: lifetimes::automatic_by_default(&node),
+            statics: Vec::new(),
         };
         let mut subroutines = procedural::subroutines_from_module_node(
             node.clone(),
@@ -843,6 +899,41 @@ impl Module {
             &parameter_values,
             &mut body_state,
         )?);
+        // Static locals of the processes that keep their value are variables
+        // of the module, initialized once with the declaration initializers.
+        let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
+        let (kept, static_initializers) = lifetimes::keep_static_locals(
+            &statics,
+            &subroutine_directions,
+            comb_processes
+                .iter_mut()
+                .map(|process| &mut process.body)
+                .chain(ff_processes.iter_mut().map(|process| &mut process.body))
+                .chain(
+                    initial_processes
+                        .iter_mut()
+                        .map(|process| &mut process.body),
+                ),
+        )?;
+        locals.retain(|local| !kept.contains(&local.name));
+        for name in kept {
+            signals.push(Signal::new(name.clone(), statics[&name].clone()));
+        }
+        if !static_initializers.is_empty() {
+            // Declaration initializers run before the other initial blocks.
+            let first_block = initial_processes
+                .iter()
+                .position(|process| !process.initializer)
+                .unwrap_or(initial_processes.len());
+            initial_processes.insert(
+                first_block,
+                InitialProcess {
+                    condition: None,
+                    body: static_initializers,
+                    initializer: true,
+                },
+            );
+        }
         let procedurally_written = procedural::written_names(
             comb_processes
                 .iter()
@@ -936,6 +1027,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.
@@ -1105,16 +1197,27 @@ impl Parameter {
         Some(value)
     }
 
-    pub(crate) fn resolved_value_with_literals(
+    /// Resolve once, retaining a nonnumeric literal for the caller to publish.
+    /// Numeric results take precedence, including numbers recovered from a
+    /// literal after two-state conversion or dependency substitution.
+    pub(crate) fn resolved_value_and_literal(
         &self,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
-    ) -> Option<i128> {
-        self.resolved_value(constants, parameter_types).or_else(|| {
-            let literal = self.resolved_literal(constants, parameter_types, literals)?;
-            eval_ast_const_expr(&expr_to_const(literal)?, constants)
-        })
+    ) -> (Option<i128>, Option<Expr>) {
+        if let Some(value) = self.resolved_value(constants, parameter_types) {
+            return (Some(value), None);
+        }
+        let literal = self.resolved_literal(constants, parameter_types, literals);
+        let value = literal
+            .as_ref()
+            .and_then(|literal| eval_ast_const_expr(&expr_to_const(literal.clone())?, constants));
+        if value.is_some() {
+            (value, None)
+        } else {
+            (None, literal)
+        }
     }
 
     pub(crate) fn resolved_literal(
@@ -1123,6 +1226,14 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
+        #[cfg(test)]
+        parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
+        if self
+            .value()
+            .is_some_and(|value| parameters::is_unbounded(value, constants))
+        {
+            return Some(Expr::Literal("$".into()));
+        }
         // A previous elaboration pass may have left this declaration's numeric
         // value in the environment. Evaluate its initializer, not that value.
         let evaluation_constants = if constants.contains_key(self.name()) {
@@ -1540,6 +1651,20 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
     },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
+    },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
+        signed: bool,
+    },
     Function {
         name: String,
         args: Vec<ConstExpr>,
@@ -1580,7 +1705,7 @@ pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
 impl ConstExpr {
     /// A call of `name`; a user subroutine call gets a site of its own.
     fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        let site = (!name.starts_with('$'))
+        let site = (!system_functions::is_system_name(&name))
             .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
         ConstExpr::Function { name, args, site }
     }
@@ -1838,6 +1963,7 @@ struct Function {
     outputs: Vec<(String, Expr)>,
     return_width: Option<usize>,
     return_first_packed_dimension_width: Option<usize>,
+    return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
 }
@@ -2055,6 +2181,7 @@ type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 struct FunctionReturnMetadata {
     width: Option<usize>,
     first_packed_dimension_width: Option<usize>,
+    dimensions: Option<usize>,
     signed: bool,
     is_2state: bool,
 }

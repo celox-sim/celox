@@ -447,6 +447,7 @@ impl<B: SimBackend> Simulator<B> {
             clock_waits: Vec::new(),
             done_processes: Vec::new(),
             ticks: 0,
+            inactive_processes: Vec::new(),
             finished: false,
         })
     }
