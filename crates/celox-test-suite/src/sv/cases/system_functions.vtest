@@ -1479,3 +1479,18 @@ a=0a  10
   (top Top)
   (eval)
   (assert_eq ok 1))
+
+(case timescale_queries_accept_directives_before_unit_declarations
+  (source "directive_before_unit.sv" #"
+    `timescale 10ns / 1ns
+    timeunit 1ns;
+    `timescale 10ns / 1ns
+    timeprecision 1ps;
+    module Top(output logic ok);
+      timeunit 100ps / 10fs;
+      assign ok = ($timeunit() == -10) && ($timeprecision() == -14);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))

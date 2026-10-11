@@ -886,6 +886,7 @@
     ],
     "cases": {
       "icarus": [
+        "system_functions::timescale_queries_accept_directives_before_unit_declarations",
         "system_functions::timescale_queries_are_constant_in_unqualified_calls",
         "system_functions::timescale_queries_distinguish_unit_and_global_precision",
         "system_functions::timescale_queries_follow_partial_declarations_and_resetall",

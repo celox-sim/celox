@@ -175,7 +175,9 @@ fn merge(
 }
 
 /// Only direct time declarations and compiler directives leave the initial
-/// time-declaration region open. Nested declarations never extend that region.
+/// time-declaration region open. `sv-parser` stores `timescale` in whitespace,
+/// outside these item lists; its top-level `resetall` description is handled
+/// explicitly below. Nested declarations never extend the initial region.
 fn time_item(node: &RefNode<'_>) -> bool {
     use sv_parser::{
         InterfaceItem, ModuleItem, NonPortInterfaceItem, NonPortModuleItem, NonPortProgramItem,
@@ -742,6 +744,30 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn timescale_directives_leave_unit_time_declarations_open() {
+        for declarations in [
+            "`timescale 10ns / 1ns\ntimeunit 1ns; timeprecision 1ps;",
+            "`timescale 10ns / 1ns\ntimeprecision 1ps; timeunit 1ns;",
+            "`timescale 10ns / 1ns\ntimeunit 1ns;\n`timescale 10ns / 1ns\ntimeprecision 1ps;",
+        ] {
+            let code = format!(
+                "{declarations} module Top(); localparam U=$timeunit($unit); localparam P=$timeprecision($unit); localparam M=$timeunit(); localparam T=$timeprecision(); endmodule"
+            );
+            let ir = crate::analyze_source(&code, Path::new("directive_before_unit.sv")).unwrap();
+            let values: Vec<_> = ir.modules()[0]
+                .parameters()
+                .iter()
+                .map(|p| p.resolved_value())
+                .collect();
+            assert_eq!(
+                values,
+                [Some(-9), Some(-12), Some(-8), Some(-9)],
+                "{declarations}"
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 73,
+    "compile_error": 74,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -799,6 +799,17 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:13: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "system_functions::timescale_queries_keep_module_and_package_names_independent",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:8: error: System function $timeunit not defined in system table or SFT file(s).\n<case>/source_0.sv:8: error: System function $timeprecision not defined in system table or SFT file(s).\n<case>/source_0.sv:8: internal error: Failed to synthesize expression: (($timeunit())==(32'b11111111111111111111111111110110))&&(($timeprecision())==(32'b11111111111111111111111111110010))\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_accept_directives_before_unit_declarations",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

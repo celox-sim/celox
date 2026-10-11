@@ -765,6 +765,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_accept_directives_before_unit_declarations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Icarus 13.0 rejects repeated initial timeunit/timeprecision declarations before the other precision/unit is first declared, reporting a missing precision or missing initial declaration. IEEE 1800-2023 3.14.2.2 permits matching repeats and separate unit/precision declarations before non-time items. Slang 12.0.0 accepts the time declarations (it separately rejects the constant timescale queries).",
       "expectation": "Simulation",
       "known_issue": {

@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
+
     fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
     fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
 
