@@ -182,6 +182,7 @@ component Counter {
   init value == 0u4;
   invariant o.count == s.value;
   steps { add = n.value == s.value + i.amount; }
+  structure { no_comb_path isolated { from i.amount; to o.value; } }
   operation advance { expect n.value == s.value + 1u4; }
   example small {
     expect positive;
@@ -204,8 +205,16 @@ samples.recovery = `design "Recovery" {
   input forall: bool;
   input bool: bool;
   inputs { state: bool; }
+  state design: bool;
+  reset {
+    design = false;
+  }
   next { x = if forall { i.forall } else { s.x }; }
 }`;
+
+// A header being typed keeps its string scope without leaking to the next line.
+samples.header = `design "Unfinished
+input rst: bool;`;
 
 // [sample, line, token, occurrence, expected innermost scope]
 const expectations = [
@@ -301,6 +310,8 @@ const expectations = [
   ['expectations', '  steps { add = n.value == s.value + i.amount; }', 'steps', 1, 'keyword.other.lydite'],
   ['expectations', '  steps { add = n.value == s.value + i.amount; }', 'n', 1, 'variable.language.namespace.lydite'],
   ['expectations', '  steps { add = n.value == s.value + i.amount; }', 'i', 1, 'variable.language.namespace.lydite'],
+  ['expectations', '  structure { no_comb_path isolated { from i.amount; to o.value; } }', 'no_comb_path', 1, 'keyword.other.lydite'],
+  ['expectations', '  structure { no_comb_path isolated { from i.amount; to o.value; } }', 'isolated', 1, 'entity.name.section.lydite'],
   ['expectations', '  operation advance { expect n.value == s.value + 1u4; }', 'expect', 1, 'keyword.other.lydite'],
   ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'observe', 1, 'keyword.other.lydite'],
   ['expectations', '    trace { advance { inputs { amount = 2u4; } observe { no.count = 2u4; } } }', 'no', 1, 'variable.language.namespace.lydite'],
@@ -321,6 +332,13 @@ const expectations = [
   ['recovery', '  input bool: bool;', 'bool', 2, 'storage.type.lydite'],
   ['recovery', '  inputs { state: bool; }', 'inputs', 1, 'keyword.other.lydite'],
   ['recovery', '  inputs { state: bool; }', 'state', 1, 'variable.other.lydite'],
+  // A document-kind word used as a name is not a document kind.
+  ['recovery', '    design = false;', 'design', 1, 'variable.other.lydite'],
+  // A header being typed keeps its string scope and stops at the line end.
+  ['header', 'design "Unfinished', '"', 1, 'punctuation.definition.string.begin.lydite'],
+  ['header', 'design "Unfinished', 'Unfinished', 1, 'string.quoted.double.lydite'],
+  ['header', 'input rst: bool;', 'input', 1, 'storage.modifier.lydite'],
+  ['header', 'input rst: bool;', 'bool', 1, 'storage.type.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 1, 'variable.other.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 2, 'variable.other.lydite'],
   ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'i', 1, 'variable.language.namespace.lydite'],

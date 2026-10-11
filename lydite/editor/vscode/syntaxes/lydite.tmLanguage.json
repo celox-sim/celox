@@ -60,6 +60,18 @@
             },
             "3": { "name": "punctuation.definition.string.end.lydite" }
           }
+        },
+        {
+          "match": "(\")((?:[^\"\\\\]|\\\\.)*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.string.begin.lydite" },
+            "2": {
+              "name": "string.quoted.double.lydite",
+              "patterns": [
+                { "match": "\\\\.", "name": "constant.character.escape.lydite" }
+              ]
+            }
+          }
         }
       ]
     },
@@ -78,7 +90,7 @@
     "document-kind": {
       "patterns": [
         {
-          "match": "^\\s*(design|specification|lemmas)\\b",
+          "match": "^\\s*(design|specification|lemmas)\\b(?=\\s*\")",
           "captures": {
             "1": { "name": "keyword.other.document.lydite" }
           }
@@ -175,7 +187,7 @@
     "named-blocks": {
       "patterns": [
         {
-          "match": "(?<=(?:[{};]|target|lemma|expectation|example|operation|component|composition|spec|impl|bind|structure)\\s*|^\\s*)(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\{)",
+          "match": "(?<=(?:[{};]|target|lemma|expectation|example|operation|component|composition|bind|no_comb_path)\\s*|^\\s*)(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\{)",
           "name": "entity.name.section.lydite"
         }
       ]
