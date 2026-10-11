@@ -341,9 +341,53 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
     for declaration in [
         "module Top; logic [7:0] a [0:1]; logic [$unpacked_dimensions(a):0] b;",
         "module Top(input logic [7:0] a [0:1], output logic [$unpacked_dimensions(a):0] b);",
+        "module Top; logic [7:0] a [0:1], b [0:$unpacked_dimensions(a)];",
+        "module Top; wire [7:0] a [0:1], b [0:$unpacked_dimensions(a)];",
+        "module Top; typedef logic [7:0] byte_t; byte_t a [0:1], b [0:$unpacked_dimensions(a)];",
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
         let tree = crate::syntax::parse_source(&code, Path::new("preceding_query.sv")).unwrap();
+        let module = tree
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                )
+            })
+            .unwrap();
+        let aliases = type_aliases_from_module_node(module, &tree).unwrap();
+        let calls = tree
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::SystemTfCall(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unpacked_dimensions_call_value(calls[0], &tree, &HashMap::default(), &aliases, None),
+            Some(1),
+            "{declaration}",
+        );
+        assert_eq!(
+            size_system_function_call_type(calls[1], &tree, &HashMap::default(), &aliases, None)
+                .map(|ty| ty.width),
+            Some(if declaration.contains("b [") { 16 } else { 2 }),
+            "{declaration}",
+        );
+    }
+}
+
+#[test]
+fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_ranges() {
+    for declaration in [
+        "module Top #(parameter logic [7:0] A [0:1] = '{default:0}) (output logic [$unpacked_dimensions(A):0] b);",
+        "module Top; localparam logic [7:0] A [0:1] = '{default:0}; logic [$unpacked_dimensions(A):0] b;",
+        "module Top; logic [7:0] a [0:1]; localparam logic [7:0] A [0:$unpacked_dimensions(a)] = '{default:0}; logic [1:0] b;",
+    ] {
+        let code = format!("{declaration} localparam W = $bits(b); endmodule");
+        let tree =
+            crate::syntax::parse_source(&code, Path::new("array_parameter_query.sv")).unwrap();
         let calls = tree
             .into_iter()
             .filter_map(|node| match node {
@@ -360,7 +404,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
                 None
             ),
             Some(1),
-            "{declaration}",
+            "{declaration}"
         );
         assert_eq!(
             size_system_function_call_type(
@@ -372,7 +416,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
             )
             .map(|ty| ty.width),
             Some(2),
-            "{declaration}",
+            "{declaration}"
         );
     }
 }

@@ -1074,12 +1074,9 @@ fn containing_packed_dimensions(
         DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
             contexts.borrow_mut().insert(module_span, dimensions);
         });
-        ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        // Discover direct value declarations without re-elaborating generate
-        // conditions or parameter initializers that may contain this query.
-        declarations::signals_from_scope_node(module.clone(), syntax_tree, const_env, type_aliases)
-            .ok()?;
-        for parameter in array_parameters::array_parameters_from_module_node(
+        // Header array parameters can determine port ranges. Scope parameters
+        // are installed with direct declarations in source order below.
+        for parameter in array_parameters::array_parameters_from_parameter_ports(
             module.clone(),
             syntax_tree,
             const_env,
@@ -1093,6 +1090,11 @@ fn containing_packed_dimensions(
                 std::slice::from_ref(&parameter.signal),
             );
         }
+        ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        // Discover direct value declarations without re-elaborating generate
+        // conditions or parameter initializers that may contain this query.
+        declarations::signals_from_scope_node(module.clone(), syntax_tree, const_env, type_aliases)
+            .ok()?;
         // With direct declarations available, retain the original discovery
         // of elaborated generate signals and hoisted procedural variables.
         let signals =

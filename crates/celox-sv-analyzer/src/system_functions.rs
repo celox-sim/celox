@@ -120,8 +120,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.4 Timescale system tasks and system functions
     unsupported("$printtimescale", Task),
     unsupported("$timeformat", Task),
-    unsupported("$timeunit", Function),
-    unsupported("$timeprecision", Function),
+    function("$timeunit", 0, 1),
+    function("$timeprecision", 0, 1),
     // 20.5 Conversion functions
     unsupported("$rtoi", Function),
     unsupported("$itor", Function),

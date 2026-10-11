@@ -173,9 +173,10 @@ impl LoweredSvModuleKey {
 
 fn analyze_sources(
     sources: &[(&str, &Path)],
+    roots: &[&str],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     // Interfaces are expanded into the modules that use them first.
-    let elaborated = sv::elaborate_interfaces(sources)?;
+    let elaborated = sv::elaborate_interfaces_with_roots(sources, roots)?;
     let elaborated_sources: Vec<(&str, &Path)>;
     let sources = match &elaborated {
         Some(codes) => {
@@ -205,7 +206,9 @@ fn analyze_sources(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
+    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages_with_roots(
+        &parsed, roots,
+    )?);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -899,7 +902,8 @@ pub fn prepare_external_hierarchy(
     root_names: &HashSet<String>,
     four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let roots: Vec<_> = root_names.iter().map(String::as_str).collect();
+    let analyzed = analyze_sources(sources, &roots)?;
     let mut names = root_names
         .iter()
         .filter(|&name| analyzed.contains_key(name))
@@ -1063,7 +1067,7 @@ pub fn schedule_sources(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let analyzed = analyze_sources(sources, &[top])?;
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),

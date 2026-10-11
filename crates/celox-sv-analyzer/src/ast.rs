@@ -55,6 +55,7 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -214,6 +215,7 @@ impl Source {
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -298,6 +300,7 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -1016,6 +1019,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.

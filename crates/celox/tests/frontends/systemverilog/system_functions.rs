@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
+    fn unpacked_dimensions_selects_integral_atoms(sim) { @case "system_functions::unpacked_dimensions_selects_integral_atoms"; }
+    fn unpacked_dimensions_publishes_array_parameters_before_declarations(sim) { @case "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations"; }
     fn unpacked_dimensions_resolves_preceding_module_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_module_declarations"; }
     fn unpacked_dimensions_prefers_values_over_imported_types(sim) { @case "system_functions::unpacked_dimensions_prefers_values_over_imported_types"; }
     fn unpacked_dimensions_checks_unevaluated_indices(sim) { @case "system_functions::unpacked_dimensions_checks_unevaluated_indices"; }
@@ -36,6 +39,80 @@ sv_backends! {
     fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
         @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
     }
+    fn timescale_queries_resolve_hierarchical_interface_instances(sim) { @case "system_functions::timescale_queries_resolve_hierarchical_interface_instances"; }
+    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
+    fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
+    fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
+    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
+    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
+    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
+
+    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
+    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
+
+    fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
+        @setup {
+            let source = r#"
+                package P;
+                    timeunit 100ps / 10fs;
+                    function automatic int root_precision(); return $timeprecision($root.Top); endfunction
+                endpackage
+                interface I;
+                    timeunit 100ns / 10ps;
+                    function automatic int root_unit(); return $timeunit($root.Top); endfunction
+                endinterface
+                module Child(output logic ok);
+                    timeunit 1us / 1ns;
+                    assign ok = ($timeunit($root.Top) == -9) && ($timeprecision($root.Top) == -12)
+                        && ($timeunit(Top) == -9) && ($timeprecision(Top) == -12)
+                        && (P::root_precision() == -12);
+                endmodule
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    logic child_ok;
+                    I info();
+                    Child child(.ok(child_ok));
+                    assign ok = child_ok && (info.root_unit() == -9);
+                endmodule
+                module Harness(); timeunit 1ms / 1us; Top unused_top(); endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("selected_root.sv"))], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
+        @setup {
+            let source = r#"
+                timeunit 10ns / 1ps;
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    Child child();
+                    assign ok = ($timeunit() == -9) && ($timeprecision() == -12)
+                        && ($timeunit(child) == -6) && ($timeprecision(child) == -7)
+                        && ($timeunit(Top.child) == -6) && ($timeprecision($root.Top.child) == -7)
+                        && ($timeunit($unit) == -8) && ($timeprecision($root) == -15);
+                endmodule
+            "#;
+            let child = "module Child(); timeunit 1us / 100ns; endmodule";
+            let unused = "module Unused(); timeunit 1fs / 1fs; endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![
+            (source, Path::new("top.sv")),
+            (child, Path::new("child.sv")),
+            (unused, Path::new("unused.sv")),
+        ], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
+    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
+    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
+    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
+    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
+    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
 
     fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
     fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
@@ -436,6 +513,28 @@ fn reports_where_a_known_system_function_is_not_supported() {
     for (expected, source) in cases {
         let error = build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+#[test]
+fn timescale_queries_reject_packages_beneath_root() {
+    for function in ["$timeunit", "$timeprecision"] {
+        for item in [
+            format!("assign y = {function}($root.P);"),
+            format!("always_comb begin {function}($root.P); y = 0; end"),
+            format!("always_comb begin void'({function}($root.P)); y = 0; end"),
+            format!("assign y = $bits({function}($root.P));"),
+            format!("localparam UNUSED = {function}($root.P); assign y = 0;"),
+        ] {
+            let source = format!(
+                "package P; timeunit 100ns / 10ps; endpackage module Top(output int y); timeunit 1ns / 1ps; {item} endmodule"
+            );
+            let error = build_error(&source);
+            assert!(
+                error.contains("unknown timescale query design element `P`"),
+                "{item}: {error}"
+            );
+        }
     }
 }
 

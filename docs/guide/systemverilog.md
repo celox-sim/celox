@@ -56,7 +56,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -206,6 +206,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
+  An import in a generate block makes names visible in that block (and the
+  blocks inside it), ahead of the module's own declarations and imports.
   A package variable is one object shared by every module that uses it,
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
@@ -295,3 +297,29 @@ The cases that remain excluded fall into these groups:
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
   hierarchical assignments) are not emitted as simulatable SystemVerilog
   modules.
+
+`$timeunit` and `$timeprecision` return a signed 32-bit exponent in seconds
+(IEEE 1800-2023 20.4.1). They resolve the current time scope, `$unit`, `$root`,
+and scalar module instance paths across source files. `timeunit`,
+`timeprecision`, preceding `timescale` directives, and `resetall` follow the
+precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
+precision includes all declared precisions and directive precisions, even in
+uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
+require elaborated hierarchy lookup and are currently rejected.
+
+Separate time unit and precision declarations may precede other scope items;
+matching repeats may appear later. Designs mixing explicitly specified or
+inherited scales with implementation defaults are rejected (3.14.2.3).
+Module definitions and packages retain independent scales even when their names
+coincide (3.13). A bare package query remains available when a same-named
+module is instantiated; visible hierarchy instances, including roots, take
+precedence over a namesake package. Simulator root lookup uses the selected
+top and reachable hierarchy; instantiations in unused supplied modules do not
+hide the selected root. Leading zeros in integer or fixed-point
+time magnitudes do not change their numeric value. Interface functions retain
+their declaration's time scope and compilation unit when copied into modules
+during elaboration. Queries of scalar interface instances and ports are
+resolved using their bound interface type before flattening, including generic
+interface ports and handles declared within a generate block. Scalar paths to
+interface instances inside child modules, such as `child.info`, are resolved
+before those instances are flattened away.
