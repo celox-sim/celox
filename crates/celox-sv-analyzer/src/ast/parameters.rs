@@ -398,6 +398,9 @@ pub(super) fn parameters_from_ref_node_with_environment(
         type_aliases,
         parameter_overrides,
     );
+    // Check the source width before normalizing fill literals or building
+    // declaration-order value environments, even for a narrow later select.
+    validate_parameter_materialization_width(parameter_width)?;
     let has_declared_type = type_node.clone().into_iter().any(|child| {
         matches!(
             child,
@@ -449,6 +452,17 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
+                // A sized literal's prefix is available without parsing or
+                // resizing its payload into a potentially enormous value.
+                for child in expr {
+                    if let RefNode::Size(size) = child {
+                        let width = syntax_tree
+                            .get_str(&size.nodes.0.nodes.0)
+                            .and_then(|size| size.replace('_', "").parse::<usize>().ok())
+                            .ok_or_else(|| unsupported("parameter literal width"))?;
+                        validate_parameter_materialization_width(Some(width))?;
+                    }
+                }
                 if selects::parameter_initializer_needs_typed_selection(expr) {
                     let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
@@ -525,9 +539,26 @@ pub(super) fn parameters_from_ref_node_with_environment(
             );
             parameter.packed_ranges = parameter_ranges.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
+            validate_parameter_materialization_width(
+                parameter
+                    .resolved_type(&environment.types)
+                    .map(|ty| ty.width),
+            )?;
             environment.append(&parameter);
             parameters.push(parameter);
         }
+    }
+    Ok(())
+}
+
+fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), AnalyzerError> {
+    if let Some(width) = width
+        && width > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
+        return Err(unsupported(format!(
+            "parameter width {width} exceeds the {}-bit constant materialization limit",
+            constant_folding::MAX_CONSTANT_CONCAT_BITS
+        )));
     }
     Ok(())
 }

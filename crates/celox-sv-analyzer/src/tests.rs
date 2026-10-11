@@ -921,6 +921,38 @@ fn bounds_constant_parameter_part_select_folding() {
 }
 
 #[test]
+fn rejects_oversized_constant_parameter_operands_before_materialization() {
+    for source in [
+        "module Top; parameter logic [65536:0] W = 0; localparam N = W[0:0]; endmodule",
+        "module Top; parameter logic [1000000000:0] W = 0; localparam N = W[0:0]; endmodule",
+        "module Top; parameter logic [1000000000:0] W = '1; localparam N = W[0:0]; endmodule",
+        "module Top #(parameter logic [1000000000:0] W = 0, N = W[0:0]); endmodule",
+        "package p; parameter logic [1000000000:0] W = 0; endpackage \
+         module Top; localparam N = p::W[0:0]; endmodule",
+        "module Top; typedef logic [1000000000:0] wide_t; parameter wide_t W = 0; \
+         localparam N = W[0:0]; endmodule",
+        "module Top; localparam W = 65537'd0; localparam N = W[0:0]; endmodule",
+        "module Top; localparam W = 1000000000'd0; localparam N = W[0:0]; endmodule",
+        "module Top; localparam W = 1000000000'bx; localparam N = W[0:0]; endmodule",
+    ] {
+        let error = analyze_source(source, Path::new("oversized_parameter_operand.sv"))
+            .expect_err("an oversized operand must not be expanded before a narrow selection");
+        assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
+        assert!(
+            error.to_string().contains("constant materialization limit"),
+            "{error}"
+        );
+    }
+    let source = "module Top; parameter logic [65535:0] W = 1; \
+        localparam N = W[0:0]; endmodule";
+    let ir = analyze_source(source, Path::new("maximum_parameter_operand.sv")).unwrap();
+    let parameters = ir.modules()[0].parameters();
+    assert_eq!(parameters[0].resolved_width(), Some(65_536));
+    assert_eq!(parameters[1].resolved_width(), Some(1));
+    assert_eq!(parameters[1].resolved_value(), Some(1));
+}
+
+#[test]
 fn preserves_signed_named_constant_parameter_elements() {
     let source = "module Top; typedef logic signed [3:0] nibble_t; \
         parameter nibble_t [1:0][1:0] W = '1; localparam N = W[0][0]; \
