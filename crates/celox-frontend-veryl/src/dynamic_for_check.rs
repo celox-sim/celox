@@ -1854,7 +1854,7 @@ fn collect_index_select_effects(
     active_functions: &mut HashSet<VarId>,
     effects: &mut Effects,
 ) {
-    for expression in &index.0 {
+    for expression in index.expressions() {
         effects.append(collect_expression_effects(
             expression,
             module,
@@ -2049,6 +2049,7 @@ mod tests {
                 var_path: VarPath(vec![StrId::default()]),
                 index: VarIndex::default(),
                 select: VarSelect::default(),
+                array: Default::default(),
                 comptime: Comptime::default(),
             },
         ))));

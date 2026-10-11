@@ -671,6 +671,20 @@ fn test_selected_testbench_destination_out_of_range_is_rejected() {
         .build()
         .expect_err("out-of-range selected destination must be rejected");
     match err.kind() {
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::InvalidSelect {
+                    kind: veryl_analyzer::analyzer_error::InvalidSelectKind::OutOfRange {
+                        beg: 9,
+                        end: 6,
+                        size: 8,
+                    },
+                    ..
+                }
+            )),
+            "expected InvalidSelect for bits 9:6 of an 8-bit destination, got {errors:?}"
+        ),
         SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
             assert_eq!(*feature, "testbench selected destination");
         }
