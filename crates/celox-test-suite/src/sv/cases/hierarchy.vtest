@@ -256,3 +256,73 @@
     (set sel 0))
   (assert_eq out_fb 1)
   (assert_eq out_dyn 1))
+
+; IEEE 1800-2023 5.7.1 and 10.9.1: retain the element assignment context.
+(case parameter_patterns_keep_fill_and_arithmetic_context
+  (source "pattern_context.sv" #"
+    module Child #(parameter logic [15:0] Q [2] = '{0, 0})
+      (output logic [31:0] y);
+      localparam bit CHOOSE = 0;
+      assign y = {Q[1], Q[0]};
+    endmodule
+    module Top(output logic [31:0] fills, expressions, repeated);
+      localparam bit CHOOSE = 1;
+      localparam logic [7:0] A = 8'hff;
+      Child #(.Q('{default: '1})) a(fills);
+      Child #(.Q('{A + 8'd1, CHOOSE ? '1 : '0})) b(expressions);
+      Child #(.Q('{2{('1)}})) c(repeated);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq fills 0xffffffff)
+  (assert_eq expressions 0xffff0100)
+  (assert_eq repeated 0xffffffff))
+
+; Explicit pattern types are self-determined in the caller, not the child.
+(case parameter_patterns_bind_caller_types
+  (source "typed_pattern_scope.sv" #"
+    module Child #(parameter logic signed [7:0] Q [2] = '{0, 0})
+      (output logic [31:0] y);
+      typedef logic [3:0] pair_t [2];
+      assign y = {16'(Q[1]), 16'(Q[0])};
+    endmodule
+    module Top(output logic [31:0] local_type, shadowed_type);
+      typedef logic signed [7:0] local_pair_t [2];
+      typedef logic signed [7:0] pair_t [2];
+      Child #(.Q(local_pair_t'{8'shf8, '1})) a(local_type);
+      Child #(.Q(pair_t'{8'shf8, '1})) b(shadowed_type);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq local_type 0xfffffff8)
+  (assert_eq shadowed_type 0xfffffff8))
+
+(case parameter_patterns_bind_nested_caller_types
+  (source "nested_typed_pattern_scope.sv" #"
+    module Child #(parameter logic signed [7:0] Q [2][2] = '{default: 0})
+      (output logic [63:0] y);
+      assign y = {16'(Q[1][1]), 16'(Q[1][0]), 16'(Q[0][1]), 16'(Q[0][0])};
+    endmodule
+    module Top(output logic [63:0] y);
+      typedef logic signed [7:0] pair_t [2];
+      Child #(.Q('{pair_t'{-3, -5}, pair_t'{-7, -9}})) a(y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0xfff7fff9fffbfffd))
+
+(case parameter_patterns_keep_unknown_fill
+  (four_state)
+  (source "pattern_unknown_fill.sv" #"
+    module Child #(parameter logic [7:0] Q [2] = '{0, 0})
+      (output logic [15:0] y);
+      assign y = {Q[1], Q[0]};
+    endmodule
+    module Top(output logic [15:0] xfill, zfill);
+      Child #(.Q('{default: 'x})) a(xfill);
+      Child #(.Q('{default: 'z})) b(zfill);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq xfill (fourstate 0xffff 0xffff))
+  (assert_eq zfill (fourstate 0 0xffff)))

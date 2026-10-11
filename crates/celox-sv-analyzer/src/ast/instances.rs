@@ -555,23 +555,66 @@ fn constant_pattern_text(
         .collect();
     let mut edits = Vec::new();
     for child in node {
-        let expression = match child {
-            RefNode::Expression(expr) if patterns::pattern_expression(expr).is_none() => {
-                RefNode::Expression(expr)
+        let value = match child {
+            RefNode::AssignmentPatternExpression(pattern) if pattern.nodes.0.is_some() => Some(
+                patterns::constant_typed_pattern_text(pattern, tree, dimensions)?,
+            ),
+            RefNode::Primary(primary)
+                if !matches!(
+                    primary,
+                    sv_parser::Primary::PrimaryLiteral(_)
+                        | sv_parser::Primary::MintypmaxExpression(_)
+                        | sv_parser::Primary::AssignmentPatternExpression(_)
+                ) =>
+            {
+                let expr = sv_parser::Expression::Primary(Box::new(primary.clone()));
+                let value = indexed_select_base(RefNode::Expression(&expr), tree, dimensions)?;
+                Some(format!(
+                    "({})",
+                    typecheck::format_integral_literal_binary(
+                        &typecheck::eval_const_integral_literal_with_types(
+                            &value.into(),
+                            &dimensions.const_env,
+                            &types,
+                        )
+                        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?,
+                    )
+                ))
             }
-            // Repeat counts and index keys are constant expressions too;
-            // freeze them before entering the child module's scope.
-            RefNode::ConstantExpression(expr) => RefNode::ConstantExpression(expr),
-            _ => continue,
+            RefNode::ConstantPrimary(primary)
+                if !matches!(
+                    primary,
+                    sv_parser::ConstantPrimary::PrimaryLiteral(_)
+                        | sv_parser::ConstantPrimary::MintypmaxExpression(_)
+                        | sv_parser::ConstantPrimary::ConstantAssignmentPatternExpression(_)
+                ) =>
+            {
+                let expr =
+                    sv_parser::ConstantExpression::ConstantPrimary(Box::new(primary.clone()));
+                let value =
+                    indexed_select_base(RefNode::ConstantExpression(&expr), tree, dimensions)?;
+                Some(format!(
+                    "({})",
+                    typecheck::format_integral_literal_binary(
+                        &typecheck::eval_const_integral_literal_with_types(
+                            &value.into(),
+                            &dimensions.const_env,
+                            &types,
+                        )
+                        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?,
+                    )
+                ))
+            }
+            // Retain literals, operators and parentheses for the callee's
+            // assignment context, including unbased fills and wider arithmetic.
+            // Descendant primary references still bind in the caller, also
+            // inside constant-expression repetition counts and index keys.
+            _ => None,
         };
-        let value = indexed_select_base(expression.clone(), tree, dimensions)?;
-        let literal = typecheck::eval_const_integral_literal_with_types(
-            &value.into(),
-            &dimensions.const_env,
-            &types,
-        )
-        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?;
-        let tokens: Vec<_> = expression
+        let Some(replacement) = value else {
+            continue;
+        };
+        let tokens: Vec<_> = child
             .into_iter()
             .filter_map(|node| {
                 if let RefNode::Locate(locate) = node {
@@ -587,11 +630,7 @@ fn constant_pattern_text(
             .map(|locate| locate.offset + locate.len)
             .max()
             .unwrap();
-        edits.push((
-            low,
-            high,
-            typecheck::format_integral_literal_binary(&literal),
-        ));
+        edits.push((low, high, replacement));
     }
     edits.sort_by_key(|(low, high, _)| (*low, std::cmp::Reverse(*high)));
     let mut result = String::new();

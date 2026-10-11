@@ -146,6 +146,10 @@
     ],
     "cases": {
       "icarus": [
+        "hierarchy::parameter_patterns_bind_caller_types",
+        "hierarchy::parameter_patterns_bind_nested_caller_types",
+        "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context",
+        "hierarchy::parameter_patterns_keep_unknown_fill",
         "procedural::aggregate_parameters_are_constant_tables",
         "system_functions::dimensions_resolves_package_array_constants",
         "system_functions::isunbounded_reports_bounded_array_parameters"

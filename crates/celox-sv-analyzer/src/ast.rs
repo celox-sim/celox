@@ -700,6 +700,26 @@ impl Module {
                     .or_insert(directions);
             }
         }
+        let mut dpi_imports = dpi::dpi_imports_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for import in &dpi_imports {
+            subroutine_params.insert(
+                import.name().to_string(),
+                import
+                    .arguments()
+                    .iter()
+                    .map(|arg| arg.name().to_string())
+                    .collect(),
+            );
+            subroutine_directions.insert(
+                import.name().to_string(),
+                vec![crate::procedural::ParamDirection::Input; import.arguments().len()],
+            );
+        }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
         let mut instances = instances_from_module_node(
@@ -794,12 +814,6 @@ impl Module {
                     },
                 )
             }));
-        let mut dpi_imports = dpi::dpi_imports_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
         packed_dimensions
             .function_return_types
             .extend(dpi_imports.iter().filter_map(|import| {

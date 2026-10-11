@@ -725,7 +725,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, args, .. } if self.m.dpi_imports.contains_key(name) => {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.dpi_imports.contains_key(name) => {
                 let import = self.m.dpi_imports[name].clone();
                 let Some(r#type) = import.return_type() else {
                     return Err(unsupported(format!(
@@ -734,7 +738,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
                 let result = self
-                    .dpi_call(&import, &args)?
+                    .dpi_call(&import, &args, arg_order)?
                     .expect("a non-void DPI-C import defines a result");
                 let (temp, temp_name) = self.m.temp(
                     "dpi",
@@ -901,6 +905,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         import: &sv::ir::DpiImport,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
         let name = import.name();
         if args.len() != import.arguments().len() {
@@ -910,8 +915,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 import.arguments().len()
             )));
         }
-        let mut registers = Vec::with_capacity(args.len());
-        for (arg, argument) in args.iter().zip(import.arguments()) {
+        let mut registers = vec![None; args.len()];
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..args.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        // Evaluate actuals in source order, then pass registers in C formal order.
+        for position in positions {
+            let argument = import.arguments().get(position).ok_or_else(|| {
+                unsupported(format!("argument position of DPI-C function `{name}`"))
+            })?;
+            let arg = &args[position];
             let Some(arg) = arg else {
                 return Err(unsupported(format!(
                     "omitted argument of DPI-C function `{name}`"
@@ -920,8 +935,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
-            registers.push(self.dpi_register(value, r#type));
+            registers[position] = Some(self.dpi_register(value, r#type));
         }
+        let registers = registers
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| unsupported(format!("missing argument of DPI-C function `{name}`")))?;
         let func = self.m.extern_function(import);
         let dst = import
             .return_type()
@@ -1560,7 +1579,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 arg_order,
             } => {
                 if let Some(import) = self.m.dpi_imports.get(name).cloned() {
-                    self.dpi_call(&import, args)?;
+                    self.dpi_call(&import, args, arg_order)?;
                     return Ok(true);
                 }
                 if !self.m.subroutines.contains_key(name) {

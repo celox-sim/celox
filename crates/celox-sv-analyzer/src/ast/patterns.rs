@@ -41,6 +41,16 @@ pub(super) fn typed_pattern(
     tree: &SyntaxTree,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
+    let r#type = typed_pattern_type(pattern, tree, dims)?;
+    let shape = procedural::dimensions_from_type(&r#type);
+    expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)
+}
+
+fn typed_pattern_type(
+    pattern: &sv_parser::AssignmentPatternExpression,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<Type> {
     let pattern_type = || unsupported("assignment pattern type");
     let r#type = match pattern.nodes.0.as_ref().ok_or_else(pattern_type)? {
         sv_parser::AssignmentPatternExpressionType::PsTypeIdentifier(identifier) => {
@@ -64,8 +74,127 @@ pub(super) fn typed_pattern(
         }
         _ => return Err(pattern_type()),
     };
+    Ok(r#type)
+}
+
+/// Serialize a typed constant pattern as positional values already converted
+/// to its caller-side type (IEEE 1800-2023 10.9). No caller typedef names escape.
+pub(super) fn constant_typed_pattern_text(
+    pattern: &sv_parser::AssignmentPatternExpression,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<String> {
+    let r#type = typed_pattern_type(pattern, tree, dims)?;
     let shape = procedural::dimensions_from_type(&r#type);
-    expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)
+    let value = expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)?;
+    let values = dims
+        .parameter_values
+        .iter()
+        .filter(|(name, _)| !dims.const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let value = substitute_expr_constants_with_parameter_literals(value, &dims.const_env, &values);
+    let Expr::Literal(value) = fold_const_integral_expr_preserving_mask(value, &dims.const_env)
+    else {
+        return Err(unsupported("nonconstant typed parameter pattern"));
+    };
+    let value = typecheck::parse_integral_literal(&value)
+        .ok_or_else(|| unsupported("typed parameter pattern value"))?;
+    pattern_value_text(&value, &shape, 0, true, dims)
+}
+
+fn pattern_value_text(
+    value: &typecheck::IntegralLiteral,
+    shape: &VariableDimensions,
+    offset: usize,
+    needs_pattern: bool,
+    dims: &PackedDimensions,
+) -> Converted<String> {
+    let mut parts = Vec::new();
+    if let Some((dimension, rest)) = shape.unpacked.split_first() {
+        let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let element = VariableDimensions {
+            unpacked: rest.to_vec(),
+            ..shape.clone()
+        };
+        let width = shape_width(&element, dims)
+            .ok_or_else(|| unsupported("typed pattern element width"))?;
+        for position in 0..count {
+            parts.push(pattern_value_text(
+                value,
+                &element,
+                offset + position * width,
+                false,
+                dims,
+            )?);
+        }
+    } else if needs_pattern && !shape.members.is_empty() {
+        for member in &shape.members {
+            let member_shape = procedural::dimensions_from_type(member.r#type());
+            parts.push(format!(
+                "{}: {}",
+                member.name(),
+                pattern_value_text(value, &member_shape, offset + member.offset(), false, dims,)?
+            ));
+        }
+    } else if needs_pattern && shape.packed.len() > 1 {
+        let dimension = &shape.packed[0];
+        let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let element = VariableDimensions {
+            packed: shape.packed[1..].to_vec(),
+            signed: shape.signed_element_depth == Some(1),
+            signed_element_depth: shape
+                .signed_element_depth
+                .and_then(|depth| depth.checked_sub(1))
+                .filter(|depth| *depth > 0),
+            ..shape.clone()
+        };
+        let width = shape_width(&element, dims)
+            .ok_or_else(|| unsupported("typed packed pattern element width"))?;
+        for position in (0..count).rev() {
+            parts.push(pattern_value_text(
+                value,
+                &element,
+                offset + position * width,
+                false,
+                dims,
+            )?);
+        }
+    } else {
+        let width =
+            shape_width(shape, dims).ok_or_else(|| unsupported("typed pattern value width"))?;
+        let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
+        let mut literal = typecheck::IntegralLiteral {
+            value: (&value.value >> offset) & &mask,
+            mask: (&value.mask >> offset) & &mask,
+            width,
+            signed: shape.signed,
+        };
+        if shape.is_2state {
+            literal.value ^= &literal.value & &literal.mask;
+            literal.mask = num_bigint::BigUint::default();
+        }
+        if !needs_pattern {
+            return Ok(typecheck::format_integral_literal_binary(&literal));
+        }
+        // A vector pattern assigns one bit per positional item, MSB first.
+        let bit = VariableDimensions {
+            packed: Vec::new(),
+            members: Vec::new(),
+            signed: false,
+            ..shape.clone()
+        };
+        for position in (0..width).rev() {
+            parts.push(pattern_value_text(
+                value,
+                &bit,
+                offset + position,
+                false,
+                dims,
+            )?);
+        }
+    }
+    Ok(format!("'{{{}}}", parts.join(", ")))
 }
 
 /// The value of one element of a pattern, as a `shape`.

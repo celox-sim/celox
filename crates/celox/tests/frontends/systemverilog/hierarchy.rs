@@ -1,6 +1,19 @@
 use super::*;
 
 sv_backends! {
+    fn parameter_patterns_keep_fill_and_arithmetic_context(sim) {
+        @case "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context";
+    }
+    fn parameter_patterns_bind_caller_types(sim) {
+        @case "hierarchy::parameter_patterns_bind_caller_types";
+    }
+    fn parameter_patterns_bind_nested_caller_types(sim) {
+        @case "hierarchy::parameter_patterns_bind_nested_caller_types";
+    }
+    fn parameter_patterns_keep_unknown_fill(sim) {
+        @case "hierarchy::parameter_patterns_keep_unknown_fill";
+    }
+
     fn drives_omitted_and_open_child_inputs_with_z(sim) {
         @case "hierarchy::drives_omitted_and_open_child_inputs_with_z";
     }
