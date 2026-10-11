@@ -819,5 +819,244 @@
         "system_functions::isunbounded_restores_shadowed_function_arguments"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_timescale_constant",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 cannot evaluate $timeprecision in a parameter initializer. IEEE 1800-2023 11.2.1 lists the timescale system functions in 20.4 among constant system function calls with constant arguments; this case uses no arguments. Slang 12.0.0 also rejects both timescale functions in constant expressions.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_are_constant_in_unqualified_calls"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_unit_argument",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 parses $unit only as the start of a qualified name and rejects $timeunit($unit). IEEE 1800-2023 20.4.1 explicitly accepts $unit and $root as standalone query arguments; Slang in SV 2023 mode accepts this source.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_accept_separate_initial_declarations",
+        "system_functions::timescale_queries_distinguish_unit_and_global_precision",
+        "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 ignores the design-element argument of $timeunit and returns the caller module unit, while $timeprecision returns the design-wide minimum even in a package function. IEEE 1800-2023 20.4.1 requires the selected/current design element scale. A standalone probe with own, child, leaf and package scales reproduces the disagreement without the suite testbench; Slang accepts the sources in SV 2023 mode.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_accept_leading_zero_magnitudes",
+        "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
+        "system_functions::timescale_queries_preserve_procedural_and_package_scopes",
+        "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+        "system_functions::timescale_queries_resolve_hierarchical_interface_instances"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_timescale_queries_compile",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_accept_directives_before_unit_declarations",
+        "system_functions::timescale_queries_are_constant_in_unqualified_calls",
+        "system_functions::timescale_queries_distinguish_unit_and_global_precision",
+        "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
+        "system_functions::timescale_queries_resolve_declarations_and_return_types",
+        "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+        "system_functions::timescale_queries_resolve_hierarchical_interface_instances",
+        "system_functions::timescale_queries_survive_type_parameter_specialization"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_timescale_queries_runtime",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 compiles procedural and package calls of the SV 2023 timescale functions but vvp exits with errors that $timeunit/$timeprecision are not defined. IEEE 1800-2023 20.4.1 defines both functions; Slang accepts this source in SV 2023 mode.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_preserve_procedural_and_package_scopes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_separate_time_declarations",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects repeated initial timeunit/timeprecision declarations before the other precision/unit is first declared, reporting a missing precision or missing initial declaration. IEEE 1800-2023 3.14.2.2 permits matching repeats and separate unit/precision declarations before non-time items. Slang 12.0.0 accepts the time declarations (it separately rejects the constant timescale queries).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_accept_separate_initial_declarations"
+      ]
+    }
+  },
+  {
+    "id": "sv_definition_package_namespaces",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_keep_module_and_package_names_independent"
+      ],
+      "icarus": [
+        "system_functions::timescale_queries_keep_module_and_package_names_independent",
+        "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_package_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 ignores bare package arguments of $timeunit/$timeprecision and returns the caller unit/global precision. IEEE 1800-2023 20.4.1 requires the selected design element scale; 3.13 gives packages and definitions separate namespaces. A standalone probe reproduces the wrong package and instance results. Slang 12.0.0 also rejects bare package query arguments, including a package without a same-named module.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_timescale_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_root_argument",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects the standalone $root argument of $timeprecision, expecting a dotted hierarchical name. IEEE 1800-2023 20.4.1 explicitly accepts $root and returns the global simulation time unit. Slang 12.0.0 accepts the argument syntax but separately rejects the constant timescale initializers in this type-specialization case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_survive_type_parameter_specialization"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_leading_zero_time_magnitudes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 checks the first digit of timeunit/timeprecision literals and rejects leading-zero integer or fixed-point spellings whose numeric magnitudes are 1, 10 or 100. IEEE 1800-2023 5.8 permits integer/fixed-point time literals, and 3.14.2.2 permits their use in time declarations. A standalone declaration without queries reproduces the failure; Verilator and Slang 12.0.0 accept these declarations.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_accept_leading_zero_magnitudes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_interface_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 ignores an interface-instance operand of $timeunit: the Top caller has unit 1ms and returns -3 for i, whose interface declares 100ns and requires -7. IEEE 1800-2023 20.4.1 queries the selected design element; 25.3 defines hierarchical interface instances and interface ports. Slang 12.0.0 also reports ExpectedModuleName for interface-instance query arguments.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_resolve_interface_instances_and_ports"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_timescale_handles",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects the typed and generic interface port declarations in this timescale-query case with syntax errors in port declarations. IEEE 1800-2023 25.3 permits these interface ports; 20.4.1 selects the queried design element time scope. The case retains its assertions for direct instances, typed/modport ports, differently bound generic ports and local generate handles.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_resolve_interface_instances_and_ports"
+      ]
+    }
   }
 ]
