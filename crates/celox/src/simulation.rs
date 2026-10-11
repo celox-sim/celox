@@ -1286,6 +1286,24 @@ mod clock_wait_tests {
 mod process_review_tests {
     use super::*;
 
+    fn check_failed_batch<B: SimBackend>(mut sim: Simulator<B>) {
+        let event = sim.event("clk");
+        let (completed, result) = SimulationExecutor::tick_many(&mut sim, event, 10);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    }
+
+    #[test]
+    fn failed_pre_edge_comb_does_not_complete_a_clock_tick() {
+        let source = "module Top(input bit clk, input bit ok, output bit q); always_comb assert(ok) else $fatal(1, \"failed comb\"); always_ff @(posedge clk) q <= 1; endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("batch.sv"))], "Top");
+        check_failed_batch(builder().build_interpreter().unwrap());
+        check_failed_batch(builder().build_cranelift().unwrap());
+        check_failed_batch(builder().build_wasm().unwrap());
+    }
+
     fn check<B: SimBackend>(mut sim: Simulation<B>) {
         sim.run_until(2).unwrap();
         assert_eq!(sim.get(sim.signal("q")), 1u8.into());
