@@ -553,7 +553,8 @@ impl<B: SimBackend> SimulationState<B> {
             .tick_clocks
             .iter()
             .filter(|(id, clock)| {
-                !events_to_process.is_empty() && !self.tick_budget_spent()
+                !events_to_process.is_empty()
+                    && !self.tick_budget_spent()
                     && clock.next_edge == current_time
                     && self.clock_has_waiters(**id)
                     && executor.backend().get_as::<u8>(clock.signal) == 0
@@ -879,7 +880,9 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        let mut ready = std::mem::take(&mut self.inactive).into_iter().collect::<Vec<_>>();
+        let mut ready = std::mem::take(&mut self.inactive)
+            .into_iter()
+            .collect::<Vec<_>>();
         while let Some(&Reverse((wakeup, process))) = self.process_wakeups.peek() {
             if wakeup != time {
                 break;
@@ -906,6 +909,31 @@ impl<B: SimBackend> SimulationState<B> {
             ready.push(process);
         }
         ready
+    }
+
+    fn process_counter_values(&self, backend: &B) -> Vec<(u32, u32)> {
+        self.process_event_counters
+            .iter()
+            .map(|(_, rises, falls)| (backend.get_as(*rises), backend.get_as(*falls)))
+            .collect()
+    }
+
+    fn process_counter_edges(&self, backend: &B, before: &[(u32, u32)]) -> BitSet {
+        let mut edges = BitSet::with_capacity(backend.num_events());
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let changed = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    backend.get_as::<u32>(*falls) != *old_falls
+                }
+                _ => backend.get_as::<u32>(*rises) != *old_rises,
+            };
+            if changed {
+                edges.insert(*id);
+            }
+        }
+        edges
     }
 
     /// Run `ready` processes, and the processes waiting for an event or a
@@ -981,7 +1009,10 @@ impl<B: SimBackend> SimulationState<B> {
                                 }
                             })?;
                             self.waiting.remove(&process);
-                            if delay == 0 && ProcessStatus::from_code(status) == Some(ProcessStatus::InactiveDelay) {
+                            if delay == 0
+                                && ProcessStatus::from_code(status)
+                                    == Some(ProcessStatus::InactiveDelay)
+                            {
                                 self.inactive.insert(process);
                             } else {
                                 self.process_wakeups.push(Reverse((time, process)));
@@ -1177,6 +1208,7 @@ impl<B: SimBackend> SimulationState<B> {
         // sampled value before, so transitions from and into x or z count
         // as IEEE 1800-2023 Table 9-2 says.
         executor.backend_mut().clear_triggered_bits();
+        let counter_values = self.process_counter_values(executor.backend());
         let mut process_driven = Vec::new();
         if !ready_processes.is_empty() || !self.waiting.is_empty() {
             let before: Vec<(bool, bool)> = self
@@ -1205,7 +1237,8 @@ impl<B: SimBackend> SimulationState<B> {
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         // Counter-recorded kernel edges survive later blocking stores that
         // restored the signal before the kernel returned.
-        let mut scheduled_trigger_ids = executor.backend().get_triggered_bits();
+        let mut scheduled_trigger_ids =
+            self.process_counter_edges(executor.backend(), &counter_values);
         // An external drive may already have been combinationally evaluated
         // by a testbench read. Compare against our saved baseline even if that
         // evaluation's transient trigger bits have since been cleared.
@@ -1315,6 +1348,7 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().clear_triggered_bits();
                 // Inactive-region (#0) continuations run after the active
                 // FF evaluations and before the pending NBA publications.
+                let inactive_counter_values = self.process_counter_values(executor.backend());
                 let mut inactive_ran = false;
                 loop {
                     let ready = std::mem::take(&mut self.inactive)
@@ -1326,7 +1360,8 @@ impl<B: SimBackend> SimulationState<B> {
                     inactive_ran |= self.run_processes(executor, current_time, ready)?;
                 }
                 if inactive_ran {
-                    let driven = executor.backend().get_triggered_bits();
+                    let driven =
+                        self.process_counter_edges(executor.backend(), &inactive_counter_values);
                     executor.eval_comb()?;
                     if track_stable_edges {
                         self.replace_triggers_with_stable_edges(executor.backend_mut());
@@ -1588,6 +1623,7 @@ pub struct ScheduleParts<B: SimBackend> {
     pub periodic: Vec<(SimEvent<B>, u64)>,
     /// Events whose signal was high when edge detection last sampled it.
     pub high_events: Vec<B::Event>,
+    pub unknown_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
     /// Processes waiting for an event or a condition, in ascending order.
@@ -1638,6 +1674,11 @@ impl<B: SimBackend> SimulationState<B> {
                 })
                 .collect(),
             high_events: self.last_clock_values.iter().map(|id| events[id]).collect(),
+            unknown_events: self
+                .unknown_clock_values
+                .iter()
+                .map(|id| events[id])
+                .collect(),
             process_wakeups: {
                 let mut wakeups = self
                     .process_wakeups
@@ -1695,8 +1736,10 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(event, count)| (PeriodicEventKey::from_event(&event), count as usize))
             .collect();
         self.last_clock_values.make_empty();
-        // A state file holds known values only.
         self.unknown_clock_values.make_empty();
+        for event in parts.unknown_events {
+            self.unknown_clock_values.insert(event.id());
+        }
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
         }

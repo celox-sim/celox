@@ -168,14 +168,26 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         if !self.program.runtime_schema.processes.is_empty() {
             for reset_event in self.components.reset_event_ids() {
                 let address = self.backend.id_to_addr_slice()[reset_event];
-                let Some(release) = self
+                let releases = self
                     .program
                     .runtime_schema
                     .processes
                     .iter()
                     .flat_map(|slots| &slots.releases)
-                    .find(|release| release.signal == address)
-                else {
+                    .filter(|release| release.signal == address);
+                // Prefer the firing domain; a single-domain component can
+                // also inherit a held reset on its derived clock.
+                let release = releases
+                    .clone()
+                    .find(|release| {
+                        release.clock.is_some_and(|clock| {
+                            self.backend
+                                .resolve_event_opt(&clock)
+                                .is_some_and(|clock| clock.id() == event.id())
+                        })
+                    })
+                    .or_else(|| releases.into_iter().next());
+                let Some(release) = release else {
                     continue;
                 };
                 let signal = self.backend.resolve_signal(&address);

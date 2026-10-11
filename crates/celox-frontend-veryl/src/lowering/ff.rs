@@ -439,6 +439,26 @@ pub(crate) enum ControlFlow {
 }
 
 impl<'a> FfParser<'a> {
+    pub(super) fn process_expression_value(&self, token: TokenRange) -> Option<RegisterId> {
+        self.function_expression_value_stack
+            .iter()
+            .rev()
+            .find_map(|values| values.get(&token).copied())
+    }
+
+    pub(super) fn push_process_expression_values(
+        &mut self,
+        values: HashMap<TokenRange, RegisterId>,
+    ) {
+        self.function_expression_value_stack.push(values);
+    }
+
+    pub(super) fn pop_process_expression_values(&mut self) {
+        self.function_expression_value_stack
+            .pop()
+            .expect("process expression scope");
+    }
+
     pub fn new(module: &'a Module, config: BuildConfig) -> Self {
         let local_working_vars = module
             .variables

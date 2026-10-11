@@ -3560,6 +3560,7 @@ pub fn compile_semantic_testbench(
     runtime_event_site_count: usize,
     random_seed: Option<u64>,
 ) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
+    let kernels = source.kernels;
     let sources: Vec<_> = source
         .sources()
         .filter(|source| source.initial_statements.is_some())
@@ -3594,7 +3595,7 @@ pub fn compile_semantic_testbench(
     let mut site_end = runtime_event_site_count.saturating_sub(total_sites);
     let mut processes = Vec::new();
     for source in sources {
-        if source.kernels {
+        if kernels {
             break;
         }
         let initial_stmts = source.initial_statements.as_ref().unwrap();

@@ -125,6 +125,7 @@ fn run<B: SimBackend>(
     if let Some(writer) = sim.vcd_writer.as_mut()
         && let Err(error) = writer.add_external_signals(&sim.components.trace_descriptors())
     {
+        let _ = sim.components.finish(0);
         return failed(format!("component VCD registration failed: {error}"));
     }
     apply_component_writes(sim, initial_writes);
@@ -261,7 +262,10 @@ fn drain<B: SimBackend>(
         match event {
             RuntimeEvent::AssertPass { message } => assertions.push(AssertionResult {
                 passed: true,
-                message: Some(message),
+                message: site
+                    .and_then(|id| sim.program.runtime_schema.runtime_event_sites.get(id))
+                    .and_then(|site| site.template.as_ref())
+                    .map(|_| message),
                 location,
             }),
             RuntimeEvent::AssertContinue { message } => assertions.push(AssertionResult {

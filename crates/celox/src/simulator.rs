@@ -847,9 +847,9 @@ mod host {
             self.collect_formatted_runtime_events(ctx)
         }
 
-        /// The runtime events with the site each came from, settling the
-        /// combinational observers first as
-        /// [`Self::drain_runtime_events_deferred_with_context`] does.
+        /// Collect already-published events with their sites. Scheduler callers
+        /// settle explicitly; collecting after an execution error must not retry
+        /// the failed combinational evaluation.
         pub(crate) fn collect_sited_runtime_events(
             &mut self,
             ctx: RuntimeFormatContext<'_>,
@@ -858,9 +858,6 @@ mod host {
                 !self.runtime_event_drain_active.load(Ordering::Acquire),
                 "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
             );
-            if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
-                self.eval_comb_for_runtime_event_drain().unwrap();
-            }
             if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
             {
                 return Vec::new();

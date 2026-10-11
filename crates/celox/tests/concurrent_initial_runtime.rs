@@ -453,6 +453,7 @@ fn tick_limit_drains_falling_edges_and_reset_release_without_resuming_processes(
     check(Simulator::builder(code, "Top").build_interpreter().unwrap());
     check(Simulator::builder(code, "Top").build_cranelift().unwrap());
     check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    check(Simulator::builder(code, "Top").build_tiered().unwrap());
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(Simulator::builder(code, "Top").build_native().unwrap());
 }
@@ -720,4 +721,250 @@ fn a_block_ending_after_a_store_settles_for_the_next_block() {
         initial { $assert(derived == 8'd42, "derived=%d", derived); $finish(); }
     }"#;
     check_passes_on_every_backend(code);
+}
+
+#[test]
+fn expression_helper_finish_stops_continuations_and_other_processes() {
+    let code = r#"#[test(Top)] module Top {
+        var value: u32;
+        function stop() -> u32 { $finish(); return 7; }
+        initial { value = stop(); for i in 0..10000 { $assert(1'd0, "continued after finish"); } }
+        initial { $assert(1'd0, "other process ran after finish"); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn expression_helper_output_stores_settle_derived_reads() {
+    let code = r#"#[test(Top)] module Top {
+        var source: logic<8>;
+        let derived: logic<8> = source + 8'd1;
+        function update(value: output logic<8>) -> logic { value = 8'd41; return 1'd1; }
+        initial { if update(source) { $assert(derived == 8'd42); } $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn effectful_case_target_is_evaluated_once() {
+    let code = r#"#[test(Top)] module Top {
+        var calls: u32;
+        function next() -> u32 { calls += 1; return calls; }
+        initial { case next() { 0: $assert(1'd0); 1: $assert(calls == 1); default: $assert(1'd0); } $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn loop_backedges_settle_the_previous_iteration_store() {
+    let code = r#"#[test(Top)] module Top {
+        var source: u32;
+        let derived: u32 = source + 1;
+        initial { for i in 0..3 { $assert(derived == i + 1); source += 1; } $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn expression_values_survive_nested_helper_clock_waits() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var value: u32;
+        function later(value: input u32) -> u32 { clk.next(); return value; }
+        initial { value = later(2) + later(5); $assert(value == 7); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn effectful_expression_helpers_preserve_short_circuit_and_branch_selection() {
+    let code = r#"#[test(Top)] module Top {
+        var calls: u32;
+        var value: logic;
+        function next() -> logic { calls += 1; return 1'd1; }
+        initial {
+            value = 1'd0 && next(); $assert(value == 1'd0);
+            value = 1'd1 || next(); $assert(value == 1'd1);
+            value = if 1'd1 ? next() : next();
+            $assert(calls == 1); $finish();
+        }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn expression_helpers_publish_passing_assertions_and_yield_before_ring_wrap() {
+    let code = r#"#[test(Top)] module Top {
+        var value: u32;
+        function emit_event() -> u32 { $write(""); $assert(1'd1); return 1; }
+        initial { for i in 0..1500 { value = emit_event(); } $finish(); }
+    }"#;
+    let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    assert!(detailed.passed, "{detailed:?}");
+    assert_eq!(detailed.assertions.len(), 1500);
+    assert!(
+        detailed
+            .assertions
+            .iter()
+            .all(|assertion| assertion.passed && assertion.message.is_none())
+    );
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn fatal_combinational_step_returns_failure_without_event_drain_panic() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var count: u32;
+        always_ff(clk) { count += 1; }
+        always_comb { $assert(count <: 2, "comb failed"); }
+        initial { clk.next(10); $finish(); }
+    }"#;
+    let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert!(
+        detailed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("comb failed")),
+        "{detailed:?}"
+    );
+}
+
+#[test]
+fn dynamic_signed_wide_singleton_uses_the_wide_loop_path() {
+    let code = r#"#[test(Top)] module Top {
+        var bound: signed logic<192>;
+        var count: u32;
+        initial { bound = -(192'd1 << 150); for i in bound..=bound { count += 1; } $assert(count == 1); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn unreachable_clock_waits_leave_a_host_driven_clock_unchanged() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        initial { if 1'd0 { clk.next(); } for i in 3..3 { clk.next(); } $assert(clk == 1'd1); $finish(); }
+    }"#;
+    let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
+    let clk = sim.signal("clk");
+    sim.set(clk, 1u8);
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+    assert_eq!(sim.get(clk), 1u8.into());
+}
+
+#[test]
+fn reset_duration_reads_the_value_before_assertion() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 2);
+        inst rst: $tb::reset_gen(clk);
+        initial { rst.assert(1); rst.assert((rst as u32) + 1); $assert(1'd1, "time=%t"); $finish(); }
+    }"#;
+    let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    assert!(detailed.passed, "{detailed:?}");
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("time=6"));
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn statement_call_arguments_preserve_order_and_each_nested_result() {
+    let code = r#"#[test(Top)] module Top {
+        var calls: u32;
+        function probe(value: input u32) -> u32 { calls = calls * 10 + value; return value; }
+        function accept(first: input u32, second: input u32) { $assert(first == 1 && second == 2); }
+        initial { accept(probe(1), probe(2)); $assert(calls == 12); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn selected_method_and_function_outputs_validate_destination_bounds() {
+    for operation in ["words[2] = random.get();", "fill(words[2]);"] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            var random: $tb::random::<u8>;
+            var words: u8[2];
+            function fill(value: output u8) {{ value=7; }}
+            initial {{ {operation} $finish(); }}
+        }}"#
+        );
+        let error = Simulator::builder(&code, "Top")
+            .build_interpreter()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("testbench selected destination") || error.contains("invalid select"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn display_and_assertion_arguments_use_process_helper_effects() {
+    let code = r#"#[test(Top)] module Top {
+        var calls: u32;
+        function probe(value: input u32) -> u32 { calls += 1; $assert(1'd1); return value; }
+        initial { $write("%d",probe(1)); $assert(1'd1,"value=%d",probe(2)); $assert(calls == 2); $finish(); }
+    }"#;
+    let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    assert!(detailed.passed, "{detailed:?}");
+    assert_eq!(detailed.assertions.len(), 4);
+    assert_eq!(detailed.assertions[2].message.as_deref(), Some("value=2"));
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn loop_and_random_bounds_survive_a_suspending_expression_call() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var random: $tb::random::<u8>;
+        var count: u32;
+        var value: u8;
+        function bound(value: input u32) -> u32 { var sample:u8; sample=random.get(); clk.next(); return value + (sample & 0); }
+        initial { for i in bound(0)..3 { count += 1; } value=random.get_range(7,bound(7)); $assert(count == 3 && value == 7); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn unknown_conditional_helpers_preserve_value_masks_and_both_effects() {
+    let code = r#"#[test(Top)] module Top(value: output logic<8>, calls: output u32) {
+        var selector: logic;
+        function one() -> logic<8> {calls += 1;return 8'haa;}
+        function two() -> logic<8> {calls += 1;return 8'haf;}
+        initial {selector=1'bx;value=if selector ? one() : two();$finish();}
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("calls")), 2u8.into());
+        assert_eq!(
+            sim.get_four_state(sim.signal("value")),
+            (0xafu8.into(), 5u8.into())
+        );
+    }
+    macro_rules! backend {
+        ($build:ident) => {
+            check(
+                Simulator::builder(code, "Top")
+                    .four_state(true)
+                    .$build()
+                    .unwrap(),
+            )
+        };
+    }
+    backend!(build_interpreter);
+    backend!(build_cranelift);
+    backend!(build_wasm);
+    backend!(build_tiered);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    backend!(build_native);
 }

@@ -26,7 +26,7 @@
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
 
@@ -77,6 +77,8 @@ pub struct ScheduleRecord {
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
     pub high_events: Vec<String>,
+    /// Events whose baseline contains X/Z bits.
+    pub unknown_events: Vec<String>,
 }
 
 /// Contents of a state file.
@@ -168,6 +170,10 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
+            put_len(w, schedule.unknown_events.len())?;
+            for event in &schedule.unknown_events {
+                put_str(w, event)?;
+            }
         }
         Ok(())
     }
@@ -180,7 +186,7 @@ impl StateFile {
             return Err(StateFileError::BadMagic);
         }
         let version = get_u16(r)?;
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(StateFileError::UnsupportedVersion(version));
         }
         let flags = get_u16(r)?;
@@ -233,7 +239,15 @@ impl StateFile {
             let high_events = (0..get_u32(r)?)
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
+            let unknown_events = if version >= 2 {
+                (0..get_u32(r)?)
+                    .map(|_| get_str(r))
+                    .collect::<Result<_, _>>()?
+            } else {
+                Vec::new()
+            };
             Some(ScheduleRecord {
+                unknown_events,
                 time,
                 clocks,
                 events,
@@ -440,6 +454,7 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
+                unknown_events: vec!["clk".into()],
             }),
         }
     }

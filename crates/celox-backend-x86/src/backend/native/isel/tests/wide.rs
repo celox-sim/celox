@@ -1537,3 +1537,113 @@ fn four_state_sar_uses_sign_fill_past_the_logical_source_words() {
         }
     }
 }
+
+#[test]
+fn widened_zero_compares_equal_to_a_zero_wide_load() {
+    for four_state in [false, true] {
+        let a = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(0),
+        };
+        let o = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(1),
+        };
+        let address = |a| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, a);
+        let [loaded, zero, widened, equal, result] = std::array::from_fn(RegisterId);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(loaded, address(a), SIROffset::Static(0), 100),
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Unary(widened, UnaryOp::Ident, zero),
+                        SIRInstruction::Binary(equal, loaded, BinaryOp::Eq, widened),
+                        SIRInstruction::Unary(result, UnaryOp::ToTwoState, equal),
+                        SIRInstruction::Store(
+                            address(o),
+                            SIROffset::Static(0),
+                            1,
+                            result,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (loaded, RegisterType::Logic { width: 100 }),
+                (
+                    zero,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    widened,
+                    RegisterType::Bit {
+                        width: 100,
+                        signed: false,
+                    },
+                ),
+                (equal, RegisterType::Logic { width: 1 }),
+                (
+                    result,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+        let mut layout = empty_layout();
+        let output_offset = if four_state { 32 } else { 16 };
+        let state_size = output_offset + 1;
+        layout.four_state = four_state;
+        layout.offsets = [(a, 0), (o, output_offset)].into_iter().collect();
+        layout.widths = [(a, 100), (o, 1)].into_iter().collect();
+        layout.is_4states = [(a, four_state), (o, false)].into_iter().collect();
+        layout.total_size = state_size;
+        layout.working_base_offset = state_size;
+        layout.sparse_base_offset = state_size;
+        layout.merged_total_size = state_size;
+        layout.triggered_bits_offset = state_size;
+        layout.scratch_base_offset = state_size;
+        let mut function = lower_execution_unit(&unit, &layout, four_state);
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; state_size];
+        state[12] = 0xf0;
+        if four_state {
+            state[25] = 0xf0;
+            state[26] = 6;
+            state[28] = 0xff;
+        } else {
+            state[13] = 6;
+            state[15] = 0xff;
+        }
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[output_offset] & 1, 1, "four_state={four_state}");
+    }
+}

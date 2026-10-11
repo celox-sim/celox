@@ -351,6 +351,13 @@ fn analyze(
 
     // Shared context for pass2
     let mut context = Context::default();
+    // The analyzer's constant evaluator does not retain testbench runtime
+    // effects. Keep calls in kernel testbench IR; SIR lowering can still fold
+    // their values after executing the process effects.
+    context.disalbe_const_opt = testbench_kernels
+        && symbol_table::get_all().iter().any(
+            |symbol| matches!(&symbol.kind, SymbolKind::Module(module) if module.test.is_some()),
+        );
 
     let mut ir = Ir::default();
 

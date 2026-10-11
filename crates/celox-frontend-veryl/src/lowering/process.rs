@@ -42,6 +42,9 @@ use crate::{
 };
 use celox_frontend_core::ScheduledRtl;
 
+mod expressions;
+use veryl_parser::token_range::TokenRange;
+
 type SourceAddr = AbsoluteAddrBase<SourceVarId>;
 type RegionedSourceAddr = RegionedAbsoluteAddrBase<SourceVarId>;
 
@@ -66,6 +69,8 @@ pub struct BlockStorage {
     /// that waits keeps its arguments and locals while another block calls
     /// the function.
     pub private: HashMap<VarId, SourceVarId>,
+    /// Values preserved while nested expression calls suspend.
+    pub expression_values: HashMap<TokenRange, (usize, SourceVarId)>,
 }
 
 /// The hidden state of a module's `initial` blocks, in declaration order.
@@ -135,6 +140,35 @@ pub(crate) fn declare_storage(
                 (need, id)
             })
             .collect();
+        let mut expression_needs = HashMap::default();
+        collect_expression_storage(
+            ir,
+            statements,
+            &mut HashSet::default(),
+            &mut expression_needs,
+        );
+        let mut expression_needs = expression_needs.into_iter().collect::<Vec<_>>();
+        expression_needs.sort_by_key(|(token, _)| {
+            (
+                token
+                    .beg
+                    .source
+                    .get_path()
+                    .and_then(resource_table::get_path_value)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                token.beg.pos,
+                token.end.pos,
+            )
+        });
+        let expression_values = expression_needs
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (token, width))| {
+                let id = declare(name(&format!("expression@{slot}")), None, width);
+                (token, (width, id))
+            })
+            .collect();
         let private = templates
             .iter()
             .map(|(local, template)| {
@@ -150,7 +184,15 @@ pub(crate) fn declare_storage(
             release: declare(name("release"), None, PROCESS_RELEASE_WIDTH),
             scratch,
             private,
+            expression_values,
         });
+    }
+    for block in &blocks {
+        for (_, id) in block.expression_values.values() {
+            let variable = variables.get_mut(id).unwrap();
+            variable.metadata.is_4state = true;
+            variable.metadata.type_kind = PortTypeKind::Logic;
+        }
     }
     Ok(ModuleProcessStorage { blocks })
 }
@@ -164,6 +206,14 @@ fn initial_blocks(ir: &Module) -> impl Iterator<Item = &[Statement]> {
             }
             _ => None,
         })
+}
+
+fn constant_truth(expr: &Expression) -> Option<bool> {
+    if expressions::has_call(expr) {
+        None
+    } else {
+        FfParser::get_constant_procedural_truth(expr)
+    }
 }
 
 /// Whether a range with constant bounds has no value.
@@ -298,8 +348,8 @@ fn loop_shape<'s>(
         cmp_signed: var_signed && continuation_signed,
         start_signed,
         end_signed,
-        start_wide: !start_signed && bound_width(start) > 64,
-        end_wide: !end_signed && bound_width(end) > 64,
+        start_wide: bound_width(start) > if start_signed { 128 } else { 64 },
+        end_wide: bound_width(end) > if end_signed { 128 } else { 64 },
     })
 }
 
@@ -329,6 +379,74 @@ fn function_body(
     }
 }
 
+fn collect_expression_storage(
+    ir: &Module,
+    statements: &[Statement],
+    active: &mut HashSet<VarId>,
+    values: &mut HashMap<TokenRange, usize>,
+) {
+    fn expr(
+        ir: &Module,
+        value: &Expression,
+        active: &mut HashSet<VarId>,
+        values: &mut HashMap<TokenRange, usize>,
+    ) {
+        if expressions::has_call(value) {
+            values.insert(value.token_range(), expressions::storage_width(value));
+            for child in expressions::children(value) {
+                values.insert(child.token_range(), expressions::storage_width(child));
+            }
+        }
+        for child in expressions::children(value) {
+            expr(ir, child, active, values);
+        }
+        if let Expression::Term(factor) = value
+            && let veryl_analyzer::ir::Factor::FunctionCall(call) = factor.as_ref()
+            && active.insert(call.id)
+        {
+            if let Some(body) = function_body(&ir.functions, call) {
+                collect_expression_storage(ir, &body.statements, active, values);
+            }
+            active.remove(&call.id);
+        }
+    }
+    for statement in statements {
+        let inputs = expressions::statement_inputs(statement);
+        if inputs.iter().any(|expr| expressions::has_call(expr)) {
+            for input in &inputs {
+                values.insert(input.token_range(), expressions::storage_width(input));
+            }
+        }
+        for value in inputs {
+            expr(ir, value, active, values);
+        }
+        if let Statement::Case(stmt) = statement {
+            values.insert(
+                stmt.case_target.token_range(),
+                expressions::storage_width(&stmt.case_target),
+            );
+        }
+        if let Statement::FunctionCall(call) = statement
+            && call.inputs.values().any(expressions::has_call)
+        {
+            for input in call.inputs.values() {
+                values.insert(input.token_range(), expressions::storage_width(input));
+            }
+        }
+        if let Statement::FunctionCall(call) = statement
+            && active.insert(call.id)
+        {
+            if let Some(body) = function_body(&ir.functions, call) {
+                collect_expression_storage(ir, &body.statements, active, values);
+            }
+            active.remove(&call.id);
+        }
+        for body in expressions::statement_bodies(statement) {
+            collect_expression_storage(ir, body, active, values);
+        }
+    }
+}
+
 /// The scratch state the statements need, in lowering order.
 fn scratch_needs(ir: &Module, statements: &[Statement]) -> Result<Vec<ScratchNeed>, ParserError> {
     let mut needs = Vec::new();
@@ -354,39 +472,35 @@ fn contains_runtime_event(
     statements: &[Statement],
     active: &mut HashSet<VarId>,
 ) -> bool {
-    statements.iter().any(|statement| match statement {
-        Statement::If(stmt) => {
-            contains_runtime_event(ir, &stmt.true_side, active)
-                || contains_runtime_event(ir, &stmt.false_side, active)
+    for statement in statements {
+        if matches!(statement, Statement::SystemFunctionCall(call) if matches!(call.kind, SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) | SystemFunctionKind::Assert {..}))
+        {
+            return true;
         }
-        Statement::IfReset(stmt) => {
-            contains_runtime_event(ir, &stmt.true_side, active)
-                || contains_runtime_event(ir, &stmt.false_side, active)
+        let mut calls = Vec::new();
+        for expr in expressions::statement_inputs(statement) {
+            expressions::expression_calls(expr, &mut calls);
         }
-        Statement::Case(stmt) => {
-            stmt.arms
-                .iter()
-                .any(|arm| contains_runtime_event(ir, &arm.body, active))
-                || contains_runtime_event(ir, &stmt.default, active)
+        if let Statement::FunctionCall(call) = statement {
+            calls.push(call);
         }
-        Statement::For(stmt) => contains_runtime_event(ir, &stmt.body, active),
-        Statement::FunctionCall(call) => {
-            active.insert(call.id)
-                && function_body(&ir.functions, call)
-                    .is_some_and(|body| contains_runtime_event(ir, &body.statements, active))
+        for call in calls {
+            if active.insert(call.id) {
+                let emits = function_body(&ir.functions, call)
+                    .is_some_and(|body| contains_runtime_event(ir, &body.statements, active));
+                active.remove(&call.id);
+                if emits {
+                    return true;
+                }
+            }
         }
-        Statement::SystemFunctionCall(call) => matches!(
-            call.kind,
-            SystemFunctionKind::Display(_)
-                | SystemFunctionKind::Write(_)
-                | SystemFunctionKind::Assert { .. }
-        ),
-        Statement::TbMethodCall(_)
-        | Statement::Assign(_)
-        | Statement::Break
-        | Statement::Unsupported(_)
-        | Statement::Null => false,
-    })
+        for body in expressions::statement_bodies(statement) {
+            if contains_runtime_event(ir, body, active) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn collect_scratch_needs(
@@ -402,8 +516,20 @@ fn collect_scratch_needs(
     // out of the kernel, and a loop over a constant-empty range, take no
     // scratch, as their slots would otherwise be handed to a later statement.
     for statement in statements {
+        let mut calls = Vec::new();
+        for expr in expressions::statement_inputs(statement) {
+            expressions::expression_calls(expr, &mut calls);
+        }
+        for call in calls {
+            if active.insert(call.id) {
+                if let Some(body) = function_body(&ir.functions, call) {
+                    collect_scratch_needs(ir, &body.statements, active, needs)?;
+                }
+                active.remove(&call.id);
+            }
+        }
         match statement {
-            Statement::If(stmt) => match FfParser::get_constant_procedural_truth(&stmt.cond) {
+            Statement::If(stmt) => match constant_truth(&stmt.cond) {
                 Some(true) => collect_scratch_needs(ir, &stmt.true_side, active, needs)?,
                 Some(false) => collect_scratch_needs(ir, &stmt.false_side, active, needs)?,
                 None => {
@@ -538,7 +664,8 @@ struct BlockLowering<'a> {
     module_id: celox_design::ModuleId,
     hierarchical: HashMap<VarId, SourceAddr>,
     private: HashMap<VarId, SourceVarId>,
-    scratch: std::vec::IntoIter<(ScratchNeed, SourceVarId)>,
+    expression_values: HashMap<TokenRange, (usize, SourceVarId)>,
+    scratch: Vec<(ScratchNeed, SourceVarId)>,
     clocks: Vec<(StrId, ProcessClock<SourceAddr>)>,
     releases: Vec<ProcessRelease<SourceAddr>>,
     host_requests: Vec<HostRequest<SourceAddr>>,
@@ -639,7 +766,8 @@ fn lower_block(
         module_id,
         hierarchical,
         private: storage.private.clone(),
-        scratch: storage.scratch.clone().into_iter(),
+        expression_values: storage.expression_values.clone(),
+        scratch: storage.scratch.clone(),
         clocks: Vec::new(),
         releases: Vec::new(),
         host_requests: Vec::new(),
@@ -653,7 +781,7 @@ fn lower_block(
         event_yield: None,
     };
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
-        lowering.event_yield = Some(lowering.take_scratch("event_yield")?.1);
+        lowering.event_yield = Some(lowering.take_scratch("event_yield", EVENT_YIELD_WIDTH)?.1);
     }
     lowering.declare_clocks(statements);
     // A block that ends right after a store settles, so a process that runs
@@ -947,15 +1075,27 @@ impl<'a> BlockLowering<'a> {
         }
     }
 
-    fn take_scratch(&mut self, purpose: &'static str) -> Result<(usize, SourceVarId), ParserError> {
-        match self.scratch.next() {
-            Some((need, id)) if need.purpose == purpose => Ok((need.width, id)),
-            other => Err(ParserError::internal(
-                "testbench process lowering",
-                format!("scratch for {purpose} expected, found {other:?}"),
-                None,
-            )),
-        }
+    fn take_scratch(
+        &mut self,
+        purpose: &'static str,
+        width: usize,
+    ) -> Result<(usize, SourceVarId), ParserError> {
+        // Nested expression calls can consume their storage between the host
+        // operation's own values. Slots are distinct; select by purpose/type
+        // rather than requiring planning and evaluation to interleave alike.
+        let position = self
+            .scratch
+            .iter()
+            .position(|(need, _)| need.purpose == purpose && need.width == width)
+            .ok_or_else(|| {
+                ParserError::internal(
+                    "testbench process lowering",
+                    format!("missing scratch for {purpose} at width {width}"),
+                    None,
+                )
+            })?;
+        let (need, id) = self.scratch.remove(position);
+        Ok((need.width, id))
     }
 
     fn error(
@@ -1001,6 +1141,18 @@ impl<'a> BlockLowering<'a> {
 
     fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<VarId>) {
         for statement in statements {
+            let mut calls = Vec::new();
+            for expr in expressions::statement_inputs(statement) {
+                expressions::expression_calls(expr, &mut calls);
+            }
+            for call in calls {
+                if active.insert(call.id) {
+                    if let Some(body) = function_body(&self.ir.functions, call) {
+                        self.scan_clocks(&body.statements, active);
+                    }
+                    active.remove(&call.id);
+                }
+            }
             match statement {
                 Statement::TbMethodCall(tb) => match &tb.method {
                     TbMethod::ClockNext { period, .. } => {
@@ -1019,10 +1171,14 @@ impl<'a> BlockLowering<'a> {
                     }
                     _ => {}
                 },
-                Statement::If(stmt) => {
-                    self.scan_clocks(&stmt.true_side, active);
-                    self.scan_clocks(&stmt.false_side, active);
-                }
+                Statement::If(stmt) => match constant_truth(&stmt.cond) {
+                    Some(true) => self.scan_clocks(&stmt.true_side, active),
+                    Some(false) => self.scan_clocks(&stmt.false_side, active),
+                    None => {
+                        self.scan_clocks(&stmt.true_side, active);
+                        self.scan_clocks(&stmt.false_side, active);
+                    }
+                },
                 Statement::IfReset(stmt) => {
                     self.scan_clocks(&stmt.true_side, active);
                     self.scan_clocks(&stmt.false_side, active);
@@ -1033,7 +1189,9 @@ impl<'a> BlockLowering<'a> {
                     }
                     self.scan_clocks(&stmt.default, active);
                 }
-                Statement::For(stmt) => self.scan_clocks(&stmt.body, active),
+                Statement::For(stmt) if !constant_empty_range(&stmt.range) => {
+                    self.scan_clocks(&stmt.body, active)
+                }
                 Statement::FunctionCall(call) => {
                     if active.insert(call.id)
                         && let Some(body) = function_body(&self.ir.functions, call)
@@ -1079,7 +1237,7 @@ impl<'a> BlockLowering<'a> {
 
     // ------------------------------------------------------------ helpers
 
-    fn expression(&mut self, expr: &Expression) -> Result<RegisterId, ParserError> {
+    fn raw_expression(&mut self, expr: &Expression) -> Result<RegisterId, ParserError> {
         let (parser, kernel, targets, sources, convert) = parts!(self);
         parser.parse_expression(
             expr,
@@ -1184,6 +1342,21 @@ impl<'a> BlockLowering<'a> {
         destination: &AssignDestination,
         value: RegisterId,
     ) -> Result<(), ParserError> {
+        if let Some(&id) = self.ids.get(&destination.id)
+            && let Some(info) = self.lookup.module_variables[&self.module_id].get(&id)
+        {
+            crate::testbench::ExprCompiler::validate_target_bounds_parts(
+                info,
+                &destination.index,
+                &destination.select,
+            )
+            .map_err(|error| match error {
+                ParserError::IllegalContext {
+                    feature, detail, ..
+                } => ParserError::illegal_context(feature, detail, Some(&destination.token)),
+                other => other,
+            })?;
+        }
         if !self.private.contains_key(&destination.id) {
             self.dirty = true;
         }
@@ -1236,10 +1409,11 @@ impl<'a> BlockLowering<'a> {
     fn host_scratch(
         &mut self,
         purpose: &'static str,
+        width: usize,
         signed: bool,
         is_string: bool,
     ) -> Result<(HostValue<SourceAddr>, SourceVarId), ParserError> {
-        let (width, id) = self.take_scratch(purpose)?;
+        let (width, id) = self.take_scratch(purpose, width)?;
         Ok((
             HostValue {
                 signal: SourceAddr {
@@ -1294,7 +1468,7 @@ impl<'a> BlockLowering<'a> {
             Statement::If(stmt) => {
                 // A constant condition keeps the other side out of the
                 // kernel, as the interpreter never ran it.
-                match FfParser::get_constant_procedural_truth(&stmt.cond) {
+                match constant_truth(&stmt.cond) {
                     Some(true) => self.lower_statements(&stmt.true_side),
                     Some(false) => self.lower_statements(&stmt.false_side),
                     None => {
@@ -1394,6 +1568,8 @@ impl<'a> BlockLowering<'a> {
         &mut self,
         stmt: &veryl_analyzer::ir::CaseStatement,
     ) -> Result<Flow, ParserError> {
+        let value = self.expression(&stmt.case_target)?;
+        self.save_expression(&stmt.case_target, value)?;
         self.lower_case_arm(stmt, 0)
     }
 
@@ -1406,7 +1582,16 @@ impl<'a> BlockLowering<'a> {
             return self.lower_statements(&stmt.default);
         };
         let condition_expr = case_arm_condition_expr(&stmt.case_target, &case_arm.patterns);
-        let condition = self.condition(&condition_expr)?;
+        self.settle_if_dirty()?;
+        let target = self.saved_expression(&stmt.case_target);
+        self.parser.push_process_expression_values(
+            [(stmt.case_target.token_range(), target)]
+                .into_iter()
+                .collect(),
+        );
+        let condition = self.condition(&condition_expr);
+        self.parser.pop_process_expression_values();
+        let condition = condition?;
         let builder = self.kernel.builder();
         let then_block = builder.new_block();
         let else_block = builder.new_block();
@@ -1506,15 +1691,29 @@ impl<'a> BlockLowering<'a> {
         } else {
             assign
         };
+        let prepared = if expressions::has_call(&assign.expr) {
+            Some(self.expression(&assign.expr)?)
+        } else {
+            None
+        };
+        if let Some(value) = prepared {
+            self.parser.push_process_expression_values(
+                [(assign.expr.token_range(), value)].into_iter().collect(),
+            );
+        }
         let (parser, kernel, targets, sources, convert) = parts!(self);
-        parser.parse_assign_statement(
+        let result = parser.parse_assign_statement(
             assign,
             targets,
             &Domain::Process,
             &convert,
             sources,
             kernel.builder(),
-        )
+        );
+        if prepared.is_some() {
+            self.parser.pop_process_expression_values();
+        }
+        result
     }
 
     /// A `for` loop whose counter and bounds live in state, so its body
@@ -1532,17 +1731,18 @@ impl<'a> BlockLowering<'a> {
             cmp_signed,
             ..
         } = shape;
-        let (_, start_slot) = self.take_scratch("for_start")?;
-        let (_, end_slot) = self.take_scratch("for_end")?;
+        let (_, start_slot) = self.take_scratch("for_start", width)?;
+        let (_, end_slot) = self.take_scratch("for_end", width)?;
         let single_slot = if shape.wide_capable() {
-            Some(self.take_scratch("for_single")?.1)
+            Some(self.take_scratch("for_single", 1)?.1)
         } else {
             None
         };
         let start_reg = self.for_bound(shape.start, width, cmp_signed)?;
-        let end_reg = self.for_bound(shape.end, width, cmp_signed)?;
         self.store_scratch(start_slot, width, start_reg);
+        let end_reg = self.for_bound(shape.end, width, cmp_signed)?;
         self.store_scratch(end_slot, width, end_reg);
+        let start_reg = self.load_scratch(start_slot, width, cmp_signed);
         let var = self.destination(stmt.var_id, stmt.token);
         let stall_message = format!(
             "non-progressing stepped for loop (loop variable `{}`)",
@@ -1560,10 +1760,21 @@ impl<'a> BlockLowering<'a> {
         // one value, nothing when it is empty, and fails otherwise.
         if let Some(single_slot) = single_slot {
             let mut wide = None;
-            for (reg, is_wide) in [(start_reg, shape.start_wide), (end_reg, shape.end_wide)] {
+            for (reg, is_wide, signed_bound) in [
+                (start_reg, shape.start_wide, shape.start_signed),
+                (end_reg, shape.end_wide, shape.end_signed),
+            ] {
                 if !is_wide {
                     continue;
                 }
+                let signed_high = if signed_bound {
+                    let low = self
+                        .parser
+                        .cast_reg_width_ext(self.kernel.builder(), reg, 128, true);
+                    Some(self.extend_for_compare(low, width, true))
+                } else {
+                    None
+                };
                 let builder = self.kernel.builder();
                 let shift = builder.alloc_bit(width, false);
                 builder.emit(SIRInstruction::Imm(shift, SIRValue::new(64u64)));
@@ -1572,7 +1783,12 @@ impl<'a> BlockLowering<'a> {
                 let zero = builder.alloc_bit(width, cmp_signed);
                 builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
                 let nonzero = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(nonzero, high, BinaryOp::Ne, zero));
+                builder.emit(SIRInstruction::Binary(
+                    nonzero,
+                    if signed_bound { reg } else { high },
+                    BinaryOp::Ne,
+                    signed_high.unwrap_or(zero),
+                ));
                 wide = Some(match wide {
                     None => nonzero,
                     Some(previous) => {
@@ -1852,6 +2068,7 @@ impl<'a> BlockLowering<'a> {
         self.kernel.builder().seal_block(SIRTerminator::Error(code));
         self.kernel.builder().switch_to_block(progress);
         self.store(&var, next)?;
+        self.settle_if_dirty()?;
         self.parser.clear_register_cache();
         match single_slot {
             Some(single_slot) => {
@@ -1898,8 +2115,18 @@ impl<'a> BlockLowering<'a> {
         width: usize,
         signed: bool,
     ) -> Result<RegisterId, ParserError> {
+        let prepared = match bound {
+            ForBound::Expression(expr) if expressions::has_call(expr) => {
+                Some((expr.token_range(), self.expression(expr)?))
+            }
+            _ => None,
+        };
+        if let Some((token, value)) = prepared {
+            self.parser
+                .push_process_expression_values([(token, value)].into_iter().collect());
+        }
         let (parser, kernel, targets, sources, convert) = parts!(self);
-        parser.parse_for_bound(
+        let result = parser.parse_for_bound(
             bound,
             width,
             width,
@@ -1909,7 +2136,11 @@ impl<'a> BlockLowering<'a> {
             &convert,
             sources,
             kernel.builder(),
-        )
+        );
+        if prepared.is_some() {
+            self.parser.pop_process_expression_values();
+        }
+        result
     }
 
     fn lower_system_function(&mut self, call: &SystemFunctionCall) -> Result<Flow, ParserError> {
@@ -1966,15 +2197,19 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn system_task(&mut self, call: &SystemFunctionCall) -> Result<Flow, ParserError> {
+        let bindings = self.expression_bindings(&expressions::system_inputs(&call.kind))?;
+        self.parser.push_process_expression_values(bindings);
         let (parser, kernel, targets, sources, convert) = parts!(self);
-        parser.parse_system_task_statement(
+        let result = parser.parse_system_task_statement(
             call,
             targets,
             &Domain::Process,
             &convert,
             sources,
             kernel.builder(),
-        )?;
+        );
+        self.parser.pop_process_expression_values();
+        result?;
         Ok(Flow::Continue)
     }
 
@@ -1985,7 +2220,22 @@ impl<'a> BlockLowering<'a> {
         cond: &SystemFunctionInput,
         args: &[SystemFunctionInput],
     ) -> Result<Flow, ParserError> {
-        let condition = self.condition(&cond.0)?;
+        let mut condition = self.condition(&cond.0)?;
+        let argument_calls = args.iter().any(|arg| expressions::has_call(&arg.0));
+        let freeze_condition = argument_calls || expressions::has_call(&cond.0);
+        if freeze_condition {
+            self.save_expression(&cond.0, condition)?;
+        }
+        self.settle_if_dirty()?;
+        let inputs = args.iter().map(|arg| &arg.0).collect::<Vec<_>>();
+        let bindings = self.expression_bindings(&inputs)?;
+        if freeze_condition {
+            let value = self.saved_expression(&cond.0);
+            condition = self
+                .parser
+                .lower_procedural_condition(value, self.kernel.builder());
+        }
+        self.parser.push_process_expression_values(bindings);
         let location = event_location(&call.comptime.token);
         let pass_site = self
             .parser
@@ -2045,6 +2295,7 @@ impl<'a> BlockLowering<'a> {
                     .seal_block(SIRTerminator::Jump(join, Vec::new()));
             }
         }
+        self.parser.pop_process_expression_values();
         self.kernel.builder().switch_to_block(join);
         self.yield_for_runtime_event()?;
         Ok(Flow::Continue)
@@ -2109,6 +2360,28 @@ impl<'a> BlockLowering<'a> {
                 Some(&call.comptime.token),
             ));
         };
+        let paths = self.ir.functions[&call.id]
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+            .collect::<Vec<_>>();
+        let inputs = paths
+            .iter()
+            .filter_map(|path| {
+                call.inputs
+                    .iter()
+                    .find_map(|(input, expr)| (input == path).then_some((path, expr)))
+            })
+            .collect::<Vec<_>>();
+        let freeze = inputs.iter().any(|(_, expr)| expressions::has_call(expr));
+        let mut values = Vec::new();
+        for (path, expr) in &inputs {
+            let value = self.expression(expr)?;
+            if freeze {
+                self.save_expression(expr, value)?;
+            }
+            values.push((*path, *expr, value));
+        }
         if !self.active_functions.insert(call.id) {
             return Err(self.error(
                 "function call in an initial block",
@@ -2116,9 +2389,13 @@ impl<'a> BlockLowering<'a> {
                 Some(&call.comptime.token),
             ));
         }
-        for (path, expr) in &call.inputs {
+        for (path, expr, value) in values {
             if let Some(&formal) = body.arg_map.get(path) {
-                let value = self.expression(expr)?;
+                let value = if freeze {
+                    self.saved_expression(expr)
+                } else {
+                    value
+                };
                 let destination = self.destination(formal, call.comptime.token);
                 self.store(&destination, value)?;
             }
@@ -2172,12 +2449,6 @@ impl<'a> BlockLowering<'a> {
                     PortTypeKind::ResetAsyncHigh | PortTypeKind::ResetSyncHigh => (1, 0),
                     _ => (0, 1),
                 };
-                let value = self.constant(assert_value, 1);
-                let destination = self.destination(
-                    reset,
-                    tb.ret.as_ref().map_or(self.ir.token, |ret| ret.token),
-                );
-                self.store(&destination, value)?;
                 let duration = match duration {
                     Some(expr) => {
                         let value = self.expression(expr)?;
@@ -2196,11 +2467,20 @@ impl<'a> BlockLowering<'a> {
                     }
                     None => self.constant(3, PROCESS_DELAY_WIDTH),
                 };
-                let release = match self
-                    .releases
-                    .iter()
-                    .position(|release| release.signal == reset_source)
-                {
+                let value = self.constant(assert_value, 1);
+                let destination = self.destination(
+                    reset,
+                    tb.ret.as_ref().map_or(self.ir.token, |ret| ret.token),
+                );
+                self.store(&destination, value)?;
+                let clock_var = self.instance_var(*clock)?;
+                let clock_source = SourceAddr {
+                    instance_id: self.instance,
+                    var_id: self.ids[&clock_var],
+                };
+                let release = match self.releases.iter().position(|release| {
+                    release.signal == reset_source && release.clock == Some(clock_source)
+                }) {
                     Some(index) => index as u32,
                     None => {
                         let clock_var = self.instance_var(*clock)?;
@@ -2228,7 +2508,7 @@ impl<'a> BlockLowering<'a> {
             TbMethod::RandomSeed { value } => {
                 let seed = self.expression(value)?;
                 let seed = self.unsigned_bits(seed, 64);
-                let (host_value, slot) = self.host_scratch("random_seed", false, false)?;
+                let (host_value, slot) = self.host_scratch("random_seed", 64, false, false)?;
                 self.store_scratch(slot, 64, seed);
                 self.host_request(HostRequest::RandomSeed {
                     handle: self.resource_name(tb.inst),
@@ -2237,7 +2517,8 @@ impl<'a> BlockLowering<'a> {
                 Ok(Flow::Continue)
             }
             TbMethod::RandomGet { width, signed } => {
-                let (result, slot) = self.host_scratch("random_value", *signed, false)?;
+                let (result, slot) =
+                    self.host_scratch("random_value", (*width as usize).max(1), *signed, false)?;
                 let result_width = result.width;
                 self.host_request(HostRequest::RandomGet {
                     handle: self.resource_name(tb.inst),
@@ -2253,16 +2534,26 @@ impl<'a> BlockLowering<'a> {
             TbMethod::RandomGetRange {
                 min,
                 max,
-                width: _,
+                width,
                 signed,
             } => {
+                let freeze = expressions::has_call(min) || expressions::has_call(max);
                 let min_reg = self.expression(min)?;
-                let min_reg = self.unsigned_bits(min_reg, 64);
+                if freeze {
+                    self.save_expression(min, min_reg)?;
+                }
                 let max_reg = self.expression(max)?;
+                let min_reg = if freeze {
+                    self.saved_expression(min)
+                } else {
+                    min_reg
+                };
+                let min_reg = self.unsigned_bits(min_reg, 64);
                 let max_reg = self.unsigned_bits(max_reg, 64);
-                let (min_value, min_slot) = self.host_scratch("random_min", *signed, false)?;
-                let (max_value, max_slot) = self.host_scratch("random_max", *signed, false)?;
-                let (result, slot) = self.host_scratch("random_value", *signed, false)?;
+                let (min_value, min_slot) = self.host_scratch("random_min", 64, *signed, false)?;
+                let (max_value, max_slot) = self.host_scratch("random_max", 64, *signed, false)?;
+                let (result, slot) =
+                    self.host_scratch("random_value", (*width as usize).max(1), *signed, false)?;
                 let result_width = result.width;
                 self.store_scratch(min_slot, 64, min_reg);
                 self.store_scratch(max_slot, 64, max_reg);
@@ -2279,7 +2570,7 @@ impl<'a> BlockLowering<'a> {
                 Ok(Flow::Continue)
             }
             TbMethod::RandomGetSeed => {
-                let (result, slot) = self.host_scratch("random_seed", false, false)?;
+                let (result, slot) = self.host_scratch("random_seed", 64, false, false)?;
                 self.host_request(HostRequest::RandomGetSeed {
                     handle: self.resource_name(tb.inst),
                     result,
@@ -2295,7 +2586,8 @@ impl<'a> BlockLowering<'a> {
                 for arg in args {
                     let is_string = arg.0.comptime().r#type.is_string();
                     let signed = expression_signed(&arg.0);
-                    let (value, slot) = self.host_scratch("component_arg", signed, is_string)?;
+                    let (value, slot) =
+                        self.host_scratch("component_arg", argument_width(arg), signed, is_string)?;
                     let width = value.width;
                     let reg = if let Some(text) = FfParser::static_string_expr(&arg.0) {
                         let builder = self.kernel.builder();
@@ -2314,8 +2606,12 @@ impl<'a> BlockLowering<'a> {
                 }
                 let result = match tb.ret.as_deref() {
                     Some(_) => {
-                        let (value, slot) =
-                            self.host_scratch("component_result", tb.ret_signed, false)?;
+                        let (value, slot) = self.host_scratch(
+                            "component_result",
+                            tb.ret_width.map_or(64, |width| width as usize).max(1),
+                            tb.ret_signed,
+                            false,
+                        )?;
                         Some((value, slot))
                     }
                     None => None,

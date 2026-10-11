@@ -3053,3 +3053,47 @@ fn concurrent_reset_only_replaces_its_own_component_clock_domain() {
         TestResult::Pass
     );
 }
+
+static VCD_FINISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+unsafe extern "C" fn finish_vcd_registration(_: *mut c_void, _: *mut sys::VrlCtx) -> i32 {
+    VCD_FINISH_CALLS.fetch_add(1, Ordering::Relaxed);
+    0
+}
+static VCD_CLEANUP_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    on_finish: finish_vcd_registration,
+    ..CLOCK_COMPONENT
+};
+
+#[test]
+fn failed_component_vcd_registration_calls_finish_on_each_run() {
+    celox::register_static_component("celox_vcd_cleanup", &VCD_CLEANUP_COMPONENT);
+    VCD_FINISH_CALLS.store(0, Ordering::Relaxed);
+    let (directory, metadata) = component_metadata();
+    let manifest = directory.path().join("component/veryl.manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    json["types"]["celox_vcd_cleanup"] = json["types"]["celox_clocked"].clone();
+    std::fs::write(&manifest, serde_json::to_vec(&json).unwrap()).unwrap();
+    let code = r#"#[test(t)] module t {
+        inst clk: $tb::clock_gen;
+        var d: logic<8>; var q: logic<8>;
+        inst component: $comp::celox_vcd_cleanup #(STEP: 0)(clk,d,q);
+        initial {clk.next();$finish();}
+    }"#;
+    let mut sim = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .vcd(directory.path().join("cleanup.vcd"))
+        .build()
+        .unwrap();
+    // A written header cannot accept newly initialized component signals.
+    sim.dump(0);
+    let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
+    for expected in 1..=2 {
+        let result = celox::testbench::run_compiled_testbench(&mut sim, &tb);
+        assert!(
+            matches!(result,TestResult::Fail(ref message) if message.contains("component VCD registration failed")),
+            "{result:?}"
+        );
+        assert_eq!(VCD_FINISH_CALLS.load(Ordering::Relaxed), expected);
+    }
+}
