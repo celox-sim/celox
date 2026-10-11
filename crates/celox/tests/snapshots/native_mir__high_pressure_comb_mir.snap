@@ -182,40 +182,40 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  mov eax,[qword gs:28h]
-  0x00000019  mov edx,[gs:2Ch]
-  0x00000021  add eax,edx
-  0x00000023  mov edx,[gs:30h]
-  0x0000002b  add eax,edx
-  0x0000002d  mov edx,[gs:34h]
-  0x00000035  add eax,edx
-  0x00000037  mov edx,[gs:38h]
-  0x0000003f  add eax,edx
-  0x00000041  mov edx,[gs:3Ch]
-  0x00000049  add eax,edx
-  0x0000004b  mov edx,[gs:40h]
-  0x00000053  add eax,edx
-  0x00000055  mov edx,[gs:44h]
-  0x0000005d  add eax,edx
-  0x0000005f  mov edx,[gs:48h]
-  0x00000067  add eax,edx
-  0x00000069  mov edx,[gs:4Ch]
-  0x00000071  add eax,edx
-  0x00000073  mov edx,[gs:50h]
-  0x0000007b  add eax,edx
-  0x0000007d  mov edx,[gs:54h]
-  0x00000085  add eax,edx
-  0x00000087  mov edx,[gs:58h]
-  0x0000008f  add eax,edx
-  0x00000091  mov edx,[gs:5Ch]
-  0x00000099  add eax,edx
-  0x0000009b  mov edx,[gs:60h]
-  0x000000a3  add eax,edx
-  0x000000a5  mov edx,[gs:64h]
-  0x000000ad  add eax,edx
-  0x000000af  mov [qword gs:68h],eax
-  0x000000b9  xor eax,eax
-  0x000000bb  jmp short 00000000000000BDh
-  0x000000bd  movq r11,xmm15
-  0x000000c2  wrgsbase r11
-  0x000000c7  ret
+  0x0000000f  mov eax,[gs:28h]
+  0x00000018  mov edx,[gs:2Ch]
+  0x00000020  add eax,edx
+  0x00000022  mov edx,[gs:30h]
+  0x0000002a  add eax,edx
+  0x0000002c  mov edx,[gs:34h]
+  0x00000034  add eax,edx
+  0x00000036  mov edx,[gs:38h]
+  0x0000003e  add eax,edx
+  0x00000040  mov edx,[gs:3Ch]
+  0x00000048  add eax,edx
+  0x0000004a  mov edx,[gs:40h]
+  0x00000052  add eax,edx
+  0x00000054  mov edx,[gs:44h]
+  0x0000005c  add eax,edx
+  0x0000005e  mov edx,[gs:48h]
+  0x00000066  add eax,edx
+  0x00000068  mov edx,[gs:4Ch]
+  0x00000070  add eax,edx
+  0x00000072  mov edx,[gs:50h]
+  0x0000007a  add eax,edx
+  0x0000007c  mov edx,[gs:54h]
+  0x00000084  add eax,edx
+  0x00000086  mov edx,[gs:58h]
+  0x0000008e  add eax,edx
+  0x00000090  mov edx,[gs:5Ch]
+  0x00000098  add eax,edx
+  0x0000009a  mov edx,[gs:60h]
+  0x000000a2  add eax,edx
+  0x000000a4  mov edx,[gs:64h]
+  0x000000ac  add eax,edx
+  0x000000ae  mov [gs:68h],eax
+  0x000000b7  xor eax,eax
+  0x000000b9  jmp short 00000000000000BBh
+  0x000000bb  movq r11,xmm15
+  0x000000c0  wrgsbase r11
+  0x000000c5  ret

@@ -1,6 +1,147 @@
 use super::*;
 
 #[test]
+fn guarded_signed_comparisons_preserve_operand_widths() {
+    for width in [2, 8, 32, 63, 64] {
+        for op in [BinaryOp::LtS, BinaryOp::LeS, BinaryOp::GtS, BinaryOp::GeS] {
+            for comparison_first in [true, false] {
+                let addresses: Vec<_> = (0..4)
+                    .map(|id| AbsoluteAddr {
+                        instance_id: InstanceId(0),
+                        var_id: VarId(id),
+                    })
+                    .collect();
+                let address = |id: usize| {
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addresses[id])
+                };
+                let [lhs, rhs, guard, cmp, cond, yes, no, result] =
+                    std::array::from_fn::<_, 8, _>(RegisterId);
+                let (first, second) = if comparison_first {
+                    (cmp, guard)
+                } else {
+                    (guard, cmp)
+                };
+                let unit = ExecutionUnit {
+                    entry_block_id: SirBlockId(0),
+                    register_map: [
+                        (lhs, width),
+                        (rhs, width),
+                        (guard, 1),
+                        (cmp, 1),
+                        (cond, 1),
+                        (yes, 8),
+                        (no, 8),
+                        (result, 8),
+                    ]
+                    .into_iter()
+                    .map(|(reg, width)| {
+                        (
+                            reg,
+                            RegisterType::Bit {
+                                width,
+                                signed: false,
+                            },
+                        )
+                    })
+                    .collect(),
+                    blocks: [(
+                        SirBlockId(0),
+                        BasicBlock {
+                            id: SirBlockId(0),
+                            params: vec![],
+                            instructions: vec![
+                                SIRInstruction::Load(lhs, address(0), SIROffset::Static(0), width),
+                                SIRInstruction::Load(rhs, address(1), SIROffset::Static(0), width),
+                                SIRInstruction::Load(guard, address(2), SIROffset::Static(0), 1),
+                                SIRInstruction::Binary(cmp, lhs, op, rhs),
+                                SIRInstruction::Binary(cond, first, BinaryOp::LogicAnd, second),
+                                SIRInstruction::Imm(yes, SIRValue::new(0xa5u8)),
+                                SIRInstruction::Imm(no, SIRValue::new(0x5au8)),
+                                SIRInstruction::Mux(result, cond, yes, no),
+                                SIRInstruction::Store(
+                                    address(3),
+                                    SIROffset::Static(0),
+                                    8,
+                                    result,
+                                    vec![],
+                                    vec![],
+                                ),
+                            ],
+                            terminator: SIRTerminator::Return,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                };
+                unit.verify();
+                let mut layout = empty_layout();
+                layout.offsets = addresses.iter().copied().zip([0, 8, 16, 17]).collect();
+                layout.widths = addresses
+                    .iter()
+                    .copied()
+                    .zip([width, width, 1, 8])
+                    .collect();
+                layout.is_4states = addresses
+                    .iter()
+                    .copied()
+                    .map(|addr| (addr, false))
+                    .collect();
+                layout.total_size = 24;
+                layout.merged_total_size = 24;
+                layout.working_base_offset = 24;
+                layout.sparse_base_offset = 24;
+                layout.triggered_bits_offset = 24;
+                layout.scratch_base_offset = 24;
+                let mut function = lower_execution_unit(&unit, &layout, false);
+                assert!(
+                    function
+                        .blocks
+                        .iter()
+                        .flat_map(|block| &block.insts)
+                        .any(|inst| matches!(inst, MInst::GuardedCmpSelect { .. }))
+                );
+                mir_legalize::legalize(&mut function);
+                mir_opt::optimize(&mut function);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                let emitted = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let jit = JitCode::new(&emitted.code).unwrap();
+                let mask = mask_for_width(width);
+                let sign = 1u64 << (width - 1);
+                let signed = |value: u64| ((value << (64 - width)) as i64) >> (64 - width);
+                for left in [0, 1, sign - 1, sign, mask] {
+                    for right in [0, 1, sign - 1, sign, mask] {
+                        let predicate = match op {
+                            BinaryOp::LtS => signed(left) < signed(right),
+                            BinaryOp::LeS => signed(left) <= signed(right),
+                            BinaryOp::GtS => signed(left) > signed(right),
+                            BinaryOp::GeS => signed(left) >= signed(right),
+                            _ => unreachable!(),
+                        };
+                        for enabled in [false, true] {
+                            let mut state = vec![0u8; 24];
+                            state[..8].copy_from_slice(&left.to_le_bytes());
+                            state[8..16].copy_from_slice(&right.to_le_bytes());
+                            state[16] = u8::from(enabled);
+                            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                            assert_eq!(
+                                state[17],
+                                if enabled && predicate { 0xa5 } else { 0x5a },
+                                "width={width}, op={op:?}, comparison_first={comparison_first}, lhs={left:#x}, rhs={right:#x}, guard={enabled}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn recognizes_full_domain_selector_branch_spine() {
     let fixture = dense_branch_table_fixture();
     let constants = collect_exact_sir_constants(&fixture);

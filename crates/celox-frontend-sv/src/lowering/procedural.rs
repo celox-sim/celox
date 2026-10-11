@@ -1518,7 +1518,9 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
             sv::ir::ConstExpr::Function { args, .. } => {
                 args.iter().for_each(|arg| const_idents(arg, names))
             }
-            sv::ir::ConstExpr::Unary { expr, .. } => const_idents(expr, names),
+            sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+                const_idents(expr, names)
+            }
             sv::ir::ConstExpr::Binary { left, right, .. } => {
                 const_idents(left, names);
                 const_idents(right, names);
@@ -1589,7 +1591,9 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
         ConstExpr::Function { name, args, .. } => {
             is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
         }
-        ConstExpr::Unary { expr, .. } => const_calls(expr, is_callee),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_calls(expr, is_callee)
+        }
         ConstExpr::Binary { left, right, .. } => {
             const_calls(left, is_callee) || const_calls(right, is_callee)
         }
@@ -1615,7 +1619,9 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
                 const_contains(expr, part) || const_contains(bit, part)
             }
             ConstExpr::Function { args, .. } => args.iter().any(|arg| const_contains(arg, part)),
-            ConstExpr::Unary { expr, .. } => const_contains(expr, part),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                const_contains(expr, part)
+            }
             ConstExpr::Binary { left, right, .. } => {
                 const_contains(left, part) || const_contains(right, part)
             }
@@ -1656,7 +1662,9 @@ fn shared_calls<'e>(
         ConstExpr::Function { args, .. } => args
             .iter()
             .for_each(|arg| shared_calls(arg, other, is_callee, shared)),
-        ConstExpr::Unary { expr, .. } => shared_calls(expr, other, is_callee, shared),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            shared_calls(expr, other, is_callee, shared)
+        }
         ConstExpr::Binary { left, right, .. } => {
             shared_calls(left, other, is_callee, shared);
             shared_calls(right, other, is_callee, shared);
@@ -1871,7 +1879,9 @@ fn collect_const_calls(
             collect_const_calls(expr, calls);
             collect_const_calls(bit, calls);
         }
-        ConstExpr::Unary { expr, .. } => collect_const_calls(expr, calls),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            collect_const_calls(expr, calls)
+        }
         ConstExpr::Binary { left, right, .. } => {
             collect_const_calls(left, calls);
             collect_const_calls(right, calls);

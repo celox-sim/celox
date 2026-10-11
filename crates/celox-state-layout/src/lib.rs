@@ -170,6 +170,10 @@ pub struct LayoutInput<A> {
     /// by exactly one lane are placed in that lane's segment; homes written by
     /// several lanes are isolated in their own segment.
     pub lane_writers: LaneWriters<A>,
+    /// Rank of each state home in the order the per-tick code first accesses
+    /// it. Homes are placed in rank order so data used together shares cache
+    /// lines and is read in address order; unranked homes go last.
+    pub access_rank: HashMap<A, u32>,
 }
 
 /// Adapter implemented by the phase artifact that precedes physical layout.
@@ -221,12 +225,31 @@ pub struct MemoryLayout<A> {
 
 type PhysicalLayoutObject<A> = (A, usize, bool, usize, usize);
 
-fn sort_layout_objects<A: Copy + Ord>(objects: &mut [PhysicalLayoutObject<A>]) {
-    // Packing by decreasing alignment avoids padding. Equal-alignment objects
-    // use semantic-address order so randomized input maps cannot perturb every
-    // physical offset and the generated machine code that embeds it.
-    objects.sort_unstable_by_key(|(address, _, _, _, alignment)| {
-        (std::cmp::Reverse(*alignment), *address)
+/// Objects larger than this are placed after the smaller objects of their
+/// run, so they do not spread the small, frequently accessed homes across
+/// more cache lines.
+const LARGE_OBJECT_BYTES: usize = 256;
+
+/// How far behind the end of a run a padding hole may still be filled.
+/// Filling only nearby holes keeps objects close to their access-order
+/// neighbours.
+const HOLE_REACH: usize = 128;
+
+fn sort_layout_objects<A: Copy + Ord + Hash>(
+    objects: &mut [PhysicalLayoutObject<A>],
+    access_rank: &HashMap<A, u32>,
+) {
+    // Small accessed homes come first in access order, then large accessed
+    // homes in access order, then homes the per-tick code never touches.
+    // Unranked homes pack by decreasing alignment, which avoids padding.
+    // Ties use semantic-address order so randomized input maps cannot
+    // perturb every physical offset and the generated machine code that
+    // embeds it.
+    objects.sort_unstable_by_key(|&(address, _, _, size, alignment)| {
+        match access_rank.get(&address) {
+            Some(&rank) => (u8::from(size > LARGE_OBJECT_BYTES), rank, 0, address),
+            None => (2, 0, usize::MAX - alignment, address),
+        }
     });
 }
 
@@ -239,6 +262,9 @@ fn sort_layout_objects<A: Copy + Ord>(objects: &mut [PhysicalLayoutObject<A>]) {
 /// the previous one, and the region ends with the same gap, so no access
 /// widened past one lane's object reaches storage written by another lane.
 /// Without writer information this is the ordinary packed placement.
+///
+/// Within a run, objects keep their sorted order. An object that fits in the
+/// alignment padding left shortly before the end of the run fills it instead.
 fn place_region<A: Copy + Eq + Hash>(
     objects: Vec<PhysicalLayoutObject<A>>,
     writers: &HashMap<A, u64>,
@@ -264,10 +290,34 @@ fn place_region<A: Copy + Eq + Hash>(
     }
     let mut current = start;
     let mut place_run = |current: &mut usize, run: Vec<PhysicalLayoutObject<A>>| {
+        let mut holes: Vec<(usize, usize)> = Vec::new();
         for object in run {
-            *current = align_up(*current, object.4);
-            place(&object, *current);
-            *current += extent(&object);
+            let size = extent(&object);
+            let alignment = object.4;
+            let reach = current.saturating_sub(HOLE_REACH);
+            holes.retain(|&(_, end)| end > reach);
+            let hole = holes
+                .iter()
+                .position(|&(begin, end)| align_up(begin, alignment) + size <= end);
+            let offset = if let Some(index) = hole {
+                let (begin, end) = holes.swap_remove(index);
+                let offset = align_up(begin, alignment);
+                if offset > begin {
+                    holes.push((begin, offset));
+                }
+                if offset + size < end {
+                    holes.push((offset + size, end));
+                }
+                offset
+            } else {
+                let offset = align_up(*current, alignment);
+                if offset > *current {
+                    holes.push((*current, offset));
+                }
+                *current = offset + size;
+                offset
+            };
+            place(&object, offset);
         }
     };
     place_run(&mut current, common);
@@ -305,6 +355,7 @@ where
             num_events,
             runtime_event_sites,
             lane_writers,
+            access_rank,
         } = input;
 
         let mut stable_objects = state_objects
@@ -327,7 +378,7 @@ where
                 )
             })
             .collect::<Vec<_>>();
-        sort_layout_objects(&mut stable_objects);
+        sort_layout_objects(&mut stable_objects, &access_rank);
 
         let mut offsets = HashMap::default();
         let mut widths = HashMap::default();
@@ -369,7 +420,7 @@ where
                 (*address, width, is_4states[address], size, alignment)
             })
             .collect::<Vec<_>>();
-        sort_layout_objects(&mut working_objects);
+        sort_layout_objects(&mut working_objects, &access_rank);
 
         let mut working_offsets = HashMap::default();
         // Working offsets are relative to a base aligned below; a segment
@@ -399,7 +450,7 @@ where
                 (*address, width, is_4states[address], size, alignment)
             })
             .collect::<Vec<_>>();
-        sort_layout_objects(&mut sparse_objects);
+        sort_layout_objects(&mut sparse_objects, &access_rank);
 
         let mut sparse_offsets = HashMap::default();
         let sparse_size = place_region(
@@ -705,8 +756,8 @@ mod tests {
         let mut forward = vec![high_address, less_aligned, low_address];
         let mut reverse = forward.iter().copied().rev().collect::<Vec<_>>();
 
-        sort_layout_objects(&mut forward);
-        sort_layout_objects(&mut reverse);
+        sort_layout_objects(&mut forward, &HashMap::default());
+        sort_layout_objects(&mut reverse, &HashMap::default());
 
         assert_eq!(forward, reverse);
         assert_eq!(forward, vec![low_address, high_address, less_aligned]);
@@ -753,12 +804,65 @@ mod tests {
                     num_events: 0,
                     runtime_event_sites: Vec::new(),
                     lane_writers: Default::default(),
+                    access_rank: Default::default(),
                 }
             }
         }
 
         let layout = MemoryLayout::build(&AliasLayoutSource, false, MemoryLayoutMode::Packed);
         assert_eq!(layout.offsets[&1], layout.offsets[&2]);
+    }
+
+    #[test]
+    fn access_rank_orders_homes_and_fills_padding_nearby() {
+        struct RankedLayoutSource;
+
+        impl LayoutSource<u32> for RankedLayoutSource {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                let object = |address, width| StateObjectLayout {
+                    address,
+                    width,
+                    is_4state: false,
+                };
+                // Access order: 4 (1 byte), 2 (8 bytes), 1 (1 byte), 5 (large),
+                // 3 (8 bytes). 6 is never accessed.
+                let access_rank = [(4, 0), (2, 1), (1, 2), (5, 3), (3, 4)]
+                    .into_iter()
+                    .collect();
+                LayoutInput {
+                    state_objects: vec![
+                        object(1, 8),
+                        object(2, 64),
+                        object(3, 64),
+                        object(4, 8),
+                        object(5, 8 * (LARGE_OBJECT_BYTES + 8)),
+                        object(6, 64),
+                    ],
+                    working_addresses: Vec::new(),
+                    sparse_addresses: Vec::new(),
+                    unpacked_arrays: HashMap::default(),
+                    requirements: LayoutRequirements::default(),
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 0,
+                    runtime_event_sites: Vec::new(),
+                    lane_writers: Default::default(),
+                    access_rank,
+                }
+            }
+        }
+
+        let layout = MemoryLayout::build(&RankedLayoutSource, false, MemoryLayoutMode::Packed);
+        let offset = |address: u32| layout.offsets[&address];
+        // Small homes follow access order; the byte accessed after the
+        // eight-byte home fills the padding in front of it.
+        assert_eq!(offset(4), STATE_HEADER_SIZE);
+        assert_eq!(offset(2), STATE_HEADER_SIZE + 8);
+        assert_eq!(offset(1), STATE_HEADER_SIZE + 1);
+        assert_eq!(offset(3), STATE_HEADER_SIZE + 16);
+        // The large home follows every small one, and the unaccessed home
+        // comes last.
+        assert!(offset(5) > offset(3));
+        assert!(offset(6) > offset(5));
     }
 
     #[test]
@@ -794,6 +898,7 @@ mod tests {
                     num_events: 0,
                     runtime_event_sites: Vec::new(),
                     lane_writers,
+                    access_rank: Default::default(),
                 }
             }
         }
@@ -842,6 +947,7 @@ mod tests {
                     num_events: 9,
                     runtime_event_sites: Vec::new(),
                     lane_writers: LaneWriters::default(),
+                    access_rank: Default::default(),
                 }
             }
         }
@@ -875,6 +981,7 @@ mod tests {
                     num_events: 3,
                     runtime_event_sites: Vec::new(),
                     lane_writers: Default::default(),
+                    access_rank: Default::default(),
                 }
             }
         }
