@@ -956,3 +956,128 @@ fn clock_waits_keep_derived_clocks_running() {
     // `half` rises on every second edge of `clk`.
     assert_eq!(sim.get(slow), 5u32.into());
 }
+
+#[test]
+fn zero_clock_wait_does_not_yield_to_another_process() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let bit = ValueType::bits(1).unwrap();
+    let x = module.output("x", bit).unwrap();
+    let seen = module.output("seen", bit).unwrap();
+    let x_target = module.whole(x).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let x_value = module.read(x).unwrap();
+    let zero = constant(&mut module, 0, 1);
+    let one = constant(&mut module, 1, 1);
+    module
+        .process(vec![
+            Statement::Assign {
+                target: x_target,
+                value: one,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: x_value,
+            },
+        ])
+        .unwrap();
+    module
+        .process(vec![Statement::Assign {
+            target: x_target,
+            value: zero,
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.settle().unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("x")), 0u8.into());
+    assert_eq!(sim.ticks(), 0);
+}
+
+#[test]
+fn settle_bounds_clock_waits_started_by_a_due_delay() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let five = constant(&mut module, 5, 64);
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: five },
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.run_until(5).unwrap();
+    sim.settle().unwrap();
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.ticks(), 1);
+    assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+}
+
+#[test]
+fn scheduled_and_process_clock_edges_sample_the_same_old_state() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let bit = ValueType::bits(1).unwrap();
+    let manual = module.input("manual", bit).unwrap();
+    let b = module.output("b", bit).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let one = constant(&mut module, 1, 1);
+    let b_value = module.read(b).unwrap();
+    let b_target = module.whole(b).unwrap();
+    let q_target = module.whole(q).unwrap();
+    module
+        .register(b_target, one, manual, Edge::Posedge, None, None)
+        .unwrap();
+    module
+        .register(q_target, b_value, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.schedule("manual", 4, 1).unwrap();
+    sim.run_until(4).unwrap();
+    assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    sim.run_until(8).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn clock_wait_vcd_records_each_edge_timestamp() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wait.vcd");
+    let mut sim = Simulation::from_frontend(module.finish())
+        .vcd(&path)
+        .build()
+        .unwrap();
+    sim.run_until(20).unwrap();
+    sim.flush_vcd().unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    for time in [2, 4, 6, 8, 10, 12] {
+        assert!(
+            text.lines().any(|line| line == format!("#{time}")),
+            "missing timestamp {time}: {text}"
+        );
+    }
+}

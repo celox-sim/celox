@@ -441,8 +441,29 @@ impl<B: SimBackend> SimulationState<B> {
                 });
             }
         }
+        let rising: Vec<usize> = self
+            .tick_clocks
+            .iter()
+            .filter(|(id, clock)| {
+                !events_to_process.is_empty()
+                    && clock.next_edge == current_time
+                    && self.clock_has_waiters(**id)
+                    && executor.backend().get_as::<u8>(clock.signal) == 0
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &rising {
+            let clock = &self.tick_clocks[id];
+            events_to_process.push(SimEvent {
+                time: current_time,
+                event_ref: clock.event,
+                signal: clock.signal,
+                next_val: 1,
+            });
+        }
         let ready = self.take_ready_processes(current_time);
         self.step_round(executor, current_time, events_to_process, ready, true)?;
+        self.credit_rising_edges(current_time, rising)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
         // Fused ticks may have moved the time on.
@@ -531,6 +552,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.step_round(executor, time, events, Vec::new(), true)?;
+        self.credit_rising_edges(time, rising)
+    }
+
+    fn credit_rising_edges(
+        &mut self,
+        time: u64,
+        rising: Vec<usize>,
+    ) -> Result<(), SimulatorErrorCode> {
         for id in rising {
             self.ticks += 1;
             let clock = self.tick_clocks.get_mut(&id).expect("a due process clock");
@@ -580,6 +609,8 @@ impl<B: SimBackend> SimulationState<B> {
         // whose registers drive another clock or reset needs the scheduler's
         // rounds, and a clock that is high now needs its normalizing fall.
         if !executor.fused_ticks_allowed()
+            || self.domain_kinds[clock] != Some(DomainKind::ClockPosedge)
+            || !self.inactive.is_empty()
             || !self.waiting.is_empty()
             || !self.process_wakeups.is_empty()
             || self.scheduler.next_event_time().is_some()
@@ -600,9 +631,9 @@ impl<B: SimBackend> SimulationState<B> {
         let Some(needed) = self.clock_waits.values().map(|wait| wait.remaining).min() else {
             return Ok(false);
         };
-        let (event, period) = {
+        let (event, signal, period) = {
             let clock = &self.tick_clocks[&clock];
-            (clock.event, clock.period)
+            (clock.event, clock.signal, clock.period)
         };
         // Edges at `time`, `time + period`, ...: the last one stays at or
         // before `limit`.
@@ -610,7 +641,12 @@ impl<B: SimBackend> SimulationState<B> {
         if count == 0 {
             return Ok(false);
         }
+        // Combinational next-state logic samples the rising level of the clock.
+        executor.backend_mut().set(signal, 1u8);
         let (completed, result) = executor.tick_many(event, count);
+        if completed == 0 {
+            executor.backend_mut().set(signal, 0u8);
+        }
         if completed > count || (completed == 0 && result.is_ok()) {
             return Err(SimulatorErrorCode::Runtime {
                 message: "the backend made invalid progress on fused clock ticks".into(),
@@ -626,10 +662,13 @@ impl<B: SimBackend> SimulationState<B> {
                 .checked_mul(period)
                 .and_then(|span| time.checked_add(span))
                 .ok_or_else(|| clock_overflow(clock))?;
-            self.tick_clocks
+            let tick_clock = self
+                .tick_clocks
                 .get_mut(&clock)
-                .expect("a due process clock")
-                .next_edge = next_edge;
+                .expect("a due process clock");
+            tick_clock.next_edge = next_edge;
+            tick_clock.falling_edge = Some(self.scheduler.time + period - period / 2);
+            self.last_clock_values.insert(clock);
             self.count_edges(clock, completed, next_edge);
         }
         result?;
@@ -705,10 +744,8 @@ impl<B: SimBackend> SimulationState<B> {
     {
         let mut progressed = false;
         let mut pass = ready;
-        let mut again = Vec::new();
         loop {
             pass.extend(self.waiting.iter().copied());
-            pass.append(&mut again);
             pass.sort_unstable();
             pass.dedup();
             if pass.is_empty() {
@@ -716,105 +753,107 @@ impl<B: SimBackend> SimulationState<B> {
             }
             let mut any_ran = false;
             for process in pass.drain(..) {
-                let before = self
-                    .process_event_counters
-                    .iter()
-                    .map(|(_, rises, falls)| {
-                        (
-                            executor.backend().get_as::<u32>(*rises),
-                            executor.backend().get_as::<u32>(*falls),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                executor.run_process(process)?;
-                for ((id, rises, falls), (old_rises, old_falls)) in
-                    self.process_event_counters.iter().zip(before)
-                {
-                    let changed = match self.domain_kinds[*id] {
-                        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                            executor.backend().get_as::<u32>(*falls) != old_falls
-                        }
-                        _ => executor.backend().get_as::<u32>(*rises) != old_rises,
-                    };
-                    if changed {
-                        executor.backend_mut().mark_triggered_bit(*id);
-                    }
-                }
-                let refs = &self.processes[process];
-                let status: u8 = executor.backend().get_as(refs.status);
-                match ProcessStatus::from_code(status) {
-                    Some(ProcessStatus::Delay | ProcessStatus::InactiveDelay) => {
-                        let delay: u64 = executor.backend().get_as(refs.delay);
-                        let time = current_time.checked_add(delay).ok_or_else(|| {
-                            SimulatorErrorCode::Runtime {
-                                message: format!(
-                                    "process {process} delay overflows simulation time"
-                                ),
-                                signals: Vec::new(),
+                loop {
+                    let before = self
+                        .process_event_counters
+                        .iter()
+                        .map(|(_, rises, falls)| {
+                            (
+                                executor.backend().get_as::<u32>(*rises),
+                                executor.backend().get_as::<u32>(*falls),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    executor.run_process(process)?;
+                    for ((id, rises, falls), (old_rises, old_falls)) in
+                        self.process_event_counters.iter().zip(before)
+                    {
+                        let changed = match self.domain_kinds[*id] {
+                            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                                executor.backend().get_as::<u32>(*falls) != old_falls
                             }
-                        })?;
-                        self.waiting.remove(&process);
-                        if delay == 0
-                            && ProcessStatus::from_code(status)
-                                == Some(ProcessStatus::InactiveDelay)
-                        {
-                            self.inactive.insert(process);
-                        } else {
-                            self.process_wakeups.push(Reverse((time, process)));
-                        }
-                        any_ran = true;
-                    }
-                    Some(ProcessStatus::Done) => {
-                        self.waiting.remove(&process);
-                        self.done.insert(process);
-                        any_ran = true;
-                    }
-                    Some(ProcessStatus::Finish) => {
-                        self.waiting.remove(&process);
-                        self.done.insert(process);
-                        self.finished = true;
-                        return Ok(true);
-                    }
-                    Some(ProcessStatus::Wait) => {
-                        self.waiting.insert(process);
-                        any_ran = true;
-                    }
-                    Some(ProcessStatus::WaitClock) => {
-                        let count: u64 = executor.backend().get_as(refs.delay);
-                        let index: u32 = executor.backend().get_as(refs.clock);
-                        let Some(clock) = refs.clocks.get(index as usize) else {
-                            return Err(SimulatorErrorCode::InternalError);
+                            _ => executor.backend().get_as::<u32>(*rises) != old_rises,
                         };
-                        self.waiting.remove(&process);
-                        if count == 0 {
-                            // Nothing to wait for: the process continues in
-                            // the next pass.
-                            again.push(process);
-                        } else {
-                            let id = clock.event.id();
-                            let tick_clock =
-                                self.tick_clocks.entry(id).or_insert_with(|| TickClock {
-                                    event: clock.event,
-                                    signal: clock.signal,
-                                    period: clock.period.max(2),
-                                    next_edge: current_time,
-                                    falling_edge: None,
-                                });
-                            tick_clock.next_edge = tick_clock.next_edge.max(current_time);
-                            self.clock_waits.insert(
-                                process,
-                                ClockWait {
-                                    clock: id,
-                                    remaining: count,
-                                },
-                            );
+                        if changed {
+                            executor.backend_mut().mark_triggered_bit(*id);
                         }
-                        any_ran = true;
                     }
-                    // The kernel found its wait condition unmet and ran
-                    // nothing; it stays waiting.
-                    Some(ProcessStatus::Pending) => {}
-                    None => return Err(SimulatorErrorCode::InternalError),
+                    let refs = &self.processes[process];
+                    let status: u8 = executor.backend().get_as(refs.status);
+                    match ProcessStatus::from_code(status) {
+                        Some(ProcessStatus::Delay | ProcessStatus::InactiveDelay) => {
+                            let delay: u64 = executor.backend().get_as(refs.delay);
+                            let time = current_time.checked_add(delay).ok_or_else(|| {
+                                SimulatorErrorCode::Runtime {
+                                    message: format!(
+                                        "process {process} delay overflows simulation time"
+                                    ),
+                                    signals: Vec::new(),
+                                }
+                            })?;
+                            self.waiting.remove(&process);
+                            if delay == 0
+                                && ProcessStatus::from_code(status)
+                                    == Some(ProcessStatus::InactiveDelay)
+                            {
+                                self.inactive.insert(process);
+                            } else {
+                                self.process_wakeups.push(Reverse((time, process)));
+                            }
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Done) => {
+                            self.waiting.remove(&process);
+                            self.done.insert(process);
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Finish) => {
+                            self.waiting.remove(&process);
+                            self.done.insert(process);
+                            self.finished = true;
+                            return Ok(true);
+                        }
+                        Some(ProcessStatus::Wait) => {
+                            self.waiting.insert(process);
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::WaitClock) => {
+                            let count: u64 = executor.backend().get_as(refs.delay);
+                            let index: u32 = executor.backend().get_as(refs.clock);
+                            let Some(clock) = refs.clocks.get(index as usize) else {
+                                return Err(SimulatorErrorCode::InternalError);
+                            };
+                            self.waiting.remove(&process);
+                            if count == 0 {
+                                // A zero-count wait does not yield to another process.
+                                continue;
+                            } else {
+                                let id = clock.event.id();
+                                let tick_clock =
+                                    self.tick_clocks.entry(id).or_insert_with(|| TickClock {
+                                        event: clock.event,
+                                        signal: clock.signal,
+                                        period: clock.period.max(2),
+                                        next_edge: current_time,
+                                        falling_edge: None,
+                                    });
+                                tick_clock.next_edge = tick_clock.next_edge.max(current_time);
+                                self.clock_waits.insert(
+                                    process,
+                                    ClockWait {
+                                        clock: id,
+                                        remaining: count,
+                                    },
+                                );
+                            }
+                            any_ran = true;
+                        }
+                        // The kernel found its wait condition unmet and ran
+                        // nothing; it stays waiting.
+                        Some(ProcessStatus::Pending) => {}
+                        None => return Err(SimulatorErrorCode::InternalError),
+                    }
+                    break;
                 }
             }
             if !any_ran {
@@ -842,7 +881,7 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         while self.next_event_time().is_some_and(|next| next < time) {
-            self.step(executor)?;
+            self.step_until(executor, time)?;
         }
         if self.finished {
             return Ok(None);
@@ -851,7 +890,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.step_round(executor, time, Vec::new(), ready, true)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
-        self.run_remaining_rounds(executor, time, u64::MAX)?;
+        self.run_remaining_rounds(executor, time, time)?;
         executor.finish_timed_step(time);
         Ok(Some(time))
     }
@@ -1189,7 +1228,11 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);
+        let process = if self.inactive.is_empty() {
+            self.process_wakeups.peek().map(|&Reverse((time, _))| time)
+        } else {
+            Some(self.scheduler.time)
+        };
         let clocks = self
             .tick_clocks
             .iter()
@@ -1205,15 +1248,6 @@ impl<B: SimBackend> SimulationState<B> {
             .into_iter()
             .flatten()
             .min()
-        let process = if self.inactive.is_empty() {
-            self.process_wakeups.peek().map(|&Reverse((time, _))| time)
-        } else {
-            Some(self.scheduler.time)
-        };
-        match (self.scheduler.next_event_time(), process) {
-            (Some(event), Some(process)) => Some(event.min(process)),
-            (event, process) => event.or(process),
-        }
     }
 
     /// Periodic clocks as (event id, period).

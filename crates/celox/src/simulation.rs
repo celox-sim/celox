@@ -103,6 +103,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             return (0, Ok(()));
         }
         if !self.program.runtime_schema.comb_observers.is_empty() {
+            if let Err(error) = self.eval_comb_checked() {
+                return (0, Err(error));
+            }
             return (1, self.tick_deferred_comb(event));
         }
         // Every tick settles the combinational logic first, so a clean
@@ -117,7 +120,7 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     fn fused_ticks_allowed(&self) -> bool {
-        !self.components.has_scheduled_components()
+        self.vcd_writer.is_none() && !self.components.has_scheduled_components()
     }
 
     fn stage_external_event(
@@ -1183,6 +1186,99 @@ mod clock_wait_tests {
     #[test]
     fn four_state_clock_waits_run_on_every_backend() {
         check_all_backends(true);
+    }
+    fn edge_design(edge: Edge) -> FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Edges").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let clock_value = module.read(clk).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let value = if edge == Edge::Posedge {
+            clock_value
+        } else {
+            one
+        };
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, value, clk, edge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let three = module.constant(Constant::two_state(3u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: three,
+                },
+                Statement::Finish,
+            ])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check_edge<B: SimBackend>(mut sim: Simulation<B>, edge: Edge) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(1).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.time(), 12);
+        assert_eq!(sim.ticks(), 3);
+        assert!(sim.is_finished());
+    }
+
+    #[test]
+    fn clock_levels_and_falling_edges_agree_across_backends() {
+        for edge in [Edge::Posedge, Edge::Negedge] {
+            let builder = || Simulator::from_frontend(edge_design(edge)).emit_triggers();
+            check_edge(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                edge,
+            );
+            check_edge(Simulation::new(builder().build_cranelift().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_wasm().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_tiered().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_native().unwrap()), edge);
+        }
+    }
+
+    #[test]
+    fn settle_at_does_not_fuse_past_a_delay_boundary() {
+        // Use a dedicated SDK design so settle_at itself advances to the due delay.
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Boundary").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let target = module.whole(q).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        let five = module.constant(Constant::two_state(5u8, 8).unwrap());
+        let ten = module.constant(Constant::two_state(10u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::Delay { amount: five },
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: ten,
+                },
+            ])
+            .unwrap();
+        let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 5).unwrap(), Some(5));
+        assert_eq!(sim.time(), 5);
+        assert_eq!(sim.ticks(), 1);
     }
 }
 

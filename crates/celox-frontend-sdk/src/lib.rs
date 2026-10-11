@@ -13,9 +13,9 @@ use thiserror::Error;
 
 /// Current JSON interchange version of [`FrontendArtifact`].
 ///
-/// Version 2 adds [`Process`]es. An artifact without processes is still
-/// written as version 1, so older consumers keep accepting it.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
+/// Version 2 adds [`Process`]es; version 3 adds [`Statement::ClockCycles`].
+/// Artifacts use the oldest version that can represent their statements.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
 
 /// Oldest JSON interchange version [`FrontendArtifact::from_json`] accepts.
 pub const MIN_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -533,10 +533,25 @@ impl FrontendArtifact {
 
     /// Decode and version-check an artifact produced by an external frontend.
     pub fn from_json(json: &str) -> Result<Self, ArtifactJsonError> {
+        #[derive(Deserialize)]
+        struct Header {
+            format_version: u32,
+        }
+        let header: Header = serde_json::from_str(json)?;
+        if !(MIN_ARTIFACT_FORMAT_VERSION..=ARTIFACT_FORMAT_VERSION).contains(&header.format_version)
+        {
+            return Err(ArtifactJsonError::UnsupportedVersion {
+                expected: ARTIFACT_FORMAT_VERSION,
+                actual: header.format_version,
+            });
+        }
         let artifact: Self = serde_json::from_str(json)?;
-        if !(MIN_ARTIFACT_FORMAT_VERSION..=ARTIFACT_FORMAT_VERSION)
-            .contains(&artifact.format_version)
-            || (artifact.format_version < 2 && !artifact.processes.is_empty())
+        let mut clocks = Vec::new();
+        for process in &artifact.processes {
+            collect_process_clocks(&process.body, &mut clocks);
+        }
+        if (artifact.format_version < 2 && !artifact.processes.is_empty())
+            || (artifact.format_version < 3 && !clocks.is_empty())
         {
             return Err(ArtifactJsonError::UnsupportedVersion {
                 expected: ARTIFACT_FORMAT_VERSION,
@@ -879,6 +894,21 @@ impl FrontendArtifact {
             let mut clocks = Vec::new();
             collect_process_clocks(&process.body, &mut clocks);
             for clock in clocks {
+                let mut targets = Vec::new();
+                for process in &self.processes {
+                    collect_process_targets(&process.body, &mut targets);
+                }
+                if driver_ranges.contains_key(&clock)
+                    || targets.iter().any(|target| target.signal == clock)
+                {
+                    return Err(BuildError::DrivenProcessClock {
+                        name: self
+                            .signal(clock)
+                            .ok_or(BuildError::UnknownSignal(clock.index()))?
+                            .name
+                            .clone(),
+                    });
+                }
                 let known = self
                     .clock_periods
                     .iter()
@@ -1014,6 +1044,8 @@ pub enum BuildError {
     InvalidClockPeriod { period: u64 },
     #[error("clock `{name}` needs a period and a register it clocks before a process waits on it")]
     UnknownProcessClock { name: String },
+    #[error("process clock `{name}` also has a continuous, register or process driver")]
+    DrivenProcessClock { name: String },
     #[error("register target `{name}` must cover the complete signal")]
     PartialRegisterTarget { name: String },
     #[error("module name must not be empty")]
@@ -1429,7 +1461,20 @@ impl ModuleBuilder {
         )?;
         let mut clocks = Vec::new();
         collect_process_clocks(&body, &mut clocks);
+        let mut targets = Vec::new();
+        collect_process_targets(&body, &mut targets);
+        for process in &self.processes {
+            collect_process_targets(&process.body, &mut targets);
+            collect_process_clocks(&process.body, &mut clocks);
+        }
         for clock in clocks {
+            if self.driver_ranges.contains_key(&clock)
+                || targets.iter().any(|target| target.signal == clock)
+            {
+                return Err(BuildError::DrivenProcessClock {
+                    name: self.signal_info(clock)?.name.clone(),
+                });
+            }
             let known = self
                 .clock_periods
                 .iter()
@@ -1453,7 +1498,15 @@ impl ModuleBuilder {
             format_version: if self.processes.is_empty() {
                 MIN_ARTIFACT_FORMAT_VERSION
             } else {
-                ARTIFACT_FORMAT_VERSION
+                let mut clocks = Vec::new();
+                for process in &self.processes {
+                    collect_process_clocks(&process.body, &mut clocks);
+                }
+                if clocks.is_empty() {
+                    2
+                } else {
+                    ARTIFACT_FORMAT_VERSION
+                }
             },
             module_name: self.name,
             signals: self.signals,
@@ -1530,6 +1583,13 @@ impl ModuleBuilder {
 
     fn record_driver_target(&mut self, target: SignalSlice) -> Result<(), BuildError> {
         let signal_name = self.signal_info(target.signal)?.name.clone();
+        let mut process_clocks = Vec::new();
+        for process in &self.processes {
+            collect_process_clocks(&process.body, &mut process_clocks);
+        }
+        if process_clocks.contains(&target.signal) {
+            return Err(BuildError::DrivenProcessClock { name: signal_name });
+        }
         let mut process_targets = Vec::new();
         for process in &self.processes {
             collect_process_targets(&process.body, &mut process_targets);
@@ -2031,6 +2091,23 @@ mod tests {
         ));
     }
 
+    fn module_for_driven_clock() -> Result<(), BuildError> {
+        let bit = ValueType::bits(1)?;
+        let mut module = ModuleBuilder::new("Driven")?;
+        let clk = module.internal("clk", bit)?;
+        let q = module.output("q", bit)?;
+        let one = module.constant(Constant::two_state(1u8, 1)?);
+        let target = module.whole(q)?;
+        module.register(target, one, clk, Edge::Posedge, None, None)?;
+        module.clock_period(clk, 4)?;
+        let target = module.whole(clk)?;
+        module.assign(target, one)?;
+        module.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+    }
+
     #[test]
     fn revalidates_process_clocks_from_json() {
         let bit = ValueType::bits(1).unwrap();
@@ -2049,7 +2126,52 @@ mod tests {
             .process(vec![Statement::ClockCycles { clock, count: one }])
             .unwrap();
         let artifact = module.finish();
+        assert_eq!(artifact.format_version(), 3);
         let json = serde_json::to_value(&artifact).unwrap();
+        let mut old_version = json.clone();
+        old_version["format_version"] = 2.into();
+        assert!(matches!(
+            FrontendArtifact::from_json(&old_version.to_string()),
+            Err(ArtifactJsonError::UnsupportedVersion { actual: 2, .. })
+        ));
+        let mut future = json.clone();
+        future["format_version"] = 4.into();
+        future["processes"][0]["body"][0] = serde_json::json!({"FutureStatement": {}});
+        assert!(matches!(
+            FrontendArtifact::from_json(&future.to_string()),
+            Err(ArtifactJsonError::UnsupportedVersion { actual: 4, .. })
+        ));
+        // Validate both builder orderings and the deserialization trust boundary.
+        let driven = module_for_driven_clock();
+        assert!(matches!(driven, Err(BuildError::DrivenProcessClock { .. })));
+        let mut late_driver = json.clone();
+        late_driver["assignments"] = serde_json::json!([{ "target": {"signal": clock, "lsb": 0, "width": 1}, "value": toggled }]);
+        assert!(matches!(
+            FrontendArtifact::from_json(&late_driver.to_string()),
+            Err(ArtifactJsonError::InvalidArtifact(
+                BuildError::DrivenProcessClock { .. }
+            ))
+        ));
+        let mut later = ModuleBuilder::new("LaterDriver").unwrap();
+        let clk = later.internal("clk", bit).unwrap();
+        let q = later.output("q", bit).unwrap();
+        let one = later.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = later.whole(q).unwrap();
+        later
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        later.clock_period(clk, 4).unwrap();
+        later
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
+        let target = later.whole(clk).unwrap();
+        assert!(matches!(
+            later.assign(target, one),
+            Err(BuildError::DrivenProcessClock { .. })
+        ));
 
         // Without its period, the clock clocks nothing.
         let mut unknown = json.clone();
