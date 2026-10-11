@@ -1302,6 +1302,7 @@ mod process_review_tests {
         check_failed_batch(builder().build_interpreter().unwrap());
         check_failed_batch(builder().build_cranelift().unwrap());
         check_failed_batch(builder().build_wasm().unwrap());
+        check_failed_batch(builder().build_tiered().unwrap());
     }
 
     fn check<B: SimBackend>(mut sim: Simulation<B>) {

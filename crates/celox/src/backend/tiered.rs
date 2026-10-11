@@ -311,10 +311,10 @@ impl CompiledTier {
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
         match self {
-            Self::Jit(jit) => (1, {
+            Self::Jit(jit) => {
                 let event = jit.id_to_event_slice()[id];
-                jit.eval_comb_apply_ff_at(event)
-            }),
+                jit.eval_comb_apply_ff_many_at(event, count)
+            }
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
@@ -1268,12 +1268,9 @@ impl SimBackend for TieredBackend {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => {
                 self.interpreted_steps = self.interpreted_steps.saturating_add(1);
-                (
-                    1,
-                    interp.eval_comb_apply_ff_at(super::interp::InterpEventRef::from_parts(
-                        event.addr(),
-                        event.id(),
-                    )),
+                interp.eval_comb_apply_ff_many_at(
+                    super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
+                    count,
                 )
             }
             Phase::Compiled(compiled) => {
