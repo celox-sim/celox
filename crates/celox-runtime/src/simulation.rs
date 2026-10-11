@@ -689,6 +689,10 @@ impl<B: SimBackend> SimulationState<B> {
                     if ready.is_empty() || self.finished {
                         break;
                     }
+                    // A new inactive batch may create a fresh occurrence of
+                    // a domain already evaluated in this time slot.
+                    discovered_in_this_step.make_empty();
+                    triggered_domains.make_empty();
                     self.run_processes(executor, current_time, ready)?
                 };
                 if progressed {

@@ -65,6 +65,7 @@ pub(super) struct Ff<'p, 'a> {
     /// bookkeeping (a subroutine an event expression calls may store) are
     /// not recorded themselves.
     recording_events: bool,
+    event_counter_state: HashSet<SourceVarId>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -90,6 +91,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 element_widths.insert(working(id), width);
             }
         }
+        let event_counter_state = m
+            .event_watchers
+            .iter()
+            .flat_map(|watcher| {
+                [
+                    &watcher.state.changes,
+                    &watcher.state.rises,
+                    &watcher.state.falls,
+                ]
+            })
+            .filter_map(|name| m.id(name))
+            .collect();
         Self {
             m,
             b: SIRBuilder::new(),
@@ -107,13 +120,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             private: HashMap::default(),
             private_watchers: HashMap::default(),
             recording_events: false,
+            event_counter_state,
         }
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
     /// the working region, or stable state in a process kernel.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() {
+        if self.kernel.is_some() || self.event_counter_state.contains(&id) {
             stable(*self.private.get(&id).unwrap_or(&id))
         } else {
             working(id)
@@ -254,11 +268,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let private = &self.private;
         let working_set = &self.working;
         let variables = &*self.m.variables;
+        let counters = &self.event_counter_state;
         let direct = self.kernel.is_some();
         let map = |id: &SourceVarId| -> Addr {
             if direct {
                 let id = aliases.get(id).unwrap_or(id);
                 stable(*private.get(id).unwrap_or(id))
+            } else if counters.contains(id) {
+                stable(*id)
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
             } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
@@ -1024,7 +1041,10 @@ impl<'p, 'a> Ff<'p, 'a> {
         width: usize,
         value: RegisterId,
     ) -> Result<(), sv::AnalyzerError> {
-        let watchers = if self.kernel.is_some() && !self.recording_events {
+        let variable = self.aliases.get(&id).copied().unwrap_or(id);
+        let watchers = if (self.kernel.is_some() || self.working.contains(&variable))
+            && !self.recording_events
+        {
             let variable = self.aliases.get(&id).copied().unwrap_or(id);
             let variable = self.private.get(&variable).copied().unwrap_or(variable);
             self.m

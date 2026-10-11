@@ -2054,6 +2054,7 @@ fn lower_module_with_overrides(
         mut runtime_event_sites,
         mut runtime_errors,
         mut extern_functions,
+        event_watch_plan,
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
@@ -2063,6 +2064,14 @@ fn lower_module_with_overrides(
             &parameter_types,
             four_state,
         );
+        if !module.initial_processes().is_empty() {
+            let bodies = module
+                .initial_processes()
+                .iter()
+                .map(|process| process.body())
+                .collect::<Vec<_>>();
+            ff::declare_event_counters(&mut pm, &bodies, &package_aliases)?;
+        }
         let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
         initial_memory_values.append(&mut pm.static_initial_values);
         (
@@ -2070,6 +2079,11 @@ fn lower_module_with_overrides(
             std::mem::take(&mut pm.runtime_event_sites),
             std::mem::take(&mut pm.runtime_errors),
             std::mem::take(&mut pm.extern_functions),
+            (
+                std::mem::take(&mut pm.event_watchers),
+                std::mem::take(&mut pm.watchers_by_var),
+                std::mem::take(&mut pm.event_counter_ids),
+            ),
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
@@ -2083,7 +2097,7 @@ fn lower_module_with_overrides(
         &mut runtime_event_sites,
         &mut runtime_errors,
         &mut extern_functions,
-        &package_aliases,
+        event_watch_plan,
     )?;
     initial_memory_values.extend(initial_values);
 
@@ -2787,7 +2801,7 @@ fn lower_initial_processes(
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
-    package_aliases: &[SourceVarId],
+    event_watch_plan: procedural::EventWatchPlan,
 ) -> Result<
     (
         Vec<InitialStateValue<SourceVarId>>,
@@ -2895,7 +2909,7 @@ fn lower_initial_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
-    ff::declare_event_counters(&mut pm, &bodies, package_aliases)?;
+    (pm.event_watchers, pm.watchers_by_var, pm.event_counter_ids) = event_watch_plan;
     let process_event_counters = module
         .ff_processes()
         .iter()
