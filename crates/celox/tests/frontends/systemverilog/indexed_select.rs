@@ -3,6 +3,31 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+
+    fn signed_indices_access_clocked_negative_range_arrays(sim) {
+        @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
+    }
+
+    fn constant_part_select_indices_of_concatenations(sim) {
+        @case "indexed_select::constant_part_select_indices_of_concatenations";
+    }
+
+    fn constant_part_select_indices_of_signed_slices(sim) {
+        @case "indexed_select::constant_part_select_indices_of_signed_slices";
+    }
+
+    fn constant_part_select_indices_in_continuous_targets(sim) {
+        @case "indexed_select::constant_part_select_indices_in_continuous_targets";
+    }
+
+    fn constant_part_select_indices_read_and_write_unpacked_arrays(sim) {
+        @case "indexed_select::constant_part_select_indices_read_and_write_unpacked_arrays";
+    }
+
+    fn constant_part_select_indices_preserve_selected_unknowns(sim) {
+        @case "indexed_select::constant_part_select_indices_preserve_selected_unknowns";
+    }
+
     fn indexed_select_reads_and_writes_both_declaration_directions(sim) {
         @case "indexed_select::indexed_select_reads_and_writes_both_declaration_directions";
     }

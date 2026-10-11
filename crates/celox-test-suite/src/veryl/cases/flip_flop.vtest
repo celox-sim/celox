@@ -917,9 +917,6 @@
   (assert_eq q 2147483640))
 
 (case test_ff_runtime_reverse_min_i32_end_wraps_before_range_check
-  ; veryl-simulator 0.20.2's non-JIT interpreter evaluates `end - 1` as i64
-  ; without truncating it to the signed 32-bit loop-counter width. It therefore
-  ; gets -2147483649 instead of wrapping to i32::MAX and skips the loop body.
   (source "test.veryl" #"
         module Top (
             clk: input clock,

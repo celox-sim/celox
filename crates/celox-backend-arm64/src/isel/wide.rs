@@ -668,10 +668,17 @@ pub(super) fn lower_wide_binary(
         // Wide right shifts (logical and arithmetic)
         BinaryOp::Shr | BinaryOp::Sar => {
             let is_sar = matches!(op, BinaryOp::Sar);
-            let src_chunks = ctx.get_wide_chunks(&lhs, block);
+            let mut src_chunks = ctx.get_wide_chunks(&lhs, block);
             let n_src = src_chunks.len();
 
             if let Some(&amount) = ctx.consts.get(&rhs) {
+                // Move the logical sign to physical bit 63 before SAR/carry.
+                if is_sar {
+                    let width = ctx.sir_width(&lhs);
+                    let top = (width - 1) / 64;
+                    src_chunks[top].0 =
+                        sign_extend_scalar(ctx, block, src_chunks[top].0, (width - 1) % 64 + 1);
+                }
                 // Constant shift
                 let cs = (amount / 64) as usize; // chunk shift
                 let is = (amount % 64) as u8; // intra-chunk shift
@@ -1374,11 +1381,17 @@ fn lower_wide_runtime_shift(
     dir: ShiftDir,
     _is_sar: bool,
 ) {
-    let src_chunks = ctx.get_wide_chunks(lhs, block);
+    let mut src_chunks = ctx.get_wide_chunks(lhs, block);
+    if matches!(dir, ShiftDir::ArithRight) {
+        let width = ctx.sir_width(lhs);
+        let top = (width - 1) / 64;
+        src_chunks[top].0 = sign_extend_scalar(ctx, block, src_chunks[top].0, (width - 1) % 64 + 1);
+    }
     let dst_chunks = lower_wide_runtime_shift_chunks(ctx, block, &src_chunks, rhs, n_chunks, dir);
     ctx.set_wide_chunks(dst, dst_chunks);
 }
 
+// SAR callers extend the partial top source word first, in either plane.
 pub(super) fn lower_wide_runtime_shift_chunks(
     ctx: &mut ISelContext,
     block: &mut MBlock,

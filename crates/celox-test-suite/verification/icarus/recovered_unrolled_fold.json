@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_independent_reductions_share_input_correctly",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_mmio_read_write_dependencies_are_independent",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_unrolled_guard_uses_procedural_four_state_truth",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "recovered_unrolled_fold::recovered_unrolled_multi_state_priority",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus 13.0 rejects the emitted unpacked-array context types for rob_addr/rob_data/rob_f3/rob_fwd. The corresponding Verilator run passes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-array-types"
+        ],
+        "id": "icarus_array_types",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted unpacked-array context types for rob_addr/rob_data/rob_f3/rob_fwd. The corresponding Verilator run passes.",
+        "upstream": []
+      },
+      "name": "recovered_unrolled_fold::recovered_unrolled_store_forward_selects_older_entry",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

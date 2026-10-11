@@ -19,6 +19,16 @@ failure, or a concrete unresolved concern. Do not repeat successful checks on
 the same source and configuration solely for reassurance. Daily full CI and
 periodic conformance gates provide broader coverage between changes.
 
+External Verilator/Icarus checks are needed when executable shared cases or the
+external adapters/emitter change. A Celox backend/frontend fix against an
+unchanged shared case does not by itself require rerunning external simulators.
+Script comments, formatting and diagnostic line shifts do not require external
+simulation. Use focused filters; the local runners reuse unchanged successful
+evidence across worktrees by default. Use `--fresh` for an intentional fresh run.
+Do not refresh checked-in verification JSON, summary tables or proof manifests
+as routine validation. Normal results belong under `target/`; change retained
+evidence only when the task changes a reviewed failure or coverage contract.
+
 When a task has a clear requested outcome, pursue it without waiting for
 step-by-step instructions. Inspect the repository, make reasonable assumptions,
 implement the change, and continue while a safe, in-scope next step remains.

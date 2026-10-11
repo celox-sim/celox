@@ -11,6 +11,8 @@ all_backends! {
     }
 
     fn test_comb_function_body_onehot_system_function(sim) {
+        // Veryl 0.22.0 folds a runtime `$onehot` inside a function body from its unknown
+        // argument, so its simulator gives 0.
         @ignore_on(veryl);
         @case "system_function::test_comb_function_body_onehot_system_function";
     }
@@ -29,6 +31,8 @@ all_backends! {
     }
 
     fn test_comb_function_body_clog2_system_function(sim) {
+        // Veryl 0.22.0 folds a runtime `$clog2` inside a function body from its unknown
+        // argument, so its simulator gives 0.
         @ignore_on(veryl);
         @case "system_function::test_comb_function_body_clog2_system_function";
     }
@@ -91,6 +95,8 @@ all_backends! {
     }
 
     fn test_ff_function_body_clog2_system_function(sim) {
+        // Veryl 0.22.0 folds a runtime `$clog2` inside a function body from its unknown
+        // argument, so its simulator gives 0.
         @ignore_on(veryl);
         @case "system_function::test_ff_function_body_clog2_system_function";
     }
@@ -117,6 +123,8 @@ all_backends! {
     }
 
     fn test_ff_function_body_onehot_system_function(sim) {
+        // Veryl 0.22.0 folds a runtime `$onehot` inside a function body from its unknown
+        // argument, so its simulator gives 0.
         @ignore_on(veryl);
         @case "system_function::test_ff_function_body_onehot_system_function";
     }

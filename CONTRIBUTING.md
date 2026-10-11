@@ -18,7 +18,7 @@ not evidence that validation is complete.
 | Rust implementation | Check formatting and lint the affected crates. Run affected unit and regression tests, plus integration tests in consumers of the changed behavior. |
 | One backend | Run its unit tests and the common language suite through that backend; include relevant width, four-state, and parallel variants. Run other backends when shared code or contracts also change. |
 | Shared frontend, IR, optimizer, layout, or runtime | Run affected unit tests and common behavioral regressions through every affected backend. Broaden to the full common suite when the impact spans language groups or cannot be bounded. Include NAPI/JS integration when the public simulator behavior changes. |
-| Shared language cases | Run the added or changed cases through Celox's backend harness and the available external simulator adapters. Retain existing backend exclusions and unchanged expected behavior. A case-only change does not require rebuilding NAPI. |
+| Shared language cases | Run added or changed executable cases through Celox's backend harness and the available external simulator adapters. Script comments, formatting and source-location shifts alone do not require simulation. Retain existing backend exclusions and unchanged expected behavior. A case-only change does not require rebuilding NAPI. |
 | JS or NAPI | Run affected package tests, lint, and type checks; build NAPI and run boundary integration tests when the change uses it. Include WASI/browser or other host targets when the changed behavior affects them. |
 | lydite | Run affected Rust tests and the applicable proof/conformance gates from `lydite/`; include Celox replay when the bridge or shared design contract changes. Solver tests require `Z3_BIN`. |
 | Dependencies, manifests, toolchain, or an uncertain impact | Use the broader workspace and integration checks. Verify relevant feature and target configurations rather than assuming host tests cover them. |
@@ -40,14 +40,18 @@ Use the actual affected case or group as the filter. For SystemVerilog cases,
 use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
 empty selections, compilation failures, and simulator errors are not passes.
 
-For repeated external verification, use `--incremental --report <report.json>`
-to refresh the full selection while running only new/changed cases and prior
-failures. Reuse is decided from `<output>/results.json`, which records reused
-evidence separately; the retained report holds only the results, so branches
-that add different cases do not conflict in it. Keep filters out of a
-full-report refresh; filtered runs still produce partial reports. See the
-[runner documentation](crates/celox-test-suite/README.md#independent-verification).
-Daily CI omits `--incremental` and runs the complete corpus afresh.
+External results are reused locally by default, including between worktrees,
+when the case, verifier and tool fingerprints match. New/changed cases and
+prior failures run again; `--fresh` forces execution. A Celox implementation
+change against an unchanged shared case does not require external revalidation
+unless it also changes the external adapter/emitter or its dependencies.
+Normal validation writes only under `target/`: omit `--report` and do not
+regenerate checked-in JSON or summary tables just because a case was added or
+passed. The daily gate checks the live catalogue and accepts new passing cases
+without a baseline refresh. Retained failure evidence changes only after review
+of a changed failure; proof contracts change when executable coverage changes.
+See the [runner documentation](crates/celox-test-suite/README.md#independent-verification).
+Daily CI uses `--fresh` and runs the complete corpus afresh.
 
 ## Finish validation
 

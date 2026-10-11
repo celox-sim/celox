@@ -21,7 +21,7 @@ pub(super) fn net_lvalue_from_node(
                     packed_dimensions,
                 );
             }
-            let name = identifier_text(
+            let name = reference_name(
                 RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0),
                 syntax_tree,
             )
@@ -51,17 +51,25 @@ pub(super) fn variable_lvalue_from_node(
             {
                 return packed_structs::variable_member(
                     node,
-                    None,
+                    identifier
+                        .nodes
+                        .0
+                        .is_some()
+                        .then(|| {
+                            reference_name(
+                                RefNode::VariableLvalueIdentifier(identifier),
+                                syntax_tree,
+                            )
+                        })
+                        .flatten(),
                     &identifier.nodes.2,
                     syntax_tree,
                     packed_dimensions,
                 );
             }
-            let name = identifier_text(
-                RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
-                syntax_tree,
-            )
-            .ok_or_else(|| unsupported("variable assignment target name"))?;
+            // `p::v = ...` assigns the package variable.
+            let name = reference_name(RefNode::VariableLvalueIdentifier(identifier), syntax_tree)
+                .ok_or_else(|| unsupported("variable assignment target name"))?;
             lvalue_from_select(
                 name,
                 &identifier.nodes.2,
@@ -120,6 +128,11 @@ fn has_indexed_selection(node: RefNode<'_>) -> bool {
     })
 }
 
+fn has_constant_part_selection(node: RefNode<'_>) -> bool {
+    node.into_iter()
+        .any(|node| matches!(node, RefNode::ConstantRange(_)))
+}
+
 /// Why a select of `name` with constant `indices` and, for a part-select,
 /// `bounds` has no representation.
 fn select_error(
@@ -175,12 +188,31 @@ pub(super) fn bit_select_index(
     if dimensions.constant_indexed_base || has_indexed_selection(RefNode::Expression(expression)) {
         indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)
     } else {
-        const_expr_from_expr(expression, syntax_tree)?.ok_or_else(|| {
+        let index_error = || {
             unsupported(format!(
                 "select index `{}`",
                 node_source_text(RefNode::Expression(expression), syntax_tree).unwrap_or_default()
             ))
-        })
+        };
+        if let Some(index) = const_expr_from_expr(expression, syntax_tree)? {
+            return Ok(index);
+        }
+        // Only extend support for constant part-select operands here.
+        if !has_constant_part_selection(RefNode::Expression(expression)) {
+            return Err(index_error());
+        }
+        let expr = expr_from_expression_with_types(expression, syntax_tree, dimensions)?;
+        expr_to_index_const(
+            expand_expr_calls(
+                expr,
+                &dimensions.functions,
+                &dimensions.expression_signedness,
+                0,
+                true,
+            ),
+            dimensions,
+        )
+        .ok_or_else(index_error)
     }
 }
 
@@ -203,13 +235,16 @@ pub(super) fn lvalue_from_select(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            expr_to_lvalue_const(expand_expr_calls(
-                expr,
-                &packed_dimensions.functions,
-                &packed_dimensions.expression_signedness,
-                0,
-                true,
-            ))
+            expr_to_index_const(
+                expand_expr_calls(
+                    expr,
+                    &packed_dimensions.functions,
+                    &packed_dimensions.expression_signedness,
+                    0,
+                    true,
+                ),
+                packed_dimensions,
+            )
             .ok_or_else(|| unsupported(format!("index of assignment target `{name}`")))
         })
         .map(|index| index.map(|index| self_determined_index(index, packed_dimensions)))
@@ -381,10 +416,23 @@ pub(super) fn lvalue_from_constant_select(
                     packed_dimensions,
                 )
             } else {
-                const_expr_from_ref_node(
-                    RefNode::ConstantExpression(&bit_select.nodes.1),
-                    syntax_tree,
-                )?
+                let node = RefNode::ConstantExpression(&bit_select.nodes.1);
+                // The lightweight parser can drop a constant part-select.
+                if !has_constant_part_selection(node.clone()) {
+                    return const_expr_from_ref_node(node, syntax_tree)?
+                        .ok_or_else(|| unsupported(format!("index of `{name}`")));
+                }
+                let expr = indexed_constant_expression(node, syntax_tree, packed_dimensions)?;
+                expr_to_index_const(
+                    expand_expr_calls(
+                        expr,
+                        &packed_dimensions.functions,
+                        &packed_dimensions.expression_signedness,
+                        0,
+                        true,
+                    ),
+                    packed_dimensions,
+                )
                 .ok_or_else(|| unsupported(format!("index of `{name}`")))
             }
         })
@@ -1897,6 +1945,7 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             }
             Some((width, variable.signed))
         }
+        ConstExpr::Resize { width, signed, .. } => Some((*width, *signed)),
         ConstExpr::Select { .. } => Some((1, false)),
         ConstExpr::Function { .. } => None,
         ConstExpr::Unary { op, expr } => match op {
@@ -2005,6 +2054,15 @@ fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) ->
             left: go(left),
             op,
             right: go(right),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: go(expr),
+            width,
+            signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary { op, expr: go(expr) },
         ConstExpr::Mux {

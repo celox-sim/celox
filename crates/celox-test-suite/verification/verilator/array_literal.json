@@ -1,0 +1,166 @@
+{
+  "cases": [
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_comb_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "array_literal::test_array_literal_default_comb_assignment",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_fills_2d_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_fills_param_sized_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_in_ff_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_default_only",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "array_literal::test_array_literal_nested_default_multidim_assignment",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "array_literal::test_array_literal_repeat_plus_default",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "array_literal::test_array_literal_single_element_size_one_array",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "array_literal::test_array_literal_two_explicit_plus_default",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -23,8 +23,9 @@ o = S'{x: a, y: b};
   (assert_eq o 0xA5))
 
 (case test_struct_constructor_member_width_adjustment
-  ; Veryl 867deb1's reference simulator debug-asserts when a non-literal
-  ; struct member expression needs width adjustment.
+  ; Veryl 0.22.0's reference simulator debug-asserts when a struct member
+  ; expression is wider than the member (veryl-lang/veryl#3215 fixed the
+  ; narrower case).
   (source "test.veryl" #"
 module Top (
 narrow: input logic<4>,

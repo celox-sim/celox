@@ -11,7 +11,7 @@ mod state_file;
 mod testbench;
 mod vcd;
 
-pub use error::SimulatorErrorCode;
+pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
 pub use reflection::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,

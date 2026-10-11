@@ -77,15 +77,11 @@ impl EventHandle for InterpEventRef {
 
 /// Map an interpreter failure onto the backend error code space.
 ///
-/// `SIRTerminator::Error` carries a positive true-loop convergence code,
-/// matching the compiled contract where a positive return value reports
-/// [`SimulatorErrorCode::DetectedTrueLoopCode`].
+/// Positive statuses identify loop/runtime errors; combinational fatal captures
+/// use negative statuses that encode their event site. Preserve either raw
+/// identity for the simulator to distinguish before rendering event records.
 fn error_code(error: InterpError) -> SimulatorErrorCode {
     match error {
-        // The interpreter is not constrained by the compiled function ABI's
-        // "zero return means success" convention, so every fatal code —
-        // including zero-valued assertion site codes — carries its runtime
-        // error info through unchanged.
         InterpError::Fatal(code) => SimulatorErrorCode::DetectedTrueLoopCode(code),
         _ => SimulatorErrorCode::InternalError,
     }

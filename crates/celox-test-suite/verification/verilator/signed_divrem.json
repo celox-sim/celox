@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_always_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_unknown",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_four_state_zero_divisor",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i128",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_zero_division": "Requires the suite's totalized two-state division/remainder result of zero, including logic destinations; SV arithmetic produces X before any two-state destination conversion (IEEE 1800-2023 11.3.4, 11.4.3)."
+      },
+      "tags": [
+        "two_state_zero_division"
+      ]
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator intentionally returns zero for MIN / -1 to avoid a host division exception (#2460). That discussion gives no SV rule permitting zero.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "evidence": [],
+        "observed_version": "5.052",
+        "reason": "Verilator intentionally returns zero for MIN / -1 to avoid a host division exception (#2460). That discussion gives no SV rule permitting zero.",
+        "standard": "IEEE 1800-2023 6.9.1, 11.4.3 and 11.6.1: fixed-width arithmetic modulo 2^64 preserves 0x8000000000000000 for MIN / -1.",
+        "upstream": [
+          "https://github.com/verilator/verilator/issues/2460#issuecomment-656970666"
+        ]
+      },
+      "name": "signed_divrem::signed_divrem_i64",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "signed_divrem::signed_divrem_i8",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

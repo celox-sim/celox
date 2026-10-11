@@ -171,6 +171,24 @@ pub(in crate::ast) fn member_first_dimension_width(
     usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
 }
 
+pub(in crate::ast) fn member_dimension_count(
+    node: RefNode<'_>,
+    select: &sv_parser::Select,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<usize> {
+    let path = variable_path(node, select, syntax_tree)?;
+    let (_, ty) = selected_member(&path, dimensions)?;
+    let remaining = ty
+        .packed_ranges
+        .len()
+        .checked_sub(select.nodes.1.nodes.0.len())?;
+    if select.nodes.2.is_some() && remaining == 0 {
+        return None;
+    }
+    Some(remaining)
+}
+
 /// A member of the structure `node` names. `base`, when given, is the name
 /// of that structure, such as the qualified name of a package parameter.
 pub(in crate::ast) fn variable_member(

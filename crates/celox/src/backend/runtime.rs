@@ -586,22 +586,28 @@ impl JitBackend {
                     events: (0..id_to_event.len()).map(|_| None).collect(),
                     fused: (0..id_to_event.len()).map(|_| None).collect(),
                 };
+                let mut compiled: Vec<Vec<SimFunc>> = Vec::with_capacity(planned.len());
                 for planned_kernel in &planned {
-                    let functions = (0..planned_kernel.tasks.len())
-                        .map(|task| {
-                            let units = planned_kernel
-                                .task_units(task)
-                                .into_iter()
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            let ptr = engine
-                                .compile_units(&units, None, None, None)
-                                .map_err(SimulatorError::from)?;
-                            Ok::<SimFunc, SimulatorError>(unsafe {
-                                std::mem::transmute::<*const u8, SimFunc>(ptr)
+                    let functions = if let Some(original) = planned_kernel.same_as {
+                        compiled[original].clone()
+                    } else {
+                        (0..planned_kernel.tasks.len())
+                            .map(|task| {
+                                let units = planned_kernel
+                                    .task_units(task)
+                                    .into_iter()
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let ptr = engine
+                                    .compile_units(&units, None, None, None)
+                                    .map_err(SimulatorError::from)?;
+                                Ok::<SimFunc, SimulatorError>(unsafe {
+                                    std::mem::transmute::<*const u8, SimFunc>(ptr)
+                                })
                             })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    compiled.push(functions.clone());
                     let kernel = JitLaneKernel {
                         schedule: celox_runtime::parallel::LaneSchedule::new(
                             lanes,
@@ -842,7 +848,9 @@ impl JitBackend {
             None => kernel.schedule.run_sequential(&runner),
         };
         result.map_err(|failure| match failure.code {
-            code if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+            code if code > 0 || celox_runtime::comb_fatal_site(code).is_some() => {
+                SimulatorErrorCode::DetectedTrueLoopCode(code)
+            }
             _ => SimulatorErrorCode::InternalError,
         })
     }

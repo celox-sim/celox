@@ -464,6 +464,9 @@ impl WasmBackend {
             0 => Ok(()),
             1 => Err(SimulatorErrorCode::DetectedTrueLoopCode(1)),
             code if code >= 2000 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
+            code if celox_runtime::comb_fatal_site(code).is_some() => {
+                Err(SimulatorErrorCode::DetectedTrueLoopCode(code))
+            }
             _ => Err(SimulatorErrorCode::InternalError),
         }
     }

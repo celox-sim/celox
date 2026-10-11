@@ -62,6 +62,9 @@ impl Verilator {
                 "--public-flat-rw",
                 "--timing",
                 "--assert",
+                // Immediate cover pass actions are disabled without user
+                // coverage, even when assertions are enabled.
+                "--coverage-user",
                 "-Wno-fatal",
                 "--x-initial",
                 "0",

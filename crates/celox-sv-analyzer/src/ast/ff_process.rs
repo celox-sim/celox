@@ -11,28 +11,31 @@ pub(super) fn ff_processes_from_module_node(
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    for item in generate::items(
+    let active = generate::items(
         node,
         syntax_tree,
         const_env,
         &packed_dimensions.type_aliases,
-    )? {
-        // Packages declare no instances, signals or processes here.
+    )?;
+    let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    for item in &active {
         let ScopeItem::Module(node) = item.node else {
             continue;
         };
-        if item.is_parameter_declaration() {
+        if !matches!(
+            item.common(),
+            Some(sv_parser::ModuleCommonItem::AlwaysConstruct(_))
+        ) {
             continue;
         }
         let start = processes.len();
-        let dimensions = item.dimensions(packed_dimensions);
-        let literals = item.parameter_literals(parameter_literals);
+        let (dimensions, literals) = views.get(item);
         ff_processes_from_module_or_generate_item(
             node,
             syntax_tree,
             &item.env,
-            &literals,
-            &dimensions,
+            literals,
+            dimensions,
             &mut processes,
             state,
         )?;
@@ -41,7 +44,7 @@ pub(super) fn ff_processes_from_module_node(
                 event.signal = item.name(&event.signal);
             }
             for stmt in &mut process.body {
-                procedural::qualify_stmt(&item, stmt);
+                procedural::qualify_stmt(item, stmt);
             }
         }
     }

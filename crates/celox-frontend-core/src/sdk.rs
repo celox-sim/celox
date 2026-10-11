@@ -1361,6 +1361,7 @@ pub fn lower_frontend_artifact(
         arena,
         reset_clock_map,
         processes,
+        package_bindings: HashMap::default(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),
@@ -1368,6 +1369,7 @@ pub fn lower_frontend_artifact(
             .into_iter()
             .collect(),
         root_id: module_id,
+        packages: Vec::new(),
     };
     let external = ExternalHierarchy {
         modules: [(
@@ -1387,6 +1389,7 @@ pub fn lower_frontend_artifact(
         roots: [(artifact.module_name().to_string(), module_id)]
             .into_iter()
             .collect(),
+        packages: Vec::new(),
     };
     Ok(LoweredFrontendArtifact { symbolic, external })
 }

@@ -227,6 +227,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    package_variable: Option<(String, String)>,
 }
 
 impl Signal {
@@ -235,7 +236,24 @@ impl Signal {
             name,
             r#type,
             is_net,
+            package_variable: None,
         }
+    }
+
+    pub(crate) fn with_package_variable(mut self, package_variable: Option<(&str, &str)>) -> Self {
+        self.package_variable =
+            package_variable.map(|(package, variable)| (package.to_string(), variable.to_string()));
+        self
+    }
+
+    /// The package variable (IEEE 1800-2023 26.2) the signal denotes, as
+    /// `(package, variable)`: every module that uses it shares that object,
+    /// the signal `variable` of the package's
+    /// [`state module`](crate::Packages::state_modules).
+    pub fn package_variable(&self) -> Option<(&str, &str)> {
+        self.package_variable
+            .as_ref()
+            .map(|(package, variable)| (package.as_str(), variable.as_str()))
     }
 
     pub fn name(&self) -> &str {
@@ -571,6 +589,13 @@ pub enum ConstExpr {
     Select {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
+    },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
+        signed: bool,
     },
     Function {
         name: String,
@@ -908,6 +933,15 @@ impl From<ast::ConstExpr> for ConstExpr {
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
+            ast::ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
+            },
             ast::ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: op.into(),
                 expr: Box::new((*expr).into()),
@@ -943,6 +977,15 @@ impl From<ConstExpr> for ast::ConstExpr {
                 name,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ast::ConstExpr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
             },
             ConstExpr::Unary { op, expr } => ast::ConstExpr::Unary {
                 op: op.into(),

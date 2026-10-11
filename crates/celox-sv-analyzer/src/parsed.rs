@@ -43,7 +43,10 @@ impl ParsedSource {
     /// Analyze the packages declared in `sources`, each once, after the
     /// packages it depends on.
     pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {
-        let trees: Vec<_> = sources.iter().map(|source| &source.tree).collect();
+        let trees: Vec<_> = sources
+            .iter()
+            .map(|source| (&source.tree, source.path.as_path()))
+            .collect();
         ast::with_call_sites(|| Packages::analyze(&trees))
     }
 
@@ -102,6 +105,7 @@ impl ParsedSource {
         ast::with_call_sites(|| {
             let source = ast::Source::from_indexed_syntax_module(
                 &self.tree,
+                &self.path,
                 &self.index,
                 module_name,
                 &overrides,

@@ -106,27 +106,50 @@ pub(super) fn reject_silently_ignored_constructs(
     let mut indexed_dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
     indexed_dimensions.parameter_values = parameter_values.clone().into();
-    let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
-    let generated_nodes: Vec<_> = if is_module {
-        node.clone()
-            .into_iter()
-            .filter(|n| {
-                matches!(
-                    n,
-                    RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
-                )
-            })
-            .flat_map(|n| n.into_iter())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    reject_silently_ignored_constructs_with_dimensions(node, syntax_tree, &indexed_dimensions)
+}
+
+/// Walk each syntax node once, excluding inactive/unelaborated generate bodies.
+/// Generate items are validated separately with their own lexical environment.
+fn validation_nodes(node: RefNode<'_>, is_module: bool) -> impl Iterator<Item = RefNode<'_>> {
+    let mut generate_depth = 0usize;
+    node.into_iter().event().filter_map(move |event| {
+        let (entering, child) = match event {
+            sv_parser::NodeEvent::Enter(child) => (true, child),
+            sv_parser::NodeEvent::Leave(child) => (false, child),
+        };
+        if is_module
+            && matches!(
+                child,
+                RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
+            )
+        {
+            if entering {
+                generate_depth += 1;
+            } else {
+                generate_depth -= 1;
+            }
+            return None;
+        }
+        (entering && generate_depth == 0).then_some(child)
+    })
+}
+
+fn reject_silently_ignored_constructs_with_dimensions(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    indexed_dimensions: &PackedDimensions,
+) -> Result<(), AnalyzerError> {
+    let const_env = &indexed_dimensions.const_env;
+    let type_aliases = &indexed_dimensions.type_aliases;
+    let is_module = matches!(
+        node,
+        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+    );
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.
-    let lowered_constant_indexed_ranges: Vec<_> = node
-        .clone()
-        .into_iter()
+    let lowered_constant_indexed_ranges: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter_map(|child| match child {
             RefNode::IndexedRange(_)
             | RefNode::Select(_)
@@ -148,9 +171,7 @@ pub(super) fn reject_silently_ignored_constructs(
         .collect();
     // Typed indexed lowering validates casts in bases, widths and supported
     // parameter initializers. Keep the generic cast checks for other contexts.
-    let typed_indexed_casts: Vec<_> = node
-        .clone()
-        .into_iter()
+    let typed_indexed_casts: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter_map(|child| match child {
             RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => Some(child),
             RefNode::ParamAssignment(parameter) => parameter
@@ -171,9 +192,7 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_) | RefNode::ConstantCast(_)))
         .collect();
-    let subroutine_casts: Vec<_> = node
-        .clone()
-        .into_iter()
+    let subroutine_casts: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter(|child| {
             matches!(
                 child,
@@ -183,9 +202,47 @@ pub(super) fn reject_silently_ignored_constructs(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
-    for child in node.clone() {
-        if generated_nodes.iter().any(|n| n == &child) {
-            continue;
+    // Procedure locals, parameters and loop indices are installed by
+    // BodyBuilder. Validate their queries while lowering that scoped body.
+    let procedural_queries: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::AlwaysConstruct(_)
+                    | RefNode::InitialConstruct(_)
+            )
+        })
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    for child in validation_nodes(node.clone(), is_module) {
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && !procedural_queries.contains(&call)
+        {
+            parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
+        }
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && system_tf_call_parts(call, syntax_tree)
+                .is_some_and(|(name, _)| name == "$isunbounded")
+        {
+            let (name, args) = system_tf_call_parts(call, syntax_tree).unwrap();
+            system_functions::check_call(
+                name,
+                args.as_deref(),
+                system_functions::CallSite::Expression,
+            )?;
+            let value = parameters::isunbounded_call(call, syntax_tree, const_env)?;
+            if value.is_none() && !procedural_queries.contains(&call) {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                });
+            }
         }
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
@@ -201,11 +258,22 @@ pub(super) fn reject_silently_ignored_constructs(
             selects::indexed_parameter_initializer(
                 expression,
                 syntax_tree,
-                &indexed_dimensions,
+                indexed_dimensions,
                 None,
             )?;
         }
         match child {
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$dimensions")
+                    && !procedural_queries.contains(&call) =>
+            {
+                // Preliminary parameter lowering may defer a type query.
+                // Check even unused declarations once their scope is known.
+                dimensions::dimensions_system_function_call_value(
+                    call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
+                ).ok_or_else(|| unsupported(format!("operand of `$dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
+            }
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)
@@ -312,9 +380,9 @@ pub(super) fn reject_silently_ignored_constructs(
                 indexed_select_base(
                     RefNode::Expression(&range.nodes.0),
                     syntax_tree,
-                    &indexed_dimensions,
+                    indexed_dimensions,
                 )?;
-                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
+                check_indexed_width(&range.nodes.2, syntax_tree, indexed_dimensions)?;
             }
             RefNode::ConstantIndexedRange(range) => {
                 if !lowered_constant_indexed_ranges.contains(&range) {
@@ -323,14 +391,14 @@ pub(super) fn reject_silently_ignored_constructs(
                 let base = indexed_select_base(
                     RefNode::ConstantExpression(&range.nodes.0),
                     syntax_tree,
-                    &indexed_dimensions,
+                    indexed_dimensions,
                 )?;
                 if eval_ast_const_expr(&base, const_env).is_none() {
                     return Err(AnalyzerError::Unsupported(
                         "indexed part-select start that is not constant".to_string(),
                     ));
                 }
-                check_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions)?;
+                check_indexed_width(&range.nodes.2, syntax_tree, indexed_dimensions)?;
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -377,13 +445,6 @@ pub(super) fn reject_silently_ignored_constructs(
             {
                 return Err(AnalyzerError::Unsupported(
                     "delayed continuous assignment".to_string(),
-                ));
-            }
-            RefNode::FunctionDeclaration(function)
-                if function_has_static_local_state(function) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "static function-local state".to_string(),
                 ));
             }
             RefNode::FunctionDeclaration(function)
@@ -438,17 +499,7 @@ pub(super) fn reject_silently_ignored_constructs(
                 }
             }
             // Package scopes and imports resolve through the imported
-            // packages; compilation-unit declarations are not analyzed.
-            RefNode::PackageExportDeclaration(_) => {
-                return Err(AnalyzerError::Unsupported(
-                    "package export declaration".to_string(),
-                ));
-            }
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
-                return Err(AnalyzerError::Unsupported(
-                    "compilation-unit scope reference `$unit::`".to_string(),
-                ));
-            }
+            // packages and the compilation unit.
             RefNode::ParamAssignment(parameter)
                 if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
                     matches!(
@@ -491,15 +542,14 @@ pub(super) fn reject_silently_ignored_constructs(
         }
     }
     if is_module {
-        for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
-            let dimensions = item.dimensions(&indexed_dimensions);
-            reject_silently_ignored_constructs(
+        let active = generate::items(node, syntax_tree, const_env, type_aliases)?;
+        let mut views = generate::ScopeViews::new(indexed_dimensions);
+        for item in &active {
+            let dimensions = views.dimensions(item);
+            reject_silently_ignored_constructs_with_dimensions(
                 item.node.node(),
                 syntax_tree,
-                &dimensions.const_env,
-                type_aliases,
-                &dimensions,
-                &dimensions.parameter_values,
+                dimensions,
             )?;
         }
     }
@@ -524,35 +574,6 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
     }
 }
 
-fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) -> bool {
-    let function_is_static = !matches!(function.nodes.1, Some(sv_parser::Lifetime::Automatic(_)));
-    let local_is_static = |item: &sv_parser::BlockItemDeclaration| {
-        let sv_parser::BlockItemDeclaration::Data(item) = item else {
-            return false;
-        };
-        let sv_parser::DataDeclaration::Variable(variable) = &item.nodes.1 else {
-            return false;
-        };
-        match &variable.nodes.2 {
-            Some(sv_parser::Lifetime::Automatic(_)) => false,
-            Some(sv_parser::Lifetime::Static(_)) => true,
-            None => function_is_static,
-        }
-    };
-    match &function.nodes.2 {
-        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-            body.nodes.5.iter().any(local_is_static)
-        }
-        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
-            matches!(
-                item,
-                sv_parser::TfItemDeclaration::BlockItemDeclaration(item)
-                    if local_is_static(item)
-            )
-        }),
-    }
-}
-
 /// Reject an indexed part-select width that is not a positive constant.
 fn check_indexed_width(
     width: &sv_parser::ConstantExpression,
@@ -566,5 +587,44 @@ fn check_indexed_width(
         Err(AnalyzerError::Unsupported(
             "indexed part-select width that is not a positive constant".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn excludes_nested_generate_bodies_but_keeps_surrounding_declarations() {
+        let tree = crate::syntax::parse_source(
+            "module Top(); logic outside_before; if (1) begin : g logic hidden; if (0) begin : nested logic deep; end end for (genvar i=0; i<2; i++) begin : loop_scope logic looped; end logic outside_after; endmodule",
+            Path::new("validation_scopes.sv"),
+        ).unwrap();
+        let node = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let declarations = |module| {
+            validation_nodes(node.clone(), module)
+                .filter_map(|node| match node {
+                    RefNode::VariableIdentifier(identifier) => {
+                        identifier_text(RefNode::VariableIdentifier(identifier), &tree)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(declarations(true), ["outside_before", "outside_after"]);
+        assert_eq!(
+            declarations(false),
+            [
+                "outside_before",
+                "hidden",
+                "deep",
+                "looped",
+                "outside_after"
+            ]
+        );
     }
 }

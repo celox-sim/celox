@@ -35,6 +35,7 @@ fn test_signed_xor_step_uses_loop_counter_width(sim) {
 }
 
 fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
+    // Veryl 0.22.0's simulator evaluates a runtime loop bound wider than 64 bits as 0.
     @ignore_on(veryl);
     @case "synth_dynamic_loop::test_i32_bitwise_steps_discard_bits_above_the_counter_width";
 }
@@ -161,6 +162,8 @@ fn test_runtime_reverse_step_matches_emitted_sv_order(sim) {
 }
 
 fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
+    // Veryl does not reject a constant step that is 0 in the 32-bit counter, and its simulator
+    // hangs.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (

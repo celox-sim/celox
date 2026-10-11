@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { checkExternalSuiteReport } from "./check-external-suite-report.mjs";
+import { readVerificationReport } from "./read-verification-report.mjs";
 
 const statuses = [
   "passed",
@@ -106,6 +106,28 @@ test("a retained baseline without run metadata is accepted", () => {
     delete input.baseline[key];
   input.baseline.cases.forEach((row) => delete row.reused);
   assert.deepEqual(check(input), { cases: 2, accepted_failures: ["known"] });
+});
+
+test("new passing cases do not require rewriting the retained baseline", () => {
+  for (const status of ["passed", "rejected"]) {
+    const input = fixture();
+    const expectation = status === "rejected" ? "CompilationError" : "Simulation";
+    const row = {
+      ...input.current.cases[1],
+      name: "new::case",
+      expectation,
+      status,
+    };
+    input.current.cases.push(row);
+    input.current.counts = counts(input.current.cases);
+    input.current.run_counts.fresh++;
+    input.catalogue.cases.push({ ...input.catalogue.cases[1], name: row.name, expectation });
+    assert.deepEqual(check(input), { cases: 3, accepted_failures: ["known"] });
+    row.status = "compile_error";
+    row.detail = "new failure";
+    input.current.counts = counts(input.current.cases);
+    assert.throws(() => check(input), /new or changed external verification failures/);
+  }
 });
 
 test("new failures, changed diagnostics and changed tools cannot use the baseline", () => {
@@ -219,9 +241,7 @@ test("all four retained baselines accept only their existing failures", () => {
   for (const suite of ["veryl", "sv"]) {
     for (const tool of ["verilator", "icarus"]) {
       const file = `../crates/celox-test-suite/verification/${suite === "sv" ? "sv/" : ""}${tool}.json`;
-      const baseline = JSON.parse(
-        readFileSync(new URL(file, import.meta.url), "utf8"),
-      );
+      const baseline = readVerificationReport(new URL(file, import.meta.url));
       const current = {
         ...structuredClone(baseline),
         suite,
@@ -253,7 +273,7 @@ test("all four retained baselines accept only their existing failures", () => {
       );
       assert.equal(
         result.accepted_failures.length,
-        suite === "sv" ? 0 : tool === "icarus" ? 11 : 1,
+        suite === "sv" ? 0 : tool === "icarus" ? 11 : 2,
       );
     }
   }

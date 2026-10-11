@@ -1,0 +1,375 @@
+{
+  "cases": [
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::always_star_and_edge_sensitive_always_match_the_systemverilog_keywords",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::assigning_the_function_name_returns_its_last_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::block_locals_and_dependent_assignments_accumulate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::break_and_continue_end_unrolled_loop_iterations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::casez_and_casex_treat_wildcard_bits_as_dont_care",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::enum_members_without_values_follow_their_predecessor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::exponentiation_works_in_constant_expressions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_function_outputs",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+        "upstream": []
+      },
+      "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_inside",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support inside expressions (\"sorry: inside expressions not supported yet\"). Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "synthesizable::inside_matches_values_ranges_and_wildcards",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_instance_array_unpacked_port",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "synthesizable::instance_array_unpacked_connection_ascending_to_descending",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_instance_array_unpacked_port",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_ascending",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_instance_array_unpacked_port",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_descending",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_instance_array_unpacked_port",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports multiple drivers. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "synthesizable::instance_array_unpacked_connection_offset_ranges",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_broadcast_and_slice_connections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 accepts a one-bit '0 connected to a wider port of an instance array, which IEEE 1800-2023 23.3.3.5 makes an error. Verilator rejects it.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_instance_array_fill_literal",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 accepts a one-bit '0 connected to a wider port of an instance array, which IEEE 1800-2023 23.3.3.5 makes an error. Verilator rejects it.",
+        "upstream": []
+      },
+      "name": "synthesizable::instance_arrays_reject_a_fill_literal_tie_off",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: Port expression width 32 does not match expected width 16 or 8.\n1 error(s) during elaboration.\n",
+      "expectation": "CompilationError",
+      "name": "synthesizable::instance_arrays_reject_an_unsized_constant_tie_off",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_with_ascending_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_with_non_zero_based_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::net_declaration_assignment_drives_the_net",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::packages_provide_types_parameters_functions_and_enums",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::positional_ports_and_parameters_bind_in_declaration_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_syntax",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::tasks_without_timing_write_their_outputs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::type_parameters_are_bound_by_instantiations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::typedef_unpacked_arrays_are_not_instance_arrays",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
