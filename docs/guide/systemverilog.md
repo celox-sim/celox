@@ -274,6 +274,11 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   the same formal names in parameter initializers, ranges and generate conditions;
   generate-local declarations retain their own signatures. Named calls with
   procedural effects in selection indices are rejected.
+- **Typed parameter patterns** are converted in the caller's type, preserving
+  width, signing and four-state values (IEEE 1800-2023 10.9, 6.20.2). Packed
+  values transfer by bits, so struct member names and field divisions may differ
+  in the child. Typed scalar patterns can override a parameter whose default is
+  an ordinary value. Unpacked patterns retain their positional array shape.
 - **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
   procedural block, function or task is static unless it, its subroutine or
   its module (`module automatic`) is declared `automatic`. A static local of a
