@@ -936,6 +936,206 @@ fn compare_retained_and_repeated_parameter_resolution() {
 }
 
 #[test]
+fn referenced_value_projection_matches_full_environment() {
+    let p = |name: &str, value: ConstExpr, width: Option<usize>, two_state: bool| {
+        Parameter::new(
+            name.into(),
+            Some(value),
+            width,
+            width.map(|_| true),
+            two_state,
+            width.is_some(),
+            true,
+        )
+    };
+    let id = |name: &str| ConstExpr::Ident(name.into());
+    let parameters = vec![
+        p(
+            "A",
+            ConstExpr::Literal("8'bxz010101".into()),
+            Some(8),
+            false,
+        ),
+        p("P", id("A"), Some(8), false),
+        p(
+            "B",
+            ConstExpr::Function {
+                name: "missing".into(),
+                args: vec![id("P")],
+                site: None,
+            },
+            Some(32),
+            false,
+        ),
+        p(
+            "wide",
+            ConstExpr::Literal("129'bz".into()),
+            Some(129),
+            false,
+        ),
+        p(
+            "selected",
+            ConstExpr::Select {
+                expr: Box::new(id("A")),
+                bit: Box::new(id("index")),
+            },
+            Some(1),
+            false,
+        ),
+        p("index", ConstExpr::Literal("3".into()), None, false),
+        p(
+            "conditional",
+            ConstExpr::Mux {
+                condition: Box::new(id("index")),
+                then_expr: Box::new(id("B")),
+                else_expr: Box::new(id("wide")),
+            },
+            Some(32),
+            true,
+        ),
+        p("forward", id("later"), None, false),
+        p("later", ConstExpr::Literal("4'shf".into()), None, false),
+        p("P", ConstExpr::Literal("8'sd7".into()), Some(8), false),
+        p("self", id("self"), Some(8), false),
+        p("cycle_a", id("cycle_b"), Some(8), false),
+        p("cycle_b", id("cycle_a"), Some(8), false),
+        // A known value can still need a preceding parameter's inferred type.
+        p("typed_known", id("later"), None, false),
+    ];
+    for env in [
+        HashMap::default(),
+        HashMap::from_iter([("B".into(), -3), ("typed_known".into(), -1)]),
+    ] {
+        let full = parameter_value_env(&parameters, &env);
+        for parameter in &parameters {
+            let wanted = HashSet::from_iter([parameter.name().to_string()]);
+            let projected = parameter_value_env_for_references(&parameters, &env, &wanted);
+            assert_eq!(
+                projected.get(parameter.name()),
+                full.get(parameter.name()),
+                "{}",
+                parameter.name()
+            );
+            for (name, value) in &projected {
+                assert_eq!(Some(value), full.get(name), "{name}");
+            }
+        }
+        PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(0));
+        assert!(
+            parameter_value_env_for_references(
+                &parameters,
+                &env,
+                &HashSet::from_iter(["not_a_parameter".into()])
+            )
+            .is_empty()
+        );
+        PARAMETER_VALUE_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+    }
+}
+
+#[test]
+fn numeric_projection_does_not_expand_initializer_dependencies() {
+    let parameters = vec![
+        Parameter::new(
+            "A".into(),
+            Some(ConstExpr::Literal("'x".into())),
+            Some(8),
+            Some(false),
+            false,
+            true,
+            true,
+        ),
+        Parameter::new(
+            "B".into(),
+            Some(ConstExpr::Ident("A".into())),
+            Some(8),
+            Some(false),
+            false,
+            true,
+            true,
+        ),
+    ];
+    let env = HashMap::from_iter([("B".into(), 3)]);
+    PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(0));
+    let projected =
+        parameter_value_env_for_references(&parameters, &env, &HashSet::from_iter(["B".into()]));
+    PARAMETER_VALUE_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected["B"], parameter_value_env(&parameters, &env)["B"]);
+}
+
+#[test]
+#[ignore = "manual paired timing probe; no timing thresholds"]
+fn compare_full_and_referenced_parameter_values() {
+    // Keep the old deep expression expansion on a large stack for comparison.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            use std::{hint::black_box, time::Instant};
+            println!("parameters,full_ms,referenced_ms,full_values,referenced_values");
+            for count in [32, 128, 512] {
+                let parameters: Vec<_> = (0..count)
+                    .map(|i| {
+                        Parameter::new(
+                            format!("P{i}"),
+                            Some(ConstExpr::Function {
+                                name: "uninstalled".into(),
+                                args: vec![if i == 0 {
+                                    ConstExpr::Literal("0".into())
+                                } else {
+                                    ConstExpr::Ident(format!("P{}", i - 1))
+                                }],
+                                site: None,
+                            }),
+                            Some(32),
+                            Some(true),
+                            true,
+                            true,
+                            true,
+                        )
+                    })
+                    .collect();
+                let env = HashMap::default();
+                let references = HashSet::from_iter(["P0".into()]);
+                let expected = parameter_value_env(&parameters[..1], &env)["P0"].clone();
+                let run = |full: bool| {
+                    let start = Instant::now();
+                    let values = if full {
+                        parameter_value_env(black_box(&parameters), &env)
+                    } else {
+                        parameter_value_env_for_references(
+                            black_box(&parameters),
+                            &env,
+                            &references,
+                        )
+                    };
+                    assert_eq!(values.len(), if full { count } else { 1 });
+                    assert_eq!(values["P0"], expected);
+                    black_box(values);
+                    start.elapsed().as_secs_f64() * 1000.0
+                };
+                let mut full = Vec::new();
+                let mut referenced = Vec::new();
+                for repetition in 0..7 {
+                    if repetition % 2 == 0 {
+                        full.push(run(true));
+                        referenced.push(run(false));
+                    } else {
+                        referenced.push(run(false));
+                        full.push(run(true));
+                    }
+                }
+                full.sort_by(f64::total_cmp);
+                referenced.sort_by(f64::total_cmp);
+                println!("{count},{:.3},{:.3},{count},1", full[3], referenced[3]);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
     let mut env = HashMap::default();
     let mut types = HashMap::default();
@@ -993,4 +1193,54 @@ fn unbounded_generate_binding_clears_inherited_numeric_values() {
         assert!(!env.contains_key(&key), "numeric binding survives: {key}");
     }
     assert_eq!(literals.get("P"), Some(&Expr::Literal("$".into())));
+}
+
+#[test]
+fn unbounded_projection_keeps_requested_aliases_and_omits_unused_dollars() {
+    let parameters = vec![
+        Parameter::new(
+            "U".into(),
+            Some(ConstExpr::Literal("$".into())),
+            Some(8),
+            Some(false),
+            false,
+            true,
+            false,
+        ),
+        Parameter::new(
+            "ALIAS".into(),
+            Some(ConstExpr::Ident("U".into())),
+            Some(32),
+            Some(true),
+            true,
+            true,
+            true,
+        ),
+        Parameter::new(
+            "NUMBER".into(),
+            Some(ConstExpr::Literal("7".into())),
+            Some(32),
+            Some(true),
+            true,
+            true,
+            true,
+        ),
+    ];
+    for env in [
+        HashMap::default(),
+        HashMap::from_iter([(unbounded_parameter_marker("U"), 1), ("U".into(), 99)]),
+    ] {
+        let full = parameter_value_env(&parameters, &env);
+        for name in ["U", "ALIAS", "NUMBER"] {
+            let projected = parameter_value_env_for_references(
+                &parameters,
+                &env,
+                &HashSet::from_iter([name.into()]),
+            );
+            assert_eq!(projected.get(name), full.get(name), "{name}");
+            if name == "NUMBER" {
+                assert_eq!(projected.len(), 1);
+            }
+        }
+    }
 }
