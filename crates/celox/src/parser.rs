@@ -632,7 +632,7 @@ pub fn parse_sv(
 /// An analyzer error as a parser error: a construct the analyzer does not
 /// support stays unsupported, and anything else is an error in the source.
 #[cfg(feature = "systemverilog")]
-fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
+pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
     match error {
         celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
             error.tracking_issue(),
@@ -653,9 +653,15 @@ fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
 #[cfg(feature = "systemverilog")]
 pub fn parse_mixed(
     top: &StrId,
-    ir: &veryl_analyzer::ir::Ir,
+    ir: &mut veryl_analyzer::ir::Ir,
+    context: &mut veryl_analyzer::Context,
     loop_provenance: &loop_provenance::LoopProvenance,
     sv_sources: &[(&str, &std::path::Path)],
+    foreign_declarations: &[(&str, &std::path::Path)],
+    top_parameters: &[(String, u64)],
+    requests: &[celox_frontend_sv::SvModuleRequest],
+    sv_interfaces: &[celox_frontend_sv::InterfaceSignature],
+    used_names: &mut fxhash::FxHashSet<String>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -683,21 +689,152 @@ pub fn parse_mixed(
     ParserError,
 > {
     let external_roots = reachable_external_sv_roots(ir, top);
-    let external_roots = external_roots
+    let mut external_roots: HashSet<_> = external_roots
         .into_iter()
         .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
         .collect();
-    let external =
-        celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
-            .map_err(|error| match error {
-                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-                celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
-            })?;
+    let top_name = veryl_parser::resource_table::get_str_value(*top).unwrap_or_default();
+    let native_top = ir.components.iter().any(|component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name.to_string() == top_name));
+    if !native_top {
+        external_roots.insert(top_name.clone());
+    }
+    let mut foreign = celox_frontend_veryl::external_signatures(ir, config)?;
+    let authored = celox_frontend_sv::module_interfaces(sv_sources).map_err(sv_analysis_error)?;
+    foreign.roots.retain(|name, _| !authored.contains_key(name));
+    let sv_top_parameters = (!native_top).then_some((top_name.as_str(), top_parameters));
+    let base = ir.clone();
+    let mut specializations = Vec::new();
+    let mut signatures: fxhash::FxHashMap<
+        _,
+        celox_frontend_core::symbolic::artifact::ExternalModule,
+    > = fxhash::FxHashMap::default();
+    let mut requests = requests.to_vec();
+    let mut sources = sv_sources
+        .iter()
+        .map(|(source, path)| (source.to_string(), path.to_path_buf()))
+        .collect::<Vec<_>>();
+    // A native specialization can introduce further SV specializations and
+    // interface behavior. Analyze the expanded requests until every alternating
+    // language boundary has been prepared; cache native elaboration by key.
+    let external = loop {
+        let borrowed_sources = sources
+            .iter()
+            .map(|(source, path)| (source.as_str(), path.as_path()))
+            .collect::<Vec<_>>();
+        let mut pending_sources = Vec::new();
+        let mut pending_requests = Vec::new();
+        let mut pending_roots = Vec::new();
+        let mut resolver =
+            |name: &str, parameters: &[(String, celox_frontend_sv::SvParameterValue)]| {
+                let key = (name.to_string(), parameters.to_vec());
+                if let Some(signature) = signatures.get(&key) {
+                    return Ok(signature.clone());
+                }
+                if signatures
+                    .keys()
+                    .filter(|(module, _)| module == name)
+                    .count()
+                    >= 64
+                {
+                    return Err(celox_frontend_core::ParserError::illegal_context(
+                        "foreign module specialization",
+                        format!("too many specializations of `{name}`"),
+                        None,
+                    ));
+                }
+                let mut prepare = || -> Result<_, ParserError> {
+                    let module = crate::simulator::mixed::specialize_foreign_module(
+                        &base, context, name, parameters, used_names,
+                    )?;
+                    let mut specialized = veryl_analyzer::ir::Ir {
+                        components: vec![veryl_analyzer::ir::Component::Module(module)],
+                    };
+                    let behavior = crate::simulator::mixed::attach_sv_interface_behavior(
+                        &mut specialized,
+                        sv_interfaces,
+                        context,
+                        used_names,
+                    )?;
+                    let mut joint_sources = borrowed_sources.clone();
+                    joint_sources.extend(behavior.iter().map(|source| {
+                        (
+                            source.as_str(),
+                            std::path::Path::new("<sv-interface-behavior>"),
+                        )
+                    }));
+                    let requests = crate::simulator::mixed::specialize_sv_instances(
+                        &mut specialized,
+                        &joint_sources,
+                        context,
+                        used_names,
+                    )?;
+                    let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
+                    let signature = exported.modules.values().next().cloned().ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "foreign module specialization",
+                            format!("no concrete signature for `{name}`"),
+                            None,
+                        )
+                    })?;
+                    pending_roots.extend(signature.unresolved_instances.iter().cloned());
+                    pending_sources.extend(behavior);
+                    pending_requests.extend(requests);
+                    specializations.extend(specialized.components);
+                    Ok(signature)
+                };
+                let signature = prepare().map_err(|error| {
+                    celox_frontend_core::ParserError::illegal_context(
+                        "foreign module specialization",
+                        error.to_string(),
+                        None,
+                    )
+                })?;
+                signatures.insert(key, signature.clone());
+                Ok(signature)
+            };
+        let external = celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver(
+            &borrowed_sources,
+            &external_roots,
+            &foreign,
+            foreign_declarations,
+            four_state,
+            Some(&mut resolver),
+            sv_top_parameters,
+            &requests,
+        )
+        .map_err(|error| match error {
+            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+            celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+        })?;
+        if pending_sources.is_empty() && pending_requests.is_empty() {
+            break external;
+        }
+        external_roots.extend(pending_roots);
+        external_roots.extend(pending_requests.iter().map(|request| request.alias.clone()));
+        requests.extend(pending_requests);
+        sources.extend(
+            pending_sources
+                .into_iter()
+                .map(|source| (source, std::path::PathBuf::from("<sv-interface-behavior>"))),
+        );
+    };
+    ir.components.extend(specializations);
+    let mut native_modules = foreign.roots.keys().cloned().collect::<HashSet<_>>();
+    native_modules.extend(ir.components.iter().filter_map(|component| {
+        if let veryl_analyzer::ir::Component::Module(module) = component
+            && !authored.contains_key(&module.name.to_string())
+        {
+            Some(module.name.to_string())
+        } else {
+            None
+        }
+    }));
     parse_with_external_hierarchy(
         top,
         ir,
         loop_provenance,
         &external,
+        Some(&native_modules),
         config,
         ignored_loops,
         true_loops,
@@ -719,6 +856,7 @@ pub fn parse_with_external_hierarchy(
     ir: &veryl_analyzer::ir::Ir,
     loop_provenance: &loop_provenance::LoopProvenance,
     external: &celox_frontend_core::symbolic::artifact::ExternalHierarchy,
+    native_modules: Option<&HashSet<String>>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -745,13 +883,24 @@ pub fn parse_with_external_hierarchy(
     ),
     ParserError,
 > {
-    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
-        ir,
-        loop_provenance,
-        external,
-        config,
-        top,
-    )?;
+    let symbolic = if let Some(native_modules) = native_modules {
+        celox_frontend_veryl::parse_ir_with_external_hierarchy_and_native_modules(
+            ir,
+            loop_provenance,
+            external,
+            config,
+            top,
+            native_modules,
+        )?
+    } else {
+        celox_frontend_veryl::parse_ir_with_external_hierarchy(
+            ir,
+            loop_provenance,
+            external,
+            config,
+            top,
+        )?
+    };
     if let Some(trace) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {

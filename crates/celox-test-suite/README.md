@@ -251,13 +251,14 @@ A case whose design has processes with delays or event controls, or a clock
 it generates itself, advances time with `run_until` and `run_to_finish` and
 checks the design's output with `expect_output`. Design delays count time
 units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
-and `timeprecision` declarations are rejected consistently by the Celox and
+and `timeprecision` declarations, and `resetall`, are rejected consistently by the Celox and
 external adapters. `tick` cannot be mixed with timed operations.
 
 Reads, output collection and `eval` settle processes due at the current
 timestamp without advancing time. External scripted adapters use an Icarus
 read/write synchronization callback or a Verilator clocking event sampled in
-the observed region. Initial blocks start after pre-run input writes settle.
+the observed region. Initial blocks and plain time-zero `always` processes start after pre-run input
+writes settle. Internal control names are chosen to avoid source identifiers.
 `run_until` drains its target timestamp before subsequent writes. Only checks
 may follow `run_to_finish`; they run in a `final` block that sees the script's
 top-level bindings. There is no simulated-time deadline: final checks require

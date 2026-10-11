@@ -468,6 +468,45 @@ fn validate_function_statement(
     }
 }
 
+/// IEEE 1800-2023 13.4.1: a nonvoid function declares a writable result
+/// variable with its own name and declared return type. Resolve its shape only
+/// when an expression uses it, to avoid rebuilding dependent return ranges
+/// during unrelated function-type discovery.
+pub(super) fn function_result_dimensions(
+    declaration: &sv_parser::FunctionDeclaration,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Option<(String, VariableDimensions)> {
+    let (name, return_type) = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => (&body.nodes.2, &body.nodes.0),
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => (&body.nodes.2, &body.nodes.0),
+    };
+    let name = identifier_text(RefNode::FunctionIdentifier(name), tree)?;
+    let used = RefNode::FunctionDeclaration(declaration)
+        .into_iter()
+        .any(|node| {
+            let RefNode::PrimaryHierarchical(primary) = node else {
+                return false;
+            };
+            reference_name(RefNode::PrimaryHierarchical(primary), tree).is_some_and(|reference| {
+                reference
+                    .strip_prefix(&name)
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'))
+            })
+        });
+    if !used {
+        return None;
+    }
+    let ty = function_type_from_ref_node(
+        RefNode::FunctionDataTypeOrImplicit(return_type),
+        tree,
+        env,
+        aliases,
+    )?;
+    Some((name, procedural::dimensions_from_type(&ty)))
+}
+
 pub(super) fn function_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
     syntax_tree: &SyntaxTree,
@@ -493,25 +532,35 @@ pub(super) fn function_from_declaration(
                 type_aliases,
             )?;
             let mut function_packed_dimensions = packed_dimensions.clone();
-            function_packed_dimensions.extend(params.iter().map(|param| {
-                (
-                    param.name.clone(),
-                    VariableDimensions {
-                        packed: param.packed_dimensions.clone(),
-                        unpacked: Vec::new(),
-                        signed: param.signed,
-                        is_2state: param.is_2state,
-                        members: Vec::new(),
-                        signed_element_depth: param.signed_element_depth,
-                    },
-                )
-            }));
-            function_packed_dimensions.extend(function_local_packed_dimensions_from_block_items(
-                &body.nodes.5,
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?);
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
+                params.iter().map(|param| {
+                    (
+                        param.name.clone(),
+                        VariableDimensions {
+                            packed: param.packed_dimensions.clone(),
+                            unpacked: Vec::new(),
+                            signed: param.signed,
+                            is_2state: param.is_2state,
+                            members: Vec::new(),
+                            signed_element_depth: param.signed_element_depth,
+                        },
+                    )
+                }),
+            );
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
+                function_local_packed_dimensions_from_block_items(
+                    &body.nodes.5,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?,
+            );
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
+                function_result_dimensions(declaration, syntax_tree, const_env, type_aliases),
+            );
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
             let output_names = params
@@ -575,26 +624,34 @@ pub(super) fn function_from_declaration(
                 type_aliases,
             )?;
             let mut function_packed_dimensions = packed_dimensions.clone();
-            function_packed_dimensions.extend(params.iter().map(|param| {
-                (
-                    param.name.clone(),
-                    VariableDimensions {
-                        packed: param.packed_dimensions.clone(),
-                        unpacked: Vec::new(),
-                        signed: param.signed,
-                        is_2state: param.is_2state,
-                        members: Vec::new(),
-                        signed_element_depth: param.signed_element_depth,
-                    },
-                )
-            }));
-            function_packed_dimensions.extend(
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
+                params.iter().map(|param| {
+                    (
+                        param.name.clone(),
+                        VariableDimensions {
+                            packed: param.packed_dimensions.clone(),
+                            unpacked: Vec::new(),
+                            signed: param.signed,
+                            is_2state: param.is_2state,
+                            members: Vec::new(),
+                            signed_element_depth: param.signed_element_depth,
+                        },
+                    )
+                }),
+            );
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
                 function_local_packed_dimensions_from_block_item_iter(
                     block_items.iter().copied(),
                     syntax_tree,
                     const_env,
                     type_aliases,
                 )?,
+            );
+            dimensions::extend_query_local_dimensions(
+                &mut function_packed_dimensions,
+                function_result_dimensions(declaration, syntax_tree, const_env, type_aliases),
             );
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
@@ -1063,6 +1120,11 @@ pub(super) fn tf_params(
         previous_packed_dimensions = packed_dimensions.clone();
         previous_signed_element_depth = signed_element_depth;
         params.push(FunctionParam {
+            has_default: port
+                .nodes
+                .4
+                .as_ref()
+                .is_some_and(|(_, _, default)| default.is_some()),
             direction,
             name,
             width: r#type.map(|r#type| r#type.width),
@@ -1115,12 +1177,13 @@ pub(super) fn tf_item_params(
             syntax_tree,
             type_aliases,
         );
-        for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
+        for (identifier, _, default) in declaration.nodes.4.nodes.0.contents() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
                 continue;
             };
             params.push(FunctionParam {
+                has_default: default.is_some(),
                 direction: ParamDirection::from_tf_port(&declaration.nodes.1)
                     .unwrap_or(ParamDirection::Input),
                 name,

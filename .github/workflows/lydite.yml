@@ -144,7 +144,8 @@ jobs:
 
   veryl-proof-corpus:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    # Cold builds plus the sequential proof/mutation gates can exceed one hour.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:

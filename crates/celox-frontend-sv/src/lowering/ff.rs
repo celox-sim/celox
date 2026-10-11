@@ -2300,7 +2300,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut reachable = true;
         for literal in values {
             let next = self.b.new_block();
-            self.store_constant(id, literal.1);
+            self.store_constant(id, literal.1)?;
             self.overlay.insert(canonical.var.clone(), literal.clone());
             self.loops.push(LoopBlocks {
                 break_block: exit,
@@ -2319,14 +2319,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.overlay.insert(canonical.var.clone(), saved);
         }
         let _ = reachable;
-        self.store_constant(id, last);
+        self.store_constant(id, last)?;
         self.jump(exit);
         self.b.switch_to_block(exit);
         Ok(true)
     }
 
     /// Store `value`, truncated to the variable's width, into `id`.
-    fn store_constant(&mut self, id: SourceVarId, value: i128) {
+    fn store_constant(&mut self, id: SourceVarId, value: i128) -> Result<(), sv::AnalyzerError> {
         let width = self.m.var(id).width;
         let modulus = num_bigint::BigInt::from(1u8) << width;
         let value = ((num_bigint::BigInt::from(value) % &modulus) + &modulus) % &modulus;
@@ -2336,7 +2336,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             SIRValue::new(value.to_biguint().expect("a non-negative value")),
         ));
         let offset = sv_memory_offset(self.m.var(id), 0, width);
-        self.store_raw(id, offset, width, register);
+        self.store(id, offset, width, register)
     }
 
     fn runtime_loop(

@@ -82,3 +82,12 @@ sv_backends! {
         @case "timing::run_to_finish_has_no_simulated_time_deadline";
     }
 }
+
+sv_backends! {
+    fn plain_always_processes_start_after_host_inputs(sim) {
+        @case "timing::plain_always_processes_start_after_host_inputs";
+    }
+    fn timed_control_names_do_not_collide_with_design_names(sim) {
+        @case "timing::timed_control_names_do_not_collide_with_design_names";
+    }
+}

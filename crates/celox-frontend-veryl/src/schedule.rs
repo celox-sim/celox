@@ -178,7 +178,9 @@ pub fn schedule_symbolic_rtl(
     for source in testbench_source.sources() {
         let lookup = &output.scheduled.frontend_lookup;
         let instance = source.base_instance(lookup);
-        let module = module_ir[&lookup.instance_module[&instance]];
+        let Some(&module) = module_ir.get(&lookup.instance_module[&instance]) else {
+            continue;
+        };
         dynamic_for_diagnostics.extend(super::check_elaborated_dynamic_for_bounds(
             &output.scheduled,
             source,
