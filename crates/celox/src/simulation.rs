@@ -258,6 +258,21 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         event_info,
         processes,
     )
+    .with_process_event_counters(
+        simulator
+            .program
+            .runtime_schema
+            .process_event_counters
+            .iter()
+            .map(|counters| {
+                (
+                    simulator.backend.resolve_signal(&counters.signal),
+                    simulator.backend.resolve_signal(&counters.rises),
+                    simulator.backend.resolve_signal(&counters.falls),
+                )
+            })
+            .collect(),
+    )
 }
 
 impl<B: SimBackend> Simulation<B> {
@@ -1002,5 +1017,65 @@ mod wait_tests {
         assert_eq!(sim.step().unwrap(), Some(10));
         assert_eq!(sim.get(y), 2u8.into());
         assert_eq!(sim.step().unwrap(), None);
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod process_review_tests {
+    use super::*;
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+    }
+
+    #[test]
+    fn transient_edges_and_inactive_region_on_all_backends() {
+        let source = r#"module Top(output bit q, observed);
+            bit clk;
+            always_ff @(posedge clk) q <= 1;
+            initial begin @(posedge clk); #0; observed = q; end
+            initial begin #1; clk = 1; clk = 0; end
+        endmodule"#;
+        let reverse = source
+            .replace("bit clk;", "bit clk = 1;")
+            .replace("clk = 1; clk = 0;", "clk = 0; clk = 1;");
+        let unknown = source
+            .replace("bit clk;", "logic clk = 0;")
+            .replace("clk = 1; clk = 0;", "clk = 1'bx; clk = 0;");
+        for (source, four_state) in [
+            (source, false),
+            (reverse.as_str(), false),
+            (unknown.as_str(), true),
+        ] {
+            let builder = || {
+                Simulator::from_sv_sources(vec![(source, std::path::Path::new("review.sv"))], "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            check(Simulation::new(builder().build_interpreter().unwrap()));
+            check(Simulation::new(builder().build_cranelift().unwrap()));
+            check(Simulation::new(builder().build_wasm().unwrap()));
+            check(Simulation::new(builder().build_tiered().unwrap()));
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                target_arch = "aarch64"
+            ))]
+            {
+                check(Simulation::new(builder().build().unwrap()));
+                let image = builder().compile_native().unwrap().into_program_image();
+                let image = crate::NativeProgramImage::from_container_bytes(
+                    &image.to_container_bytes().unwrap(),
+                )
+                .unwrap();
+                check(Simulation::new(
+                    Simulator::from_sources(Vec::new(), "Top")
+                        .emit_triggers()
+                        .build_native_from_image(image)
+                        .unwrap(),
+                ));
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! Packages (IEEE 1800-2023 26).
+//! Packages (IEEE 1800-2023 26) and compilation units (3.12.1).
 //!
 //! A package is analyzed once, after the packages it depends on, with the
 //! collectors that analyze a module: its declarations form a scope of their
@@ -6,6 +6,14 @@
 //! references among them bound to those names (see the `scope` module). A
 //! module or package that uses packages starts from their symbols, and from
 //! an alias for each name its imports bind (see the `imports` module).
+//!
+//! Each source file is a compilation unit of its own. Its declarations
+//! outside any module or package form the compilation-unit scope `$unit`,
+//! which is analyzed like a package: the scope can hold any item a package
+//! can (3.12.1). A module of the file sees the items of its unit declared
+//! before it, and every subroutine of the unit, after its own scope.
+
+use std::path::PathBuf;
 
 use super::scope::ScopeSymbols;
 use super::*;
@@ -13,13 +21,60 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
+    pub(super) timescales: Arc<timescales::Timescales>,
     packages: HashMap<String, Arc<Package>>,
+    /// The compilation unit of each source file that declares items outside
+    /// its modules and packages.
+    units: HashMap<PathBuf, Arc<Unit>>,
+}
+
+/// The compilation-unit scope of a source file.
+#[derive(Debug)]
+pub(super) struct Unit {
+    pub visibility: UnitVisibility,
+    /// The scope analyzed as a package. A module needs it only when it uses
+    /// an item of the unit, so an item no module uses that cannot be
+    /// analyzed is reported only then.
+    pub scope: Result<Package, AnalyzerError>,
+}
+
+impl Unit {
+    /// Whether a reference at source offset `offset` sees the item `name`
+    /// of the unit: one declared before it, or a subroutine (IEEE 1800-2023
+    /// 3.12.1).
+    pub fn declares_before(&self, name: &str, offset: usize) -> bool {
+        self.visibility.subroutines.contains(name)
+            || self
+                .visibility
+                .declared_at
+                .get(name)
+                .is_some_and(|declared| *declared < offset)
+    }
+}
+
+/// The name of the compilation-unit scope.
+pub(super) const UNIT: &str = "$unit";
+
+/// What a module of a compilation unit sees of it (IEEE 1800-2023 3.12.1).
+#[derive(Debug, Default)]
+pub(super) struct UnitVisibility {
+    /// The source offset of the item that declares each name.
+    pub declared_at: HashMap<String, usize>,
+    /// The subroutines of the unit, which are visible anywhere in it.
+    subroutines: HashSet<String>,
+    /// The package imports of the unit: their source offsets, packages, and
+    /// imported items, with no item for a wildcard import.
+    pub imports: Vec<(usize, String, Option<String>)>,
 }
 
 #[derive(Debug)]
 pub(super) struct Package {
+    name: String,
     /// The names the package declares.
     own: HashSet<String>,
+    /// The imported names the package exports, and the qualified names of
+    /// the declarations they denote (IEEE 1800-2023 26.6).
+    exports: HashMap<String, String>,
     /// The packages it imports or refers to.
     dependencies: Vec<String>,
     /// Its symbols and those of its dependencies, by qualified name.
@@ -33,6 +88,16 @@ impl Package {
     /// Whether the package declares `name`.
     pub fn declares(&self, name: &str) -> bool {
         self.own.contains(name)
+    }
+
+    /// The qualified name of the declaration an import of `name` from the
+    /// package denotes: one the package declares or exports.
+    pub fn provides(&self, name: &str) -> Option<String> {
+        if self.declares(name) {
+            Some(format!("{}::{name}", self.name))
+        } else {
+            self.exports.get(name).cloned()
+        }
     }
 }
 
@@ -53,11 +118,22 @@ impl Packages {
     pub fn state_modules(&self) -> impl Iterator<Item = &crate::ir::Module> {
         self.packages
             .values()
+            .map(|package| &**package)
+            .chain(
+                self.units
+                    .values()
+                    .filter_map(|unit| unit.scope.as_ref().ok()),
+            )
             .filter_map(|package| package.state_module.as_ref())
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Package> {
         self.packages.get(name).map(|package| &**package)
+    }
+
+    /// The compilation unit of the source file `path`, if it declares items.
+    pub(super) fn unit(&self, path: &Path) -> Option<&Unit> {
+        self.units.get(path).map(|unit| &**unit)
     }
 
     /// Add `name` and, before it, the packages it depends on, each once.
@@ -75,11 +151,66 @@ impl Packages {
         order.push(name.to_string());
     }
 
-    /// Analyze the packages declared in `trees`, each after the packages it
-    /// depends on.
-    pub fn analyze(trees: &[&SyntaxTree]) -> Result<Self, AnalyzerError> {
+    /// Analyze the packages declared in the source files `trees`, each after
+    /// the packages it depends on, and then their compilation units.
+    pub fn analyze(trees: &[(&SyntaxTree, &Path)]) -> Result<Self, AnalyzerError> {
+        Self::analyze_with_roots(trees, None)
+    }
+
+    pub(crate) fn analyze_with_roots(
+        trees: &[(&SyntaxTree, &Path)],
+        roots: Option<&[&str]>,
+    ) -> Result<Self, AnalyzerError> {
+        let mut timescales = timescales::Timescales::collect(trees)?;
+        if let Some(roots) = roots {
+            timescales.select_roots(roots);
+        }
+        let timescales = Arc::new(timescales);
+        let _timescales = timescales::install(timescales.clone());
+        let mut packages = Self::analyze_packages(trees)?;
+        packages.timescales = timescales;
+        let units: Vec<_> = trees
+            .iter()
+            .map(|(tree, path)| (unit_declaration(tree), *tree, *path))
+            .collect();
+        for (unit, tree, path) in &units {
+            let Some(unit) = unit else {
+                continue;
+            };
+            let visibility = unit_visibility(unit, tree)?;
+            let node = RefNode::PackageDeclaration(unit);
+            let scope = analyze_package(UNIT, node, tree, &packages);
+            if scope
+                .as_ref()
+                .is_ok_and(|scope| scope.state_module.is_some())
+                && packages.units.values().any(|unit| {
+                    unit.scope
+                        .as_ref()
+                        .is_ok_and(|scope| scope.state_module.is_some())
+                })
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "compilation-unit variables in more than one source file".to_string(),
+                ));
+            }
+            // Modules find their unit by the path of their source.
+            if trees.iter().filter(|(_, other)| other == path).count() > 1 {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "compilation-unit declarations in a source whose path `{}` another source \
+                     shares",
+                    path.display()
+                )));
+            }
+            packages
+                .units
+                .insert(path.to_path_buf(), Arc::new(Unit { visibility, scope }));
+        }
+        Ok(packages)
+    }
+
+    fn analyze_packages(trees: &[(&SyntaxTree, &Path)]) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, RefNode<'_>, &SyntaxTree)> = Vec::new();
-        for tree in trees {
+        for (tree, _) in trees {
             // Only modules and packages are analyzed, so an import declared
             // at compilation-unit scope would never be found.
             for node in *tree {
@@ -263,7 +394,10 @@ fn analyze_package_scope(
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
-    let mut imported = imports::imported_symbols(node.clone(), tree, packages)?;
+    let imports::ResolvedImports {
+        symbols: mut imported,
+        exports,
+    } = imports::resolve_imports(node.clone(), tree, packages, None)?;
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }
@@ -272,7 +406,7 @@ fn analyze_package_scope(
     // The names the package declares, from its syntax: an escaped name may
     // contain `::` itself.
     let own = imports::scope_names(node.clone(), tree);
-    let variables = match &node {
+    let mut variables = match &node {
         RefNode::PackageDeclaration(package) => package_variables(name, &package.nodes.6, tree)?,
         _ => HashSet::default(),
     };
@@ -291,6 +425,70 @@ fn analyze_package_scope(
         .symbols
         .take()
         .expect("a package analysis keeps the package symbols");
+    // Static subroutine activation storage is package state as well. Copies
+    // imported into different instances must denote the same object (13.3.1).
+    let mut activation = HashSet::default();
+    for subroutine in &module.subroutines {
+        if !subroutine.automatic {
+            activation.extend(subroutine.params.iter().map(|param| param.name.clone()));
+            activation.extend(subroutine.return_var.clone());
+        }
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let Stmt::Local {
+                    name,
+                    r#static: true,
+                    ..
+                } = stmt
+                {
+                    activation.insert(name.clone());
+                }
+            });
+        }
+    }
+    for local in &module.locals {
+        if activation.contains(&local.name) && !imported_locals.contains(&local.name) {
+            let r#type = &local.r#type;
+            let r#type = Type {
+                kind: match r#type.kind() {
+                    crate::ir::TypeKind::Bit => TypeKind::Bit,
+                    crate::ir::TypeKind::Logic => TypeKind::Logic,
+                    crate::ir::TypeKind::Reg => TypeKind::Reg,
+                    crate::ir::TypeKind::Implicit => TypeKind::Implicit,
+                },
+                is_signed: r#type.is_signed(),
+                packed_ranges: r#type
+                    .packed_ranges()
+                    .iter()
+                    .map(|range| {
+                        PackedRange::new(range.left().clone().into(), range.right().clone().into())
+                    })
+                    .collect(),
+                unpacked_ranges: r#type
+                    .unpacked_ranges()
+                    .iter()
+                    .map(|range| {
+                        UnpackedRange::new(
+                            range.left().clone().into(),
+                            range.right().clone().into(),
+                        )
+                    })
+                    .collect(),
+                members: Vec::new(),
+                signed_element_depth: None,
+            };
+            let signal = Signal::new(local.name.clone(), r#type);
+            module.signals.push(signal.clone());
+            symbols.signals.push(signal);
+            variables.insert(local.name.clone());
+        }
+    }
+    module
+        .locals
+        .retain(|local| !variables.contains(&local.name));
+    symbols
+        .locals
+        .retain(|local| !variables.contains(&local.name));
     // The package's variables, and those it imports, are shared objects;
     // the other signals are constants, copied with their initializers.
     let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)
@@ -335,7 +533,7 @@ fn analyze_package_scope(
         .map(|declared| (declared.clone(), qualified(declared)))
         .collect();
     let mut own_locals = HashSet::default();
-    for local in symbols.local_names() {
+    for local in symbols.local_names().into_iter().chain(activation) {
         if !imported_locals.contains(&local) {
             names.insert(local.clone(), qualified(&local));
             own_locals.insert(local);
@@ -348,9 +546,131 @@ fn analyze_package_scope(
     names.extend(aliases);
     let symbols = symbols.renamed(&names);
     Ok(Package {
+        name: name.to_string(),
         own,
+        exports,
         dependencies: Vec::new(),
         symbols,
         state_module,
     })
+}
+
+/// The compilation-unit scope of `tree` as a package declaration: the items
+/// of the file outside its design elements, which are package items too.
+/// A compilation unit has no keyword of its own, so its keywords are empty.
+fn unit_declaration(tree: &SyntaxTree) -> Option<sv_parser::PackageDeclaration> {
+    let items: Vec<_> = tree
+        .into_iter()
+        .filter_map(|node| match node {
+            RefNode::DescriptionPackageItem(item) => Some(item.nodes.clone()),
+            _ => None,
+        })
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let empty = sv_parser::Locate {
+        offset: 0,
+        line: 0,
+        len: 0,
+    };
+    let keyword = || sv_parser::Keyword {
+        nodes: (empty, Vec::new()),
+    };
+    Some(sv_parser::PackageDeclaration {
+        nodes: (
+            Vec::new(),
+            keyword(),
+            None,
+            sv_parser::PackageIdentifier {
+                nodes: (sv_parser::Identifier::SimpleIdentifier(Box::new(
+                    sv_parser::SimpleIdentifier {
+                        nodes: (empty, Vec::new()),
+                    },
+                )),),
+            },
+            sv_parser::Symbol {
+                nodes: (empty, Vec::new()),
+            },
+            None,
+            items,
+            keyword(),
+            None,
+        ),
+    })
+}
+
+/// Whether `package` is the compilation-unit scope of a file.
+pub(super) fn is_unit(package: &sv_parser::PackageDeclaration) -> bool {
+    package.nodes.1.nodes.0.len == 0
+}
+
+/// Where the items of the compilation unit `unit` are declared.
+fn unit_visibility(
+    unit: &sv_parser::PackageDeclaration,
+    tree: &SyntaxTree,
+) -> Result<UnitVisibility, AnalyzerError> {
+    let mut visibility = UnitVisibility::default();
+    for (_, item) in &unit.nodes.6 {
+        let node = RefNode::PackageItem(item);
+        let Some(offset) = node.clone().into_iter().find_map(|child| match child {
+            RefNode::Locate(locate) => Some(locate.offset),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let subroutine = matches!(
+            item,
+            sv_parser::PackageItem::PackageOrGenerateItemDeclaration(declaration)
+                if matches!(
+                    **declaration,
+                    sv_parser::PackageOrGenerateItemDeclaration::FunctionDeclaration(_)
+                        | sv_parser::PackageOrGenerateItemDeclaration::TaskDeclaration(_)
+                )
+        );
+        // An item whose names cannot be read is reported if a module uses
+        // the scope.
+        for name in interfaces::package_item_names(item, tree).unwrap_or_default() {
+            if subroutine {
+                visibility.subroutines.insert(name.clone());
+            }
+            visibility.declared_at.entry(name).or_insert(offset);
+        }
+        // Only an import declaration of the unit itself; one in a subroutine
+        // of the unit is the subroutine's.
+        let sv_parser::PackageItem::PackageOrGenerateItemDeclaration(declaration) = item else {
+            continue;
+        };
+        let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = &**declaration
+        else {
+            continue;
+        };
+        if !matches!(
+            **data,
+            sv_parser::DataDeclaration::PackageImportDeclaration(_)
+        ) {
+            continue;
+        }
+        for child in node {
+            match child {
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
+                    if let (Some(package), Some(name)) = (
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
+                    ) {
+                        visibility.imports.push((offset, package, Some(name)));
+                    }
+                }
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => {
+                    if let Some(package) =
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
+                    {
+                        visibility.imports.push((offset, package, None));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(visibility)
 }

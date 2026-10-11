@@ -44,6 +44,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                 FunctionReturnMetadata {
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
+                    dimensions: f.return_dimensions,
                     signed: f.return_signed,
                     is_2state: f.return_is_2state,
                 },
@@ -234,4 +235,31 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         assert_eq!(reused, discovered, "{declaration}");
         assert_eq!(reused.unwrap().0, expected_width, "{declaration}");
     }
+}
+#[test]
+fn nonansi_validation_leaves_generate_queries_to_elaboration() {
+    let code = r#"
+        module Top(y);
+            output y;
+            if (0) begin : inactive
+                localparam N = $dimensions(missing);
+            end else begin : active
+                assign y = 0;
+            end
+        endmodule
+    "#;
+    let tree = crate::syntax::parse_source(code, Path::new("nonansi_validation.sv")).unwrap();
+    let node = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::ModuleDeclarationNonansi(_)))
+        .unwrap();
+    crate::ast::validation::reject_silently_ignored_constructs(
+        node,
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &ScopedMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap();
 }

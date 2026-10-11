@@ -3,6 +3,9 @@
 
 use celox::{ParserError, Simulator, SimulatorErrorKind};
 
+#[path = "test_utils/veryl_sv.rs"]
+mod veryl_sv;
+
 fn output(source: &str) -> u64 {
     outputs(source, &["y"])[0]
 }
@@ -254,25 +257,168 @@ fn qualified_types_formals_and_escaped_names_resolve() {
     );
 }
 
+/// An export makes imported declarations visible to the importers of the
+/// package; an import through an export denotes the original declaration
+/// (IEEE 1800-2023 26.6).
 #[test]
-fn package_exports_are_unsupported() {
-    let error = Simulator::from_sv_sources(
-        vec![(
-            "package base; localparam int X = 1; endpackage
-             package ext; import base::*; export base::X; endpackage
-             module Top(output logic [7:0] y); assign y = 0; endmodule",
-            std::path::Path::new("packages.sv"),
-        )],
-        "Top",
-    )
-    .build()
-    .expect_err("package exports are not supported");
-    match error.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { detail, .. }) => {
-            assert!(detail.contains("package export declaration"), "{detail}")
-        }
-        other => panic!("expected an unsupported construct, got {other:?}"),
-    }
+fn packages_export_imported_names() {
+    let p1 = "package p1; localparam int X = 3; localparam int Y = 4; endpackage";
+    // `export p1::*` exports what the package imports from `p1`.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::*; endpackage
+             module Top(output logic [7:0] y); import p2::*; assign y = X; endmodule"
+        )),
+        3
+    );
+    // Exports chain, and a declaration exported through two packages does
+    // not make a wildcard reference ambiguous.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::*; endpackage
+             package p3; import p1::*; import p2::*; export p2::*; localparam int Q = X; endpackage
+             package p4; import p1::*; export p1::*; localparam int Z = X + 1; endpackage
+             module Top(output logic [7:0] y); import p3::*; import p4::*;
+               assign y = X * 10 + Q + Z; endmodule"
+        )),
+        30 + 3 + 4
+    );
+    // `export p::x` imports an unreferenced candidate; `export *::*` exports
+    // every imported declaration.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p5; import p1::*; export p1::Y; endpackage
+             package p6; export *::*; import p1::X; endpackage
+             module Top(output logic [7:0] y); import p5::*; import p6::X;
+               assign y = X * 10 + Y; endmodule"
+        )),
+        34
+    );
+    // An explicit import of an exported name, and of the same declaration
+    // through two packages.
+    assert_eq!(
+        output(&format!(
+            "{p1}
+             package p2; import p1::X; export p1::X; endpackage
+             module Top(output logic [7:0] y); import p2::X; import p1::X; assign y = X; endmodule"
+        )),
+        3
+    );
+}
+
+#[test]
+fn packages_export_only_imported_names() {
+    let p1 = "package p1; localparam int X = 3; localparam int Y = 4; endpackage";
+    // `Y` is a candidate for import into `p3` but not imported, so the
+    // export does not make it available.
+    let detail = error(&format!(
+        "{p1}
+         package p3; import p1::*; export p1::*; localparam int Q = X; endpackage
+         module Top(output logic [7:0] y); import p3::Y; assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `Y`"), "{detail}");
+    // A name a subroutine of the package declares is not imported by the
+    // references to it there.
+    let detail = error(&format!(
+        "{p1}
+         package p3; import p1::*; export p1::*;
+           function automatic int f(input int X); return X; endfunction
+         endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// A qualified name may name an exported declaration: `p2::X` and `p1::X`
+/// are the same declaration (IEEE 1800-2023 26.6).
+#[test]
+fn qualified_names_reach_exported_declarations() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; typedef logic [5:0] t; endpackage
+             package p2; import p1::X; import p1::t; export p1::X, p1::t; endpackage
+             module Top(output logic [7:0] y); p2::t v; assign v = '1; assign y = p2::X + v; endmodule"
+        ),
+        66
+    );
+}
+
+/// A wildcard reference a function local shadows is not ambiguous, and a
+/// named export binds its name before other references look it up.
+#[test]
+fn shadowed_and_exported_names_are_not_ambiguous() {
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             module Top(output logic [7:0] y); import p::*; import q::*;
+               function automatic int f(input int X); return X + 1; endfunction
+               assign y = f(1); endmodule"
+        ),
+        2
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        3
+    );
+}
+
+#[test]
+fn illegal_exports_are_errors() {
+    let p1 = "package p1; localparam int X = 3; endpackage
+              package q; localparam int X = 5; endpackage";
+    // An export refers to the name, so the package cannot declare it.
+    let detail = error(&format!(
+        "{p1}
+         package p6; import p1::*; export p1::X; localparam int X = 1; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(
+        detail.contains("names an item the package declares"),
+        "{detail}"
+    );
+    // The package must import the name from the package it exports it from.
+    let detail = error(&format!(
+        "{p1}
+         package p7; export p1::X; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("does not import"), "{detail}");
+    let detail = error(&format!(
+        "{p1}
+         package p8; import q::X; import p1::*; export p1::X; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("`p1::X`"), "{detail}");
+    let detail = error(&format!(
+        "{p1}
+         package p9; import p1::*; export p1::Z; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule"
+    ));
+    assert!(detail.contains("no item `Z`"), "{detail}");
+}
+
+/// An exported package variable is the original package's one object.
+#[test]
+fn exported_package_variables_are_shared() {
+    assert_eq!(
+        output(
+            "package p; logic [7:0] shared; function automatic logic [7:0] inc(logic [7:0] v);
+               return v + 8'd1; endfunction endpackage
+             package q; import p::*; export p::shared, p::inc; localparam int K = 2; endpackage
+             module W(input logic [7:0] a); import q::*; always_comb shared = inc(a) + K; endmodule
+             module Top(output logic [7:0] y); W w(.a(8'd9)); assign y = p::shared; endmodule"
+        ),
+        12
+    );
 }
 
 #[test]
@@ -660,4 +806,401 @@ fn instance_paths_ending_in_scope_separators_keep_their_dot() {
     let program = simulator.program();
     let address = program.get_addr(&[("\\u::", 0)], &["y"]).unwrap();
     assert_eq!(program.get_path(&address), "\\u::.y");
+}
+
+/// A declaration of a nested block shadows a name only inside that block,
+/// and a qualified name of an exported declaration may repeat.
+#[test]
+fn nested_block_declarations_shadow_only_inside_them() {
+    assert_eq!(
+        output(
+            "package p1; localparam int X = 3; logic [7:0] shared; endpackage
+             package q; import p1::*; export p1::*;
+               function automatic int f(input int a);
+                 begin int X; X = a; end
+                 return a + X;
+               endfunction
+               localparam int Y = f(1);
+               typedef logic [7:0] byte_t; byte_t unused;
+               function automatic logic [7:0] g(); return shared; endfunction
+             endpackage
+             module W; always_comb q::shared = 8'd5; endmodule
+             module Top(output logic [7:0] y); import q::X; W w();
+               assign y = X * 10 + q::Y + q::shared + q::shared; endmodule"
+        ),
+        30 + 4 + 10
+    );
+}
+
+/// A named export does not repair an earlier reference, and a name an
+/// explicit import binds is not imported through a wildcard as well.
+#[test]
+fn exports_follow_lexical_order_and_explicit_imports() {
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package q; localparam int X = 5; endpackage
+         package r; import p::*; import q::*; localparam int Y = X; export p::X; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("`X`"), "{detail}");
+    let detail = error(
+        "package p1; localparam int X = 3; endpackage
+         package p2; import p1::X; export p1::X; endpackage
+         package p3; import p2::X; import p1::*; localparam int Y = X; export p1::*; endpackage
+         module Top(output logic [7:0] y); import p3::X; assign y = 0; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// Review cases: the first of repeated exports, `for` loop scopes, and a
+/// package naming its own export.
+#[test]
+fn exports_loops_and_self_qualified_exports() {
+    let p = "package p; localparam int X = 3; endpackage
+             package q; localparam int X = 5; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{p}
+             package r; import p::*; import q::*; export p::X; localparam int Y = X; export p::X;
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        )),
+        3
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::*;
+               function automatic int f();
+                 int s = 0;
+                 for (int X = 0; X < 2; X++) s += X;
+                 return s + X;
+               endfunction
+               localparam int Y = f();
+             endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    assert_eq!(
+        output(
+            "package p; localparam int X = 3; endpackage
+             package r; import p::X; export p::X; localparam int Y = r::X + 1; endpackage
+             module Top(output logic [7:0] y); assign y = r::Y; endmodule"
+        ),
+        4
+    );
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         package r; import p::X; localparam int Y = r::X + 1; endpackage
+         module Top(output logic [7:0] y); assign y = r::Y; endmodule",
+    );
+    assert!(detail.contains("no item `X`"), "{detail}");
+}
+
+/// A wildcard import binds a type used to declare a variable, and the
+/// target of a continuous assignment.
+#[test]
+fn wildcard_imports_bind_declaration_types_and_assignment_targets() {
+    assert_eq!(
+        output(
+            "package p; typedef logic [3:0] nib_t; logic [7:0] g; endpackage
+             module Top(output logic [7:0] y); import p::*;
+               nib_t n; assign n = 4'h9; assign g = 8'd4; assign y = p::g + n; endmodule"
+        ),
+        13
+    );
+}
+
+/// An import in a generate block makes names visible in that block, ahead of
+/// the module's declarations and imports (IEEE 1800-2023 26.3).
+#[test]
+fn generate_block_imports_are_scoped_to_their_block() {
+    let pk = "package p; localparam int X = 3; endpackage
+              package q; localparam int X = 5; endpackage";
+    let cases = [
+        ("if (1) begin : g import p::*; assign y = X; end", 3),
+        // The block's wildcard import comes before the module's.
+        (
+            "import q::*; if (1) begin : g import p::*; assign y = X; end",
+            3,
+        ),
+        // Each block imports its own declaration.
+        (
+            "logic [7:0] a, b;
+             if (1) begin : g import p::*; assign a = X; end
+             if (1) begin : h import q::*; assign b = X; end
+             assign y = a * 10 + b;",
+            35,
+        ),
+        // The block's import comes before a declaration of the module.
+        (
+            "localparam int X = 9; logic [7:0] a;
+             if (1) begin : g import p::*; assign a = X; end
+             assign y = a * 10 + X;",
+            39,
+        ),
+        // In widths and generate conditions of the block.
+        (
+            "import q::*; logic [7:0] b;
+             if (1) begin : g import p::*; logic [X-1:0] v;
+               if (X == 3) begin : h assign v = '1; end
+               assign b = v; end
+             assign y = b * 10 + X;",
+            75,
+        ),
+        // A declaration of a block inside it comes first.
+        (
+            "if (1) begin : g import p::*; if (1) begin : h localparam int X = 7; assign y = X; end end",
+            7,
+        ),
+        (
+            "for (genvar i = 0; i < 1; i++) begin : g import p::*; assign y = X + i; end",
+            3,
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(
+            output(&format!(
+                "{pk}
+                 module Top(output logic [7:0] y); {body} endmodule"
+            )),
+            expected,
+            "{body}"
+        );
+    }
+    // Subroutines and package variables of the block's package.
+    assert_eq!(
+        output(
+            "package p; logic [7:0] s;
+               function automatic logic [7:0] inc(logic [7:0] v); return v + 1; endfunction
+             endpackage
+             package q; localparam int s = 9; endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; always_comb s = inc(8'd4); assign a = s; end
+               assign y = a * 10 + s;
+             endmodule"
+        ),
+        59
+    );
+    // A subroutine the block imports as another one than its module is not
+    // supported: calls look up formal names and shapes module-wide.
+    let detail = Simulator::from_sv_sources(
+        vec![(
+            "package p; function automatic int f(int a); return a + 1; endfunction endpackage
+             package q; function automatic int f(int b); return b + 2; endfunction endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; assign a = f(4); end
+               assign y = a + f(0);
+             endmodule",
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .expect_err("a block-local subroutine binding is unsupported")
+    .to_string();
+    assert!(detail.contains("subroutine `f`"), "{detail}");
+    // A loop's genvar hides a wildcard import of its body.
+    assert_eq!(
+        output(
+            "package p; localparam int i = 7; endpackage
+             module Top(output logic [7:0] y);
+               for (genvar i = 0; i < 1; i++) begin : g import p::*; assign y = i; end
+             endmodule"
+        ),
+        0
+    );
+    assert_eq!(
+        output(
+            "package p; typedef logic [3:0] nib_t; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; nib_t n; assign n = 4'hf; assign y = n; end
+             endmodule"
+        ),
+        15
+    );
+}
+
+#[test]
+fn generate_block_imports_are_not_visible_outside_their_block() {
+    let result = Simulator::from_sv_sources(
+        vec![(
+            "package p; localparam int X = 3; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; end
+               assign y = X;
+             endmodule",
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(result.is_err(), "`X` is imported only in block `g`");
+    let detail = error(
+        "package p; localparam int X = 3; endpackage
+         module Top(output logic [7:0] y);
+           if (1) begin : g import p::X; localparam int X = 1; assign y = X; end
+         endmodule",
+    );
+    assert!(detail.contains("the generate block declares"), "{detail}");
+}
+
+/// Veryl emits an import of a generate block inside the block.
+#[test]
+fn veryl_generate_block_imports_resolve_in_both_frontends() {
+    let code = r#"
+package PkgA {
+    const X: u32 = 3;
+}
+package PkgB {
+    const X: u32 = 5;
+}
+module Top (
+    y: output logic<8>,
+) {
+    import PkgB::*;
+    var a: logic<8>;
+    if 1 :g {
+        import PkgA::*;
+        assign a = X;
+    }
+    assign y = a * 10 + X;
+}
+"#;
+    let emitted = veryl_sv::emit_veryl_sources(&[(code, std::path::Path::new("top.veryl"))]);
+    let mut sv = Simulator::from_sv_sources(emitted.as_sv_sources(), "Top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let y = sv.signal("y");
+    assert_eq!(u64::try_from(sv.get(y)).unwrap(), 35);
+    let mut veryl = Simulator::builder(code, "Top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let y = veryl.signal("y");
+    assert_eq!(u64::try_from(veryl.get(y)).unwrap(), 35);
+}
+
+/// Review cases: block declarations see the block's imports, single-item
+/// blocks are scopes, and every explicit block import is checked.
+#[test]
+fn generate_block_imports_reach_declarations_and_single_items() {
+    let pk = "package p; localparam int X = 3; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y); localparam int X = 9;
+               if (1) begin : g import p::*; localparam int Y = X; assign y = Y; end
+             endmodule"
+        )),
+        3
+    );
+    let result = Simulator::from_sv_sources(
+        vec![(
+            format!(
+                "{pk}
+                 module Top(output logic [7:0] y); if (1) import p::*; assign y = X; endmodule"
+            )
+            .as_str(),
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(result.is_err(), "a single-item block is a scope of its own");
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y); if (1) begin : g import p::missing; end assign y = 0;
+         endmodule"
+    ));
+    assert!(detail.contains("no item `missing`"), "{detail}");
+}
+
+/// Review cases: unused block wildcard imports name packages, and a loop's
+/// genvar is not a declaration of the block around the loop.
+#[test]
+fn generate_block_imports_check_packages_and_skip_loop_genvars() {
+    let detail = error(
+        "module Top(output logic [7:0] y); if (1) begin : g import missing::*; end assign y = 0;
+         endmodule",
+    );
+    assert!(detail.contains("unknown package `missing`"), "{detail}");
+    assert_eq!(
+        output(
+            "package p; localparam int i = 4; endpackage
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::i;
+                 for (genvar i = 0; i < 1; i++) begin : l end
+                 assign y = i;
+               end
+             endmodule"
+        ),
+        4
+    );
+}
+
+/// Review cases: conditional loop bodies, structure members, and child block
+/// names in generate scopes.
+#[test]
+fn generate_scopes_follow_loop_bodies_members_and_child_blocks() {
+    let pk = "package p; localparam int i = 7; localparam int X = 3; localparam int h = 1;
+              endpackage
+              package q; localparam int i = 8; endpackage";
+    // The genvar of a loop whose body is a conditional generate.
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; import q::*;
+                 for (genvar i = 0; i < 1; i++) if (i == 0) begin : c assign y = i + 5; end
+               end
+             endmodule"
+        )),
+        5
+    );
+    // A structure member does not hide the imported name.
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; struct packed {{ logic X; }} value;
+                 assign value = 1'b1; assign y = X; end
+             endmodule"
+        )),
+        3
+    );
+    // A child block's name is a declaration of its parent.
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y);
+           if (1) begin : g import p::h; if (1) begin : h end assign y = 0; end
+         endmodule"
+    ));
+    assert!(detail.contains("the generate block declares"), "{detail}");
+}
+
+/// Review cases: a loop body's name is declared beside the loop, and an
+/// outer block's declaration keeps an inner block's import to that block.
+#[test]
+fn generate_scopes_declare_loop_body_names_and_keep_inner_imports() {
+    let pk = "package p; localparam int X = 3; localparam int g = 1; endpackage";
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y);
+           if (1) begin : o import p::g; for (genvar i = 0; i < 1; i++) begin : g end end
+           assign y = 0;
+         endmodule"
+    ));
+    assert!(detail.contains("the generate block declares"), "{detail}");
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : o localparam int X = 9;
+                 if (1) begin : i import p::X; assign y = X; end
+               end
+             endmodule"
+        )),
+        3
+    );
 }

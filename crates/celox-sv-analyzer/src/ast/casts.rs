@@ -21,7 +21,9 @@ fn cast_target_type(
                 expr_type_from_type(r#type, const_env)
             } else {
                 Some(ExprType {
-                    width: usize::try_from(*const_env.get(&name)?).ok()?.max(1),
+                    width: usize::try_from(*const_env.get(&name)?)
+                        .ok()
+                        .filter(|width| *width > 0)?,
                     signed: false,
                 })
             }
@@ -30,7 +32,7 @@ fn cast_target_type(
             if let Some(r#type) =
                 size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
             {
-                return Some(r#type);
+                return (r#type.width > 0).then_some(r#type);
             }
             let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
                 .ok()
@@ -42,7 +44,7 @@ fn cast_target_type(
             }
             let width = eval_ast_const_expr(&target, const_env)?;
             Some(ExprType {
-                width: usize::try_from(width).ok()?.max(1),
+                width: usize::try_from(width).ok().filter(|width| *width > 0)?,
                 signed: false,
             })
         }

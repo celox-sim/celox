@@ -9,7 +9,8 @@ mod tests;
 
 pub(super) use layout::{declaration, parse_type};
 pub(super) use selects::{
-    has_member_access, member_first_dimension_width, net_member, variable_member,
+    has_member_access, member_dimension_count, member_first_dimension_width, net_member,
+    variable_member,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
