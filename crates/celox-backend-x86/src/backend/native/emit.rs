@@ -1499,6 +1499,7 @@ fn emit_planned(
         asm.dq(table)?;
     }
 
+    shorten_absolute_moves(&mut asm)?;
     let mut result =
         asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
     let first_data_label = jump_table_labels
@@ -1594,6 +1595,56 @@ fn emit_planned(
         block_offsets,
         required_image_features,
     })
+}
+
+/// Re-encode `mov` between AL/AX/EAX/RAX and an absolute address with a
+/// ModRM/SIB 32-bit displacement.
+///
+/// The code assembler selects the `moffs` form for these registers, whose
+/// 64-bit address is two bytes longer. Segment-based state access makes
+/// every state operand absolute, so the longer form would otherwise appear in
+/// a large share of all loads and stores and inflate the instruction-cache
+/// footprint. Instruction order and count are unchanged, so labels, which
+/// name instruction indices, stay valid.
+fn shorten_absolute_moves(asm: &mut CodeAssembler) -> Result<(), iced_x86::IcedError> {
+    use iced_x86::{Code, Instruction, MemoryOperand, Register};
+    for instruction in asm.take_instructions() {
+        let (code, load) = match instruction.code() {
+            Code::Mov_AL_moffs8 => (Code::Mov_r8_rm8, true),
+            Code::Mov_AX_moffs16 => (Code::Mov_r16_rm16, true),
+            Code::Mov_EAX_moffs32 => (Code::Mov_r32_rm32, true),
+            Code::Mov_RAX_moffs64 => (Code::Mov_r64_rm64, true),
+            Code::Mov_moffs8_AL => (Code::Mov_rm8_r8, false),
+            Code::Mov_moffs16_AX => (Code::Mov_rm16_r16, false),
+            Code::Mov_moffs32_EAX => (Code::Mov_rm32_r32, false),
+            Code::Mov_moffs64_RAX => (Code::Mov_rm64_r64, false),
+            _ => {
+                asm.add_instruction(instruction)?;
+                continue;
+            }
+        };
+        let Ok(displacement) = i32::try_from(instruction.memory_displacement64()) else {
+            asm.add_instruction(instruction)?;
+            continue;
+        };
+        let memory = MemoryOperand::new(
+            Register::None,
+            Register::None,
+            1,
+            i64::from(displacement),
+            4,
+            false,
+            instruction.segment_prefix(),
+        );
+        let mut shortened = if load {
+            Instruction::with2(code, instruction.op0_register(), memory)?
+        } else {
+            Instruction::with2(code, memory, instruction.op1_register())?
+        };
+        shortened.set_ip(instruction.ip());
+        asm.add_instruction(shortened)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
