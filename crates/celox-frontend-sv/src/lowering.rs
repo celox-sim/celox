@@ -174,8 +174,119 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
+    analyze_sources_with_foreign(sources, &ExternalHierarchy::default(), &[])
+}
+
+/// The type and modport contract of an SV interface, without translating its
+/// executable body to another language.
+pub struct InterfaceSignature {
+    pub name: String,
+    pub module: sv::ir::Module,
+    pub modports: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    pub parameters: Vec<String>,
+    pub driven: Vec<String>,
+    pub has_behavior: bool,
+}
+
+pub fn interface_signatures(
+    sources: &[(&str, &Path)],
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    interface_signatures_for(sources, None)
+}
+
+pub fn interface_signatures_for(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    let (mut prototypes, signature_sources) = sv::interface_prototypes(sources)?;
+    if let Some(names) = names {
+        prototypes.retain(|prototype| names.contains(&prototype.name));
+    }
+    if prototypes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let probe_path = Path::new("<interface-signatures>");
+    let mut all_sources = signature_sources
+        .iter()
+        .zip(sources)
+        .map(|(code, (_, path))| (code.as_str(), *path))
+        .collect::<Vec<_>>();
+    all_sources.extend(
+        prototypes
+            .iter()
+            .map(|prototype| (prototype.probe_source.as_str(), probe_path)),
+    );
+    let analyzed = analyze_sources(&all_sources)?;
+    prototypes
+        .into_iter()
+        .map(|prototype| {
+            let lowered = specialize_module(
+                &analyzed[&prototype.probe_name],
+                &LoweredSvModuleKey::base(prototype.probe_name),
+                false,
+                false,
+            )?;
+            Ok(InterfaceSignature {
+                name: prototype.name,
+                module: lowered.source,
+                modports: prototype.modports,
+                parameters: prototype.parameters,
+                driven: prototype.driven,
+                has_behavior: prototype.has_behavior,
+            })
+        })
+        .collect()
+}
+
+fn analyze_sources_with_foreign(
+    sources: &[(&str, &Path)],
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
+    analyze_sources_with_requests(sources, foreign, declarations, &[]).map(|(modules, _)| modules)
+}
+
+#[derive(Clone, Debug)]
+pub struct SvModuleRequest {
+    pub alias: String,
+    pub module: String,
+    pub parameters: Vec<(String, i128)>,
+    pub interfaces: Vec<(String, String)>,
+}
+
+fn analyze_sources_with_requests(
+    sources: &[(&str, &Path)],
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    requests: &[SvModuleRequest],
+) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
+    if !declarations.is_empty() {
+        for (code, path) in sources {
+            let parsed = sv::ParsedSource::parse(code, path)?;
+            if let Some(name) = parsed
+                .module_names()
+                .iter()
+                .find(|name| foreign.roots.contains_key(*name))
+            {
+                return Err(sv::AnalyzerError::DuplicateModule { name: name.clone() });
+            }
+        }
+    }
+    let mut joint_sources = sources.to_vec();
+    joint_sources.extend_from_slice(declarations);
+    let sources = joint_sources.as_slice();
     // Interfaces are expanded into the modules that use them first.
-    let elaborated = sv::elaborate_interfaces(sources)?;
+    let bindings = requests
+        .iter()
+        .map(|request| {
+            (
+                request.alias.clone(),
+                request.module.clone(),
+                request.interfaces.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (elaborated, root_names) = sv::elaborate_interfaces_with_bindings(sources, &bindings)?;
     let elaborated_sources: Vec<(&str, &Path)>;
     let sources = match &elaborated {
         Some(codes) => {
@@ -203,6 +314,26 @@ fn analyze_sources(
     for (source, _, _) in &sources {
         interfaces.extend(source.module_interfaces().clone());
     }
+    for (name, id) in &foreign.roots {
+        if interfaces.contains_key(name) && declarations.is_empty() {
+            return Err(sv::AnalyzerError::DuplicateModule { name: name.clone() });
+        }
+        if interfaces.contains_key(name) {
+            continue;
+        }
+        let module = &foreign.modules[id];
+        interfaces.insert(
+            name.clone(),
+            sv::ModuleInterface {
+                ports: module
+                    .port_order
+                    .iter()
+                    .map(|id| module.sim_module.variables[id].path.join("."))
+                    .collect(),
+                parameters: Vec::new(),
+            },
+        );
+    }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
     let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
@@ -212,6 +343,9 @@ fn analyze_sources(
                 .into_iter()
                 .collect();
         for module_name in source.module_names().iter().cloned() {
+            if !declarations.is_empty() && foreign.roots.contains_key(&module_name) {
+                continue;
+            }
             let name = module_name.clone();
             if modules.contains_key(&name) {
                 return Err(sv::AnalyzerError::DuplicateModule { name: module_name });
@@ -231,7 +365,7 @@ fn analyze_sources(
             );
         }
     }
-    Ok(modules)
+    Ok((modules, root_names))
 }
 
 fn validate_specialized_instance_net_drivers(
@@ -899,10 +1033,123 @@ pub fn prepare_external_hierarchy(
     root_names: &HashSet<String>,
     four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    prepare_external_hierarchy_with_foreign(
+        sources,
+        root_names,
+        &ExternalHierarchy::default(),
+        &[],
+        four_state,
+    )
+}
+
+/// Link SV bodies against foreign signatures. Foreign bodies are placeholders
+/// here; their owning frontend replaces them before symbolic scheduling.
+pub fn prepare_external_hierarchy_with_foreign(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        None,
+        None,
+        &[],
+    )
+}
+
+pub type ForeignModuleResolver<'a> =
+    dyn FnMut(&str, &[(String, i128)]) -> Result<ExternalModule, ParserError> + 'a;
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    mut resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+) -> Result<ExternalHierarchy, FrontendError> {
+    let (analyzed, bound_names) =
+        analyze_sources_with_requests(sources, foreign, declarations, requests)?;
+    let dummy = sv::ParsedSource::parse(
+        "module __celox_foreign(); endmodule",
+        Path::new("<foreign-signature>"),
+    )?;
+    let dummy_ir = dummy.analyze_module(
+        "__celox_foreign",
+        &HashMap::default(),
+        &[],
+        &sv::ModuleInterfaces::default(),
+        &sv::Packages::default(),
+    )?;
+    let lower_foreign = |signature: &ExternalModule| {
+        let variables: HashMap<_, _> = signature
+            .sim_module
+            .variables
+            .iter()
+            .map(|(&id, variable)| {
+                (
+                    id,
+                    SvVariable {
+                        path: vec![variable.path.join("$")],
+                        width: variable.metadata.width,
+                        signed: variable.signed,
+                        is_4state: variable.metadata.is_4state,
+                        packed_ranges: variable
+                            .packed_dims
+                            .iter()
+                            .map(|&width| ((width - 1) as i128, 0))
+                            .collect(),
+                        array_dims: variable.metadata.array_dims.clone(),
+                        domain_kind: variable.metadata.kind,
+                        kind: variable.kind,
+                        type_kind: variable.metadata.type_kind,
+                        source: variable.source.clone(),
+                        hidden: !variable.module_affiliated,
+                    },
+                )
+            })
+            .collect();
+        LoweredSvModule {
+            source: dummy_ir.modules()[0].clone(),
+            implicit_nets_allowed: false,
+            sim_module: signature.sim_module.clone(),
+            signal_names: variables
+                .iter()
+                .map(|(&id, variable)| (variable.path.join("."), id))
+                .collect(),
+            variables,
+            port_order: signature.port_order.clone(),
+            constants: HashMap::default(),
+            parameter_types: HashMap::default(),
+            instances: Vec::new(),
+            package_variables: Vec::new(),
+        }
+    };
+    let foreign_modules: HashMap<_, _> = foreign
+        .roots
+        .iter()
+        .map(|(name, id)| (name.clone(), lower_foreign(&foreign.modules[id])))
+        .collect();
+    let mut foreign_specializations = HashMap::default();
     let mut names = root_names
         .iter()
-        .filter(|&name| analyzed.contains_key(name))
+        .filter(|&name| {
+            analyzed.contains_key(name)
+                || foreign_modules.contains_key(name)
+                || requests.iter().any(|request| {
+                    &request.alias == name
+                        && analyzed.contains_key(bound_names.get(name).unwrap_or(&request.module))
+                })
+        })
         .cloned()
         .collect::<Vec<_>>();
     names.sort();
@@ -910,8 +1157,41 @@ pub fn prepare_external_hierarchy(
     let mut module_ids = HashMap::default();
     let mut module_specialization_counts = HashMap::default();
     let mut queue = Vec::new();
+    let mut requested_roots = HashMap::default();
     for name in names {
-        let key = LoweredSvModuleKey::base(name.clone());
+        let mut key = LoweredSvModuleKey::base(name.clone());
+        if let Some(request) = requests.iter().find(|request| request.alias == name) {
+            key.name = bound_names
+                .get(&request.alias)
+                .unwrap_or(&request.module)
+                .clone();
+            key.parameter_overrides = request
+                .parameters
+                .iter()
+                .map(|(name, value)| LoweredSvParameterOverride {
+                    name: name.clone(),
+                    value: Some(const_expr_from_i128(*value)),
+                    type_text: None,
+                })
+                .collect();
+            requested_roots.insert(name.clone(), key.clone());
+        }
+        if let Some((top, parameters)) = top_parameters
+            && name == top
+            && analyzed.contains_key(top)
+        {
+            key.parameter_overrides = parameters
+                .iter()
+                .map(|(name, value)| LoweredSvParameterOverride {
+                    name: name.clone(),
+                    value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
+                    type_text: None,
+                })
+                .collect();
+        }
+        if module_ids.contains_key(&key) {
+            continue;
+        }
         let module_id = ModuleId(module_ids.len());
         module_ids.insert(key.clone(), module_id);
         module_specialization_counts.insert(name.clone(), 1usize);
@@ -922,13 +1202,64 @@ pub fn prepare_external_hierarchy(
     while index < queue.len() {
         let key = queue[index].clone();
         index += 1;
+        if foreign_modules.contains_key(&key.name) {
+            let specialized;
+            let signature = if key.parameter_overrides.is_empty() {
+                &foreign.modules[&foreign.roots[&key.name]]
+            } else {
+                let Some(resolver) = resolver.as_deref_mut() else {
+                    return Err(sv::AnalyzerError::Unsupported(format!(
+                        "foreign module parameter specialization `{}`",
+                        key.name
+                    ))
+                    .into());
+                };
+                let parameters = key
+                    .parameter_overrides
+                    .iter()
+                    .map(|parameter| {
+                        let value = parameter
+                            .value
+                            .as_ref()
+                            .and_then(|value| {
+                                sv::typecheck::eval_const_expr(value, &HashMap::default())
+                            })
+                            .ok_or_else(|| {
+                                sv::AnalyzerError::Unsupported(format!(
+                                    "foreign parameter `{}` without a numeric value",
+                                    parameter.name
+                                ))
+                            })?;
+                        Ok((parameter.name.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>, sv::AnalyzerError>>()?;
+                specialized = resolver(&key.name, &parameters)?;
+                foreign_specializations.insert(key.clone(), lower_foreign(&specialized));
+                &specialized
+            };
+            for name in &signature.unresolved_instances {
+                if !analyzed.contains_key(name) && !foreign_modules.contains_key(name) {
+                    continue;
+                }
+                let dependency = LoweredSvModuleKey::base(name.clone());
+                if !module_ids.contains_key(&dependency) {
+                    let id = ModuleId(module_ids.len());
+                    module_ids.insert(dependency.clone(), id);
+                    module_specialization_counts.insert(name.clone(), 1);
+                    queue.push(dependency);
+                }
+            }
+            continue;
+        }
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let lowered = specialize_module(base, &key, four_state, false)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
-            if !analyzed.contains_key(&child_key.name) {
+            if !analyzed.contains_key(&child_key.name)
+                && !foreign_modules.contains_key(&child_key.name)
+            {
                 continue;
             }
             if !module_ids.contains_key(&child_key) {
@@ -949,6 +1280,12 @@ pub fn prepare_external_hierarchy(
     let lowered_modules = module_ids
         .iter()
         .map(|(key, &module_id)| {
+            if let Some(module) = foreign_specializations.get(key) {
+                return Ok((module_id, module.clone()));
+            }
+            if let Some(module) = foreign_modules.get(&key.name) {
+                return Ok((module_id, module.clone()));
+            }
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
@@ -989,11 +1326,21 @@ pub fn prepare_external_hierarchy(
             },
         );
     }
-    let roots = module_ids
+    let mut roots: HashMap<_, _> = module_ids
         .iter()
         .filter(|(key, _)| key.parameter_overrides.is_empty())
         .map(|(key, &module_id)| (key.name.clone(), module_id))
         .collect();
+    roots.extend(
+        requested_roots
+            .into_iter()
+            .map(|(alias, key)| (alias, module_ids[&key])),
+    );
+    if let Some((top, _)) = top_parameters
+        && let Some(key) = queue.iter().find(|key| key.name == top)
+    {
+        roots.insert(top.to_string(), module_ids[key]);
+    }
     let Some(any_module) = analyzed.values().next() else {
         return Ok(ExternalHierarchy {
             modules,

@@ -22,6 +22,8 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
+pub use ast::interfaces::elaborate_interfaces_with_bindings;
+pub use ast::interfaces::{InterfacePrototype, interface_prototypes};
 pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;

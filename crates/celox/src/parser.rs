@@ -632,7 +632,7 @@ pub fn parse_sv(
 /// An analyzer error as a parser error: a construct the analyzer does not
 /// support stays unsupported, and anything else is an error in the source.
 #[cfg(feature = "systemverilog")]
-fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
+pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
     match error {
         celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
             error.tracking_issue(),
@@ -653,9 +653,13 @@ fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
 #[cfg(feature = "systemverilog")]
 pub fn parse_mixed(
     top: &StrId,
-    ir: &veryl_analyzer::ir::Ir,
+    ir: &mut veryl_analyzer::ir::Ir,
+    context: &mut veryl_analyzer::Context,
     loop_provenance: &loop_provenance::LoopProvenance,
     sv_sources: &[(&str, &std::path::Path)],
+    foreign_declarations: &[(&str, &std::path::Path)],
+    top_parameters: &[(String, u64)],
+    requests: &[celox_frontend_sv::SvModuleRequest],
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -683,16 +687,68 @@ pub fn parse_mixed(
     ParserError,
 > {
     let external_roots = reachable_external_sv_roots(ir, top);
-    let external_roots = external_roots
+    let mut external_roots: HashSet<_> = external_roots
         .into_iter()
         .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
         .collect();
-    let external =
-        celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
-            .map_err(|error| match error {
-                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-                celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+    external_roots.insert(veryl_parser::resource_table::get_str_value(*top).unwrap_or_default());
+    let foreign = celox_frontend_veryl::external_signatures(ir, config)?;
+    let top_name = veryl_parser::resource_table::get_str_value(*top).unwrap_or_default();
+    let sv_top_parameters =
+        (!foreign.roots.contains_key(&top_name)).then_some((top_name.as_str(), top_parameters));
+    let base = ir.clone();
+    let mut specializations = Vec::new();
+    let mut resolver = |name: &str, parameters: &[(String, i128)]| {
+        let module = crate::simulator::mixed::specialize_foreign_module(
+            &base,
+            context,
+            name,
+            parameters,
+            specializations.len(),
+        )
+        .map_err(|error| {
+            celox_frontend_core::ParserError::illegal_context(
+                "foreign module specialization",
+                error.to_string(),
+                None,
+            )
+        })?;
+        let specialized = veryl_analyzer::ir::Ir {
+            components: vec![veryl_analyzer::ir::Component::Module(module)],
+        };
+        let signatures =
+            celox_frontend_veryl::external_signatures(&specialized, config).map_err(|error| {
+                celox_frontend_core::ParserError::illegal_context(
+                    "foreign module signature",
+                    error.to_string(),
+                    None,
+                )
             })?;
+        let signature = signatures.modules.values().next().cloned().ok_or_else(|| {
+            celox_frontend_core::ParserError::illegal_context(
+                "foreign module specialization",
+                format!("no concrete signature for `{name}`"),
+                None,
+            )
+        })?;
+        specializations.extend(specialized.components);
+        Ok(signature)
+    };
+    let external = celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver(
+        sv_sources,
+        &external_roots,
+        &foreign,
+        foreign_declarations,
+        four_state,
+        Some(&mut resolver),
+        sv_top_parameters,
+        requests,
+    )
+    .map_err(|error| match error {
+        celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+        celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+    })?;
+    ir.components.extend(specializations);
     parse_with_external_hierarchy(
         top,
         ir,

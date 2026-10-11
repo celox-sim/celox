@@ -36,7 +36,147 @@ use super::*;
 /// Joins an interface handle (instance or port) and an interface item name.
 const SEPARATOR: &str = "$";
 
+/// Interface declarations exported for mixed-language type resolution. The
+/// probe uses ordinary SV elaboration, including typedefs and parameter widths.
+#[derive(Clone, Debug)]
+pub struct InterfacePrototype {
+    pub name: String,
+    pub probe_name: String,
+    pub probe_source: String,
+    pub modports: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    pub parameters: Vec<String>,
+    pub driven: Vec<String>,
+    pub has_behavior: bool,
+}
+
+pub fn interface_prototypes(
+    sources: &[(&str, &Path)],
+) -> Result<(Vec<InterfacePrototype>, Vec<String>), AnalyzerError> {
+    let files = sources
+        .iter()
+        .map(|(code, path)| File::new(code, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let design = Design::collect(&files)?;
+    let mut declarations = design.interfaces.values().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| left.name.cmp(&right.name));
+    let signature_sources = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let edits = design
+                .modules
+                .values()
+                .filter(|module| module.file == index)
+                .map(|module| Edit {
+                    span: module.span,
+                    text: String::new(),
+                })
+                .collect::<Vec<_>>();
+            apply(file.code, (0, file.code.len()), &edits)
+        })
+        .collect();
+    Ok((
+        declarations
+            .into_iter()
+            .map(|interface| {
+                let probe_name = format!("__celox_interface_{}", interface.name);
+                let behavior_functions = interface
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Item::Process(span) => Some(*span),
+                        Item::Member(index) => interface.members[*index].initializer,
+                        _ => None,
+                    })
+                    .flat_map(|span| interface.referenced(span))
+                    .filter(|name| interface.function(name).is_some())
+                    .map(str::to_string)
+                    .collect::<HashSet<_>>();
+                let behavior_captures =
+                    interface.captured_members(&interface.function_closure(&behavior_functions));
+                InterfacePrototype {
+                    name: interface.name.clone(),
+                    probe_source: format!(
+                        "module {}{probe_name}({} h); endmodule",
+                        if interface.automatic {
+                            "automatic "
+                        } else {
+                            ""
+                        },
+                        interface.name
+                    ),
+                    probe_name,
+                    parameters: interface
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                    driven: interface
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member.initializer.is_some()
+                                || behavior_captures.get(&member.name) == Some(&Direction::Output)
+                                || interface.references.iter().any(|(span, name)| {
+                                    name == &member.name
+                                        && interface.lvalues.contains(&span.0)
+                                        && !interface.functions.iter().any(|function| {
+                                            function.span.0 <= span.0 && span.1 <= function.span.1
+                                        })
+                                })
+                        })
+                        .map(|member| member.name.clone())
+                        .collect(),
+                    has_behavior: interface
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, Item::Process(_)))
+                        || interface
+                            .members
+                            .iter()
+                            .any(|member| member.initializer.is_some()),
+                    modports: interface
+                        .modports
+                        .iter()
+                        .map(|(name, items)| {
+                            (
+                                name.clone(),
+                                items
+                                    .iter()
+                                    .map(|item| match item {
+                                        ModportItem::Member(direction, name) => {
+                                            (name.clone(), direction.keyword().to_string())
+                                        }
+                                        ModportItem::Import(name) => {
+                                            (name.clone(), "import".to_string())
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        signature_sources,
+    ))
+}
+
 type Span = (usize, usize);
+
+pub(crate) fn component_references(tree: &SyntaxTree) -> HashSet<String> {
+    tree.into_iter()
+        .filter_map(|node| match node {
+            RefNode::ModuleInstantiation(instance) => {
+                identifier_text(RefNode::ModuleIdentifier(&instance.nodes.0), tree)
+            }
+            RefNode::InterfaceIdentifier(identifier) => {
+                identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 fn unsupported(construct: impl Into<String>) -> AnalyzerError {
     AnalyzerError::Unsupported(construct.into())
@@ -56,13 +196,22 @@ fn joined(handle: &str, item: &str) -> String {
 pub fn elaborate_interfaces(
     sources: &[(&str, &Path)],
 ) -> Result<Option<Vec<String>>, AnalyzerError> {
+    elaborate_interfaces_with_bindings(sources, &[]).map(|(sources, _)| sources)
+}
+
+/// Interface bindings supplied by a foreign-language caller. Return the
+/// specialized SV root names alongside the rewritten sources.
+pub fn elaborate_interfaces_with_bindings(
+    sources: &[(&str, &Path)],
+    roots: &[(String, String, Vec<(String, String)>)],
+) -> Result<(Option<Vec<String>>, HashMap<String, String>), AnalyzerError> {
     let files = sources
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Result<Vec<_>, _>>()?;
     let design = Design::collect(&files)?;
     if design.interfaces.is_empty() {
-        return Ok(None);
+        return Ok((None, HashMap::default()));
     }
     // Generated names contain the separator; a source name containing it
     // could collide with one.
@@ -87,7 +236,41 @@ pub fn elaborate_interfaces(
             }
         }
     }
-    design.elaborate().map(Some)
+    let mut clones = Vec::new();
+    let mut names = HashMap::default();
+    for (alias, module_name, bindings) in roots {
+        let Some(module) = design.modules.get(module_name) else {
+            continue;
+        };
+        let mut generic = Vec::new();
+        for (port, interface) in bindings {
+            let declaration = module
+                .port(port)
+                .and_then(|port| port.interface.as_ref())
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "`{port}` of `{module_name}` is not an interface port"
+                    ))
+                })?;
+            if let Some(expected) = &declaration.interface {
+                if expected != interface {
+                    return Err(unsupported(format!(
+                        "interface `{interface}` connected to `{module_name}.{port}` of type `{expected}`"
+                    )));
+                }
+            } else {
+                generic.push((port.clone(), interface.clone()));
+            }
+        }
+        generic.sort();
+        if generic.is_empty() {
+            names.insert(alias.clone(), module_name.clone());
+        } else {
+            names.insert(alias.clone(), clone_module_name(module_name, &generic));
+            clones.push((module_name.clone(), generic));
+        }
+    }
+    Ok((Some(design.elaborate_with_roots(clones)?), names))
 }
 
 /// A parsed source and its tokens.
@@ -1038,11 +1221,13 @@ impl<'a> Design<'a> {
         Err(unsupported(format!("module `{}`", module.name)))
     }
 
-    fn elaborate(&self) -> Result<Vec<String>, AnalyzerError> {
+    fn elaborate_with_roots(
+        &self,
+        mut clones: Vec<(String, Vec<(String, String)>)>,
+    ) -> Result<Vec<String>, AnalyzerError> {
         let mut edits: Vec<Vec<Edit>> = vec![Vec::new(); self.files.len()];
         let mut names: Vec<String> = self.modules.keys().cloned().collect();
         names.sort();
-        let mut clones: Vec<(String, Vec<(String, String)>)> = Vec::new();
         let mut cloned: HashSet<String> = HashSet::default();
         for name in &names {
             let module = &self.modules[name];

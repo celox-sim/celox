@@ -1,6 +1,379 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_interface_function_writes_in_systemverilog_behavior(sim) {
+        @setup {
+    let veryl = "module Top (a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";
+    let sv = r#"
+        interface Bus;
+            logic [7:0] req, rsp;
+            function automatic void update(input logic [7:0] value);
+                rsp = value + 8'd1;
+            endfunction
+            function automatic void dispatch(input logic [7:0] value);
+                update(value);
+            endfunction
+            always_comb dispatch(req);
+        endinterface
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+        sim.modify(|io| io.set(a, 127u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 128u8.into());
+    }
+
+    fn preserves_wide_signed_systemverilog_interface_parameters(sim) {
+        @setup {
+    let veryl = "module Top (y: output logic<64>) { inst bus: $sv::Bus #(V: 64'sh1_0000_0001); assign y = bus.value; }";
+    let sv = "interface Bus #(parameter longint signed V = -1); logic [63:0] value; assign value = V; endinterface";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        assert_eq!(sim.get(sim.signal("y")), 0x1_0000_0001u64.into());
+    }
+
+    fn overrides_parameters_of_a_systemverilog_top_in_a_mixed_design(sim) {
+        @setup {
+    let veryl = "module Child (a: input logic<16>, y: output logic<16>) { assign y = a + 1; }";
+    let sv = "module Top #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y); Child child(.a(a), .y(y)); endmodule";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        ).param("W", 16);
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn specializes_systemverilog_children_from_veryl_parameters(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (a: input logic<16>, y: output logic<16>) {
+            inst child: $sv::Child #(W: 16) (a, y);
+        }
+    "#;
+    let sv = r#"
+        module Child #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y);
+            assign y = a + 1;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("child.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn binds_a_veryl_interface_to_a_generic_systemverilog_port(sim) {
+        @setup {
+    let veryl = r#"
+        interface Bus #(param W: u32 = 8) {
+            var req: logic<W>;
+            var rsp: logic<W>;
+            modport slave { req: input, rsp: output, }
+        }
+        module Top (a: input logic<16>, y: output logic<16>) {
+            inst bus: Bus #(W: 16);
+            assign bus.req = a;
+            inst child: $sv::Child (bus);
+            assign y = bus.rsp;
+        }
+    "#;
+    let sv = "module Child(interface bus); assign bus.rsp = bus.req + 1; endmodule";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("bus.veryl"))],
+            vec![(sv, Path::new("child.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn forwards_systemverilog_interface_parameters_from_veryl(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (a: input logic<16>, y: output logic<16>) {
+            inst bus: $sv::Bus #(W: 16);
+            assign bus.req = a;
+            inst child: $sv::Child (bus);
+            assign y = bus.rsp;
+        }
+    "#;
+    let sv = r#"
+        interface Bus #(parameter W = 8);
+            logic [W-1:0] req, rsp;
+            modport slave(input req, output rsp);
+        endinterface
+        module Child(Bus.slave bus); assign bus.rsp = bus.req + 1; endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("child.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn specializes_veryl_children_from_systemverilog_parameters(sim) {
+        @setup {
+    let veryl = r#"
+        module Child #(param W: u32 = 8) (a: input logic<W>, y: output logic<W>) {
+            assign y = a + 1;
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [15:0] a, output logic [15:0] y);
+            Child #(.W(16)) child(.a(a), .y(y));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn specializes_veryl_modports_to_the_connected_systemverilog_interface(sim) {
+        @setup {
+    let veryl = r#"
+        module Child (bus: modport $sv::Bus::slave) {
+            assign bus.rsp = bus.req + 1;
+        }
+    "#;
+    let sv = r#"
+        interface Bus #(parameter W = 8);
+            logic [W-1:0] req, rsp;
+            modport slave(input req, output rsp);
+        endinterface
+        module Top(input logic [15:0] a, output logic [15:0] y);
+            Bus #(.W(16)) bus();
+            assign bus.req = a;
+            Child child(.bus(bus));
+            assign y = bus.rsp;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1235u16.into());
+    }
+
+    fn runs_parameterized_systemverilog_interface_arrays_instantiated_in_veryl(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (a: input logic<16>, y0: output logic<16>, y1: output logic<16>) {
+            inst bus: $sv::Bus [2] #(W: 16);
+            assign bus[0].req = a;
+            assign bus[1].req = a + 1;
+            assign y0 = bus[0].rsp;
+            assign y1 = bus[1].rsp;
+        }
+    "#;
+    let sv = r#"
+        interface Bus #(parameter W = 8);
+            logic [W-1:0] req, rsp;
+            assign rsp = req + 1;
+        endinterface
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y0")), 0x1235u16.into());
+        assert_eq!(sim.get(sim.signal("y1")), 0x1236u16.into());
+    }
+
+    fn runs_systemverilog_interface_logic_instantiated_in_veryl(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (a: input logic<8>, y: output logic<8>) {
+            inst bus: $sv::Bus;
+            assign bus.req = a;
+            assign y = bus.rsp;
+        }
+    "#;
+    let sv = r#"
+        interface Bus;
+            logic [7:0] req, rsp;
+            assign rsp = req + 8'd1;
+        endinterface
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+    }
+
+    fn connects_a_veryl_interface_from_systemverilog(sim) {
+        @setup {
+    let veryl = r#"
+        interface Bus {
+            var req: logic<8>;
+            var rsp: logic<8>;
+            modport slave { req: input, rsp: output, }
+        }
+        module Child (bus: modport Bus::slave) {
+            assign bus.rsp = bus.req + 8'd1;
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y);
+            Bus bus();
+            assign bus.req = a;
+            Child child(.bus(bus));
+            assign y = bus.rsp;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("bus.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+    }
+
+    fn passes_a_veryl_interface_to_a_systemverilog_module(sim) {
+        @setup {
+    let veryl = r#"
+        interface Bus {
+            var req: logic<8>;
+            var rsp: logic<8>;
+            modport slave { req: input, rsp: output, }
+        }
+        module Top (a: input logic<8>, y: output logic<8>) {
+            inst bus: Bus;
+            assign bus.req = a;
+            inst slave: $sv::Slave (bus);
+            assign y = bus.rsp;
+        }
+    "#;
+    let sv = "module Slave(Bus.slave bus); assign bus.rsp = bus.req + 8'd1; endmodule";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("bus.veryl"))],
+            vec![(sv, Path::new("slave.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+    }
+
+    fn passes_a_systemverilog_interface_to_a_veryl_module(sim) {
+        @setup {
+    let veryl = r#"
+        module Child (bus: modport $sv::Bus::slave) {
+            assign bus.rsp = bus.req + 8'd1;
+        }
+    "#;
+    let sv = r#"
+        interface Bus;
+            logic [7:0] req, rsp;
+            modport slave(input req, output rsp);
+        endinterface
+        module Top(input logic [7:0] a, output logic [7:0] y);
+            Bus bus();
+            assign bus.req = a;
+            Child child(.bus(bus));
+            assign y = bus.rsp;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+    }
+
+    fn connects_a_systemverilog_interface_from_veryl(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (a: input logic<8>, y: output logic<8>) {
+            inst bus: $sv::Bus;
+            assign bus.req = a;
+            inst slave: $sv::Slave (bus);
+            assign y = bus.rsp;
+        }
+    "#;
+    let sv = r#"
+        interface Bus;
+            logic [7:0] req, rsp;
+            modport slave(input req, output rsp);
+        endinterface
+        module Slave(Bus.slave bus);
+            assign bus.rsp = bus.req + 8'd1;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 41u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+    }
+
+    fn simulates_systemverilog_top_with_veryl_child_and_systemverilog_grandchild(sim) {
+        @setup {
+    let veryl = r#"
+        module VerylChild (a: input logic<8>, y: output logic<8>) {
+            var intermediate: logic<8>;
+            assign intermediate = a + 8'd3;
+            inst leaf: $sv::SvLeaf (a: intermediate, y);
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y);
+            VerylChild child(.y(y), .a(a));
+        endmodule
+        module SvLeaf(input logic [7:0] a, output logic [7:0] y);
+            assign y = a ^ 8'h55;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x76u8.into());
+    }
+
     fn preserves_positional_veryl_to_systemverilog_port_order(sim) {
         @setup {
     let veryl = r#"
@@ -259,5 +632,222 @@ sv_backends! {
     sim.modify(|io| io.set(a, 0x80u8)).unwrap();
     assert_eq!(sim.get(sim.signal("part_y")), 0x0080u16.into());
     assert_eq!(sim.get(sim.signal("bit_y")), 1u16.into());
+    }
+}
+
+#[test]
+fn rejects_missing_children_of_a_systemverilog_top_in_a_mixed_design() {
+    let veryl = "module Unused {}";
+    let sv = "module Top(output logic y); Missing child(.y(y)); endmodule";
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("unused.veryl"))],
+        vec![(sv, Path::new("top.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap_err();
+    assert!(error.to_string().contains("Missing"), "{error}");
+}
+
+#[test]
+fn rejects_cycles_that_cross_language_boundaries() {
+    let veryl = "module Child { inst parent: $sv::Top; }";
+    let sv = "module Top; Child child(); endmodule";
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("child.veryl"))],
+        vec![(sv, Path::new("top.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("recursive mixed-language"),
+        "{error}"
+    );
+}
+
+// These assert the intended simulation results, so implementing the missing
+// bridge behavior only requires removing the ignore attributes.
+mod pending_interface_functions {
+    use super::*;
+
+    sv_backends! {
+        #[ignore = "SV interface function bodies are not imported into the Veryl frontend"]
+        fn calls_systemverilog_interface_function_from_veryl(sim) {
+            @setup {
+                let veryl = r#"
+                    module Top (b: input logic<8>, k: input logic<8>, y: output logic<8>) {
+                        inst bus: $sv::Bus;
+                        assign bus.bias = b;
+                        assign y = bus.transform(k);
+                    }
+                "#;
+                let sv = r#"
+                    interface Bus;
+                        logic [7:0] bias;
+                        function automatic logic [7:0] transform(input logic [7:0] value);
+                            return bias + value;
+                        endfunction
+                    endinterface
+                "#;
+            }
+            @build Simulator::from_mixed_sources(
+                vec![(veryl, Path::new("top.veryl"))],
+                vec![(sv, Path::new("bus.sv"))], "Top",
+            );
+            let b = sim.signal("b");
+            let k = sim.signal("k");
+            let y = sim.signal("y");
+            for (bias, value, expected) in [(0u8, 0u8, 0u8), (16, 5, 21), (255, 2, 1), (3, 7, 10)] {
+                sim.modify(|io| { io.set(b, bias); io.set(k, value); }).unwrap();
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
+
+        #[ignore = "Veryl interface function bodies are not exported to the SV frontend"]
+        fn calls_veryl_interface_function_from_systemverilog(sim) {
+            @setup {
+                let veryl = r#"
+                    interface Bus {
+                        var bias: logic<8>;
+                        function transform (value: input logic<8>) -> logic<8> {
+                            return bias + value;
+                        }
+                    }
+                "#;
+                let sv = r#"
+                    module Top(input logic [7:0] b, k, output logic [7:0] y);
+                        Bus bus();
+                        assign bus.bias = b;
+                        assign y = bus.transform(k);
+                    endmodule
+                "#;
+            }
+            @build Simulator::from_mixed_sources(
+                vec![(veryl, Path::new("bus.veryl"))],
+                vec![(sv, Path::new("top.sv"))], "Top",
+            );
+            let b = sim.signal("b");
+            let k = sim.signal("k");
+            let y = sim.signal("y");
+            for (bias, value, expected) in [(0u8, 0u8, 0u8), (16, 5, 21), (255, 2, 1), (3, 7, 10)] {
+                sim.modify(|io| { io.set(b, bias); io.set(k, value); }).unwrap();
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
+
+        #[ignore = "SV modport function imports and captured members are not bridged to Veryl"]
+        fn imports_systemverilog_interface_function_into_veryl_modport(sim) {
+            @setup {
+                let veryl = r#"
+                    module Child (bus: modport $sv::Bus::reader, k: input logic<8>, y: output logic<8>) {
+                        assign y = bus.transform(k);
+                    }
+                "#;
+                let sv = r#"
+                    interface Bus;
+                        logic [7:0] bias;
+                        function automatic logic [7:0] transform(input logic [7:0] value);
+                            return bias + value;
+                        endfunction
+                        modport reader(import transform);
+                    endinterface
+                    module Top(input logic [7:0] b, k, output logic [7:0] y);
+                        Bus bus();
+                        assign bus.bias = b;
+                        Child child(.bus(bus), .k(k), .y(y));
+                    endmodule
+                "#;
+            }
+            @build Simulator::from_mixed_sources(
+                vec![(veryl, Path::new("child.veryl"))],
+                vec![(sv, Path::new("top.sv"))], "Top",
+            );
+            let b = sim.signal("b");
+            let k = sim.signal("k");
+            let y = sim.signal("y");
+            for (bias, value, expected) in [(0u8, 0u8, 0u8), (16, 5, 21), (255, 2, 1), (3, 7, 10)] {
+                sim.modify(|io| { io.set(b, bias); io.set(k, value); }).unwrap();
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
+
+        #[ignore = "Veryl modport function imports and captured members are not bridged to SV"]
+        fn imports_veryl_interface_function_into_systemverilog_modport(sim) {
+            @setup {
+                let veryl = r#"
+                    interface Bus {
+                        var bias: logic<8>;
+                        function transform (value: input logic<8>) -> logic<8> {
+                            return bias + value;
+                        }
+                        modport reader { transform: import, }
+                    }
+                    module Top (b: input logic<8>, k: input logic<8>, y: output logic<8>) {
+                        inst bus: Bus;
+                        assign bus.bias = b;
+                        inst child: $sv::Child (bus, k, y);
+                    }
+                "#;
+                let sv = r#"
+                    module Child(Bus.reader bus, input logic [7:0] k, output logic [7:0] y);
+                        assign y = bus.transform(k);
+                    endmodule
+                "#;
+            }
+            @build Simulator::from_mixed_sources(
+                vec![(veryl, Path::new("top.veryl"))],
+                vec![(sv, Path::new("child.sv"))], "Top",
+            );
+            let b = sim.signal("b");
+            let k = sim.signal("k");
+            let y = sim.signal("y");
+            for (bias, value, expected) in [(0u8, 0u8, 0u8), (16, 5, 21), (255, 2, 1), (3, 7, 10)] {
+                sim.modify(|io| { io.set(b, bias); io.set(k, value); }).unwrap();
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
+
+        #[ignore = "SV modport exports and calls from a Veryl importer are not implemented"]
+        fn calls_systemverilog_exported_function_from_veryl_modport(sim) {
+            @setup {
+                let veryl = r#"
+                    module Child (bus: modport $sv::Bus::client, k: input logic<8>, y: output logic<8>) {
+                        assign y = bus.transform(k);
+                    }
+                "#;
+                // IEEE 1800-2023 25.7: a function supplied by another module
+                // needs a full prototype on the importing modport.
+                let sv = r#"
+                    interface Bus;
+                        logic [7:0] bias;
+                        modport server(input bias, export transform);
+                        modport client(import function logic [7:0] transform(input logic [7:0] value));
+                    endinterface
+                    module Provider(Bus.server bus);
+                        function automatic logic [7:0] bus.transform(input logic [7:0] value);
+                            return bus.bias + value;
+                        endfunction
+                    endmodule
+                    module Top(input logic [7:0] b, k, output logic [7:0] y);
+                        Bus bus();
+                        assign bus.bias = b;
+                        Provider provider(.bus(bus));
+                        Child child(.bus(bus), .k(k), .y(y));
+                    endmodule
+                "#;
+            }
+            @build Simulator::from_mixed_sources(
+                vec![(veryl, Path::new("child.veryl"))],
+                vec![(sv, Path::new("top.sv"))], "Top",
+            );
+            let b = sim.signal("b");
+            let k = sim.signal("k");
+            let y = sim.signal("y");
+            for (bias, value, expected) in [(0u8, 0u8, 0u8), (16, 5, 21), (255, 2, 1), (3, 7, 10)] {
+                sim.modify(|io| { io.set(b, bias); io.set(k, value); }).unwrap();
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
     }
 }

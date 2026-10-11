@@ -40,6 +40,11 @@ impl ParsedSource {
         &self.index.interfaces
     }
 
+    /// Module and interface names referenced by instantiations and ports.
+    pub fn component_references(&self) -> fxhash::FxHashSet<String> {
+        ast::interfaces::component_references(&self.tree)
+    }
+
     /// Analyze the packages declared in `sources`, each once, after the
     /// packages it depends on.
     pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {

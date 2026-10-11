@@ -2,8 +2,8 @@
 
 Celox は [Veryl](https://veryl-lang.org/) と、**SystemVerilog の合成可能なサブセット**をシミュレートします。
 2 つのフロントエンドは同じ中間表現へ lowering するため、スケジューリング、最適化、バックエンド、
-ランタイムを共有します。2 つの言語を混在させることもでき、Veryl のトップから SystemVerilog の
-モジュールをインスタンス化できます。
+ランタイムを共有します。両言語を混在させ、どちらをトップにしても双方向にモジュールを
+インスタンス化できます。
 
 SystemVerilog フロントエンドは、`celox` crate の Cargo feature `systemverilog` の背後にある Rust API です。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl だけを読み込みます。
@@ -29,7 +29,19 @@ let mut sim = Simulator::from_sv_sources(
 .build()?;
 ```
 
-`Simulator::from_mixed_sources` は、Veryl のソースと SystemVerilog の子モジュールを組み合わせます。
+`Simulator::from_mixed_sources` は両言語のソースを組み合わせます。トップはどちらの言語でもよく、
+階層は Veryl → SV → Veryl のように言語境界を複数回跨げます。Veryl では `$sv::Module`、
+SV では Veryl のモジュール名でインスタンス化します。数値パラメータは、それぞれの frontend が解決します。
+
+interface と `input` / `output` modport のメンバー接続も双方向に対応します。SV の interface は
+Veryl で `inst bus: $sv::Bus;`、ポートで `bus: modport $sv::Bus::slave` と指定できます。
+SV から Veryl の interface をインスタンス化し、両言語のモジュールに接続することもできます。
+interface のパラメータ、インスタンス配列、SV の generic interface ポートは接続先の型で解決します。
+Veryl からインスタンス化した SV interface の内部ロジックは、SV frontend で実行します。
+
+両 frontend の宣言情報と解析結果を直接接続するため、Veryl の SV emitter は不要です。
+言語境界を跨ぐ interface 関数の呼び出しと、関数の `import` / `export` modport は、まだ未対応です。
+各言語内での対応範囲は従来どおりです。
 
 ## サポートしているもの
 
