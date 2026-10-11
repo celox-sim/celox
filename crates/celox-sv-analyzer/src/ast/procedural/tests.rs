@@ -38,9 +38,14 @@ fn declared_shapes_are_independent_of_subroutine_and_parent_lifetimes() {
                             .unwrap();
                         let env = HashMap::default();
                         let aliases = HashMap::default();
-                        let dimensions =
-                            subroutine_declared_dimensions(node.clone(), &tree, &env, &aliases)
-                                .unwrap();
+                        let dimensions = subroutine_declared_dimensions(
+                            node.clone(),
+                            &tree,
+                            &env,
+                            &aliases,
+                            (0, 0),
+                        )
+                        .unwrap();
                         let (name, parameters) = subroutine_declared_parameter_shapes(
                             node.clone(),
                             &tree,

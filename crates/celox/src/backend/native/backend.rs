@@ -388,6 +388,9 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
+    /// Ordered so that the encoded image does not depend on hash order.
+    pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     #[serde(default)]
     pub(crate) process_event_counters: Vec<celox_design::ProcessEventCounters<AbsoluteAddr>>,
@@ -486,6 +489,8 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                dead_store_policy: self.runtime_schema.dead_store_policy,
+                live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
                 process_event_counters: self.runtime_schema.process_event_counters.clone(),
             },
@@ -2259,6 +2264,14 @@ fn compile_program(
                     .runtime()
                     .runtime_schema
                     .comb_writes
+                    .iter()
+                    .copied()
+                    .collect(),
+                dead_store_policy: sir.runtime().runtime_schema.dead_store_policy,
+                live_signals: sir
+                    .runtime()
+                    .runtime_schema
+                    .live_signals
                     .iter()
                     .copied()
                     .collect(),

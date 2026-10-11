@@ -76,8 +76,43 @@ pub(super) fn array_parameters_from_module_node<'a>(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
+    let mut parameters = array_parameters_from_parameter_ports(
+        node.clone(),
+        tree,
+        const_env,
+        type_aliases,
+        &mut |_| {},
+    )?;
+    for declaration in scope_declarations(node.clone()) {
+        let declaration = match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
+                RefNode::LocalParameterDeclaration(&declaration.0)
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
+                RefNode::ParameterDeclaration(&declaration.0)
+            }
+            _ => continue,
+        };
+        parameters.extend(array_parameters_from_declaration(
+            declaration,
+            tree,
+            const_env,
+            type_aliases,
+            &mut |_| {},
+        )?);
+    }
+    Ok(parameters)
+}
+
+/// Header parameters must be visible before dependent port ranges are lowered.
+pub(super) fn array_parameters_from_parameter_ports<'a>(
+    node: RefNode<'a>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    publish: &mut impl FnMut(&ArrayParameter<'a>),
+) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
     let mut declarations = Vec::new();
-    // The `#(...)` list, then the module items.
     if let Some(list) = module_parameter_port_list(node.clone()) {
         for child in list {
             match child {
@@ -91,45 +126,56 @@ pub(super) fn array_parameters_from_module_node<'a>(
             }
         }
     }
-    for declaration in scope_declarations(node.clone()) {
-        declarations.push(match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
-                RefNode::LocalParameterDeclaration(&declaration.0)
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
-                RefNode::ParameterDeclaration(&declaration.0)
-            }
-            _ => continue,
-        });
-    }
     let mut parameters = Vec::new();
     for declaration in declarations {
-        for child in declaration.clone() {
-            let RefNode::ParamAssignment(param) = child else {
-                continue;
-            };
-            if !is_array_parameter(param) {
-                continue;
-            }
-            let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
-            let element = declared_type(declaration.clone(), tree, const_env, type_aliases)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
-                })?;
-            let ranges = unpacked_ranges_from_dimensions_with_env(
-                &param.nodes.1,
-                tree,
-                const_env,
-                type_aliases,
-            )?;
-            let pattern = value_pattern(param).ok_or_else(|| {
-                AnalyzerError::Unsupported(format!("value of array parameter `{name}`"))
-            })?;
-            parameters.push(ArrayParameter {
-                signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
-                pattern,
-            });
+        parameters.extend(array_parameters_from_declaration(
+            declaration,
+            tree,
+            const_env,
+            type_aliases,
+            publish,
+        )?);
+    }
+    Ok(parameters)
+}
+
+/// A scope scan installs each array parameter declaration in source order.
+pub(super) fn array_parameters_from_declaration<'a>(
+    declaration: RefNode<'a>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    publish: &mut impl FnMut(&ArrayParameter<'a>),
+) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
+    let mut parameters = Vec::new();
+    for child in declaration.clone() {
+        let RefNode::ParamAssignment(param) = child else {
+            continue;
+        };
+        if !is_array_parameter(param) {
+            continue;
         }
+        let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
+        let element = declared_type(declaration.clone(), tree, const_env, type_aliases)
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
+            })?;
+        let ranges = unpacked_ranges_from_dimensions_with_env(
+            &param.nodes.1,
+            tree,
+            const_env,
+            type_aliases,
+        )?;
+        let pattern = value_pattern(param).ok_or_else(|| {
+            AnalyzerError::Unsupported(format!("value of array parameter `{name}`"))
+        })?;
+        let parameter = ArrayParameter {
+            signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
+            pattern,
+        };
+        // Publish before the next declarator can query this array's shape.
+        publish(&parameter);
+        parameters.push(parameter);
     }
     Ok(parameters)
 }

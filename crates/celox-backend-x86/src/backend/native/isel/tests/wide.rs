@@ -1537,3 +1537,104 @@ fn four_state_sar_uses_sign_fill_past_the_logical_source_words() {
         }
     }
 }
+
+#[test]
+fn loaded_slices_survive_bulk_writes_across_padded_array_elements() {
+    for commit in [false, true] {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(0),
+        };
+        let out_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(1),
+        };
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let working = RegionedAbsoluteAddr::from_absolute_addr(1, array_abs);
+        let out = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, out_abs);
+        let [loaded, zero, sliced] = std::array::from_fn(RegisterId);
+        let write = if commit {
+            SIRInstruction::Commit(working, stable, SIROffset::Static(0), 18, vec![])
+        } else {
+            SIRInstruction::Store(stable, SIROffset::Static(0), 18, zero, vec![], vec![])
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(loaded, stable, SIROffset::Static(9), 9),
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        write,
+                        SIRInstruction::Slice(sliced, loaded, 8, 1),
+                        SIRInstruction::Store(out, SIROffset::Static(0), 1, sliced, vec![], vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(loaded, 9), (zero, 18), (sliced, 1)]
+                .into_iter()
+                .map(|(id, width)| {
+                    (
+                        id,
+                        RegisterType::Bit {
+                            width,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        unit.verify();
+        let mut layout = empty_layout();
+        layout.offsets = [(array_abs, 0), (out_abs, 4)].into_iter().collect();
+        layout.widths = [(array_abs, 18), (out_abs, 1)].into_iter().collect();
+        layout.is_4states = [(array_abs, false), (out_abs, false)].into_iter().collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            celox_state_layout::UnpackedArrayLayout {
+                element_width: 9,
+                element_count: 2,
+                element_stride: 2,
+                plane_size: 4,
+            },
+        );
+        layout.total_size = 5;
+        layout.working_base_offset = 5;
+        layout.working_offsets.insert(array_abs, 0);
+        layout.sparse_base_offset = 9;
+        layout.merged_total_size = 9;
+        layout.triggered_bits_offset = 9;
+        layout.scratch_base_offset = 9;
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; 9];
+        state[3] = 1;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            state[3], 0,
+            "bulk write did not update the padded element, commit={commit}"
+        );
+        assert_eq!(
+            state[4] & 1,
+            1,
+            "slice reloaded a value after bulk write, commit={commit}"
+        );
+    }
+}
