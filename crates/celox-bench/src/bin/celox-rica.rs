@@ -297,9 +297,12 @@ fn load_platform(project: &Path, user: bool) -> Result<Platform, RicaError> {
         early_alu: flag("early_alu")?,
         direct_load_return: flag("direct_load_return")?,
     };
-    if platform.memory_hz == 0 || !platform.cpu_hz.is_multiple_of(platform.memory_hz) {
+    if platform.cpu_hz == 0
+        || platform.memory_hz == 0
+        || !platform.cpu_hz.is_multiple_of(platform.memory_hz)
+    {
         return Err(message(
-            "platform-user.json: cpu_hz must be a multiple of memory_hz",
+            "platform-user.json: cpu_hz and memory_hz must be positive and cpu_hz a multiple of memory_hz",
         ));
     }
     Ok(platform)
@@ -368,6 +371,10 @@ fn builder<'a, B>(
     builder
 }
 
+/// Addresses the board model's debug loader can write: the reset trampoline
+/// and the RAM window.
+const BOARD_RANGES: [std::ops::Range<u64>; 2] = [0..0x1000, 0x8000_0000..0x8003_f000];
+
 struct ElfImage {
     memory: BTreeMap<u64, u8>,
     tohost: u64,
@@ -405,6 +412,20 @@ impl ElfImage {
         let mut memory = BTreeMap::new();
         for segment in elf.segments() {
             let address = segment.address();
+            // Check the whole memory image, including a zero-filled tail.
+            let end = address
+                .checked_add(segment.size())
+                .ok_or_else(|| message(format!("{}: segment overflows", path.display())))?;
+            if segment.size() != 0
+                && !BOARD_RANGES
+                    .iter()
+                    .any(|range| range.start <= address && end <= range.end)
+            {
+                return Err(message(format!(
+                    "{}: segment {address:#x}..{end:#x} is outside the board memory",
+                    path.display()
+                )));
+            }
             for (offset, byte) in segment.data()?.iter().copied().enumerate() {
                 memory.insert(address + offset as u64, byte);
             }
@@ -424,13 +445,6 @@ impl ElfImage {
             .find(|symbol| symbol.name().ok() == Some("tohost"))
             .ok_or_else(|| message(format!("{} has no tohost symbol", path.display())))?
             .address();
-        for address in memory.keys() {
-            if *address >= 0x1000 && !(0x8000_0000..0x8003_f000).contains(address) {
-                return Err(message(format!(
-                    "hardware RTL address {address:#x} is out of range"
-                )));
-            }
-        }
         let name = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())

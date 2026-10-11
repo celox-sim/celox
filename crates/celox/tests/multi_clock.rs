@@ -114,18 +114,20 @@ module Top (
         check_coincident_edges!(builder().build_wasm().unwrap());
     }
 
-    // A single-domain design has no split kernels; repeated or aliased
-    // events of that domain are one ordinary tick.
+    // A design with one active domain has no split kernels; repeated
+    // events of that domain are one ordinary tick, and a clock that drives
+    // no FF is a no-op alongside it.
     #[test]
     fn single_domain() {
         let mut sim = Simulator::builder(
             r#"
 module Top (
-    clk: input clock,
-    rst: input reset,
-    count: output logic<8>,
+    clk: input 'a clock,
+    idle_clk: input 'b clock,
+    rst: input 'a reset,
+    count: output 'a logic<8>,
 ) {
-    always_ff {
+    always_ff (clk, rst) {
         if_reset {
             count = 0;
         } else {
@@ -146,6 +148,11 @@ module Top (
         sim.modify(|io| io.set(rst, 1u8)).unwrap();
         sim.tick_events(&[clk, clk]).unwrap();
         assert_eq!(sim.get(count), 1u64.into());
+        let idle = sim.event("idle_clk");
+        sim.tick_events(&[clk, idle]).unwrap();
+        assert_eq!(sim.get(count), 2u64.into());
+        sim.tick_events(&[idle, clk]).unwrap();
+        assert_eq!(sim.get(count), 3u64.into());
     }
 
     #[test]

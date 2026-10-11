@@ -1327,22 +1327,31 @@ mod host {
                     unique.push((canonical, *event));
                 }
             }
-            match unique.as_slice() {
-                [] => return Ok(()),
-                [(_, event)] => return self.tick(*event),
-                _ => {}
-            }
+            // Split kernels exist for every active domain once a design has
+            // more than one. A domain without them drives no FF, unless the
+            // design has at most one active domain and no split kernels at
+            // all; then ticking each event in turn is exact, because at most
+            // one of them changes state.
             let mut domains = Vec::with_capacity(unique.len());
+            let mut unsplit = Vec::new();
             for (canonical, event) in unique {
-                let eval_only = self.backend.resolve_eval_only_event(&canonical);
-                let apply = self.backend.resolve_apply_event(&canonical);
-                let (Some(eval_only), Some(apply)) = (eval_only, apply) else {
-                    return Err(RuntimeErrorCode::NotAnEvent(format!(
-                        "event_id={}",
-                        event.id()
-                    )));
-                };
-                domains.push((eval_only, apply));
+                match (
+                    self.backend.resolve_eval_only_event(&canonical),
+                    self.backend.resolve_apply_event(&canonical),
+                ) {
+                    (Some(eval_only), Some(apply)) => domains.push((event, eval_only, apply)),
+                    _ => unsplit.push(event),
+                }
+            }
+            match domains.as_slice() {
+                [] => {
+                    for event in unsplit {
+                        self.tick(event)?;
+                    }
+                    return Ok(());
+                }
+                [(event, _, _)] => return self.tick(*event),
+                _ => {}
             }
             let timing_enabled = self.diagnostics.tick_timing_every.is_some();
             let mut eval_comb_ns = 0u64;
@@ -1356,10 +1365,10 @@ mod host {
                 self.dirty = false;
             }
             let start = timing_enabled.then(crate::timing::now);
-            for (eval_only, _) in &domains {
+            for (_, eval_only, _) in &domains {
                 self.eval_only_ff_at_checked(*eval_only)?;
             }
-            for (_, apply) in &domains {
+            for (_, _, apply) in &domains {
                 self.apply_ff_at_checked(*apply)?;
             }
             if let Some(start) = start {
