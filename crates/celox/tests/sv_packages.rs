@@ -1138,3 +1138,43 @@ fn generate_block_imports_check_packages_and_skip_loop_genvars() {
         4
     );
 }
+
+/// Review cases: conditional loop bodies, structure members, and child block
+/// names in generate scopes.
+#[test]
+fn generate_scopes_follow_loop_bodies_members_and_child_blocks() {
+    let pk = "package p; localparam int i = 7; localparam int X = 3; localparam int h = 1;
+              endpackage
+              package q; localparam int i = 8; endpackage";
+    // The genvar of a loop whose body is a conditional generate.
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; import q::*;
+                 for (genvar i = 0; i < 1; i++) if (i == 0) begin : c assign y = i + 5; end
+               end
+             endmodule"
+        )),
+        5
+    );
+    // A structure member does not hide the imported name.
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : g import p::*; struct packed {{ logic X; }} value;
+                 assign value = 1'b1; assign y = X; end
+             endmodule"
+        )),
+        3
+    );
+    // A child block's name is a declaration of its parent.
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y);
+           if (1) begin : g import p::h; if (1) begin : h end assign y = 0; end
+         endmodule"
+    ));
+    assert!(detail.contains("the generate block declares"), "{detail}");
+}

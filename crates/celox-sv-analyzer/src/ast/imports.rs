@@ -418,9 +418,23 @@ fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
     ) {
         return Vec::new();
     }
+    // A loop body is always a scope of its own.
+    let loop_bodies: HashSet<(usize, usize)> = node
+        .clone()
+        .into_iter()
+        .filter_map(|child| match child {
+            RefNode::LoopGenerateConstruct(construct) => {
+                Some(node_range(RefNode::GenerateBlock(&construct.nodes.2)))
+            }
+            _ => None,
+        })
+        .collect();
     node.into_iter()
         .filter_map(|child| match child {
             RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(_)) => {
+                Some(node_range(child))
+            }
+            RefNode::GenerateBlock(_) if loop_bodies.contains(&node_range(child.clone())) => {
                 Some(node_range(child))
             }
             // A single item is a scope too, except a conditional generate
@@ -467,10 +481,17 @@ impl GenerateScope {
 /// declarations that are its own rather than those of a block, function or
 /// task nested in it.
 fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
-    let blocks = generate_blocks(node.clone());
+    let mut blocks = generate_blocks(node.clone());
     if blocks.is_empty() {
         return Vec::new();
     }
+    // A loop's genvar is also visible in the loop's own header.
+    blocks.extend(node.clone().into_iter().filter_map(|child| match child {
+        RefNode::LoopGenerateConstruct(_) => Some(node_range(child)),
+        _ => None,
+    }));
+    // Subroutines and blocks declare names of their own, and the members of
+    // a structure live in the member name space of its type.
     let subroutines: Vec<(usize, usize)> = node
         .clone()
         .into_iter()
@@ -480,6 +501,7 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
                 RefNode::FunctionDeclaration(_)
                     | RefNode::TaskDeclaration(_)
                     | RefNode::SeqBlock(_)
+                    | RefNode::StructUnionMember(_)
             )
         })
         .map(node_range)
@@ -548,13 +570,42 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
             // (IEEE 1800-2023 27.4).
             RefNode::LoopGenerateConstruct(construct) => {
                 let body = node_range(RefNode::GenerateBlock(&construct.nodes.2));
-                if let Some(index) = blocks.iter().position(|range| *range == body)
-                    && let Some(name) = identifier_text(
-                        RefNode::GenvarIdentifier(&construct.nodes.1.nodes.1.0.nodes.1),
-                        tree,
-                    )
+                let header = node_range(child.clone());
+                if let Some(name) = identifier_text(
+                    RefNode::GenvarIdentifier(&construct.nodes.1.nodes.1.0.nodes.1),
+                    tree,
+                ) {
+                    for (index, range) in blocks.iter().enumerate() {
+                        if *range == body || *range == header {
+                            scopes[index].declared.insert(name.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+            // A named generate block is a declaration of the scope around
+            // it, not of itself.
+            RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(block)) => {
+                let label = block
+                    .nodes
+                    .2
+                    .as_ref()
+                    .map(|(_, name)| name)
+                    .or_else(|| block.nodes.0.as_ref().map(|(name, _)| name));
+                let range = node_range(child.clone());
+                let parent = blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (start, end))| {
+                        (*start, *end) != range && *start <= range.0 && range.1 <= *end
+                    })
+                    .min_by_key(|(_, (start, end))| end - start)
+                    .map(|(index, _)| index);
+                if let (Some(label), Some(parent)) = (label, parent)
+                    && let Some(name) =
+                        identifier_text(RefNode::GenerateBlockIdentifier(label), tree)
                 {
-                    scopes[index].declared.insert(name);
+                    scopes[parent].declared.insert(name);
                 }
                 continue;
             }
