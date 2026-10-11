@@ -30,10 +30,14 @@ whole-design performance.
 
 The regular Benchmark workflow runs daily at 01:47 UTC (10:47 JST) and can also
 be dispatched manually. It runs Rust, Verilator, and TypeScript sequentially
-in one job, so backend comparisons within that run share a VM and CPU. The
-`bench-host` artifact records its CPU and runner identity. Separate workflow runs
-can receive different CPUs; use history to spot trends rather than to establish
-small changes between commits. The [Heliodor suite](./heliodor.md#expanded-linux-suite)
+in one job, so backend comparisons within that run share a VM and CPU. Each
+published result records the CPU model that produced it, and every chart keeps
+one series per backend and CPU model: the legend names the model, the line style
+separates models of the same backend, and results published before the model was
+captured appear as `CPU not recorded`. The `bench-host` artifact retains the
+full runner identity. Separate workflow runs can receive different CPUs; use
+history to spot trends rather than to establish small changes between commits.
+The [Heliodor suite](./heliodor.md#expanded-linux-suite)
 groups backends on one host where runtimes allow it; ARM four-hart comparisons
 use two pairs, and eight-hart runs use separate jobs. Only results within the same
 group share a CPU.
@@ -58,7 +62,8 @@ time separately for Celox and Veryl-CC tiered execution. Standalone Cranelift bo
 results are excluded because their much longer runtime makes this chart
 ineffective for that comparison.
 Heliodor charts are separated by CPU architecture because results from different
-runner types are not directly comparable. Every chart uses a zero baseline.
+runner types are not directly comparable, and every series within a section is
+split by CPU model the same way. Every chart uses a zero baseline.
 
 ## Run locally
 
