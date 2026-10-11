@@ -2,6 +2,8 @@ mod builder;
 #[cfg(feature = "host-runtime")]
 mod checkpoint;
 mod error;
+#[cfg(feature = "systemverilog")]
+pub(crate) mod mixed;
 #[cfg(feature = "host-runtime")]
 mod state_file;
 
@@ -1719,7 +1721,7 @@ mod host {
             SimulatorBuilder::<Simulator>::from_sv_sources(sources, top)
         }
 
-        /// Build a simulator from a Veryl hierarchy with SystemVerilog children.
+        /// Build a mixed Veryl/SystemVerilog hierarchy with a top in either language.
         #[cfg(feature = "systemverilog")]
         pub fn from_mixed_sources<'a>(
             sources: Vec<(&'a str, &'a std::path::Path)>,
