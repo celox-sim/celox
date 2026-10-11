@@ -1075,6 +1075,34 @@
     (tick clk)
     (assert_eq registered (<< 1 index))))
 
+(case signed_indices_access_clocked_negative_range_arrays
+  ; IEEE 1800-2023 7.4.2: unpacked array ranges can have negative indices.
+  (source "clocked_negative_array.sv" #"
+    module Top(input logic clk, input logic signed [1:0] c,
+               input logic [7:0] d, output logic [7:0] direct, wrapped,
+               output logic [31:0] contents);
+      logic [7:0] mem [-2:1];
+      always_ff @(posedge clk) mem[c] <= d;
+      assign direct = mem[c];
+      assign wrapped = mem[c + 2'sd1];
+      assign contents = {mem[1], mem[0], mem[-1], mem[-2]};
+    endmodule
+  "#)
+  (top Top)
+  (for (bits value expected)
+       (list (2 0x22 0x00000022) (3 0x33 0x00003322)
+             (0 0x44 0x00443322) (1 0x55 0x55443322))
+    (modify (set c bits) (set d value))
+    (tick clk)
+    (assert_eq direct value)
+    (assert_eq contents expected))
+  (let by_index 0x33225544)
+  (for bits (range 0 4)
+    (modify (set c bits))
+    (assert_eq direct (& (>> by_index (* bits 8)) 255))
+    (let next (& (+ bits 1) 3))
+    (assert_eq wrapped (& (>> by_index (* next 8)) 255))))
+
 (case constant_part_select_indices_of_signed_slices
   ; IEEE 1800-2023 7.4.2: negative unpacked indices are valid when
   ; they lie inside the declared range. Preserve cast widths in arithmetic.
@@ -1089,13 +1117,13 @@
                         mem[0] = 8'h30;
                         mem[1] = 8'h40;
                         mem[$signed(c[1:0])] = d;
-                        direct = mem[$signed(c[1:0])];
-                        casted = mem[signed'(c[1:0])];
-                        widened = mem[int'(signed'(c[1:0]))];
-                        wrapped = mem[$signed(c[1:0]) + 2'sd1];
-                        contents = {mem[1], mem[0], mem[-1], mem[-2]};
                     end
-                    always_ff @(posedge clk) registered <= direct;
+                    assign direct = mem[$signed(c[1:0])];
+                    assign casted = mem[signed'(c[1:0])];
+                    assign widened = mem[int'(signed'(c[1:0]))];
+                    assign wrapped = mem[$signed(c[1:0]) + 2'sd1];
+                    assign contents = {mem[1], mem[0], mem[-1], mem[-2]};
+                    always_ff @(posedge clk) registered <= mem[$signed(c[1:0])];
                 endmodule
             "#)
   (top Top)

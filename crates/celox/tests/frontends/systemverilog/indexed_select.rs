@@ -4,6 +4,10 @@ use super::*;
 // independently determine the endpoints of the selected range.
 sv_backends! {
 
+    fn signed_indices_access_clocked_negative_range_arrays(sim) {
+        @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
+    }
+
     fn constant_part_select_indices_of_concatenations(sim) {
         @case "indexed_select::constant_part_select_indices_of_concatenations";
     }
