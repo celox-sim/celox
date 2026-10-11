@@ -1086,6 +1086,8 @@ impl Module {
         // Expression construction tracks only whole-variable assignments.
         // Leave calls of functions with selected/concatenated writes symbolic
         // in declaration contracts rather than publishing a partial body.
+        // Expression inlining also sizes formal and return conversions at the
+        // default specialization; symbolic signature widths cannot be inlined.
         for subroutine in &declaration_subroutines {
             let mut selected_write = false;
             for statement in &subroutine.body {
@@ -1099,7 +1101,17 @@ impl Module {
                     );
                 });
             }
-            if selected_write && let Some(function) = functions.get_mut(&subroutine.name) {
+            let symbolic_type = subroutine
+                .return_type
+                .as_ref()
+                .is_some_and(crate::ir::Type::has_symbolic_ranges)
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.r#type.has_symbolic_ranges());
+            if (selected_write || symbolic_type)
+                && let Some(function) = functions.get_mut(&subroutine.name)
+            {
                 function.body = None;
             }
         }

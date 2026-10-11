@@ -277,6 +277,24 @@ pub(super) fn symbolic_module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
+    // Native evaluation uses concrete types. Declaration dependency metadata
+    // must also retain parameters appearing only in typedef dimensions.
+    let symbolic_aliases;
+    let type_aliases = if symbolic_parameters.is_empty() {
+        type_aliases
+    } else {
+        let constants = const_env
+            .iter()
+            .filter(|(name, _)| !symbolic_parameters.contains(*name))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+        symbolic_aliases =
+            match type_aliases_from_module_node_with_env(node.clone(), tree, &constants) {
+                Ok(aliases) => aliases,
+                Err(error) => return ConstantFunctions::unconverted(error),
+            };
+        &symbolic_aliases
+    };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
         match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
             Ok(names) => names,

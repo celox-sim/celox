@@ -182,7 +182,14 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
         else {
             return false;
         };
-        let mut dependent = false;
+        let mut dependent = subroutine
+            .return_type
+            .as_ref()
+            .is_some_and(|ty| type_depends(ty, signature, visited))
+            || subroutine
+                .params
+                .iter()
+                .any(|param| type_depends(&param.r#type, signature, visited));
         for statement in &subroutine.body {
             statement.walk(&mut |statement| {
                 use sv::StmtBase::*;
@@ -241,6 +248,17 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             });
         }
         dependent
+    }
+    fn type_depends(
+        ty: &sv::Type,
+        signature: &InterfaceSignature,
+        visited: &mut fxhash::FxHashSet<String>,
+    ) -> bool {
+        ty.packed_ranges().iter().any(|range| {
+            visit(range.left(), signature, visited) || visit(range.right(), signature, visited)
+        }) || ty.unpacked_ranges().iter().any(|range| {
+            visit(range.left(), signature, visited) || visit(range.right(), signature, visited)
+        })
     }
     fn destination(
         lhs: &sv::LValue,
@@ -1705,6 +1723,56 @@ mod tests {
                 "{assignment}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn constant_function_types_retain_header_dependencies() {
+        // Formal copies and return values use their declared types (IEEE
+        // 1800-2023 13.5.1 and 13.4.1), even when the body only returns a value.
+        for (declarations, function, call) in [
+            (
+                "",
+                "function automatic integer value(input logic [W-1:0] x); return x; endfunction",
+                "value(16'h100)",
+            ),
+            (
+                "",
+                "function automatic logic [W-1:0] value(); return 16'h100; endfunction",
+                "value()",
+            ),
+            (
+                "localparam B = W; typedef logic [B-1:0] word_t;",
+                "function automatic integer value(input word_t x); return x; endfunction",
+                "value(16'h100)",
+            ),
+        ] {
+            let source = format!(
+                "interface Bus #(parameter W = 8); {declarations} {function} localparam N = {call}; logic [7:0] req; endinterface"
+            );
+            let signatures = celox_frontend_sv::interface_signatures(&[(
+                source.as_str(),
+                std::path::Path::new("bus.sv"),
+            )])
+            .unwrap();
+            let error = veryl_interface_contracts(&signatures).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("header-dependent SV constant function"),
+                "{function}: {error}"
+            );
+        }
+        let source = "interface Bus #(parameter W = 8); localparam B = 16; typedef logic [B-1:0] word_t; function automatic word_t value(input word_t x); return x; endfunction localparam logic [15:0] N = value(16'h100); logic [7:0] req; endinterface";
+        let signatures =
+            celox_frontend_sv::interface_signatures(&[(source, std::path::Path::new("bus.sv"))])
+                .unwrap();
+        let contract = veryl_interface_contracts(&signatures).unwrap();
+        assert!(
+            contract
+                .lines()
+                .any(|line| line.starts_with("const N:") && line.ends_with(" = 16'h100;")),
+            "{contract}"
+        );
     }
 
     #[test]

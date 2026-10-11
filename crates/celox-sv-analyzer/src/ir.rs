@@ -519,6 +519,17 @@ impl Type {
     pub fn resolved_width(&self) -> Option<usize> {
         self.resolved_width
     }
+
+    pub(crate) fn has_symbolic_ranges(&self) -> bool {
+        let constants = fxhash::FxHashMap::default();
+        self.packed_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        }) || self.unpacked_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

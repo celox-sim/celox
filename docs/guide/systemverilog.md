@@ -48,7 +48,9 @@ Declared parameter widths retain dependencies on earlier interface parameters.
 Constant functions used by interface defaults are expanded into declaration
 expressions when the native analyzer can represent their bodies that way.
 Header-dependent functions with statement bodies that cannot be expressed in
-the contract, such as loops, produce an unsupported diagnostic.
+the contract, such as loops, produce an unsupported diagnostic. Functions with
+header-dependent formal or return widths also produce an unsupported diagnostic;
+the contract cannot represent those symbolic type conversions yet.
 
 The bridge exchanges declaration contracts and links native symbolic modules;
 it does not require the Veryl-to-SV emitter. Cross-language interface function

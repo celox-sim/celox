@@ -1783,20 +1783,32 @@ pub(super) fn subroutines_with_symbolic_parameters(
             };
             let item_dimensions = &*item_dimensions;
 
+            let declaration_env = if symbolic_parameters.is_empty() {
+                std::borrow::Cow::Borrowed(&*item.env)
+            } else {
+                std::borrow::Cow::Owned(
+                    item.env
+                        .iter()
+                        .filter(|(name, _)| !symbolic_parameters.contains(*name))
+                        .map(|(name, value)| (name.clone(), *value))
+                        .collect::<HashMap<_, _>>(),
+                )
+            };
+
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
                     syntax.ports,
                     syntax.items,
                     tree,
-                    &item.env,
+                    &declaration_env,
                     &type_aliases,
                 )?;
                 let return_type = match syntax.return_type {
                     Some(node) => function_type_from_ref_node(
                         RefNode::FunctionDataTypeOrImplicit(node),
                         tree,
-                        &item.env,
+                        &declaration_env,
                         &type_aliases,
                     )
                     .or_else(|| match node {
@@ -1830,7 +1842,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                         source_name: source,
                         direction,
                         r#type: crate::ir::Type::from_ast(
-                            scoped_type(r#type, &item.env),
+                            scoped_type(r#type, &declaration_env),
                             &item.env,
                         ),
                         default,
@@ -1867,26 +1879,15 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
                     return_type: return_type.map(|r#type| {
-                        crate::ir::Type::from_ast(scoped_type(r#type, &item.env), &item.env)
+                        crate::ir::Type::from_ast(scoped_type(r#type, &declaration_env), &item.env)
                     }),
                     params: lowered_params,
                     return_var,
                     body,
                 };
-                let substitution_env = if symbolic_parameters.is_empty() {
-                    std::borrow::Cow::Borrowed(&*item.env)
-                } else {
-                    std::borrow::Cow::Owned(
-                        item.env
-                            .iter()
-                            .filter(|(name, _)| !symbolic_parameters.contains(*name))
-                            .map(|(name, value)| (name.clone(), *value))
-                            .collect::<HashMap<_, _>>(),
-                    )
-                };
                 for stmt in &mut subroutine.body {
                     qualify_stmt(item, stmt);
-                    substitute_stmt_constants(stmt, &substitution_env, literals);
+                    substitute_stmt_constants(stmt, &declaration_env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {
