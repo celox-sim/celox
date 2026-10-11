@@ -317,19 +317,19 @@
     },
     {
       "category": "Combinational",
-      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_syntax",
         "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
+        "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_syntax",
-        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
-        "upstream": []
+        ]
       },
       "name": "synthesizable::struct_assignment_patterns_follow_the_target_layout",
       "phase": "skip",
@@ -393,6 +393,29 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
+      "expectation": "Simulation",
+      "name": "synthesizable::named_calls_in_constant_contexts",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_function_return_dimensions",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

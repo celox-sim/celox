@@ -692,3 +692,31 @@ fn rejects_unsupported_imports_and_calls() {
         );
     }
 }
+
+static QUERY_DPI_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn dpi_query_value() -> i32 {
+    QUERY_DPI_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    42
+}
+
+dpi_backends! {
+    fn unpacked_dimensions_queries_local_import_without_calling_it(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(output int constant_rank, runtime_rank);
+                    import "DPI-C" function int value();
+                    localparam N = $unpacked_dimensions(value());
+                    assign constant_rank = N;
+                    assign runtime_rank = $unpacked_dimensions(value());
+                endmodule
+            "#)
+            .dpi_function("value", dpi_query_value as *const ())
+        };
+        sim.eval_comb().unwrap();
+        for name in ["constant_rank", "runtime_rank"] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(0u32));
+        }
+        assert_eq!(QUERY_DPI_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}

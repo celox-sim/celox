@@ -621,16 +621,23 @@ fn expr_from_system_function_call(
         )
         .map(|count| Expr::Literal(count.to_string()))
         .ok_or_else(operand_error),
-        "$left" | "$right" | "$low" | "$high" | "$increment" | "$unpacked_dimensions" => {
-            dimensions::array_query_call(
-                call,
-                syntax_tree,
-                &packed_dimensions.const_env,
-                &packed_dimensions.type_aliases,
-                Some(packed_dimensions),
-            )
-            .ok_or_else(operand_error)
-        }
+        "$unpacked_dimensions" => dimensions::unpacked_dimensions_call_value(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+        .map(|count| Expr::Literal(count.to_string()))
+        .ok_or_else(operand_error),
+        "$left" | "$right" | "$low" | "$high" | "$increment" => dimensions::array_query_call(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+        .ok_or_else(operand_error),
         // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
         "$bits" | "$size" => dimensions::size_system_function_call_type(
             call,
@@ -747,12 +754,44 @@ pub(super) fn expr_from_tf_call(
     {
         return Ok(Expr::Ident(name));
     }
+    let query_formals = packed_dimensions
+        .type_query
+        .then(|| {
+            packed_dimensions
+                .function_return_types
+                .get(&name)
+                .and_then(|metadata| metadata.arguments.as_deref())
+        })
+        .flatten();
+    let query_names;
+    let signatures = if let Some(formals) = query_formals {
+        query_names = HashMap::from_iter([(
+            name.clone(),
+            formals.iter().map(|formal| formal.name.clone()).collect(),
+        )]);
+        &query_names
+    } else {
+        &packed_dimensions.subroutine_param_names
+    };
     let (bindings, arg_order) = bind_call_arguments(
         &name,
         call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
         syntax_tree,
-        &packed_dimensions.subroutine_param_names,
+        signatures,
     )?;
+    if let Some(formals) = query_formals {
+        if bindings.len() > formals.len() {
+            return Err(unsupported(format!("extra arguments of `{name}`")));
+        }
+        for (position, formal) in formals.iter().enumerate() {
+            if bindings.get(position).is_none_or(|actual| actual.is_none()) && !formal.has_default {
+                return Err(unsupported(format!(
+                    "omitted argument {} of `{name}`",
+                    position + 1
+                )));
+            }
+        }
+    }
     let mut args = Vec::new();
     for (position, expr) in bindings.into_iter().enumerate() {
         let Some(expr) = expr else {
@@ -783,6 +822,14 @@ pub(super) fn expr_from_tf_call(
             }
             _ => expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?,
         };
+        if query_formals.is_some_and(|formals| formals[position].direction.is_written())
+            && !query_actual_is_writable(&arg, packed_dimensions)
+        {
+            return Err(unsupported(format!(
+                "non-writable argument {} of `{name}`",
+                position + 1
+            )));
+        }
         args.push(Some(arg));
     }
     Ok(Expr::Call {
@@ -790,6 +837,27 @@ pub(super) fn expr_from_tf_call(
         args,
         arg_order,
     })
+}
+
+fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expression {
+        Expr::Ident(name) => {
+            dimensions.get(name).is_some()
+                && !dimensions.const_env.contains_key(name)
+                && !dimensions.parameter_values.contains_key(name)
+                && !dimensions
+                    .const_env
+                    .contains_key(&parameters::unbounded_parameter_marker(name))
+        }
+        Expr::Select { expr, .. } => query_actual_is_writable(expr, dimensions),
+        Expr::Concat(parts) => {
+            !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|part| query_actual_is_writable(part, dimensions))
+        }
+        _ => false,
+    }
 }
 
 fn selected_concatenation(

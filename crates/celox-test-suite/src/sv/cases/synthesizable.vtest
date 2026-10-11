@@ -665,8 +665,9 @@
 
 (case named_calls_in_constant_contexts
   (source "named_constants.sv" #"
-    module Top(output logic [31:0] y, output logic ok);
-      function automatic int f(input int a, b); return a*10 + b; endfunction
+    module Top(output logic [31:0] y, output logic ok, output logic [7:0] query);
+      function automatic int f(input int a, b = 2); return a*10 + b; endfunction
+      assign query = {4'($dimensions(f(.a(3)))), 4'($unpacked_dimensions(f(.a(3))))};
       localparam N = f(.b(2), .a(3));
       logic [f(.b(2), .a(3))-1:0] word_value;
       assign word_value = 32'h80000001;
@@ -681,7 +682,8 @@
   (top Top)
   (eval)
   (assert_eq y 0x80000001)
-  (assert_eq ok 1))
+  (assert_eq ok 1)
+  (assert_eq query 0x10))
 
 (case named_calls_respect_generate_signatures
   (source "named_scoped_calls.sv" #"

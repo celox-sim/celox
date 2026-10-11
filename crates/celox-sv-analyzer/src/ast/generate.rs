@@ -986,6 +986,7 @@ impl<'a> Elaborator<'a, '_> {
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_unpacked_dimensions_marker(&name),
                     variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
@@ -1091,6 +1092,7 @@ impl<'a> Elaborator<'a, '_> {
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
+                    variable_unpacked_dimensions_marker(&name),
                     variable_dimensions_marker(&name),
                 ] {
                     scope.env.remove(&key);
@@ -1991,6 +1993,7 @@ mod tests {
             .unwrap();
         let active = items(module, &tree, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
+            arguments: None,
             width: Some(8),
             first_packed_dimension_width: Some(2),
             dimensions: Some(2),
@@ -1998,6 +2001,7 @@ mod tests {
             is_2state: false,
         };
         let inner = FunctionReturnMetadata {
+            arguments: None,
             width: Some(4),
             first_packed_dimension_width: Some(4),
             dimensions: Some(1),
@@ -2005,9 +2009,12 @@ mod tests {
             is_2state: true,
         };
         let dimensions = PackedDimensions {
-            function_return_types: [("f".to_string(), outer), ("g.f".to_string(), inner)]
-                .into_iter()
-                .collect(),
+            function_return_types: [
+                ("f".to_string(), outer.clone()),
+                ("g.f".to_string(), inner.clone()),
+            ]
+            .into_iter()
+            .collect(),
             ..PackedDimensions::default()
         };
         let local = active[0].dimensions(&dimensions);

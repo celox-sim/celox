@@ -416,10 +416,17 @@
       (output logic [7:0] y);
       assign y = {P.a, P.b};
     endmodule
-    module Top(output logic [7:0] y);
+    module Scalar #(parameter integer P=0)(output logic [31:0] y); assign y=P; endmodule
+    module Top(output logic [7:0] y, output logic [31:0] xvalue, zvalue, two_state);
       typedef struct packed {bit [3:0] x; logic [3:0] y;} caller_t;
       Child #(.P(caller_t'{x: 'x, y: 'z})) c(y);
+      Scalar #(.P(integer'{default: 'x})) x(xvalue);
+      Scalar #(.P(integer'{default: 'z})) z(zvalue);
+      Scalar #(.P(int'{default: 'x})) b(two_state);
     endmodule
   "#)
   (top Top)
-  (assert_eq y (fourstate 0 0x0f)))
+  (assert_eq y (fourstate 0 0x0f))
+  (assert_eq xvalue (fourstate 0xffffffff 0xffffffff))
+  (assert_eq zvalue (fourstate 0 0xffffffff))
+  (assert_eq two_state 0))

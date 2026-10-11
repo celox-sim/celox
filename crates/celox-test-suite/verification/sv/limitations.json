@@ -92,7 +92,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+    "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -108,7 +108,10 @@
         "indexed_select::indexed_select_multidimensional_packed_reads",
         "synthesizable::struct_assignment_patterns_follow_the_target_layout",
         "review_regressions::preserves_four_state_shift_and_bit_select_constants",
-        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays"
+        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+        "hierarchy::parameter_patterns_transfer_packed_values",
+        "hierarchy::parameter_patterns_override_scalar_defaults",
+        "hierarchy::parameter_patterns_preserve_packed_member_states"
       ]
     }
   },
@@ -154,7 +157,11 @@
         "system_functions::dimensions_resolves_package_array_constants",
         "system_functions::isunbounded_reports_bounded_array_parameters",
         "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
-        "hierarchy::parameter_patterns_override_body_declarations"
+        "hierarchy::parameter_patterns_override_body_declarations",
+        "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
+        "system_functions::unpacked_dimensions_resolves_package_array_constants",
+        "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+        "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"
       ]
     }
   },
@@ -230,7 +237,9 @@
         "procedural::select_index_call_skipped_by_logical_and",
         "procedural::select_index_calls_run_as_written",
         "procedural::select_indices_call_functions",
-        "synthesizable::function_output_and_inout_arguments_are_written_back"
+        "synthesizable::function_output_and_inout_arguments_are_written_back",
+        "system_functions::unpacked_dimensions_accepts_function_result_arguments",
+        "system_functions::unpacked_dimensions_validates_writable_function_arguments"
       ]
     }
   },
@@ -708,7 +717,9 @@
     "cases": {
       "icarus": [
         "system_functions::dimensions_resolves_procedural_scopes",
-        "system_functions::dimensions_types_function_pattern_arguments"
+        "system_functions::dimensions_types_function_pattern_arguments",
+        "system_functions::unpacked_dimensions_resolves_procedural_scopes",
+        "system_functions::unpacked_dimensions_types_function_pattern_arguments"
       ]
     }
   },
@@ -717,7 +728,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -725,7 +736,8 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::dimensions_resolves_imported_function_returns"
+        "system_functions::dimensions_resolves_imported_function_returns",
+        "synthesizable::named_calls_in_constant_contexts"
       ]
     }
   },
@@ -1165,6 +1177,75 @@
     "cases": {
       "icarus": [
         "synthesizable::named_calls_preserve_defaults_and_declaration_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_element",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_is_independent_of_unknown_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_partial_array",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+        "system_functions::unpacked_dimensions_checks_unevaluated_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_wildcard_typedef_shadowing",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_prefers_values_over_imported_types"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_typed_pattern_sign_extension",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 zero-extends int'{default: 1} to a 64-bit parameter (0x00000000ffffffff). IEEE 1800-2023 10.9 gives the expression the self-determined int type, signed under 6.11.3; 6.20.2 requires assignment conversion to the parameter, giving 0xffffffffffffffff. The same Verilator probe sign-extends through an int variable or explicit int cast.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "hierarchy::parameter_patterns_override_scalar_defaults"
       ]
     }
   }

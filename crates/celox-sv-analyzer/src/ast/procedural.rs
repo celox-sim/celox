@@ -1590,6 +1590,7 @@ pub(super) fn subroutine_declared_dimensions(
     tree: &SyntaxTree,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
+    target_span: (usize, usize),
 ) -> Option<VariablePackedDimensions> {
     let syntax = match node {
         RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1598,6 +1599,22 @@ pub(super) fn subroutine_declared_dimensions(
     }?;
     let params =
         subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    // The implicit result is a body variable. Discovering it while a query
+    // is still resolving the return declaration would rebuild that same type.
+    let in_body = syntax
+        .block_items
+        .iter()
+        .map(|item| RefNode::BlockItemDeclaration(item))
+        .chain(
+            syntax
+                .statements
+                .iter()
+                .map(|stmt| RefNode::Statement(stmt)),
+        )
+        .any(|node| {
+            dimensions::ref_node_source_span(node)
+                .is_some_and(|(start, end)| start <= target_span.0 && target_span.1 <= end)
+        });
     let mut dimensions: VariablePackedDimensions = params
         .into_iter()
         .map(|(name, _, ty, _)| (name, dimensions_from_type(&ty)))
@@ -1608,6 +1625,14 @@ pub(super) fn subroutine_declared_dimensions(
         env,
         aliases,
     )?);
+    if in_body && let RefNode::FunctionDeclaration(declaration) = node {
+        dimensions.extend(functions::function_result_dimensions(
+            declaration,
+            tree,
+            env,
+            aliases,
+        ));
+    }
     Some(dimensions)
 }
 

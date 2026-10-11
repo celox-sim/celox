@@ -109,6 +109,29 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 zero-extends int'{default: 1} to a 64-bit parameter (0x00000000ffffffff). IEEE 1800-2023 10.9 gives the expression the self-determined int type, signed under 6.11.3; 6.20.2 requires assignment conversion to the parameter, giving 0xffffffffffffffff. The same Verilator probe sign-extends through an int variable or explicit int cast.",
+      "expectation": "Simulation",
+      "name": "hierarchy::parameter_patterns_override_scalar_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_typed_pattern_sign_extension",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Verilator 5.052 zero-extends int'{default: 1} to a 64-bit parameter (0x00000000ffffffff). IEEE 1800-2023 10.9 gives the expression the self-determined int type, signed under 6.11.3; 6.20.2 requires assignment conversion to the parameter, giving 0xffffffffffffffff. The same Verilator probe sign-extends through an int variable or explicit int cast.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

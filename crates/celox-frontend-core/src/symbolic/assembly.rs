@@ -1401,6 +1401,8 @@ pub fn schedule_symbolic_rtl(
             testbench_read_roots: Default::default(),
             rtl_writes,
             comb_writes: Default::default(),
+            dead_store_policy: Default::default(),
+            live_signals: Default::default(),
             processes: process_slots,
         },
     };

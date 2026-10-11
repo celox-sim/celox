@@ -1,4 +1,4 @@
-#![cfg(any(feature = "verilator", feature = "icarus"))]
+#![cfg(feature = "external")]
 use std::collections::BTreeSet;
 
 const STATUSES: [&str; 9] = [

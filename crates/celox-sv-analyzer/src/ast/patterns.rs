@@ -62,12 +62,20 @@ fn typed_pattern_type(
                 .clone()
         }
         sv_parser::AssignmentPatternExpressionType::IntegerAtomType(atom) => {
-            let atom =
+            let atom_type =
                 integer_atom_expr_type(RefNode::IntegerAtomType(atom)).ok_or_else(pattern_type)?;
-            let mut r#type = Type::new(TypeKind::Bit);
-            r#type.is_signed = atom.signed;
+            let kind = if matches!(
+                atom.as_ref(),
+                sv_parser::IntegerAtomType::Integer(_) | sv_parser::IntegerAtomType::Time(_)
+            ) {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            };
+            let mut r#type = Type::new(kind);
+            r#type.is_signed = atom_type.signed;
             r#type.packed_ranges = vec![PackedRange::new(
-                ConstExpr::Literal((atom.width - 1).to_string()),
+                ConstExpr::Literal((atom_type.width - 1).to_string()),
                 ConstExpr::Literal("0".to_string()),
             )];
             r#type
