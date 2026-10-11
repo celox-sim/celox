@@ -437,6 +437,101 @@ fn test_dse_preserve_top_ports() {
 }
 
 #[test]
+fn test_dse_rejects_handles_to_unguaranteed_signals() {
+    // Handles resolve from the policy and the design, not from what the pass
+    // kept: `observed` is a combinational wire the policy does not guarantee,
+    // so it is rejected even though `echo` (which the design reads) survived.
+    // Ports the policy preserves and state no combinational logic writes
+    // stay resolvable.
+    let source = r#"
+module Sub (
+    i_data: input logic<8>,
+    o_data: output logic<8>,
+) {
+    var inner: logic<8>;
+    assign inner = i_data + 8'd1;
+    assign o_data = inner;
+}
+
+module Top (
+    clk: input clock,
+    rst: input reset,
+    top_in: input logic<8>,
+    top_out: output logic<8>,
+) {
+    var observed: logic<8>;
+    var echo: logic<8>;
+    var count: logic<8>;
+    assign observed = ~top_in;
+    assign echo = top_in;
+    always_ff {
+        if_reset {
+            count = 0;
+        } else {
+            count = count + 1;
+        }
+    }
+    inst u_sub: Sub (
+        i_data: echo,
+        o_data: top_out,
+    );
+}
+"#;
+    let sim = Simulator::builder(source, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .build()
+        .unwrap();
+    assert!(matches!(
+        sim.try_signal("observed"),
+        Err(celox::AddrLookupError::DeadStoreEliminated { ref path }) if path == "observed"
+    ));
+    assert!(matches!(
+        sim.try_signal("echo"),
+        Err(celox::AddrLookupError::DeadStoreEliminated { .. })
+    ));
+    assert!(matches!(
+        sim.try_child_signal(&[("u_sub", 0)], "o_data"),
+        Err(celox::AddrLookupError::DeadStoreEliminated { ref path }) if path == "u_sub[0].o_data"
+    ));
+    assert!(sim.try_signal("top_out").is_ok());
+    assert!(sim.try_signal("top_in").is_ok());
+    assert!(sim.try_signal("count").is_ok());
+
+    let all_ports = Simulator::builder(source, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveAllPorts)
+        .build()
+        .unwrap();
+    assert!(
+        all_ports
+            .try_child_signal(&[("u_sub", 0)], "o_data")
+            .is_ok()
+    );
+    assert!(matches!(
+        all_ports.try_child_signal(&[("u_sub", 0)], "inner"),
+        Err(celox::AddrLookupError::DeadStoreEliminated { .. })
+    ));
+
+    let mut live = Simulator::builder(source, "Top")
+        .dead_store_policy(DeadStorePolicy::PreserveTopPorts)
+        .live_signal(vec![], vec!["observed".to_string()])
+        .build()
+        .unwrap();
+    let top_in = live.signal("top_in");
+    let observed = live.signal("observed");
+    live.modify(|io| io.set(top_in, 0x0Fu8)).unwrap();
+    assert_eq!(live.get(observed), 0xF0u64.into());
+
+    let mut off = Simulator::builder(source, "Top")
+        .dead_store_policy(DeadStorePolicy::Off)
+        .build()
+        .unwrap();
+    let observed = off.signal("observed");
+    let top_in = off.signal("top_in");
+    off.modify(|io| io.set(top_in, 0x0Fu8)).unwrap();
+    assert_eq!(off.get(observed), 0xF0u64.into());
+}
+
+#[test]
 fn test_o2_dse_preserves_signals_read_by_native_testbench() {
     let result = Simulator::builder(
         r#"

@@ -1347,9 +1347,15 @@ mod host {
 
         /// Resolves a signal path into a performance-optimized [`SignalRef`].
         /// This handle allows for direct memory access without `HashMap` lookups.
+        ///
+        /// # Panics
+        ///
+        /// Panics when the path does not resolve, including when the dead
+        /// store elimination policy does not guarantee the signal; see
+        /// [`Self::try_signal`].
         pub fn signal(&self, path: &str) -> SignalRef {
-            let addr = self.program.get_addr(&[], &[path]).unwrap();
-            self.backend.resolve_signal(&addr)
+            self.try_signal(path)
+                .unwrap_or_else(|error| panic!("cannot resolve signal: {error}"))
         }
 
         /// Resolve a port name to an event handle.
@@ -1360,8 +1366,7 @@ mod host {
 
         /// Try to resolve a signal path. Returns `Err` if the path is not found or ambiguous.
         pub fn try_signal(&self, path: &str) -> Result<SignalRef, crate::ir::AddrLookupError> {
-            let addr = self.program.get_addr(&[], &[path])?;
-            Ok(self.backend.resolve_signal(&addr))
+            self.try_child_signal(&[], path)
         }
 
         /// Try to resolve a port name to an event handle.
@@ -1607,18 +1612,59 @@ mod host {
 
         /// Resolves a signal inside a child instance.
         pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
-            let addr = self.program.get_addr(instance_path, &[var]).unwrap();
-            self.backend.resolve_signal(&addr)
+            self.try_child_signal(instance_path, var)
+                .unwrap_or_else(|error| panic!("cannot resolve signal: {error}"))
         }
 
         /// Try to resolve a signal inside a child instance.
+        ///
+        /// Under a dead store elimination policy, only state the policy
+        /// guarantees to keep resolves: ports the policy preserves, signals
+        /// listed with `live_signal()`, and state no combinational logic
+        /// writes. Anything else may have lost its stores, and a handle to it
+        /// would only read memory that never updates.
         pub fn try_child_signal(
             &self,
             instance_path: &[(&str, usize)],
             var: &str,
         ) -> Result<SignalRef, crate::ir::AddrLookupError> {
             let addr = self.program.get_addr(instance_path, &[var])?;
+            if !self.observable_under_dead_store_policy(instance_path, addr) {
+                let path = instance_path
+                    .iter()
+                    .map(|(name, index)| format!("{name}[{index}]."))
+                    .chain(std::iter::once(var.to_string()))
+                    .collect::<String>();
+                return Err(crate::ir::AddrLookupError::DeadStoreEliminated { path });
+            }
             Ok(self.backend.resolve_signal(&addr))
+        }
+
+        fn observable_under_dead_store_policy(
+            &self,
+            instance_path: &[(&str, usize)],
+            addr: crate::ir::AbsoluteAddr,
+        ) -> bool {
+            use crate::DeadStorePolicy;
+            let schema = &self.program.runtime_schema;
+            if schema.dead_store_policy == DeadStorePolicy::Off
+                || !schema.comb_writes.contains(&addr)
+                || schema.live_signals.contains(&addr)
+                || schema.testbench_read_roots.contains(&addr)
+            {
+                return true;
+            }
+            let is_port = self
+                .program
+                .design
+                .variable(&addr)
+                .is_some_and(|variable| variable.var_kind.is_port());
+            match schema.dead_store_policy {
+                DeadStorePolicy::Off => true,
+                DeadStorePolicy::PreserveListedSignals => false,
+                DeadStorePolicy::PreserveTopPorts => instance_path.is_empty() && is_port,
+                DeadStorePolicy::PreserveAllPorts => is_port,
+            }
         }
 
         /// Returns the full instance hierarchy starting from the top module.

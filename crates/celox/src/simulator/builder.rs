@@ -1153,20 +1153,7 @@ mod host {
     use crate::backend::JitBackend;
     use crate::ir::LaidOutProgram;
 
-    /// Controls which stores the dead store elimination pass preserves.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-    pub enum DeadStorePolicy {
-        /// Keep all stores (no dead store elimination). Default for user-facing builds.
-        #[default]
-        Off,
-        /// Eliminate stores except those explicitly marked live via `live_signal()`
-        /// and those loaded by execution units.
-        PreserveListedSignals,
-        /// Eliminate stores except those to top-module ports and those loaded by EUs.
-        PreserveTopPorts,
-        /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
-        PreserveAllPorts,
-    }
+    pub use celox_design::DeadStorePolicy;
 
     /// Controls when the tiered backend adopts background-compiled code.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2951,13 +2938,19 @@ mod host {
         externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
         // User-specified live signals
+        let mut listed = HashSet::default();
         for (inst_path, var_path) in live_signals {
             let inst_refs: Vec<(&str, usize)> =
                 inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
             let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
             let addr = program.get_addr(&inst_refs, &var_refs).unwrap();
             externally_live.insert(addr);
+            listed.insert(addr);
         }
+        // The runtime resolves handles from the policy and the design, not
+        // from what this particular run happened to keep.
+        program.runtime.runtime_schema.dead_store_policy = options.dead_store_policy;
+        program.runtime.runtime_schema.live_signals = listed;
 
         // PreserveTopPorts: auto-collect top module port addresses
         if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
