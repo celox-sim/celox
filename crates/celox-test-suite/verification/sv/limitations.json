@@ -850,7 +850,8 @@
     "cases": {
       "verilator": [
         "system_functions::timescale_queries_accept_separate_initial_declarations",
-        "system_functions::timescale_queries_distinguish_unit_and_global_precision"
+        "system_functions::timescale_queries_distinguish_unit_and_global_precision",
+        "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"
       ]
     }
   },
@@ -946,7 +947,42 @@
         "system_functions::timescale_queries_keep_module_and_package_names_independent"
       ],
       "icarus": [
-        "system_functions::timescale_queries_keep_module_and_package_names_independent"
+        "system_functions::timescale_queries_keep_module_and_package_names_independent",
+        "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_package_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 ignores bare package arguments of $timeunit/$timeprecision and returns the caller unit/global precision. IEEE 1800-2023 20.4.1 requires the selected design element scale; 3.13 gives packages and definitions separate namespaces. A standalone probe reproduces the wrong package and instance results. Slang 12.0.0 also rejects bare package query arguments, including a package without a same-named module.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_timescale_queries",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"
       ]
     }
   }

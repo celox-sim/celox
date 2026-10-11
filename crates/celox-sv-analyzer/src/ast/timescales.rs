@@ -480,7 +480,11 @@ impl Timescales {
         Ok(design)
     }
 
-    fn query(&self, call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Converted<i32> {
+    pub(super) fn query(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+    ) -> Converted<i32> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
         system_functions::check_call(
@@ -564,6 +568,18 @@ impl Timescales {
                         && current.is_some_and(|s| s.instances.contains_key(first))
                     {
                         (current.unwrap(), 0)
+                    } else if hierarchy.nodes.0.is_none()
+                        && path.len() == 1
+                        && let Some(package) = self.packages.get(first).or_else(|| {
+                            unit.scopes
+                                .iter()
+                                .find(|s| s.kind == ScopeKind::Package && s.name == *first)
+                        })
+                    {
+                        // Package and definition names have separate global
+                        // namespaces (3.13). An instantiated module type with
+                        // this spelling does not hide the package.
+                        (package, 1)
                     } else {
                         if self.instantiated.contains(first)
                             && current.is_none_or(|scope| scope.name != *first)
@@ -744,6 +760,64 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn resolves_packages_before_rejecting_instantiated_definition_names() {
+        let code = "module P(); timeunit 1us / 1ns; endmodule package P; timeunit 100ns / 10ps; endpackage package Q; timeunit 10us / 100ps; endpackage module Q(); timeunit 10ns / 1ps; endmodule module Top(); timeunit 1ns / 1ps; P p_inst(); Q q_inst(); localparam U=$timeunit(P); localparam T=$timeprecision(P); localparam V=$timeunit(Q); localparam S=$timeprecision(Q); endmodule";
+        let result = crate::analyze_source(code, Path::new("package_queries.sv")).unwrap();
+        let top = result.modules().iter().find(|m| m.name() == "Top").unwrap();
+        let values: Vec<_> = top
+            .parameters()
+            .iter()
+            .map(|p| p.resolved_value())
+            .collect();
+        assert_eq!(values, [Some(-7), Some(-11), Some(-5), Some(-10)]);
+        let code = "module P(); timeunit 1us / 1ns; endmodule module Top(); timeunit 1ns / 1ps; P p_inst(); localparam U=$timeunit(P); endmodule";
+        assert!(crate::analyze_source(code, Path::new("module_type_query.sv")).is_err());
+    }
+
+    #[test]
+    fn interface_query_rewriting_preserves_macros_in_module_scopes() {
+        let code = "`define U $timeunit()\ninterface I; timeunit 1ns / 1ps; endinterface module Top(); timeunit 1ms / 1us; localparam U=`U; endmodule module Child(); timeunit 1us / 1ns; localparam U=`U; endmodule";
+        let elaborated = crate::elaborate_interfaces(&[(code, Path::new("macro_times.sv"))])
+            .unwrap()
+            .unwrap();
+        let result = crate::analyze_source(&elaborated[0], Path::new("macro_times.sv")).unwrap();
+        for (name, value) in [("Top", -3), ("Child", -6)] {
+            let module = result.modules().iter().find(|m| m.name() == name).unwrap();
+            assert_eq!(module.parameters()[0].resolved_value(), Some(value));
+        }
+    }
+
+    #[test]
+    fn interface_query_rewriting_validates_discarded_and_hidden_operands() {
+        for expression in [
+            "$timeunit(missing);",
+            "void'($timeprecision(1));",
+            "int x = $bits($timeunit(1));",
+        ] {
+            let code = format!(
+                "interface I; timeunit 1ns / 1ps; function automatic int f(); {expression} return 0; endfunction endinterface module Top(); timeunit 1ns / 1ps; I i(); endmodule"
+            );
+            assert!(
+                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_query.sv"))])
+                    .is_err(),
+                "accepted {expression}"
+            );
+        }
+        for items in [
+            "timeunit 1ns / 1ps; timeunit 10ns;",
+            "logic x; timeunit 1ns;",
+            "timeunit 1ns / 1ps;",
+        ] {
+            let code = format!("interface I; {items} endinterface module Top(); endmodule");
+            assert!(
+                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_scale.sv"))])
+                    .is_err(),
+                "accepted {items}"
+            );
+        }
     }
 
     #[test]

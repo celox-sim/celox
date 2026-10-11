@@ -904,6 +904,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interface_timescale_queries",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_preserve_interface_scopes_when_flattened",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Icarus 13.0 compiles procedural and package calls of the SV 2023 timescale functions but vvp exits with errors that $timeunit/$timeprecision are not defined. IEEE 1800-2023 20.4.1 defines both functions; Slang accepts this source in SV 2023 mode.",
       "expectation": "Simulation",
       "known_issue": {
@@ -965,6 +988,30 @@
         "upstream": []
       },
       "name": "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_definition_package_namespaces",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

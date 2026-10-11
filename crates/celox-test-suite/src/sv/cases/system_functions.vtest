@@ -1494,3 +1494,69 @@ a=0a  10
   (top Top)
   (eval)
   (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_packages_with_instantiated_namesakes
+  (source "package_queries.sv" #"
+    module P(); timeunit 1us / 1ns; endmodule
+    package P; timeunit 100ns / 10ps; endpackage
+    package Q; timeunit 10us / 100ps; endpackage
+    module Q(); timeunit 10ns / 1ps; endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      P p_inst(); Q q_inst();
+      assign ok = ($timeunit(P) == -7) && ($timeprecision(P) == -11)
+        && ($timeunit(Q) == -5) && ($timeprecision(Q) == -10)
+        && ($timeunit(p_inst) == -6) && ($timeprecision(p_inst) == -9)
+        && ($timeunit(q_inst) == -8) && ($timeprecision(q_inst) == -12);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_preserve_interface_scopes_when_flattened
+  (source "interface_times.sv" #"
+    timeunit 100ps / 100fs;
+    interface ClockInfo;
+      timeunit 100ns / 10ps;
+      function automatic int unit_value();
+        $timeunit();
+        void'($timeprecision());
+        return $timeunit();
+      endfunction
+      function automatic int precision_value(); return $timeprecision(); endfunction
+      function automatic int unit_scope(); return $timeunit($unit); endfunction
+      function automatic int precision_scope(); return $timeprecision($unit); endfunction
+      modport reader(import unit_value, import precision_value);
+    endinterface
+    interface Unused; timeunit 1ns / 1fs; endinterface
+  "#)
+  (source "interface_users.sv" #"
+    timeunit 10ns / 1ps;
+    module Reader(ClockInfo.reader info, output int u, p);
+      timeunit 1us / 1ns;
+      assign u = info.unit_value();
+      assign p = info.precision_value();
+    endmodule
+    module Top(output int direct_unit, direct_precision, port_unit, port_precision,
+               output logic ok);
+      timeunit 1ms / 1us;
+      ClockInfo info();
+      Reader reader(.info(info), .u(port_unit), .p(port_precision));
+      assign direct_unit = info.unit_value();
+      assign direct_precision = info.precision_value();
+      assign ok = ($timeunit() == -3) && ($timeprecision() == -6)
+        && ($timeunit($unit) == -8) && ($timeprecision($unit) == -12)
+        && ($timeunit($root) == -15) && ($timeprecision($root) == -15)
+        && (info.unit_scope() == -10) && (info.precision_scope() == -13)
+        && ($bits($timeunit()) == 32) && ($timeunit() < 0);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_unit (trunc 32 -7))
+  (assert_eq direct_precision (trunc 32 -11))
+  (assert_eq port_unit (trunc 32 -7))
+  (assert_eq port_precision (trunc 32 -11))
+  (assert_eq ok 1))

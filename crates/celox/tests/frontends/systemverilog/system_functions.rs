@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
+    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
     fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
 
     fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }

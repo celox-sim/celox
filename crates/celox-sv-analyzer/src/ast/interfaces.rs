@@ -64,9 +64,30 @@ pub fn elaborate_interfaces(
     if design.interfaces.is_empty() {
         return Ok(None);
     }
+    // Copied interface items lose their original time scope. Resolve their
+    // queries before copying, using all files' original scopes and precision.
+    // The original interface declarations remain in the rewritten sources,
+    // so their precision still contributes to module-level $root queries.
+    let rewritten = resolve_interface_timescale_queries(&files, sources)?;
+    let rewritten_files = rewritten
+        .as_ref()
+        .map(|codes| {
+            codes
+                .iter()
+                .zip(sources)
+                .map(|(code, (_, path))| File::new(code, path))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let files = rewritten_files.as_deref().unwrap_or(&files);
+    let rewritten_design = rewritten_files
+        .as_ref()
+        .map(|files| Design::collect(files))
+        .transpose()?;
+    let design = rewritten_design.as_ref().unwrap_or(&design);
     // Generated names contain the separator; a source name containing it
     // could collide with one.
-    for file in &files {
+    for file in files {
         for &start in &file.identifiers {
             let index = file.tokens.partition_point(|&(token, _)| token < start);
             let Some(&token) = file.tokens.get(index) else {
@@ -88,6 +109,70 @@ pub fn elaborate_interfaces(
         }
     }
     design.elaborate().map(Some)
+}
+
+fn resolve_interface_timescale_queries(
+    files: &[File<'_>],
+    sources: &[(&str, &Path)],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    let trees: Vec<_> = files
+        .iter()
+        .zip(sources)
+        .map(|(file, (_, path))| (&file.syntax_tree, *path))
+        .collect();
+    let scales = super::timescales::Timescales::collect(&trees)?;
+    let is_query = |call, tree| {
+        system_tf_call_parts(call, tree)
+            .is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
+    };
+    let mut changed = false;
+    let codes = files
+        .iter()
+        .map(|file| {
+            let mut edits = Vec::new();
+            for interface in &file.syntax_tree {
+                if !matches!(interface, RefNode::InterfaceDeclaration(_)) {
+                    continue;
+                }
+                for node in interface {
+                    match node {
+                        RefNode::SystemTfCall(call) if is_query(call, &file.syntax_tree) => {
+                            let value = scales.query(call, &file.syntax_tree)?;
+                            edits.push(Edit {
+                                span: file.span(node)?,
+                                // An unsized decimal and its unary minus retain
+                                // the query's 32-bit signed integer result type.
+                                text: format!("({value})"),
+                            });
+                        }
+                        RefNode::SubroutineCallStatement(statement) => {
+                            let call = match statement {
+                                sv_parser::SubroutineCallStatement::SubroutineCall(call) => &call.0,
+                                sv_parser::SubroutineCallStatement::Function(call) => {
+                                    &call.nodes.2.nodes.1.nodes.0
+                                }
+                            };
+                            if let sv_parser::SubroutineCall::SystemTfCall(call) = call
+                                && is_query(call, &file.syntax_tree)
+                            {
+                                // These queries have no side effects. Still
+                                // validate the operand before discarding it.
+                                scales.query(call, &file.syntax_tree)?;
+                                edits.push(Edit {
+                                    span: file.span(node)?,
+                                    text: ";".into(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            changed |= !edits.is_empty();
+            Ok(apply(file.code, (0, file.code.len()), &edits))
+        })
+        .collect::<Result<_, AnalyzerError>>()?;
+    Ok(changed.then_some(codes))
 }
 
 /// A parsed source and its tokens.
@@ -2317,7 +2402,18 @@ impl<'a> Design<'a> {
             }
         }
         if !functions_text.is_empty() {
-            let (_, end) = file.span(RefNode::Symbol(&header.nodes.7))?;
+            let (_, mut end) = file.span(RefNode::Symbol(&header.nodes.7))?;
+            // Imported functions are non-time items. Keep every initial
+            // time declaration before them (IEEE 1800-2023 3.14.2.2).
+            if let Some(declaration) = &declaration.nodes.1 {
+                end = file.span(RefNode::TimeunitsDeclaration(declaration))?.1;
+            }
+            for item in &declaration.nodes.2 {
+                let sv_parser::NonPortModuleItem::TimeunitsDeclaration(declaration) = item else {
+                    break;
+                };
+                end = file.span(RefNode::TimeunitsDeclaration(declaration))?.1;
+            }
             edits.push(Edit {
                 span: (end, end),
                 text: functions_text,

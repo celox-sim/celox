@@ -488,6 +488,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 parses $unit only as the start of a qualified name and rejects $timeunit($unit). IEEE 1800-2023 20.4.1 explicitly accepts $unit and $root as standalone query arguments; Slang in SV 2023 mode accepts this source.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_timescale_unit_argument",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 parses $unit only as the start of a qualified name and rejects $timeunit($unit). IEEE 1800-2023 20.4.1 explicitly accepts $unit and $root as standalone query arguments; Slang in SV 2023 mode accepts this source.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_preserve_interface_scopes_when_flattened",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator 5.052 ignores the design-element argument of $timeunit and returns the caller module unit, while $timeprecision returns the design-wide minimum even in a package function. IEEE 1800-2023 20.4.1 requires the selected/current design element scale. A standalone probe with own, child, leaf and package scales reproduces the disagreement without the suite testbench; Slang accepts the sources in SV 2023 mode.",
       "expectation": "Simulation",
       "known_issue": {
@@ -526,6 +549,29 @@
         "upstream": []
       },
       "name": "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 ignores bare package arguments of $timeunit/$timeprecision and returns the caller unit/global precision. IEEE 1800-2023 20.4.1 requires the selected design element scale; 3.13 gives packages and definitions separate namespaces. A standalone probe reproduces the wrong package and instance results. Slang 12.0.0 also rejects bare package query arguments, including a package without a same-named module.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_timescale_package_argument",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 ignores bare package arguments of $timeunit/$timeprecision and returns the caller unit/global precision. IEEE 1800-2023 20.4.1 requires the selected design element scale; 3.13 gives packages and definitions separate namespaces. A standalone probe reproduces the wrong package and instance results. Slang 12.0.0 also rejects bare package query arguments, including a package without a same-named module.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,
