@@ -312,3 +312,26 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
         );
     }
 }
+
+#[test]
+fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
+    let source = r#"
+        module Top(input int index_value, output int y);
+            logic [7:0] a [0:1][0:2];
+            assign y = $unpacked_dimensions(a[0][index_value +: 1]);
+        endmodule
+    "#;
+    let tree = crate::syntax::parse_source(source, Path::new("runtime_query_range.sv")).unwrap();
+    Source::from_syntax(&tree).unwrap();
+    let call = tree
+        .into_iter()
+        .find_map(|node| match node {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &HashMap::default(), None),
+        Some(1)
+    );
+}

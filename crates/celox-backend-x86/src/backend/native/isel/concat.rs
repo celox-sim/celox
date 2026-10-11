@@ -14,11 +14,15 @@ pub(super) fn match_guarded_cmp_select_cond(
     else {
         return None;
     };
-    if let Some((cmp_lhs, cmp_rhs, kind)) = match_cmp_sir_value(ctx, sir_block, sir_defs, lhs) {
+    if let Some((cmp_lhs, cmp_rhs, kind)) =
+        match_cmp_sir_value(ctx, block, sir_block, sir_defs, lhs)
+    {
         let guard = lower_sir_bool_value(ctx, block, rhs)?;
         return Some((guard, cmp_lhs, cmp_rhs, kind));
     }
-    if let Some((cmp_lhs, cmp_rhs, kind)) = match_cmp_sir_value(ctx, sir_block, sir_defs, rhs) {
+    if let Some((cmp_lhs, cmp_rhs, kind)) =
+        match_cmp_sir_value(ctx, block, sir_block, sir_defs, rhs)
+    {
         let guard = lower_sir_bool_value(ctx, block, lhs)?;
         return Some((guard, cmp_lhs, cmp_rhs, kind));
     }
@@ -26,7 +30,8 @@ pub(super) fn match_guarded_cmp_select_cond(
 }
 
 fn match_cmp_sir_value(
-    ctx: &ISelContext,
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
     sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
     reg: RegisterId,
@@ -55,7 +60,19 @@ fn match_cmp_sir_value(
     {
         return None;
     }
-    Some((ctx.reg_map.get(lhs), ctx.reg_map.get(rhs), kind))
+    let lhs_vreg = ctx.reg_map.get(lhs);
+    let rhs_vreg = ctx.reg_map.get(rhs);
+    // The fused compare must use the same signed operands as an ordinary
+    // comparison. SIR values narrower than a machine word are zero extended.
+    let (lhs_vreg, rhs_vreg) = if matches!(
+        kind,
+        CmpKind::LtS | CmpKind::LeS | CmpKind::GtS | CmpKind::GeS
+    ) {
+        sign_extend_pair(ctx, block, &lhs, &rhs, lhs_vreg, rhs_vreg)
+    } else {
+        (lhs_vreg, rhs_vreg)
+    };
+    Some((lhs_vreg, rhs_vreg, kind))
 }
 
 fn lower_sir_bool_value(

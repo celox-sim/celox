@@ -753,7 +753,9 @@ fn const_expr_reads(expr: &ConstExpr, name: &str) -> bool {
             const_expr_reads(expr, name) || const_expr_reads(bit, name)
         }
         ConstExpr::Function { args, .. } => args.iter().any(|arg| const_expr_reads(arg, name)),
-        ConstExpr::Unary { expr, .. } => const_expr_reads(expr, name),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_expr_reads(expr, name)
+        }
         ConstExpr::Binary { left, right, .. } => {
             const_expr_reads(left, name) || const_expr_reads(right, name)
         }
@@ -777,7 +779,7 @@ fn expr_is_constant(expr: &Expr) -> bool {
             ConstExpr::Ident(_) | ConstExpr::Function { .. } => false,
             ConstExpr::Literal(_) => true,
             ConstExpr::Select { expr, bit } => constant(expr) && constant(bit),
-            ConstExpr::Unary { expr, .. } => constant(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant(expr),
             ConstExpr::Binary { left, right, .. } => constant(left) && constant(right),
             ConstExpr::Mux {
                 condition,

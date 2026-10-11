@@ -45,7 +45,7 @@ fn erase_sites(expr: &mut ConstExpr) {
             erase_sites(expr);
             erase_sites(bit);
         }
-        ConstExpr::Unary { expr, .. } => erase_sites(expr),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => erase_sites(expr),
         ConstExpr::Binary { left, right, .. } => {
             erase_sites(left);
             erase_sites(right);

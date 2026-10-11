@@ -347,6 +347,13 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
 
+The `indexed_select::constant_part_select_indices_of_concatenations` case also
+uses these standard concatenation and replication selections as array indices
+(IEEE 1800-2023 11.4.12). Icarus 13.0 rejects them with syntax errors before
+simulation; its exact diagnostic is retained in
+[`verification/sv/limitations/icarus.json`](verification/sv/limitations/icarus.json).
+Verilator 5.052 passes the case on its unchanged stimulus and assertions.
+
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
 | `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
@@ -356,7 +363,7 @@ The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations
 | `sv_icarus_generate_forward_reference` | execute | icarus | 1 | Icarus 13.0 resolves a name used before its declaration in the same generate block to the enclosing scope. Verilator (which warns VARHIDDEN) and Celox resolve it to the block's own declaration. |
 | `sv_icarus_generate_case_context` | execute | icarus | 1 | Icarus 13.0 compares a case-generate selector without the common width and signedness of the selector and all labels; IEEE 1800-2023 12.5 makes the comparison unsigned when any operand is unsigned. Verilator agrees with the expected value. |
 | `sv_icarus_input_port_width` | execute | icarus | 1 | Icarus 13.0 evaluates an input port connection at its self-determined width before padding, losing the carry; IEEE 1800-2023 10.8 and 11.8.2 widen the operands to the port first. Verilator agrees with the expected value. |
-| `sv_icarus_syntax` | compile | icarus | 8 | Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases. |
+| `sv_icarus_syntax` | compile | icarus | 9 | Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases. |
 | `sv_icarus_packed_array_parameters` | compile | icarus | 5 | Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported. |
 | `sv_icarus_unpacked_array_parameters` | compile | icarus | 5 | Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately. |
 | `sv_icarus_internal_error` | compile | icarus | 3 | Icarus 13.0 crashes on these designs: a segmentation fault while compiling, or a vvp assertion (vthread.cc of_DISABLE_FLOW) while running. Verilator passes these cases. |

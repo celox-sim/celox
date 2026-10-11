@@ -550,6 +550,15 @@ impl Renamer<'_> {
                 args: args.into_iter().map(|arg| self.const_expr(arg)).collect(),
                 site,
             },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.const_expr(*expr)),
+                width,
+                signed,
+            },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op,
                 expr: Box::new(self.const_expr(*expr)),
