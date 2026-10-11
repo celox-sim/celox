@@ -101,6 +101,24 @@ pub(crate) fn elaborate_interfaces_with_roots(
         .map(|files| Design::collect(files))
         .transpose()?;
     let design = rewritten_design.as_ref().unwrap_or(&design);
+    // Folding lexical queries changes offsets. Hierarchical queries must
+    // use the corresponding trees, collected once for all module rewrites.
+    let updated_scales = rewritten_files
+        .as_ref()
+        .map(|files| {
+            let trees: Vec<_> = files
+                .iter()
+                .zip(sources)
+                .map(|(file, (_, path))| (&file.syntax_tree, *path))
+                .collect();
+            let mut scales = super::timescales::Timescales::collect(&trees)?;
+            if let Some(roots) = roots {
+                scales.select_roots(roots);
+            }
+            Ok::<_, AnalyzerError>(scales)
+        })
+        .transpose()?;
+    let scales = updated_scales.as_ref().unwrap_or(&scales);
     // Generated names contain the separator; a source name containing it
     // could collide with one.
     for file in files {
@@ -124,7 +142,7 @@ pub(crate) fn elaborate_interfaces_with_roots(
             }
         }
     }
-    design.elaborate(&scales).map(Some)
+    design.elaborate(scales).map(Some)
 }
 
 fn resolve_interface_timescale_queries(
@@ -1886,9 +1904,31 @@ impl<'a> Design<'a> {
                 }
             }
         }
-        if handles.is_empty() && child_instantiations.is_empty() && clone_name.is_none() {
+        let qualified_time_query =
+            RefNode::ModuleDeclarationAnsi(declaration)
+                .into_iter()
+                .any(|node| {
+                    let RefNode::SystemTfCall(call) = node else {
+                        return false;
+                    };
+                    system_tf_call_parts(call, &file.syntax_tree)
+                        .is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
+                        && super::timescales::argument(call).is_some_and(|argument| {
+                            file.syntax_tree
+                                .get_str_trim(argument)
+                                .is_some_and(|text| text.contains('.'))
+                        })
+                });
+        if handles.is_empty()
+            && child_instantiations.is_empty()
+            && clone_name.is_none()
+            && !qualified_time_query
+        {
             return Ok(None);
         }
+        let path_query = qualified_time_query
+            .then(|| scales.interface_path_queries(&file.syntax_tree))
+            .transpose()?;
         self.check_imported_names(module_name, declaration, file, &handles)?;
         // Handle references are found by name, so no declaration may reuse
         // the name of a handle.
@@ -1924,25 +1964,34 @@ impl<'a> Design<'a> {
             };
             let name =
                 normalize_identifier(file.syntax_tree.get_str_trim(argument).unwrap_or_default());
-            if !handles.contains(&name) {
+            let (span, value) = if handles.contains(&name) {
+                system_functions::check_call(
+                    function,
+                    args.as_deref(),
+                    system_functions::CallSite::Expression,
+                )?;
+                let span = file.span(RefNode::SystemTfCall(call))?;
+                let handle = handles.at(&name, span).ok_or_else(|| {
+                    unsupported(format!("reference to interface `{name}` outside the generate block that declares it"))
+                })?;
+                if handle.arrayed {
+                    return Err(unsupported("interface array in timescale query"));
+                }
+                (
+                    span,
+                    scales.definition_value(&handle.interface, function == "$timeprecision")?,
+                )
+            } else if name.contains('.') {
+                // Keep ordinary module queries for the module analyzer. Only
+                // a path ending at an interface must be frozen here.
+                let Some(value) = path_query.as_ref().unwrap()(call).ok().flatten() else {
+                    return Ok(None);
+                };
+                (file.span(RefNode::SystemTfCall(call))?, value)
+            } else {
                 return Ok(None);
-            }
-            system_functions::check_call(
-                function,
-                args.as_deref(),
-                system_functions::CallSite::Expression,
-            )?;
-            let span = file.span(RefNode::SystemTfCall(call))?;
+            };
             check_query_origin(file, file.syntax_tree.get_str_trim(call), span)?;
-            let handle = handles.at(&name, span).ok_or_else(|| {
-                unsupported(format!(
-                    "reference to interface `{name}` outside the generate block that declares it"
-                ))
-            })?;
-            if handle.arrayed {
-                return Err(unsupported("interface array in timescale query"));
-            }
-            let value = scales.definition_value(&handle.interface, function == "$timeprecision")?;
             Ok(Some(Edit {
                 span,
                 // Preserve the query's self-determined signed integer type,

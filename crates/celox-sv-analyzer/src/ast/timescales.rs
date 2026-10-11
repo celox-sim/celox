@@ -24,6 +24,7 @@ enum ScopeKind {
 struct Scope {
     name: String,
     kind: ScopeKind,
+    is_interface: bool,
     start: usize,
     end: usize,
     scale: Scale,
@@ -347,6 +348,10 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
     Some(Scope {
         name,
         kind,
+        is_interface: matches!(
+            node,
+            RefNode::InterfaceDeclarationAnsi(_) | RefNode::InterfaceDeclarationNonansi(_)
+        ),
         start: offset(node)?,
         end,
         scale: DEFAULT,
@@ -595,6 +600,32 @@ impl Timescales {
         unit: &Unit,
         local: Option<&Self>,
     ) -> Converted<i32> {
+        self.query_details(call, tree, unit, local)
+            .map(|(value, _)| value)
+    }
+
+    pub(super) fn interface_path_queries<'a>(
+        &'a self,
+        tree: &'a SyntaxTree,
+    ) -> Converted<impl Fn(&sv_parser::SystemTfCall) -> Converted<Option<i32>> + 'a> {
+        let unit = self
+            .units
+            .get(key(tree))
+            .ok_or_else(|| unsupported("missing interface query time scope"))?;
+        // Resolve the content key once for this rewrite, not for each query.
+        Ok(move |call: &sv_parser::SystemTfCall| {
+            self.query_details(call, tree, unit, None)
+                .map(|(value, interface)| interface.then_some(value))
+        })
+    }
+
+    fn query_details(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        unit: &Unit,
+        local: Option<&Self>,
+    ) -> Converted<(i32, bool)> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
         system_functions::check_call(
@@ -608,6 +639,7 @@ impl Timescales {
             .iter()
             .filter(|s| s.start <= at && at < s.end)
             .min_by_key(|s| s.end - s.start);
+        let mut interface_target = false;
         let scale = if args.as_ref().is_some_and(|args| args.is_empty()) {
             current.map_or(unit.scale, |s| s.scale)
         } else {
@@ -727,15 +759,19 @@ impl Timescales {
                                 unsupported(format!("unknown timescale query module `{module}`"))
                             })?;
                     }
+                    interface_target = target.is_interface;
                     target.scale
                 }
             }
         };
-        Ok(if name == "$timeunit" {
-            scale.unit
-        } else {
-            scale.precision
-        })
+        Ok((
+            if name == "$timeunit" {
+                scale.unit
+            } else {
+                scale.precision
+            },
+            interface_target,
+        ))
     }
 }
 

@@ -318,4 +318,6 @@ time magnitudes do not change their numeric value. Interface functions retain
 their declaration's time scope and compilation unit when copied into modules
 during elaboration. Queries of scalar interface instances and ports are
 resolved using their bound interface type before flattening, including generic
-interface ports and handles declared within a generate block.
+interface ports and handles declared within a generate block. Scalar paths to
+interface instances inside child modules, such as `child.info`, are resolved
+before those instances are flattened away.

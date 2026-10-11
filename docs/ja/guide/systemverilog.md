@@ -184,4 +184,5 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 コピーされた後も、宣言元の時間スコープとコンパイル単位を使用します。
 スカラーのinterfaceインスタンス・ポートへの問い合わせは、展開前にバインドされた
 interface型から解決します。generic interfaceポートとgenerate内のローカルハンドルも
-対象です。
+対象です。`child.info`のように子module内のinterfaceインスタンスを指定する
+スカラー階層も、インスタンスが展開で消える前に解決します。

@@ -1671,3 +1671,47 @@ a=0a  10
   (assert_eq generated_u (trunc 32 -6))
   (assert_eq generated_p (trunc 32 -10))
   (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_hierarchical_interface_instances
+  (source "hierarchical_interface_times.sv" #"
+    timeunit 1ns / 1ps;
+    interface I;
+      timeunit 100ns / 10ps;
+      logic value;
+      function automatic int own_unit(); return $timeunit(); endfunction
+    endinterface
+    interface J; timeunit 1us / 100ps; logic value; endinterface
+    module Leaf;
+      timeunit 10ns / 1ps;
+      J nested();
+      assign nested.value = 0;
+    endmodule
+    module Child;
+      timeunit 1us / 1ns;
+      I info();
+      Leaf leaf();
+      assign info.value = 0;
+    endmodule
+    module Top(output int u, p, deep_u, deep_p, output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign u = $timeunit(child.info);
+      assign p = $timeprecision(child.info);
+      assign deep_u = $timeunit(child.leaf.nested);
+      assign deep_p = $timeprecision(child.leaf.nested);
+      always_comb begin
+        $timeunit(child.info);
+        void'($timeprecision(child.leaf.nested));
+        ok = ($timeunit(child) == -6) && ($timeprecision(child) == -9)
+          && ($bits($timeunit(child.info)) == 32) && ($timeunit(child.info) < 0);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq u (trunc 32 -7))
+  (assert_eq p (trunc 32 -11))
+  (assert_eq deep_u (trunc 32 -6))
+  (assert_eq deep_p (trunc 32 -10))
+  (assert_eq ok 1))

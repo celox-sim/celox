@@ -872,7 +872,8 @@
         "system_functions::timescale_queries_accept_leading_zero_magnitudes",
         "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
         "system_functions::timescale_queries_preserve_procedural_and_package_scopes",
-        "system_functions::timescale_queries_resolve_directives_and_hierarchy"
+        "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+        "system_functions::timescale_queries_resolve_hierarchical_interface_instances"
       ]
     }
   },
@@ -895,6 +896,7 @@
         "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
         "system_functions::timescale_queries_resolve_declarations_and_return_types",
         "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+        "system_functions::timescale_queries_resolve_hierarchical_interface_instances",
         "system_functions::timescale_queries_survive_type_parameter_specialization"
       ]
     }
