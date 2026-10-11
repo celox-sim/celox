@@ -695,16 +695,12 @@ impl<'a> Elaborator<'a, '_> {
                         // signed 32-bit type, including after every loop update.
                         value = i128::from(value as i32);
                         let mut iteration = scope.clone();
-                        iteration.env.insert(name.clone(), value);
-                        // Inherited parameter markers would keep this loop index
-                        // symbolic during constant substitution (for example in selects).
-                        for marker in [
-                            parameter_marker(&name),
-                            local_parameter_marker(&name),
-                            parameters::unbounded_parameter_marker(&name),
-                        ] {
+                        // Replace the entire inherited binding, including packed
+                        // bounds and rank, before installing the signed int genvar.
+                        for marker in parameters::binding_keys(&name, &iteration.env, 0) {
                             iteration.env.remove(&marker);
                         }
+                        iteration.env.insert(name.clone(), value);
                         insert_parameter_type_markers(
                             &mut iteration.env,
                             &name,
@@ -713,6 +709,7 @@ impl<'a> Elaborator<'a, '_> {
                                 signed: true,
                             },
                         );
+                        iteration.env.insert(parameter_rank_marker(&name), 1);
                         iteration.names.remove(&name);
                         Arc::make_mut(&mut iteration.shadowed).insert(name.clone());
                         iteration
@@ -1914,6 +1911,54 @@ mod tests {
                 .contains("cyclic generate-local parameter dependency"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn genvar_scopes_discard_all_inherited_packed_bounds() {
+        let tree = crate::syntax::parse_source(
+            "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
+            Path::new("genvar_packed_bounds.sv"),
+        ).unwrap();
+        let node = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let parameters = parameters_from_module_node(
+            node.clone(),
+            &tree,
+            &HashMap::default(),
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        let mut env = HashMap::default();
+        extend_const_env_with_parameters(&mut env, &parameters);
+        assert_eq!(env[&parameter_dimensions_marker("i")], 2);
+        let active = items(node, &tree, &env, &HashMap::default()).unwrap();
+        let iterations: Vec<_> = active
+            .iter()
+            .filter(|item| !item.scope.is_empty())
+            .collect();
+        assert_eq!(iterations.len(), 2);
+        for (value, item) in iterations.iter().enumerate() {
+            assert_eq!(item.env["i"], value as i128);
+            assert_eq!(item.env[&parameter_width_marker("i")], 32);
+            assert_eq!(item.env[&parameter_signed_marker("i")], 1);
+            assert_eq!(item.env[&parameter_rank_marker("i")], 1);
+            assert!(!item.env.contains_key(&parameter_dimensions_marker("i")));
+            assert!(!item.parameter_dimensions.contains_key("i"));
+            for dimension in 0..2 {
+                for bound in ["left", "right"] {
+                    assert!(
+                        !item
+                            .env
+                            .contains_key(&parameter_dimension_marker("i", dimension, bound))
+                    );
+                }
+            }
+        }
+        assert_eq!(env[&parameter_dimension_marker("i", 0, "left")], 2);
+        assert_eq!(env[&parameter_dimension_marker("i", 1, "right")], 0);
     }
 
     #[test]

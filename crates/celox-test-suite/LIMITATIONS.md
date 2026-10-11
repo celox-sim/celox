@@ -356,6 +356,7 @@ Verilator 5.052 passes the case on its unchanged stimulus and assertions.
 
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
+| `sv_icarus_genvar_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for `$dimensions` of a generated loop index's implicit integer localparam; IEEE 1800-2023 27.4 and 20.7 require one packed dimension. Celox and Verilator pass the unchanged assertions. The [standalone reproducer and pre-exclusion result](verification/repros/sv_genvar_dimensions.json) retain the observed disagreement. |
 | `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
 | `sv_icarus_runtime_array_queries` | execute | icarus | 1 | Icarus 13.0 aborts on a runtime dimension argument. A standalone reproducer also rejects an integer variable as the dimension. IEEE 1800-2023 20.7 permits querying fixed-size dimensions with runtime expressions. |
 | `sv_icarus_immediate_cover_actions` | execute | icarus | 1 | Icarus 13.0 drops immediate cover pass statements even with `-gassertions`. IEEE 1800-2023 16.3 requires the action for a true condition. Verilator passes with the adapter's `--coverage-user` flag. |

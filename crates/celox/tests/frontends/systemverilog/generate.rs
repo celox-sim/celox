@@ -9,6 +9,10 @@ sv_backends! {
         @case "generate::genvar_shadows_inherited_parameter_values_and_types";
     }
 
+    fn genvar_shadows_inherited_parameter_shapes(sim) {
+        @case "generate::genvar_shadows_inherited_parameter_shapes";
+    }
+
     fn size_queries_use_generate_local_parameter_types(sim) {
         @case "generate::size_queries_use_generate_local_parameter_types";
     }

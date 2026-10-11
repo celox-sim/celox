@@ -67,6 +67,65 @@
   (assert_eq nested_value 5)
   (assert_eq unknown_shadow 3))
 
+(case genvar_shadows_inherited_parameter_shapes
+  (source "genvar_parameter_shapes.sv" #"
+                module Top #(parameter logic [7:0] i=9,
+                             parameter logic [2:9] j=5,
+                             parameter logic k=1)
+                           (output logic [31:0] left_bound, right_bound, low_bound,
+                            high_bound, increment, dimensions, unpacked_dimensions,
+                            output logic [4:0] checks, output logic [31:0] outer_left,
+                            outer_right, outer_dimensions);
+                    for (genvar i=0; i<1; i++) begin : descending
+                        assign left_bound = $left(i);
+                        assign right_bound = $right(i);
+                        assign low_bound = $low(i);
+                        assign high_bound = $high(i);
+                        assign increment = $increment(i);
+                        assign dimensions = $dimensions(i);
+                        assign unpacked_dimensions = $unpacked_dimensions(i);
+                        localparam LEFT = $left(i), RANK = $dimensions(i);
+                        if (LEFT==31 && RANK==1 && $size(i)==32 && $bits(i)==32)
+                            assign checks[0] = 1;
+                        else assign checks[0] = 0;
+                        if (1) begin : nested
+                            localparam WIDTH = $left(i) + 1;
+                            logic [WIDTH-1:0] tmp;
+                            assign tmp = i;
+                            assign checks[1] = $bits(tmp)==32 && $right(i)==0;
+                        end
+                    end
+                    for (genvar j=0; j<1; j++) begin : ascending
+                        assign checks[2] = $left(j)==31 && $right(j)==0
+                                           && $low(j)==0 && $high(j)==31
+                                           && $increment(j)==1 && $dimensions(j)==1;
+                    end
+                    for (genvar k=0; k<1; k++) begin : scalar
+                        assign checks[3] = $left(k)==31 && $right(k)==0
+                                           && $dimensions(k)==1 && $size(k)==32;
+                    end
+                    for (genvar k=0; k<$dimensions(k); k++) begin : bounded
+                        assign checks[4] = k==0 && $left(k)==31;
+                    end
+                    assign outer_left = $left(j);
+                    assign outer_right = $right(j);
+                    assign outer_dimensions = $dimensions(k);
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq left_bound 31)
+  (assert_eq right_bound 0)
+  (assert_eq low_bound 0)
+  (assert_eq high_bound 31)
+  (assert_eq increment 1)
+  (assert_eq dimensions 1)
+  (assert_eq unpacked_dimensions 0)
+  (assert_eq checks 31)
+  (assert_eq outer_left 2)
+  (assert_eq outer_right 9)
+  (assert_eq outer_dimensions 0))
+
 (case size_queries_use_generate_local_parameter_types
   (source "generate_size_query_shadowing.sv" #"
                 module Top(input logic [7:0] x,
