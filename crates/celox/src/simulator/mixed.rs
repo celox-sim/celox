@@ -118,13 +118,20 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
             };
             format!("({op}{})", const_expr(expr)?)
         }
-        sv::ConstExpr::Function { name, args, .. } => format!(
-            "{name}({})",
-            args.iter()
-                .map(const_expr)
-                .collect::<Result<Vec<_>, _>>()?
-                .join(", ")
-        ),
+        sv::ConstExpr::Function { name, args, .. } => {
+            if !name.starts_with('$') {
+                return Err(unsupported(format!(
+                    "header-dependent SV constant function `{name}` without an expression body"
+                )));
+            }
+            format!(
+                "{name}({})",
+                args.iter()
+                    .map(const_expr)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            )
+        }
         sv::ConstExpr::Mux {
             condition,
             then_expr,
@@ -138,8 +145,19 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
         sv::ConstExpr::Select { expr, bit } => {
             format!("{}[{}]", const_expr(expr)?, const_expr(bit)?)
         }
-        sv::ConstExpr::Resize { .. } => {
-            return Err(unsupported("integral cast in SV interface declaration"));
+        sv::ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            if !matches!(width, 8 | 16 | 32 | 64) {
+                return Err(unsupported(format!("SV declaration cast to {width} bits")));
+            }
+            format!(
+                "({} as {}{width})",
+                const_expr(expr)?,
+                if *signed { "i" } else { "u" }
+            )
         }
     })
 }
@@ -148,6 +166,126 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
 // survive in the foreign contract. SV package constants and independent
 // constant functions have already been evaluated by their owning analyzer.
 fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bool {
+    fn function(
+        name: &str,
+        signature: &InterfaceSignature,
+        visited: &mut fxhash::FxHashSet<String>,
+    ) -> bool {
+        if !visited.insert(name.to_string()) {
+            return false;
+        }
+        let Some(subroutine) = signature
+            .module
+            .declaration_subroutines()
+            .iter()
+            .find(|function| function.name == name)
+        else {
+            return false;
+        };
+        let mut dependent = false;
+        for statement in &subroutine.body {
+            statement.walk(&mut |statement| {
+                use sv::StmtBase::*;
+                match statement {
+                    Assign { rhs, .. } | AssignConcat { rhs, .. } | Eval(rhs) => {
+                        dependent |= expression(rhs, signature, visited)
+                    }
+                    Return(Some(expr))
+                    | Local {
+                        init: Some(expr), ..
+                    } => dependent |= expression(expr, signature, visited),
+                    If { condition, .. } => dependent |= expression(condition, signature, visited),
+                    Case {
+                        selector, items, ..
+                    } => {
+                        dependent |= expression(selector, signature, visited);
+                        for item in items {
+                            for label in &item.labels {
+                                match label {
+                                    sv::CaseLabel::Value(value) => {
+                                        dependent |= expression(value, signature, visited)
+                                    }
+                                    sv::CaseLabel::Range { low, high } => {
+                                        dependent |= expression(low, signature, visited)
+                                            || expression(high, signature, visited)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Loop {
+                        condition, kind, ..
+                    } => {
+                        if let Some(condition) = condition {
+                            dependent |= expression(condition, signature, visited);
+                        }
+                        if let sv::LoopKind::Repeat(count) = kind {
+                            dependent |= expression(count, signature, visited);
+                        }
+                    }
+                    Call { name, args } => {
+                        dependent |= function(name, signature, visited);
+                        dependent |= args
+                            .iter()
+                            .flatten()
+                            .any(|arg| expression(arg, signature, visited));
+                    }
+                    _ => {}
+                }
+            });
+        }
+        dependent
+    }
+    fn expression(
+        expr: &sv::Expr,
+        signature: &InterfaceSignature,
+        visited: &mut fxhash::FxHashSet<String>,
+    ) -> bool {
+        use sv::Expr::*;
+        match expr {
+            Ident(name) => visit(&sv::ConstExpr::Ident(name.clone()), signature, visited),
+            Literal(_) => false,
+            Select { expr, msb, lsb, .. } => {
+                expression(expr, signature, visited)
+                    || visit(msb, signature, visited)
+                    || visit(lsb, signature, visited)
+            }
+            Concat(parts) => parts
+                .iter()
+                .any(|part| expression(part, signature, visited)),
+            RepeatConcat { count, parts } => {
+                visit(count, signature, visited)
+                    || parts
+                        .iter()
+                        .any(|part| expression(part, signature, visited))
+            }
+            Resize { expr, .. } | Unary { expr, .. } => expression(expr, signature, visited),
+            Binary { left, right, .. } => {
+                expression(left, signature, visited) || expression(right, signature, visited)
+            }
+            Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                expression(condition, signature, visited)
+                    || expression(then_expr, signature, visited)
+                    || expression(else_expr, signature, visited)
+            }
+            Call { name, args } => {
+                function(name, signature, visited)
+                    || args.iter().any(|arg| expression(arg, signature, visited))
+            }
+            Inside { expr, items } => {
+                expression(expr, signature, visited)
+                    || items.iter().any(|item| {
+                        item.exprs()
+                            .iter()
+                            .any(|expr| expression(expr, signature, visited))
+                    })
+            }
+        }
+    }
     fn visit(
         expr: &sv::ConstExpr,
         signature: &InterfaceSignature,
@@ -171,7 +309,7 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
                     .parameters()
                     .iter()
                     .find(|parameter| parameter.name() == name)
-                    .and_then(|parameter| parameter.value())
+                    .and_then(|parameter| parameter.declaration_value())
                     .is_some_and(|value| visit(value, signature, visited))
             }
             Literal(_) => false,
@@ -182,7 +320,10 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             Select { expr, bit } => {
                 visit(expr, signature, visited) || visit(bit, signature, visited)
             }
-            Function { args, .. } => args.iter().any(|arg| visit(arg, signature, visited)),
+            Function { name, args, .. } => {
+                function(name, signature, visited)
+                    || args.iter().any(|arg| visit(arg, signature, visited))
+            }
             Mux {
                 condition,
                 then_expr,
@@ -241,7 +382,7 @@ fn contract_expr(
             // Body constants depending on the header retain their declaration
             // and symbolic reference so overrides still reach member widths.
             if parameter
-                .value()
+                .declaration_value()
                 .is_some_and(|value| depends_on_header(value, signature))
             {
                 continue;
@@ -312,16 +453,28 @@ fn veryl_type(ty: &sv::Type, signature: &InterfaceSignature) -> Result<String, P
     Ok(text)
 }
 
-fn parameter_type(parameter: &sv::Parameter) -> String {
-    format!(
-        "{}logic<{}>",
+fn parameter_type(
+    parameter: &sv::Parameter,
+    signature: &InterfaceSignature,
+) -> Result<String, ParserError> {
+    let width = if parameter.packed_ranges().is_empty() {
+        parameter.resolved_width().unwrap_or(32).to_string()
+    } else {
+        parameter
+            .packed_ranges()
+            .iter()
+            .map(|range| dimension(range.left(), range.right(), signature))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" * ")
+    };
+    Ok(format!(
+        "{}logic<{width}>",
         if parameter.resolved_signed().unwrap_or(false) {
             "signed "
         } else {
             ""
-        },
-        parameter.resolved_width().unwrap_or(32)
-    )
+        }
+    ))
 }
 
 /// Register these declaration-only interfaces under the `$sv` namespace before
@@ -346,12 +499,12 @@ pub(super) fn veryl_interface_contracts(
                             signature.name
                         ))
                     })?;
-                let value = parameter.value().ok_or_else(|| {
+                let value = parameter.declaration_value().ok_or_else(|| {
                     unsupported(format!("interface parameter `{name}` without a default"))
                 })?;
                 source.push_str(&format!(
                     "param {name}: {} = {},\n",
-                    parameter_type(parameter),
+                    parameter_type(parameter, signature)?,
                     if depends_on_header(value, signature) {
                         contract_expr(value, signature)?
                     } else {
@@ -373,10 +526,10 @@ pub(super) fn veryl_interface_contracts(
             {
                 continue;
             }
-            if let Some(value) = parameter.value() {
+            if let Some(value) = parameter.declaration_value() {
                 source.push_str(&format!(
                     "const {name}: {} = {};\n",
-                    parameter_type(parameter),
+                    parameter_type(parameter, signature)?,
                     if depends_on_header(value, signature) {
                         contract_expr(value, signature)?
                     } else {
@@ -474,6 +627,18 @@ pub(crate) fn attach_sv_interface_behavior(
         used_names: &mut fxhash::FxHashSet<String>,
         next_name: &mut usize,
     ) -> Result<(), ParserError> {
+        let mut instance_names = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| {
+                if let Declaration::Inst(instance) = declaration {
+                    Some(instance.name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<fxhash::FxHashSet<_>>();
+        let mut next_instance = 0;
         let mut groups = std::collections::BTreeMap::new();
         for variable in module.variables.values() {
             let Ok(symbol) = symbol_table::resolve(&variable.token.beg) else {
@@ -640,7 +805,11 @@ pub(crate) fn attach_sv_interface_behavior(
             module
                 .declarations
                 .push(Declaration::Inst(Box::new(InstDeclaration {
-                    name: resource_table::insert_str(&format!("__sv_logic_{}", symbol.token.text)),
+                    name: resource_table::insert_str(&fresh_name(
+                        &format!("__sv_logic_{}", symbol.token.text),
+                        &mut instance_names,
+                        &mut next_instance,
+                    )),
                     hierarchy: Vec::new(),
                     inputs: Vec::new(),
                     outputs: Vec::new(),
@@ -1273,7 +1442,7 @@ pub(crate) fn specialize_foreign_module(
     context: &mut veryl_analyzer::Context,
     name: &str,
     parameters: &[(String, i128)],
-    index: usize,
+    used_names: &mut fxhash::FxHashSet<String>,
 ) -> Result<veryl_analyzer::ir::Module, ParserError> {
     use veryl_analyzer::{ir::*, symbol_table};
     use veryl_parser::resource_table;
@@ -1413,7 +1582,11 @@ pub(crate) fn specialize_foreign_module(
         module.clone()
     };
     specialized.eval_assign(context);
-    specialized.name = resource_table::insert_str(&format!("__celox_foreign_{name}_{index}"));
+    specialized.name = resource_table::insert_str(&fresh_name(
+        &format!("__celox_foreign_{name}"),
+        used_names,
+        &mut 0,
+    ));
     let errors = context.drain_errors();
     if errors.iter().any(veryl_analyzer::AnalyzerError::is_error) {
         return Err(unsupported(format!(
@@ -1421,4 +1594,90 @@ pub(crate) fn specialize_foreign_module(
         )));
     }
     Ok(specialized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veryl_analyzer::{
+        Analyzer, Context,
+        ir::{Component, Declaration, Ir},
+    };
+    use veryl_parser::{Parser, resource_table};
+
+    #[test]
+    fn dependent_statement_function_defaults_are_not_silently_folded() {
+        let sv = "interface Bus #(parameter W = 8); function automatic integer twice(); integer result; result = 0; for (integer i = 0; i < W; i++) result += 2; return result; endfunction localparam N = twice(); logic [N-1:0] req; endinterface";
+        let signatures =
+            celox_frontend_sv::interface_signatures(&[(sv, std::path::Path::new("bus.sv"))])
+                .unwrap();
+        let error = veryl_interface_contracts(&signatures).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("header-dependent SV constant function"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn wrapper_instances_preserve_existing_ir_instance_names() {
+        let sv = "interface Bus; logic [7:0] req, rsp; assign rsp = req + 1; endinterface module Child(input logic [7:0] a, output logic [7:0] y); assign y = a + 42; endmodule";
+        let sources = [(sv, std::path::Path::new("bus.sv"))];
+        let signatures = celox_frontend_sv::interface_signatures(&sources).unwrap();
+        let contracts = veryl_interface_contracts(&signatures).unwrap();
+        let contracts = Parser::parse(&contracts, &"contracts.veryl").unwrap();
+        let authored = Parser::parse("module Top(a: input logic<8>, y: output logic<8>, authored: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; inst child: $sv::Child(a, y: authored); }", &"top.veryl").unwrap();
+        let metadata = veryl_metadata::Metadata::create_default("prj").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        assert!(analyzer.analyze_pass1("$sv", &contracts.veryl).is_empty());
+        assert!(analyzer.analyze_pass1("prj", &authored.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        for parser in [&contracts, &authored] {
+            let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
+            assert!(errors.iter().all(|error| !error.is_error()), "{errors:?}");
+        }
+        let Component::Module(module) = ir.components.iter_mut().find(|component|
+            matches!(component, Component::Module(module) if module.name.to_string() == "Top")).unwrap() else { unreachable!() };
+        let child = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| {
+                if let Declaration::Inst(instance) = declaration {
+                    Some(instance)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        // Veryl reserves authored double-underscore identifiers, but internally
+        // prepared IR can already contain helper instances with these names.
+        child.name = resource_table::insert_str("__sv_logic_bus");
+        let mut sibling = child.clone();
+        sibling.name = resource_table::insert_str("__sv_logic_bus_0");
+        module.declarations.push(Declaration::Inst(sibling));
+        let mut names = component_names(&sources).unwrap();
+        let generated =
+            attach_sv_interface_behavior(&mut ir, &signatures, &mut context, &mut names).unwrap();
+        assert_eq!(generated.len(), 1);
+        let Component::Module(module) = ir.components.iter().find(|component|
+            matches!(component, Component::Module(module) if module.name.to_string() == "Top")).unwrap() else { unreachable!() };
+        let instances = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| {
+                if let Declaration::Inst(instance) = declaration {
+                    Some(instance.name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(instances.len(), 3);
+        assert_eq!(instances.iter().collect::<fxhash::FxHashSet<_>>().len(), 3);
+        assert!(instances.iter().any(|name| name == "__sv_logic_bus"));
+        assert!(instances.iter().any(|name| name == "__sv_logic_bus_0"));
+    }
 }

@@ -739,11 +739,7 @@ pub fn parse_mixed(
             }
             let mut prepare = || -> Result<_, ParserError> {
                 let module = crate::simulator::mixed::specialize_foreign_module(
-                    &base,
-                    context,
-                    name,
-                    parameters,
-                    specializations.len(),
+                    &base, context, name, parameters, used_names,
                 )?;
                 let mut specialized = veryl_analyzer::ir::Ir {
                     components: vec![veryl_analyzer::ir::Component::Module(module)],

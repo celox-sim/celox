@@ -1,6 +1,69 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_parameter_types_dependent_on_sv_interface_headers(sim) {
+        @setup {
+            let veryl = "module Top(a: input logic<16>, y: output logic<16>) { inst bus: $sv::Bus #(W: 16, V: 16'h0101, S: 16'sh8001); assign bus.req = a; assign y = bus.result; }";
+            let sv = r#"
+                interface Bus #(parameter W = 8, parameter logic [W-1:0] V = 1, parameter logic signed [W-1:0] S = -1);
+                    logic [V-1:0] req;
+                    logic [W-1:0] result;
+                    assign result = req ^ S;
+                endinterface
+            "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x2bccu16.into());
+    }
+
+    fn preserves_sv_constant_function_header_dependencies(sim) {
+        @setup {
+            let veryl = "module Top(a: input logic<32>, y: output logic<32>) { inst bus: $sv::Bus #(W: 16); assign bus.req = a; assign y = bus.rsp; }";
+            let sv = r#"
+                interface Bus #(parameter W = 8, parameter N = twice());
+                    function automatic integer width_value(); return W; endfunction
+                    function automatic integer twice(); return width_value() * 2; endfunction
+                    localparam M = twice();
+                    logic [N-1:0] req;
+                    logic [M-1:0] rsp;
+                    assign rsp = req + N;
+                endinterface
+            "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234_5678u32)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1234_5698u32.into());
+    }
+
+    fn avoids_foreign_specialization_name_collisions(sim) {
+        @setup {
+            let veryl = "module Child #(param K: u32 = 1)(a: input logic<8>, y: output logic<8>) { assign y = a + K; }";
+            let sv = r#"
+                module __celox_foreign_Child_0(input logic [7:0] a, output logic [7:0] y);
+                    assign y = a + 42;
+                endmodule
+                module Top(input logic [7:0] a, output logic [7:0] specialized, authored);
+                    Child #(.K(5)) child(.a(a), .y(specialized));
+                    __celox_foreign_Child_0 other(.a(a), .y(authored));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("specialized")), 6u8.into());
+        assert_eq!(sim.get(sim.signal("authored")), 43u8.into());
+    }
+
     fn avoids_interface_behavior_name_collisions(sim) {
         @setup {
             let veryl = "module Top(a: input logic<8>, y: output logic<8>, authored: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; inst child: $sv::__celox_sv_interface_0(a, y: authored); }";

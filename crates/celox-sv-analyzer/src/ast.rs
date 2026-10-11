@@ -392,6 +392,9 @@ pub struct Module {
     dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.
     constant_functions: const_functions::ConstantFunctions,
+    /// Expression bodies used to publish symbolic declaration contracts.
+    symbolic_functions: HashMap<String, Function>,
+    declaration_subroutines: Vec<crate::ir::Subroutine>,
     /// The package parameters the module sees, by qualified name and by the
     /// names its imports bind.
     imported_parameters: Vec<Parameter>,
@@ -400,6 +403,25 @@ pub struct Module {
 }
 
 impl Module {
+    pub(crate) fn declaration_expr(
+        &self,
+        expr: &ConstExpr,
+        signedness: &HashMap<String, bool>,
+    ) -> ConstExpr {
+        let expanded = expand_expr_calls(
+            const_expr_to_expr(expr.clone()),
+            &self.symbolic_functions,
+            signedness,
+            0,
+            true,
+        );
+        expr_to_index_const(expanded, &PackedDimensions::default()).unwrap_or_else(|| expr.clone())
+    }
+
+    pub(crate) fn declaration_subroutines(&self) -> &[crate::ir::Subroutine] {
+        &self.declaration_subroutines
+    }
+
     /// Make the module's constant functions available to the constant
     /// evaluator until the guard is dropped.
     pub(crate) fn install_constant_functions(&self) -> impl Drop {
@@ -512,6 +534,16 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        // Contract dependency analysis must see module parameter references
+        // before the normal procedural lowering substitutes default literals.
+        let declaration_subroutines = with_imported(const_functions::module_constant_functions(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+            &imported.parameter_values,
+        ))
+        .declarations();
         const_functions::replace(with_imported(const_functions::module_constant_functions(
             node.clone(),
             syntax_tree,
@@ -1056,6 +1088,8 @@ impl Module {
             subroutines,
             dpi_imports,
             constant_functions: const_functions::installed(),
+            symbolic_functions: functions,
+            declaration_subroutines,
             imported_parameters,
             symbols,
         })
@@ -1261,6 +1295,10 @@ impl Parameter {
             .or(inferred.map(|r#type| r#type.signed))
             .unwrap_or(false);
         Some(ExprType { width, signed })
+    }
+
+    pub(crate) fn packed_ranges(&self) -> &[PackedRange] {
+        &self.packed_ranges
     }
 
     pub(crate) fn declared_width(&self) -> Option<usize> {

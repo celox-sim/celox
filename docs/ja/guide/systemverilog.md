@@ -39,6 +39,10 @@ SV から Veryl の interface をインスタンス化し、両言語のモジ�
 interface のパラメータ、インスタンス配列、SV の generic interface ポートは接続先の型で解決します。
 Veryl からインスタンス化した SV interface の内部ロジックは、SV frontend で実行します。
 
+パラメータの宣言幅が先行する interface パラメータに依存する場合も、上書きを反映します。
+interface の既定値で呼び出す定数関数は、native analyzer が本体を式として表せる場合に宣言式へ展開します。
+ループなど、本体を宣言式で表せないヘッダ依存の定数関数は、未対応として診断します。
+
 両 frontend の宣言情報と解析結果を直接接続するため、Veryl の SV emitter は不要です。
 言語境界を跨ぐ interface 関数の呼び出しと、関数の `import` / `export` modport は、まだ未対応です。
 各言語内での対応範囲は従来どおりです。

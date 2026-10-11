@@ -44,6 +44,12 @@ Interface parameters, instance arrays and generic SV interface ports are
 bound to the actual interface. Logic inside an SV interface instantiated
 from Veryl runs in the SV frontend.
 
+Declared parameter widths retain dependencies on earlier interface parameters.
+Constant functions used by interface defaults are expanded into declaration
+expressions when the native analyzer can represent their bodies that way.
+Header-dependent functions with statement bodies that cannot be expressed in
+the contract, such as loops, produce an unsupported diagnostic.
+
 The bridge exchanges declaration contracts and links native symbolic modules;
 it does not require the Veryl-to-SV emitter. Cross-language interface function
 calls and function `import` / `export` modports are not supported yet. They

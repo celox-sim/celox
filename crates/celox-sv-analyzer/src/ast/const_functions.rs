@@ -210,6 +210,35 @@ impl ConstantFunctions {
         }
     }
 
+    pub(super) fn declarations(&self) -> Vec<crate::ir::Subroutine> {
+        self.functions
+            .iter()
+            .map(|(name, function)| crate::ir::Subroutine {
+                name: name.clone(),
+                is_task: false,
+                return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
+                return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
+                params: function
+                    .params
+                    .iter()
+                    .map(|(name, ty)| crate::ir::SubroutineParam {
+                        name: name.clone(),
+                        source_name: name.clone(),
+                        direction: crate::procedural::ParamDirection::Input,
+                        r#type: ty.clone(),
+                        default: None,
+                    })
+                    .collect(),
+                body: function
+                    .body
+                    .iter()
+                    .cloned()
+                    .map(|statement| statement.map(&mut |expr| expr.into(), &mut |lhs| lhs.into()))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// The names of the locals of these functions.
     pub(super) fn local_names(&self) -> impl Iterator<Item = &String> {
         self.locals.keys()
