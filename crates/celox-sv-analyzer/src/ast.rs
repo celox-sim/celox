@@ -1055,6 +1055,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.
@@ -1723,6 +1724,13 @@ pub enum ConstExpr {
     Select {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
+    },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
     },
     /// An integral cast whose width and signedness remain independent of
     /// the enclosing index arithmetic.

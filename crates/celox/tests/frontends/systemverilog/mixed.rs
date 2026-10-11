@@ -1,6 +1,18 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_sv_interface_constant_range_selection(sim) {
+        @setup {
+            let veryl = "module Top(y: output logic<9>, wide: output logic<17>) { inst bus: $sv::Bus #(W: 18); inst high: $sv::Bus #(W: 30); assign bus.req = 9'h1ff; assign y = bus.req; assign high.req = 17'h1ffff; assign wide = high.req; }";
+            let sv = "interface Bus #(parameter logic [31:0] W = 8); function automatic integer low_width(input logic [31:0] x); return x[3:0] + 1; endfunction localparam N = low_width(W); logic [N-1:0] req; endinterface";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        assert_eq!(sim.get(sim.signal("y")), 7u8.into());
+        assert_eq!(sim.get(sim.signal("wide")), 0x7fffu32.into());
+    }
+
     fn preserves_parameter_dependent_veryl_interface_constants(sim) {
         @setup {
             let veryl = r#"

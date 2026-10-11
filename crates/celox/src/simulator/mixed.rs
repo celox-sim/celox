@@ -145,6 +145,25 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
         sv::ConstExpr::Select { expr, bit } => {
             format!("{}[{}]", const_expr(expr)?, const_expr(bit)?)
         }
+        sv::ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let expr = const_expr(expr)?;
+            let msb = const_expr(msb)?;
+            let lsb = const_expr(lsb)?;
+            let width =
+                format!("(if ({msb}) >= ({lsb}) ? ({msb}) - ({lsb}) + 1 : ({lsb}) - ({msb}) + 1)");
+            let low = format!("(if ({msb}) >= ({lsb}) ? ({lsb}) : ({msb}))");
+            // Veryl selects require an identifier. Shift an arbitrary expression
+            // and truncate at a width-context boundary, then restore the IR sign.
+            format!(
+                "${}(($unsigned({expr}) >> {low}) as ({width}))",
+                if *signed { "signed" } else { "unsigned" }
+            )
+        }
         sv::ConstExpr::Resize {
             expr,
             width,
@@ -364,6 +383,11 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
             Unary { expr, .. } | Resize { expr, .. } => visit(expr, signature, visited),
             Select { expr, bit } => {
                 visit(expr, signature, visited) || visit(bit, signature, visited)
+            }
+            SelectRange { expr, msb, lsb, .. } => {
+                visit(expr, signature, visited)
+                    || visit(msb, signature, visited)
+                    || visit(lsb, signature, visited)
             }
             Function { name, args, .. } => {
                 function(name, signature, visited)

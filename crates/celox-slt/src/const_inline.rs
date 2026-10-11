@@ -313,8 +313,9 @@ fn contains_legacy_fold<A: Clone + Eq + Hash>(root: NodeId, arena: &SLTNodeArena
                 else_expr,
             } => pending.extend([*cond, *then_expr, *else_expr]),
             SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(child, _)| *child)),
+            SLTNode::Input { index, .. } => pending.extend(index.iter().map(|entry| entry.node)),
             // Grouped folds cannot contain legacy folds (verified at allocation).
-            SLTNode::ForFoldGroup { .. } | SLTNode::Constant(..) | SLTNode::Input { .. } => {}
+            SLTNode::ForFoldGroup { .. } | SLTNode::Constant(..) => {}
         }
     }
     false
@@ -347,6 +348,36 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                 arena.alloc(SLTNode::Constant(val, msk, width, false))?
             } else {
                 node
+            }
+        }
+        SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access,
+        } => {
+            // The indexed variable stays in memory, but its index can read
+            // constant drivers. Rewrite those reads before removing their
+            // dependency edges, so the load cannot run before their stores.
+            let new_index = index
+                .iter()
+                .map(|entry| {
+                    Ok(crate::SLTIndex {
+                        node: rewrite_expr(entry.node, arena, const_vars, cache)?,
+                        stride: entry.stride,
+                        kind: entry.kind,
+                    })
+                })
+                .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+            if new_index == index {
+                node
+            } else {
+                arena.alloc(SLTNode::Input {
+                    variable,
+                    signed,
+                    index: new_index,
+                    access,
+                })?
             }
         }
         SLTNode::Slice { expr, access } => {

@@ -269,6 +269,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => self.rename_name(name),
             },
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.rename_const(expr);
+                self.rename_const(msb);
+                self.rename_const(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.rename_const(expr);
                 self.rename_const(bit);
@@ -1659,7 +1664,7 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
-    for item in generate::items(node, tree, const_env, type_aliases)? {
+    for item in generate::subroutine_items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1755,7 +1760,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
-    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let active = generate::subroutine_items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
         if item.is_parameter_declaration() {

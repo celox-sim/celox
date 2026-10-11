@@ -1273,21 +1273,33 @@ a=0a  10
     module Child #(parameter int P = -1) (output logic y);
       assign y = $isunbounded(P);
     endmodule
-    module Top(output logic [1:0] result, output logic [7:0] constant_value,
-               output int nested_bits);
+    module Top(output logic [4:0] result, output logic [7:0] constant_value,
+               output int nested_bits, output logic [15:0] genvar_values);
       parameter int P = -1;
       localparam Q = $isunbounded(P);
+      localparam int i = 9;
       Child #(.P(Q)) c(.y(result[1]));
       assign result[0] = $isunbounded(Q);
       assign constant_value = Q;
       assign nested_bits = $bits($isunbounded(P));
+      for (genvar i=-1; i<1; i++) begin : g
+        localparam BOUNDED = !$isunbounded(i);
+        if (BOUNDED) begin : nested
+          assign result[i+3] = $isunbounded(i);
+        end else assign result[i+3] = 1;
+        assign genvar_values[8*(i+1)+:8] = i;
+      end
+      for (genvar j=0; j<1; j++) begin : fresh
+        assign result[4] = $isunbounded(j);
+      end
     endmodule
   "#)
   (top Top)
   (eval)
   (assert_eq result 0)
   (assert_eq constant_value 0)
-  (assert_eq nested_bits 1))
+  (assert_eq nested_bits 1)
+  (assert_eq genvar_values 0x00ff))
 
 (case isunbounded_reports_bounded_array_parameters
   (source "isunbounded_array.sv" #"
