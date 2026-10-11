@@ -319,6 +319,33 @@ pub(super) fn items<'a>(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
+    items_with_literal_use(node, tree, env, aliases, LiteralUse::All)
+}
+
+/// Elaborate the same scopes and diagnostics, retaining module parameter
+/// literals needed by subroutines, declarations and generate constructs.
+pub(super) fn subroutine_items<'a>(
+    node: RefNode<'a>,
+    tree: &'a SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Result<Vec<Item<'a>>, AnalyzerError> {
+    items_with_literal_use(node, tree, env, aliases, LiteralUse::Subroutines)
+}
+
+#[derive(Clone, Copy)]
+enum LiteralUse {
+    All,
+    Subroutines,
+}
+
+fn items_with_literal_use<'a>(
+    node: RefNode<'a>,
+    tree: &'a SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    literal_use: LiteralUse,
+) -> Result<Vec<Item<'a>>, AnalyzerError> {
     let mut elaborator = Elaborator {
         tree,
         aliases,
@@ -328,7 +355,7 @@ pub(super) fn items<'a>(
     };
     let parameters =
         parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
-    let references = parameter_literal_references(node.clone(), tree);
+    let references = parameter_literal_references(node.clone(), tree, literal_use);
     let mut literals =
         parameters::parameter_value_env_for_references(&parameters, env, &references);
     if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
@@ -369,7 +396,11 @@ pub(super) fn items<'a>(
 /// All references in executable/type-bearing items, including inactive and
 /// nested generate branches. Direct scalar parameter initializers are accounted
 /// for by the dependency closure rather than expanded as independent roots.
-fn parameter_literal_references(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+fn parameter_literal_references(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    literal_use: LiteralUse,
+) -> HashSet<String> {
     let items: Vec<_> = match node {
         RefNode::PackageDeclaration(package) => package_declarations(package)
             .map(RefNode::PackageOrGenerateItemDeclaration)
@@ -381,6 +412,31 @@ fn parameter_literal_references(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet
     };
     let mut references = HashSet::default();
     for node in items {
+        // Top-level RTL bodies do not contribute to subroutine discovery.
+        // Keep declarations (including signal types queried by functions) and
+        // whole generate constructs, whose conditions, imports and local
+        // declarations participate in elaboration for every collector. Keep
+        // procedural declarations too, as type queries can name their scopes.
+        if matches!(literal_use, LiteralUse::Subroutines)
+            && let RefNode::NonPortModuleItem(sv_parser::NonPortModuleItem::ModuleOrGenerateItem(
+                item,
+            )) = &node
+            && let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item
+            && matches!(
+                item.nodes.1,
+                sv_parser::ModuleCommonItem::ContinuousAssign(_)
+                    | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
+                    | sv_parser::ModuleCommonItem::InitialConstruct(_)
+            )
+            && !node.clone().into_iter().any(|child| {
+                matches!(
+                    child,
+                    RefNode::DataDeclaration(_) | RefNode::NetDeclaration(_)
+                )
+            })
+        {
+            continue;
+        }
         let declaration = match node.clone() {
             RefNode::PackageOrGenerateItemDeclaration(declaration) => Some(declaration),
             RefNode::NonPortModuleItem(item) => {
@@ -2199,7 +2255,7 @@ mod tests {
                 node,
                 RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
             ) {
-                let refs = parameter_literal_references(node, &tree);
+                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
                 for name in [
                     "ARRAY_INPUT",
                     "FUNCTION_INPUT",
@@ -2212,7 +2268,7 @@ mod tests {
                 }
                 assert!(!refs.contains("ONLY_INITIALIZER"));
             } else if matches!(node, RefNode::PackageDeclaration(_)) {
-                let refs = parameter_literal_references(node, &tree);
+                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
                 assert!(refs.contains("PACKAGE_INPUT"));
                 assert!(!refs.contains("only_in_initializer"));
             }
@@ -2298,6 +2354,218 @@ mod tests {
             assert_eq!(item.literals.get("B"), full.get("B"));
             assert_eq!(item.literals.get("A"), full.get("A"));
             assert!(!item.literals.contains_key("UNUSED"));
+        }
+    }
+
+    #[test]
+    fn subroutine_reference_scan_excludes_rtl_only_bindings() {
+        let code = r#"
+            module Top;
+                localparam INITIALIZER = ONLY_INITIALIZER;
+                function automatic logic f(); return FUNCTION_INPUT; endfunction
+                task t(input logic [TASK_WIDTH-1:0] value); endtask
+                assign out = RTL_INPUT;
+                always_comb out = ALWAYS_INPUT;
+                initial out = INITIAL_INPUT;
+                initial begin : named logic [PROCEDURAL_WIDTH-1:0] local_signal; end
+                logic [RTL_WIDTH-1:0] signal;
+                if (CONDITION) begin : g
+                    localparam P = LOCAL_INPUT;
+                    logic [SIGNAL_WIDTH-1:0] x;
+                    assign x = GENERATE_INPUT;
+                end
+                generate
+                    assign other = REGION_INPUT;
+                endgenerate
+            endmodule
+            package pkg;
+                localparam INITIALIZER = ONLY_INITIALIZER;
+                function automatic logic f(); return PACKAGE_INPUT; endfunction
+            endpackage
+        "#;
+        let tree =
+            crate::syntax::parse_source(code, Path::new("subroutine_references.sv")).unwrap();
+        for node in &tree {
+            if matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            ) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+                for name in [
+                    "FUNCTION_INPUT",
+                    "TASK_WIDTH",
+                    "RTL_WIDTH",
+                    "PROCEDURAL_WIDTH",
+                    "CONDITION",
+                    "LOCAL_INPUT",
+                    "SIGNAL_WIDTH",
+                    "GENERATE_INPUT",
+                    "REGION_INPUT",
+                ] {
+                    assert!(refs.contains(name), "{name}: {refs:?}");
+                }
+                for name in [
+                    "ONLY_INITIALIZER",
+                    "RTL_INPUT",
+                    "ALWAYS_INPUT",
+                    "INITIAL_INPUT",
+                ] {
+                    assert!(!refs.contains(name), "{name}: {refs:?}");
+                }
+            } else if matches!(node, RefNode::PackageDeclaration(_)) {
+                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+                assert!(refs.contains("PACKAGE_INPUT"));
+                assert!(!refs.contains("ONLY_INITIALIZER"));
+            }
+        }
+    }
+
+    #[test]
+    fn subroutine_literals_preserve_functions_tasks_and_generate_scopes() {
+        let code = r#"
+            module Top(output logic [7:0] out);
+                localparam logic [7:0] A = 8'bxz010101;
+                localparam logic [7:0] B = A;
+                localparam logic [7:0] RTL_ONLY = 'x;
+                function automatic logic [7:0] f(); return B; endfunction
+                task t(output logic [7:0] result); result = A; endtask
+                if (1) begin : g
+                    localparam logic [7:0] C = B;
+                    logic [7:0] x;
+                    assign x = C;
+                end
+                assign out = RTL_ONLY;
+            endmodule
+        "#;
+        let tree = crate::syntax::parse_source(code, Path::new("subroutine_literals.sv")).unwrap();
+        let node = (&tree)
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let env = HashMap::default();
+        let aliases = HashMap::default();
+        let full = items(node.clone(), &tree, &env, &aliases).unwrap();
+        let projected = subroutine_items(node, &tree, &env, &aliases).unwrap();
+        assert_eq!(projected.len(), full.len());
+        for (full, projected) in full.iter().zip(&projected) {
+            assert_eq!(projected.env, full.env);
+            assert_eq!(projected.names, full.names);
+            assert_eq!(projected.shadowed, full.shadowed);
+            assert_eq!(projected.parameter_dimensions, full.parameter_dimensions);
+            assert_eq!(projected.scope, full.scope);
+            for name in ["A", "B", "C"] {
+                assert_eq!(projected.literals.get(name), full.literals.get(name));
+            }
+            assert!(!projected.literals.contains_key("RTL_ONLY"));
+            assert!(full.literals.contains_key("RTL_ONLY"));
+        }
+        // The emitted RTL still uses the ordinary collector's complete roots.
+        let ir = crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+        let crate::ir::Expr::Literal(value) = ir.modules()[0].assignments().last().unwrap().rhs()
+        else {
+            panic!("RTL-only four-state parameter must remain a literal")
+        };
+        let value = typecheck::parse_integral_literal(value).unwrap();
+        assert_eq!(value.width, 8);
+        assert_eq!(value.mask, 255u32.into());
+    }
+
+    #[test]
+    fn rtl_referenced_unresolved_chains_do_not_expand_during_subroutine_discovery() {
+        use std::fmt::Write;
+
+        for count in [16, 64, 256] {
+            for doubling in [false, true] {
+                let declaration = if doubling {
+                    "function automatic int next_value(input int left, right); return left + right; endfunction\n"
+                } else {
+                    "function automatic int next_value(input int value); return value + 1; endfunction\n"
+                };
+                let mut code = format!("module Top(output int result); {declaration}");
+                for i in 0..count {
+                    let arg = match (i, doubling) {
+                        (0, false) => "0".into(),
+                        (0, true) => "1, 1".into(),
+                        (_, false) => format!("P{}", i - 1),
+                        (_, true) => format!("P{0}, P{0}", i - 1),
+                    };
+                    writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
+                }
+                writeln!(code, "assign result = P{}; endmodule", count - 1).unwrap();
+                let tree = crate::syntax::parse_source(&code, Path::new("rtl_chain.sv")).unwrap();
+                let node = (&tree)
+                    .into_iter()
+                    .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+                    .unwrap();
+                let active =
+                    subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+                        .unwrap();
+                assert!(active.iter().all(|item| item.literals.is_empty()));
+                let ir =
+                    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+                let parameters = ir.modules()[0].parameters();
+                assert_eq!(parameters.len(), count);
+                for (i, parameter) in parameters.iter().enumerate() {
+                    let expected = if !doubling {
+                        i as i128 + 1
+                    } else if i >= 31 {
+                        0
+                    } else {
+                        (1u32 << (i + 1)) as i32 as i128
+                    };
+                    assert_eq!(parameter.resolved_value(), Some(expected));
+                }
+                let crate::ir::Expr::Literal(value) = ir.modules()[0].assignments()[0].rhs() else {
+                    panic!("resolved chain must reach RTL as a literal")
+                };
+                let value = typecheck::parse_integral_literal(value).unwrap();
+                assert_eq!(
+                    value.value,
+                    if doubling {
+                        if count >= 32 { 0 } else { 1u32 << count }
+                    } else {
+                        count as u32
+                    }
+                    .into()
+                );
+                assert_eq!(value.mask, 0u32.into());
+                assert_eq!(value.width, 32);
+            }
+        }
+    }
+
+    #[test]
+    fn subroutine_projection_preserves_generate_diagnostics() {
+        for body in [
+            "if (UNKNOWN) begin : g logic x; end",
+            "if (1) begin : g typedef logic T; T x; end",
+            "for (genvar i=0; i<1; i++) begin : g function logic f(); return 0; endfunction end",
+            "if (1) begin : g localparam P=Q; localparam Q=P; end",
+        ] {
+            let code = format!("module Top; {body} endmodule");
+            let tree =
+                crate::syntax::parse_source(&code, Path::new("subroutine_diagnostics.sv")).unwrap();
+            let node = (&tree)
+                .into_iter()
+                .find(|node| {
+                    matches!(
+                        node,
+                        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                    )
+                })
+                .unwrap();
+            let full = items(
+                node.clone(),
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+            )
+            .err()
+            .expect(body);
+            let projected = subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+                .err()
+                .expect(body);
+            assert_eq!(projected.to_string(), full.to_string(), "{body}");
         }
     }
 }

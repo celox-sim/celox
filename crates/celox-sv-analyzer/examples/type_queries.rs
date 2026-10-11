@@ -8,7 +8,10 @@ use celox_sv_analyzer::{analyze, ast, syntax};
 fn source(kind: &str, count: usize, ranged: bool, four_state: bool) -> String {
     let parameter_type = if ranged { "logic [31:0]" } else { "int" };
     let mut code = String::from("module Top(input logic [1:0][3:0] a);\n");
-    if kind == "constant_function_parameters" {
+    if matches!(
+        kind,
+        "constant_function_parameters" | "referenced_constant_function_parameters"
+    ) {
         code.push_str(
             "function automatic int next_value(input int value); return value + 1; endfunction\n",
         );
@@ -21,9 +24,15 @@ fn source(kind: &str, count: usize, ranged: bool, four_state: bool) -> String {
     if kind == "alias_bits" {
         code.push_str("typedef logic [7:0] byte_t;\n");
     }
-    if matches!(kind, "parameters" | "constant_function_parameters") {
+    if matches!(
+        kind,
+        "parameters" | "constant_function_parameters" | "referenced_constant_function_parameters"
+    ) {
         for i in 0..count {
-            let value = if kind == "constant_function_parameters" {
+            let value = if matches!(
+                kind,
+                "constant_function_parameters" | "referenced_constant_function_parameters"
+            ) {
                 if i == 0 {
                     "next_value(0)".into()
                 } else {
@@ -67,6 +76,9 @@ fn source(kind: &str, count: usize, ranged: bool, four_state: bool) -> String {
             writeln!(code, "assign q{i} = {query};").unwrap();
         }
     }
+    if kind == "referenced_constant_function_parameters" {
+        writeln!(code, "logic [31:0] result; assign result = P{};", count - 1).unwrap();
+    }
     code.push_str("endmodule\n");
     code
 }
@@ -77,9 +89,13 @@ fn main() {
         .first()
         .is_some_and(|arg| arg == "--four-state-parameters");
     let ranged = four_state || args.first().is_some_and(|arg| arg == "--ranged-parameters");
-    let constant_functions = args
+    let referenced_functions = args
         .first()
-        .is_some_and(|arg| arg == "--constant-functions");
+        .is_some_and(|arg| arg == "--referenced-constant-functions");
+    let constant_functions = referenced_functions
+        || args
+            .first()
+            .is_some_and(|arg| arg == "--constant-functions");
     let parameters =
         ranged || constant_functions || args.first().is_some_and(|arg| arg == "--parameters");
     if parameters {
@@ -98,7 +114,9 @@ fn main() {
     } else {
         counts
     };
-    let kinds: &[&str] = if constant_functions {
+    let kinds: &[&str] = if referenced_functions {
+        &["referenced_constant_function_parameters"]
+    } else if constant_functions {
         &["constant_function_parameters"]
     } else if parameters {
         &["parameters", "generate_dependencies"]
@@ -125,7 +143,12 @@ fn main() {
                 let ir = analyze::analyze_source(source).unwrap();
                 let finished = Instant::now();
                 let module = &ir.modules()[0];
-                if matches!(kind, "parameters" | "constant_function_parameters") {
+                if matches!(
+                    kind,
+                    "parameters"
+                        | "constant_function_parameters"
+                        | "referenced_constant_function_parameters"
+                ) {
                     assert_eq!(module.parameters().len(), count);
                     assert_eq!(
                         module.parameters()[count - 1].resolved_value(),
@@ -133,6 +156,18 @@ fn main() {
                     );
                     if four_state {
                         assert_eq!(module.parameters()[count - 1].resolved_width(), Some(32));
+                    }
+                    if kind == "referenced_constant_function_parameters" {
+                        let celox_sv_analyzer::ir::Expr::Literal(value) =
+                            module.assignments()[0].rhs()
+                        else {
+                            panic!("referenced parameter must be resolved before RTL lowering")
+                        };
+                        let value =
+                            celox_sv_analyzer::typecheck::parse_integral_literal(value).unwrap();
+                        assert_eq!(value.width, 32);
+                        assert_eq!(value.value, (count as u32).into());
+                        assert_eq!(value.mask, 0u32.into());
                     }
                 } else if kind == "generate_dependencies" {
                     assert_eq!(
