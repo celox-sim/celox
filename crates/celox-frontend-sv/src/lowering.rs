@@ -110,6 +110,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
+    interface_ports: HashSet<String>,
     source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
@@ -286,7 +287,9 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let (elaborated, root_names) = sv::elaborate_interfaces_with_bindings(sources, &bindings)?;
+    let elaboration = sv::elaborate_interfaces_with_metadata(sources, &bindings)?;
+    let elaborated = elaboration.sources;
+    let root_names = elaboration.root_names;
     let elaborated_sources: Vec<(&str, &Path)>;
     let sources = match &elaborated {
         Some(codes) => {
@@ -353,6 +356,11 @@ fn analyze_sources_with_requests(
             modules.insert(
                 name,
                 AnalyzedSvModule {
+                    interface_ports: elaboration
+                        .interface_ports
+                        .get(module_name.split('$').next().unwrap())
+                        .cloned()
+                        .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
                         .get(&module_name)
                         .copied()
@@ -1380,6 +1388,27 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                         unresolved_instances: Vec::new(),
                     },
                 );
+            }
+        }
+    }
+    // Structured paths carry the original interface port identity to foreign
+    // consumers. Ordinary identifiers containing '$' remain a single segment.
+    for (key, id) in &module_ids {
+        let Some(base) = analyzed.get(&key.name) else {
+            continue;
+        };
+        for port in &lowered_modules[id].port_order {
+            let variable = modules
+                .get_mut(id)
+                .unwrap()
+                .sim_module
+                .variables
+                .get_mut(port)
+                .unwrap();
+            if let Some((root, member)) = variable.path[0].split_once('$')
+                && base.interface_ports.contains(root)
+            {
+                variable.path = vec![root.to_string(), member.to_string()];
             }
         }
     }

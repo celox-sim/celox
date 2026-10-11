@@ -205,13 +205,29 @@ pub fn elaborate_interfaces_with_bindings(
     sources: &[(&str, &Path)],
     roots: &[(String, String, Vec<(String, String)>)],
 ) -> Result<(Option<Vec<String>>, HashMap<String, String>), AnalyzerError> {
+    let result = elaborate_interfaces_with_metadata(sources, roots)?;
+    Ok((result.sources, result.root_names))
+}
+
+/// Original interface port names, retained independently of generated names.
+#[derive(Default)]
+pub struct InterfaceElaboration {
+    pub sources: Option<Vec<String>>,
+    pub root_names: HashMap<String, String>,
+    pub interface_ports: HashMap<String, HashSet<String>>,
+}
+
+pub fn elaborate_interfaces_with_metadata(
+    sources: &[(&str, &Path)],
+    roots: &[(String, String, Vec<(String, String)>)],
+) -> Result<InterfaceElaboration, AnalyzerError> {
     let files = sources
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Result<Vec<_>, _>>()?;
     let design = Design::collect(&files)?;
     if design.interfaces.is_empty() {
-        return Ok((None, HashMap::default()));
+        return Ok(InterfaceElaboration::default());
     }
     // Generated names contain the separator; a source name containing it
     // could collide with one.
@@ -270,7 +286,26 @@ pub fn elaborate_interfaces_with_bindings(
             clones.push((module_name.clone(), generic));
         }
     }
-    Ok((Some(design.elaborate_with_roots(clones)?), names))
+    let interface_ports = design
+        .modules
+        .iter()
+        .map(|(name, module)| {
+            (
+                name.clone(),
+                module
+                    .ports
+                    .iter()
+                    .filter(|port| port.interface.is_some())
+                    .map(|port| port.name.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(InterfaceElaboration {
+        sources: Some(design.elaborate_with_roots(clones)?),
+        root_names: names,
+        interface_ports,
+    })
 }
 
 /// A parsed source and its tokens.

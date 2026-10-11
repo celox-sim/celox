@@ -8,6 +8,17 @@ fn unsupported(detail: impl Into<String>) -> ParserError {
     ParserError::illegal_context("mixed-language interface contract", detail, None)
 }
 
+fn fresh_name(prefix: &str, used: &mut fxhash::FxHashSet<String>, next: &mut usize) -> String {
+    loop {
+        let index = *next;
+        *next += 1;
+        let name = format!("{prefix}_{index}");
+        if used.insert(name.clone()) {
+            return name;
+        }
+    }
+}
+
 pub(super) fn referenced_sv_components<'a>(
     sources: impl IntoIterator<Item = &'a veryl_parser::veryl_grammar_trait::Veryl>,
 ) -> fxhash::FxHashSet<String> {
@@ -572,7 +583,7 @@ pub(super) fn sv_declaration_contracts(
         let Component::Interface(interface) = component.as_ref() else {
             continue;
         };
-        let parameters = sv_parameters(&property.parameters, &interface.variables)?;
+        let parameters = sv_parameters(&property.parameters, &interface.variables, context)?;
         source.push_str(&format!("interface {}{parameters};\n", symbol.token.text));
         let mut variables = interface.variables.values().collect::<Vec<_>>();
         variables.sort_by_key(|variable| variable.id);
@@ -656,7 +667,7 @@ pub(super) fn sv_declaration_contracts(
                 ));
             }
         }
-        let parameters = sv_parameters(&property.parameters, &module.variables)?;
+        let parameters = sv_parameters(&property.parameters, &module.variables, context)?;
         source.push_str(&format!(
             "module {}{parameters}({}); endmodule\n",
             module.name,
@@ -669,7 +680,139 @@ pub(super) fn sv_declaration_contracts(
 fn sv_parameters(
     parameters: &[veryl_analyzer::symbol::Parameter],
     variables: &fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Variable>,
+    context: &mut veryl_analyzer::Context,
 ) -> Result<String, ParserError> {
+    use veryl_analyzer::ir::{Expression, Factor, Op, SystemFunctionKind};
+    use veryl_parser::veryl_walker::VerylWalker;
+    struct Dependencies {
+        parameters: fxhash::FxHashSet<veryl_analyzer::symbol::SymbolId>,
+        visited: fxhash::FxHashSet<veryl_analyzer::symbol::SymbolId>,
+        dependent: bool,
+    }
+    impl VerylWalker for Dependencies {
+        fn scoped_identifier(
+            &mut self,
+            identifier: &veryl_parser::veryl_grammar_trait::ScopedIdentifier,
+        ) {
+            use veryl_parser::veryl_grammar_trait::ScopedIdentifierGroup;
+            if let ScopedIdentifierGroup::IdentifierScopedIdentifierOpt(group) =
+                identifier.scoped_identifier_group.as_ref()
+                && let Some(arguments) = &group.scoped_identifier_opt
+            {
+                self.with_generic_argument(&arguments.with_generic_argument);
+            }
+            for segment in &identifier.scoped_identifier_list {
+                if let Some(arguments) = &segment.scoped_identifier_opt0 {
+                    self.with_generic_argument(&arguments.with_generic_argument);
+                }
+            }
+            let Ok(symbol) = veryl_analyzer::symbol_table::resolve(identifier) else {
+                return;
+            };
+            if self.parameters.contains(&symbol.found.id) {
+                self.dependent = true;
+            } else if self.visited.insert(symbol.found.id) {
+                match &symbol.found.kind {
+                    veryl_analyzer::symbol::SymbolKind::Parameter(property) => {
+                        if let Some(value) = &property.value {
+                            self.expression(value);
+                        }
+                    }
+                    veryl_analyzer::symbol::SymbolKind::Function(property) => {
+                        if let Some(definition) = property
+                            .definition
+                            .and_then(veryl_analyzer::definition_table::get)
+                            && let veryl_analyzer::definition_table::Definition::Function(function) =
+                                definition.as_ref()
+                        {
+                            self.function_declaration(function);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    fn render(
+        expr: &Expression,
+        variables: &fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Variable>,
+    ) -> Result<String, ParserError> {
+        Ok(match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(id, index, select, _)
+                    if index.0.is_empty() && select.is_empty() =>
+                {
+                    variables
+                        .get(id)
+                        .ok_or_else(|| unsupported("unresolved parameter default reference"))?
+                        .path
+                        .to_string()
+                }
+                Factor::Value(value) => format!(
+                    "{:x}",
+                    value
+                        .get_value()
+                        .map_err(|_| unsupported("nonnumeric parameter default"))?
+                ),
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Clog2(input) => {
+                        format!("$clog2({})", render(&input.0, variables)?)
+                    }
+                    _ => return Err(unsupported("system function in foreign parameter default")),
+                },
+                _ => return Err(unsupported("expression in foreign parameter default")),
+            },
+            Expression::Unary(op, value, _) => format!("({op}{})", render(value, variables)?),
+            Expression::Binary(left, op, right, _) if *op != Op::As => {
+                let operator = match op {
+                    Op::Less => "<".to_string(),
+                    Op::Greater => ">".to_string(),
+                    _ => op.to_string(),
+                };
+                format!(
+                    "({} {operator} {})",
+                    render(left, variables)?,
+                    render(right, variables)?
+                )
+            }
+            Expression::Ternary(condition, yes, no, _) => format!(
+                "({} ? {} : {})",
+                render(condition, variables)?,
+                render(yes, variables)?,
+                render(no, variables)?
+            ),
+            Expression::Concatenation(parts, _) => {
+                let parts = parts
+                    .iter()
+                    .map(|(value, count)| {
+                        let value = render(value, variables)?;
+                        Ok(match count {
+                            Some(count) => format!("{{{}{{{value}}}}}", render(count, variables)?),
+                            None => value,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParserError>>()?;
+                format!("{{{}}}", parts.join(", "))
+            }
+            _ => return Err(unsupported("expression in foreign parameter default")),
+        })
+    }
+    let mut evaluation = veryl_analyzer::Context::default();
+    evaluation.inherit(context);
+    evaluation.variables = variables.clone();
+    evaluation.disalbe_const_opt = true;
+    for variable in variables.values() {
+        let mut comptime = veryl_analyzer::ir::Comptime::from_type(
+            variable.r#type.clone(),
+            veryl_analyzer::symbol::ClockDomain::None,
+            variable.token,
+        );
+        if let Some(value) = variable.value.first() {
+            comptime.value = veryl_analyzer::ir::ValueVariant::Numeric(value.clone());
+            comptime.is_const = true;
+        }
+        evaluation.insert_var_path_with_id(variable.path.clone(), variable.id, comptime);
+    }
     let mut declarations = Vec::new();
     for parameter in parameters {
         let variable = variables
@@ -681,14 +824,49 @@ fn sv_parameters(
                     parameter.name
                 ))
             })?;
-        let value = variable.value.first().ok_or_else(|| {
-            unsupported(format!(
-                "foreign parameter `{}` without a concrete default",
-                parameter.name
-            ))
-        })?;
+        let symbol = veryl_analyzer::symbol_table::get(parameter.symbol).unwrap();
+        let property = parameter.property();
+        let value = property
+            .value
+            .as_ref()
+            .ok_or_else(|| unsupported("foreign parameter without a default"))?;
+        let mut dependencies = Dependencies {
+            parameters: parameters
+                .iter()
+                .map(|parameter| parameter.symbol)
+                .collect(),
+            visited: Default::default(),
+            dependent: false,
+        };
+        dependencies.expression(value);
+        let value = if dependencies.dependent {
+            evaluation.push_namespace(symbol.namespace);
+            let expression = veryl_analyzer::conv::utils::eval_expr(
+                &mut evaluation,
+                Some(variable.r#type.clone()),
+                value,
+                false,
+            )
+            .map_err(|_| {
+                unsupported(format!(
+                    "cannot resolve default of foreign parameter `{}`",
+                    parameter.name
+                ))
+            });
+            evaluation.pop_namespace();
+            let (_, expression) = expression?;
+            render(&expression, &evaluation.variables)?
+        } else {
+            // Defaults independent of the overridable header retain the full
+            // native evaluator, including constant functions and casts.
+            let value = variable
+                .value
+                .first()
+                .ok_or_else(|| unsupported("foreign parameter without a concrete default"))?;
+            format!("{value:x}")
+        };
         declarations.push(format!(
-            "parameter {} {} = {value:x}",
+            "parameter {} {} = {value}",
             sv_type(&variable.r#type),
             parameter.name
         ));
@@ -709,6 +887,21 @@ pub(super) fn specialize_sv_instances(
     use veryl_parser::resource_table;
     let interfaces =
         celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
+    let mut used_names = interfaces.keys().cloned().collect::<fxhash::FxHashSet<_>>();
+    used_names.extend(
+        symbol_table::get_all()
+            .iter()
+            .map(|symbol| symbol.token.text.to_string()),
+    );
+    used_names.extend(
+        ir.components
+            .iter()
+            .filter_map(|component| match component {
+                Component::Module(module) => Some(module.name.to_string()),
+                Component::SystemVerilog(module) => Some(module.name.to_string()),
+                Component::Interface(_) => None,
+            }),
+    );
     fn numeric(value: &veryl_analyzer::value::Value) -> Result<i128, ParserError> {
         if value.width() > 128
             || value.mask_xz().as_ref() != &num_bigint::BigUint::default()
@@ -734,6 +927,8 @@ pub(super) fn specialize_sv_instances(
         interfaces: &celox_frontend_sv::ModuleInterfaces,
         context: &mut veryl_analyzer::Context,
         requests: &mut Vec<celox_frontend_sv::SvModuleRequest>,
+        used_names: &mut fxhash::FxHashSet<String>,
+        next_alias: &mut usize,
     ) -> Result<(), ParserError> {
         let mut evaluation = veryl_analyzer::Context::default();
         evaluation.inherit(context);
@@ -758,7 +953,7 @@ pub(super) fn specialize_sv_instances(
                 continue;
             };
             if let Component::Module(child) = std::sync::Arc::make_mut(&mut instance.component) {
-                walk(child, interfaces, context, requests)?;
+                walk(child, interfaces, context, requests, used_names, next_alias)?;
                 continue;
             }
             let Component::SystemVerilog(component) = instance.component.as_ref() else {
@@ -884,7 +1079,7 @@ pub(super) fn specialize_sv_instances(
                 offset += count;
             }
             if !parameters.is_empty() || !bindings.is_empty() {
-                let alias = format!("__celox_sv_instance_{}", requests.len());
+                let alias = fresh_name("__celox_sv_instance", used_names, next_alias);
                 requests.push(celox_frontend_sv::SvModuleRequest {
                     alias: alias.clone(),
                     module: name,
@@ -902,9 +1097,17 @@ pub(super) fn specialize_sv_instances(
         Ok(())
     }
     let mut requests = Vec::new();
+    let mut next_alias = 0;
     for component in &mut ir.components {
         if let Component::Module(module) = component {
-            walk(module, &interfaces, context, &mut requests)?;
+            walk(
+                module,
+                &interfaces,
+                context,
+                &mut requests,
+                &mut used_names,
+                &mut next_alias,
+            )?;
         }
     }
     Ok(requests)
@@ -923,10 +1126,15 @@ pub(crate) fn specialize_foreign_module(
     let ordinary = parameters
         .iter()
         .filter(|(name, _)| !name.contains('$'))
-        .map(|(name, value)| (name.clone(), *value as u64))
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                veryl_analyzer::value::Value::from_u128(*value as u128, 0, 128, *value < 0),
+            )
+        })
         .collect::<Vec<_>>();
     if !ordinary.is_empty() {
-        super::builder::elaborate_parameterized_top(&mut ir, context, name, &ordinary)?;
+        super::builder::elaborate_parameterized_top_values(&mut ir, context, name, &ordinary)?;
     }
     let module = ir
         .components

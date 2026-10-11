@@ -1,6 +1,110 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_signed_and_wide_veryl_parameters_from_systemverilog(sim) {
+        @setup {
+    let veryl = r#"
+        module Child #(param NEG: signed logic<128> = 0, param HIGH: logic<96> = 0)
+            (negative: output logic<128>, positive: output logic<96>) {
+            assign negative = NEG;
+            assign positive = HIGH;
+        }
+    "#;
+    let sv = r#"
+        module Top(output logic [127:0] negative, output logic [95:0] positive);
+            Child #(.NEG(-128'sd1), .HIGH(96'h1_0000_0000_0000_0001)) child(.negative(negative), .positive(positive));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        assert_eq!(sim.get(sim.signal("negative")), (BigUint::from(1u8) << 128usize) - 1u8);
+        assert_eq!(sim.get(sim.signal("positive")), (BigUint::from(1u8) << 64usize) + 1u8);
+    }
+
+    fn avoids_specialization_alias_collisions_with_source_modules(sim) {
+        @setup {
+    let veryl = r#"
+        module Top(a: input logic<8>, specialized: output logic<8>, authored: output logic<8>) {
+            inst child: $sv::Child #(K: 5) (a, y: specialized);
+            inst other: $sv::__celox_sv_instance_0 (a, y: authored);
+        }
+    "#;
+    let sv = r#"
+        module Child #(parameter K = 1)(input logic [7:0] a, output logic [7:0] y);
+            assign y = a + K;
+        endmodule
+        module __celox_sv_instance_0(input logic [7:0] a, output logic [7:0] y);
+            assign y = a + 42;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("specialized")), 6u8.into());
+        assert_eq!(sim.get(sim.signal("authored")), 43u8.into());
+    }
+
+    fn preserves_dollar_signs_in_ordinary_systemverilog_ports(sim) {
+        @setup {
+    let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst child: $sv::Child (a, y); }";
+    let sv = "module Child(input logic [7:0] data$in, output logic [7:0] y); assign y = data$in ^ 8'h55; endmodule";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x33u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x66u8.into());
+    }
+
+    fn preserves_dependent_veryl_module_parameter_defaults(sim) {
+        @setup {
+    let veryl = r#"
+        package Defaults { function increment() -> u32 { return 16; } }
+        module Child #(param W: u32 = 8, param N: u32 = W * 2, param C: u32 = Defaults::increment())
+            (a: input logic<N>, y: output logic<N>) { assign y = a + C; }
+    "#;
+    let sv = "module Top(input logic [31:0] a, output logic [31:0] y); Child #(.W(16)) child(.a(a), .y(y)); endmodule";
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234_5678u32)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1234_5688u32.into());
+    }
+
+    fn preserves_dependent_veryl_interface_parameter_defaults(sim) {
+        @setup {
+    let veryl = r#"
+        interface Bus #(param W: u32 = 8, param N: u32 = W * 2) {
+            var req: logic<N>; var rsp: logic<N>;
+            modport slave { req: input, rsp: output, }
+        }
+        module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req + 1; }
+    "#;
+    let sv = r#"
+        module Top(input logic [31:0] a, output logic [31:0] y);
+            Bus #(.W(16)) bus();
+            assign bus.req = a;
+            Child child(.bus(bus));
+            assign y = bus.rsp;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234_5678u32)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1234_5679u32.into());
+    }
+
     fn preserves_interface_function_writes_in_systemverilog_behavior(sim) {
         @setup {
     let veryl = "module Top (a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";

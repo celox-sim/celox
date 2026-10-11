@@ -1504,7 +1504,7 @@ impl<'a> ModuleParser<'a> {
         let interface_ports = child
             .port_order
             .iter()
-            .any(|id| child.sim_module.variables[id].path.join(".").contains('$'));
+            .any(|id| child.sim_module.variables[id].path.len() > 1);
         if !interface_ports && child.port_order.len() != system_verilog.connects.len() {
             return Err(ParserError::illegal_context(
                 "external module port connections",
@@ -1524,8 +1524,7 @@ impl<'a> ModuleParser<'a> {
         if interface_ports {
             let mut groups = Vec::new();
             for id in &child.port_order {
-                let path = child.sim_module.variables[id].path.join(".");
-                let group = path.split('$').next().unwrap().to_string();
+                let group = child.sim_module.variables[id].path[0].clone();
                 if !groups.contains(&group) {
                     groups.push(group);
                 }
@@ -1552,10 +1551,8 @@ impl<'a> ModuleParser<'a> {
                     ));
                 };
                 let is_interface = child.port_order.iter().any(|id| {
-                    child.sim_module.variables[id]
-                        .path
-                        .join(".")
-                        .starts_with(&format!("{formal}$"))
+                    let path = &child.sim_module.variables[id].path;
+                    path.len() > 1 && path[0] == formal
                 });
                 if is_interface {
                     let token = first.token;
@@ -1618,7 +1615,7 @@ impl<'a> ModuleParser<'a> {
                     )
                 })?;
             let parent_dst = if uses_named_associations {
-                let formal_name = child_var.path.join(".");
+                let formal_name = child_var.path.join("$");
                 connections.get(formal_name.as_str()).ok_or_else(|| {
                     ParserError::illegal_context(
                         "external module port connections",

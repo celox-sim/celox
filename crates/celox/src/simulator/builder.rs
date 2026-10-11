@@ -123,6 +123,19 @@ pub(super) fn elaborate_parameterized_top(
     top: &str,
     param_overrides: &[(String, u64)],
 ) -> Result<(), ParserError> {
+    let values = param_overrides
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::new(*value, 64, false)))
+        .collect::<Vec<_>>();
+    elaborate_parameterized_top_values(ir, context, top, &values)
+}
+
+pub(super) fn elaborate_parameterized_top_values(
+    ir: &mut Ir,
+    context: &mut Context,
+    top: &str,
+    param_overrides: &[(String, Value)],
+) -> Result<(), ParserError> {
     let top_name = resource_table::insert_str(top);
     let Some(top_index) = ir.components.iter().rposition(
         |component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name == top_name),
@@ -147,7 +160,7 @@ pub(super) fn elaborate_parameterized_top(
     };
     let values: fxhash::FxHashMap<_, _> = param_overrides
         .iter()
-        .map(|(name, value)| (resource_table::insert_str(name), *value))
+        .map(|(name, value)| (resource_table::insert_str(name), value.clone()))
         .collect();
 
     // push_override expects expressions that have already been evaluated in
@@ -181,9 +194,7 @@ pub(super) fn elaborate_parameterized_top(
             let path = VarPath::new(parameter.name);
             let mut expr = if let Some(value) = values.get(&parameter.name) {
                 let width = r#type.total_width().ok_or_else(invalid)?;
-                let mut value = Value::new(*value, 64, false)
-                    .expand(width, false)
-                    .into_owned();
+                let mut value = value.expand(width, value.signed()).into_owned();
                 value.trunc(width);
                 value.set_signed(r#type.signed);
                 let mut comptime = Comptime::create_value(value.clone(), token);
