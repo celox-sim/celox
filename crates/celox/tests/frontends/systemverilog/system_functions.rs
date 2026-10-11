@@ -478,6 +478,28 @@ fn reports_where_a_known_system_function_is_not_supported() {
 }
 
 #[test]
+fn timescale_queries_reject_packages_beneath_root() {
+    for function in ["$timeunit", "$timeprecision"] {
+        for item in [
+            format!("assign y = {function}($root.P);"),
+            format!("always_comb begin {function}($root.P); y = 0; end"),
+            format!("always_comb begin void'({function}($root.P)); y = 0; end"),
+            format!("assign y = $bits({function}($root.P));"),
+            format!("localparam UNUSED = {function}($root.P); assign y = 0;"),
+        ] {
+            let source = format!(
+                "package P; timeunit 100ns / 10ps; endpackage module Top(output int y); timeunit 1ns / 1ps; {item} endmodule"
+            );
+            let error = build_error(&source);
+            assert!(
+                error.contains("unknown timescale query design element `P`"),
+                "{item}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rejects_system_function_calls_with_invalid_arguments() {
     let cases = [
         (

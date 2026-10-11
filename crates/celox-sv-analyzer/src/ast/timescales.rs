@@ -755,12 +755,6 @@ impl Timescales {
                                         s.kind == ScopeKind::Definition && s.name == *first
                                     })
                                 })
-                                .or_else(|| self.packages.get(first))
-                                .or_else(|| {
-                                    unit.scopes
-                                        .iter()
-                                        .find(|s| s.kind == ScopeKind::Package && s.name == *first)
-                                })
                                 .ok_or_else(|| {
                                     unsupported(format!(
                                         "unknown timescale query design element `{first}`"
@@ -1025,6 +1019,44 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn package_queries_require_an_unqualified_single_component() {
+        for function in ["$timeunit", "$timeprecision"] {
+            for operand in ["P", "$root.P", "P.child", "$root.P.child"] {
+                let code = format!(
+                    "package P; timeunit 100ns / 10ps; endpackage module Top(); timeunit 1ns / 1ps; localparam Q={function}({operand}); endmodule"
+                );
+                let result = crate::analyze_source(&code, Path::new("package_path.sv"));
+                let tree =
+                    crate::syntax::parse_source(&code, Path::new("package_path.sv")).unwrap();
+                let call = tree
+                    .into_iter()
+                    .find_map(|node| match node {
+                        RefNode::SystemTfCall(call) => Some(call),
+                        _ => None,
+                    })
+                    .unwrap();
+                // Exercise both collected design metadata and the local-tree fallback.
+                let local = Timescales::default().query(call, &tree);
+                if operand == "P" {
+                    let expected: i32 = if function == "$timeunit" { -7 } else { -11 };
+                    let ir = result.unwrap();
+                    assert_eq!(
+                        ir.modules()[0].parameters()[0].resolved_value(),
+                        Some(i128::from(expected))
+                    );
+                    assert_eq!(local.unwrap(), expected);
+                } else {
+                    assert!(result.is_err(), "accepted {function}({operand})");
+                    assert!(
+                        local.is_err(),
+                        "local fallback accepted {function}({operand})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
