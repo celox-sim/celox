@@ -264,6 +264,11 @@ fn reject_silently_ignored_constructs_with_dimensions(
         }
         match child {
             RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision")) =>
+            {
+                timescales::query(call, syntax_tree)?;
+            }
+            RefNode::SystemTfCall(call)
                 if system_tf_call_parts(call, syntax_tree)
                     .is_some_and(|(name, _)| name == "$dimensions")
                     && !procedural_queries.contains(&call) =>

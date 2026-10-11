@@ -979,6 +979,13 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if matches!(name, "$timeunit" | "$timeprecision") {
+                        return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
+                            i128::from(timescales::query(system_call, syntax_tree)?),
+                            32,
+                            true,
+                        ))));
+                    }
                     parameters::reject_unbounded_data_query(
                         system_call,
                         syntax_tree,
