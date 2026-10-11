@@ -3,6 +3,21 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn nested_array_indices_preserve_cast_widths(sim) {
+        @case "indexed_select::nested_array_indices_preserve_cast_widths";
+    }
+
+    fn nested_array_indices_freeze_concat_targets(sim) {
+        @case "indexed_select::nested_array_indices_freeze_concat_targets";
+    }
+
+    fn nested_array_indices_preserve_elements_and_ranges(sim) {
+        @case "indexed_select::nested_array_indices_preserve_elements_and_ranges";
+    }
+
+    fn nested_array_indices_preserve_invalid_reads_and_writes(sim) {
+        @case "indexed_select::nested_array_indices_preserve_invalid_reads_and_writes";
+    }
 
     fn signed_indices_access_clocked_negative_range_arrays(sim) {
         @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
