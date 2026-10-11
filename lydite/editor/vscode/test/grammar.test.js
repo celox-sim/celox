@@ -195,7 +195,7 @@ samples.recovery = `design "Recovery" {
   input half: bv<8
   input whole: bool;
   input forall: bool;
-  next { x = if forall { i.half } else { s.x }; }
+  next { x = if forall { i.forall } else { s.x }; }
 }`;
 
 // [sample, line, token, occurrence, expected innermost scope]
@@ -302,9 +302,10 @@ const expectations = [
   ['recovery', '  input whole: bool;', 'bool', 1, 'storage.type.lydite'],
   // Contextual words are variables when used as names, conditions or fields.
   ['recovery', '  input forall: bool;', 'forall', 1, 'variable.other.lydite'],
-  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'forall', 1, 'variable.other.lydite'],
-  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'else', 1, 'keyword.control.lydite'],
-  ['recovery', '  next { x = if forall { i.half } else { s.x }; }', 'i', 1, 'variable.language.namespace.lydite']
+  ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 1, 'variable.other.lydite'],
+  ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'forall', 2, 'variable.other.lydite'],
+  ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'i', 1, 'variable.language.namespace.lydite'],
+  ['recovery', '  next { x = if forall { i.forall } else { s.x }; }', 'else', 1, 'keyword.control.lydite']
 ];
 
 function findFiles(directory) {
