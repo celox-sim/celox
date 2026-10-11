@@ -1673,9 +1673,24 @@ fn substitute_indexed_parameter_values(expression: Expr, dimensions: &PackedDime
     substitute_expr_constants_with_parameter_literals(expression, &dimensions.const_env, &values)
 }
 
+/// Selections that need declared dimensions and typed expression lowering,
+/// rather than the lightweight constant parser's single-bit representation.
+pub(super) fn parameter_initializer_needs_typed_selection(
+    initializer: &sv_parser::ConstantParamExpression,
+) -> bool {
+    initializer.into_iter().any(|node| match node {
+        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_) => true,
+        RefNode::ConstantSelect(select) => {
+            select.nodes.2.is_some() || select.nodes.1.nodes.0.len() > 1
+        }
+        RefNode::Select(select) => select.nodes.2.is_some() || select.nodes.1.nodes.0.len() > 1,
+        _ => false,
+    })
+}
+
 // Parameter arithmetic receives the assignment width after self-determined
 // selection operands have been folded, rather than the index expression context.
-pub(super) fn indexed_parameter_initializer(
+pub(super) fn selected_parameter_initializer(
     initializer: &sv_parser::ConstantParamExpression,
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
@@ -1788,12 +1803,18 @@ fn indexed_constant_expression(
                 )
                 .ok_or_else(|| unsupported("parameter name"))?;
                 let selected = lvalue_from_constant_select(
-                    name,
+                    name.clone(),
                     &parameter.nodes.1,
                     syntax_tree,
                     dimensions,
                     false,
                 )?;
+                if matches!(selected, LValue::Ident(_))
+                    && (!parameter.nodes.1.nodes.1.nodes.0.is_empty()
+                        || parameter.nodes.1.nodes.2.is_some())
+                {
+                    return Err(unsupported(format!("constant select of `{name}`")));
+                }
                 Ok(expr_from_lvalue(&selected, dimensions))
             }
             sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {

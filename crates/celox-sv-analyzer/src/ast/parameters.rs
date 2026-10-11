@@ -449,12 +449,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
-                if expr.into_iter().any(|node| {
-                    matches!(
-                        node,
-                        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
-                    )
-                }) {
+                if selects::parameter_initializer_needs_typed_selection(expr) {
                     let mut dimensions = PackedDimensions::new(
                         parameter_packed_dimensions(parameters),
                         const_env,
@@ -464,7 +459,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.
-                    selects::indexed_parameter_initializer(
+                    selects::selected_parameter_initializer(
                         expr,
                         syntax_tree,
                         &dimensions,

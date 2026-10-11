@@ -744,6 +744,57 @@ fn resolves_function_scope_size_casts() {
 }
 
 #[test]
+fn resolves_constant_parameter_part_selects() {
+    for (declaration, selection, expected, width, signed) in [
+        ("logic [31:0] W = 18", "W[3:0] + 1", 3, 32, false),
+        ("logic [11:4] W = 8'hab", "W[7:4]", 11, 4, false),
+        ("logic [4:11] W = 8'hab", "W[8:11]", 11, 4, false),
+        ("logic [-1:-8] W = 8'hab", "W[-5:-8]", 11, 4, false),
+        ("logic [-8:-1] W = 8'hab", "W[-4:-1]", 11, 4, false),
+        ("logic signed [7:0] W = -2", "W[7:0] >> 1", 127, 8, false),
+        ("logic [7:0] W = 8'hab", "int'(W[3:0]) + 1", 12, 32, true),
+        ("logic [7:0] W = 8'hab", "$clog2(W[7:4])", 4, 32, true),
+        ("logic [1:0][7:4] W = 8'hab", "W[0][7:4]", 11, 4, false),
+        ("logic [0:1][4:7] W = 8'hab", "W[1][4:7]", 11, 4, false),
+        ("logic [2:1][7:4] W = 8'hab", "W[2:2]", 10, 4, false),
+        ("logic [1:2][4:7] W = 8'hab", "W[1:1]", 10, 4, false),
+        ("logic [1:0][7:4] W = 8'hab", "W[0][5]", 1, 1, false),
+    ] {
+        let source = format!(
+            "module Top; parameter {declaration}; localparam N = {selection}; \
+             localparam BITS = $bits(N); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("constant_parameter_select.sv"))
+            .unwrap_or_else(|error| panic!("{selection}: {error}"));
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(
+            parameters[1].resolved_value(),
+            Some(expected),
+            "{selection}"
+        );
+        assert_eq!(
+            parameters[1].resolved_width(),
+            Some(width as usize),
+            "{selection}"
+        );
+        assert_eq!(parameters[1].resolved_signed(), Some(signed), "{selection}");
+        assert_eq!(parameters[2].resolved_value(), Some(width), "{selection}");
+    }
+}
+
+#[test]
+fn rejects_unrepresentable_constant_parameter_selections() {
+    for selection in ["W[MISSING:0]", "W[0][3:0]", "W[0][1]"] {
+        let source = format!(
+            "module Top; parameter logic [7:0] W = 18; localparam N = {selection}; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unsupported_parameter_select.sv"))
+            .expect_err("an unused unsupported selection must not become the base parameter");
+        assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
+    }
+}
+
+#[test]
 fn preserves_use_site_dimensions_in_parameter_alias_types() {
     let source = r#"
         module Top #(parameter W = 4, N = 2) ();

@@ -137,6 +137,14 @@ sv_backends! {
         @case "indexed_select::indexed_ternaries_preserve_both_arm_types";
     }
 
+    fn constant_parameter_initializers_preserve_selections(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_selections";
+    }
+
+    fn constant_parameter_initializers_shape_ports_and_generate(sim) {
+        @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
+    }
+
     fn indexed_parameter_initializers_preserve_selections(sim) {
         @case "indexed_select::indexed_parameter_initializers_preserve_selections";
     }
