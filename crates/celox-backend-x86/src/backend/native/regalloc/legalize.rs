@@ -283,7 +283,8 @@ impl PermModel {
                         "Perm row must have exactly one source from its predecessor",
                     ));
                 }
-                let mut allowed_colors = all_color_bits();
+                let mut allowed_colors =
+                    allocatable_color_bits(func.target_features.allocatable_register_count());
                 if let Some(&required) = fixed.get(&phi.dst) {
                     allowed_colors &= color_bit(required);
                 }
@@ -502,8 +503,10 @@ fn color_bit(color: PhysReg) -> u16 {
     1u16 << color as u8
 }
 
-fn all_color_bits() -> u16 {
-    ALLOCATABLE_REGS
+/// Colors the function may allocate. A reserved state-base register is
+/// excluded, so a Perm row is never matched to it.
+fn allocatable_color_bits(register_count: usize) -> u16 {
+    ALLOCATABLE_REGS[..register_count]
         .iter()
         .copied()
         .fold(0, |mask, color| mask | color_bit(color))
@@ -986,6 +989,41 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(matching[&fixed], PhysReg::RCX);
+    }
+
+    #[test]
+    fn perm_rows_never_match_the_reserved_state_base_register() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let amount = vregs.alloc();
+        let result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        // Legacy shifts force a Perm boundary; the test features reserve R15
+        // for the state base.
+        select_legacy_shifts(&mut func);
+        assert_eq!(func.target_features.allocatable_register_count(), 14);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm {
+            dst: amount,
+            value: 1,
+        });
+        block.push(MInst::Shl {
+            dst: result,
+            lhs,
+            rhs: amount,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let initial = super::super::cfg::normalize(&mut func).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
+        let boundary = &model.boundaries[0];
+        assert!(boundary.rows.iter().all(|row| !row.allows(PhysReg::R15)));
+        // Even a source that prefers R15 is matched elsewhere.
+        let matching = boundary.match_colors(|_| Some(PhysReg::R15)).unwrap();
+        assert!(matching.values().all(|&color| color != PhysReg::R15));
     }
 
     #[test]
