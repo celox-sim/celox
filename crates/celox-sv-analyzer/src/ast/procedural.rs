@@ -269,6 +269,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => self.rename_name(name),
             },
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.rename_const(expr);
+                self.rename_const(msb);
+                self.rename_const(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.rename_const(expr);
                 self.rename_const(bit);

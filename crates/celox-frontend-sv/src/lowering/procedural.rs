@@ -1511,6 +1511,11 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
                 names.insert(name.clone());
             }
             sv::ir::ConstExpr::Literal(_) => {}
+            sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                const_idents(expr, names);
+                const_idents(msb, names);
+                const_idents(lsb, names);
+            }
             sv::ir::ConstExpr::Select { expr, bit } => {
                 const_idents(expr, names);
                 const_idents(bit, names);
@@ -1583,6 +1588,11 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
     use sv::ir::ConstExpr;
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_calls(expr, is_callee)
+                || const_calls(msb, is_callee)
+                || const_calls(lsb, is_callee)
+        }
         ConstExpr::Select { expr, bit } => {
             const_calls(expr, is_callee) || const_calls(bit, is_callee)
         }
@@ -1611,6 +1621,9 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
     expr == part
         || match expr {
             ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                const_contains(expr, part) || const_contains(msb, part) || const_contains(lsb, part)
+            }
             ConstExpr::Select { expr, bit } => {
                 const_contains(expr, part) || const_contains(bit, part)
             }
@@ -1649,6 +1662,11 @@ fn shared_calls<'e>(
     }
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            shared_calls(expr, other, is_callee, shared);
+            shared_calls(msb, other, is_callee, shared);
+            shared_calls(lsb, other, is_callee, shared);
+        }
         ConstExpr::Select { expr, bit } => {
             shared_calls(expr, other, is_callee, shared);
             shared_calls(bit, other, is_callee, shared);
@@ -1867,6 +1885,11 @@ fn collect_const_calls(
             args.iter().for_each(|arg| collect_const_calls(arg, calls));
         }
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            collect_const_calls(expr, calls);
+            collect_const_calls(msb, calls);
+            collect_const_calls(lsb, calls);
+        }
         ConstExpr::Select { expr, bit } => {
             collect_const_calls(expr, calls);
             collect_const_calls(bit, calls);

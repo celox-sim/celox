@@ -460,6 +460,32 @@ fn substitute_const_expr_constants_impl(
             ConstExpr::Literal(value.to_string())
         }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            msb: Box::new(substitute_const_expr_constants_impl(
+                *msb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            lsb: Box::new(substitute_const_expr_constants_impl(
+                *lsb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_const_expr_constants_impl(
                 *expr,
@@ -808,9 +834,16 @@ pub(super) fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
             op,
             right: Box::new(expr_to_lvalue_const(*right)?),
         }),
-        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Some(ConstExpr::SelectRange {
             expr: Box::new(expr_to_lvalue_const(*expr)?),
-            bit: Box::new(msb),
+            msb: Box::new(msb),
+            lsb: Box::new(lsb),
+            signed,
         }),
         Expr::Mux {
             condition,
@@ -827,9 +860,7 @@ pub(super) fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
                 .map(expr_to_lvalue_const)
                 .collect::<Option<_>>()?,
         )),
-        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => {
-            None
-        }
+        Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => None,
     }
 }
 

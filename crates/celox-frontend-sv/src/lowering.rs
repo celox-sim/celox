@@ -1668,6 +1668,11 @@ fn const_expr_references_identifier(expr: &sv::ir::ConstExpr) -> bool {
     match expr {
         sv::ir::ConstExpr::Ident(_) => true,
         sv::ir::ConstExpr::Literal(_) => false,
+        sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_expr_references_identifier(expr)
+                || const_expr_references_identifier(msb)
+                || const_expr_references_identifier(lsb)
+        }
         sv::ir::ConstExpr::Select { expr, bit } => {
             const_expr_references_identifier(expr) || const_expr_references_identifier(bit)
         }
@@ -5166,6 +5171,17 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
     Some(match expr {
         sv::ir::ConstExpr::Literal(value) => sv::ir::Expr::Literal(value.clone()),
         sv::ir::ConstExpr::Ident(name) => sv::ir::Expr::Ident(name.clone()),
+        sv::ir::ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => sv::ir::Expr::Select {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            msb: (**msb).clone(),
+            lsb: (**lsb).clone(),
+            signed: *signed,
+        },
         sv::ir::ConstExpr::Select { expr, bit } => sv::ir::Expr::Select {
             expr: Box::new(expr_from_const_expr(expr)?),
             msb: (**bit).clone(),

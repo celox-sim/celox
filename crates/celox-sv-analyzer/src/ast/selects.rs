@@ -182,6 +182,13 @@ pub(super) fn bit_select_index(
 ) -> Converted<ConstExpr> {
     if dimensions.constant_indexed_base || has_indexed_selection(RefNode::Expression(expression)) {
         indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)
+    } else if RefNode::Expression(expression).into_iter().any(|node| {
+        matches!(node, RefNode::Select(select) if !select.nodes.1.nodes.0.is_empty() || select.nodes.2.is_some())
+    }) {
+        // Nested selections need their declared element width and bounds.
+        // The lightweight parser represents every `A[idx]` as a single bit.
+        let expression = expr_from_expression_with_types(expression, syntax_tree, dimensions)?;
+        expr_to_lvalue_const(expression).ok_or_else(|| unsupported("select index expression"))
     } else {
         const_expr_from_expr(expression, syntax_tree)?.ok_or_else(|| {
             unsupported(format!(
@@ -1905,6 +1912,16 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             }
             Some((width, variable.signed))
         }
+        ConstExpr::SelectRange {
+            msb, lsb, signed, ..
+        } => Some((
+            typecheck::select_range_width(
+                &(**msb).clone().into(),
+                &(**lsb).clone().into(),
+                const_env,
+            )?,
+            *signed,
+        )),
         ConstExpr::Select { .. } => Some((1, false)),
         ConstExpr::Function { .. } => None,
         ConstExpr::Unary { op, expr } => match op {

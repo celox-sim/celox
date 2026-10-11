@@ -115,6 +115,9 @@ fn calls_subroutine(expr: &Expr) -> bool {
             ConstExpr::Function { name, args, .. } => {
                 !system_functions::is_system_name(name) || args.iter().any(constant)
             }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                constant(expr) || constant(msb) || constant(lsb)
+            }
             ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
             ConstExpr::Unary { expr, .. } => constant(expr),
             ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
