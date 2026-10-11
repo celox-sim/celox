@@ -93,6 +93,28 @@ expect(sim.dut.u_sub.o_data).toBe(0x42n);
 With both DSE policies, internal variables (`var` declarations that are not ports) may be eliminated if no execution unit reads them. Only port signals are guaranteed to survive.
 :::
 
+## Resolving signals under a policy
+
+Signal handles resolve from the policy and the design, not from what a
+particular compilation happened to keep. Under a DSE policy, `signal()`,
+`child_signal()` and their `try_` variants only resolve:
+
+- ports the policy preserves (top-module ports for `PreserveTopPorts`, every
+  instance's ports for `PreserveAllPorts`),
+- signals declared with `live_signal()` and signals a native testbench reads,
+- state that no combinational logic writes, such as registers and inputs.
+
+Any other combinational signal fails with `AddrLookupError::DeadStoreEliminated`
+instead of returning memory that never updates. A host testbench that observes an
+internal wire declares it:
+
+```rust
+let mut sim = Simulator::builder(code, "Top")
+    .opt_level(OptLevel::O2)
+    .live_signal(vec![], vec!["data_store_retire_ready".to_string()])
+    .build()?;
+```
+
 ## How It Works
 
 1. The Rust optimizer analyzes which stores are loaded by execution units.
