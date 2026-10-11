@@ -493,6 +493,13 @@ struct File<'a> {
     /// and of struct and union member names, which live in other name spaces
     /// than handles.
     type_names: HashSet<usize>,
+    print_tasks: Vec<PrintTask>,
+}
+
+struct PrintTask {
+    span: Span,
+    call: sv_parser::SystemTfCall,
+    site: system_functions::CallSite,
 }
 
 impl<'a> File<'a> {
@@ -565,13 +572,53 @@ impl<'a> File<'a> {
             .collect();
         tokens.sort_unstable();
         tokens.dedup();
-        Ok(Self {
+        let mut file = Self {
             code,
             syntax_tree,
             tokens,
             identifiers,
             type_names,
-        })
+            print_tasks: Vec::new(),
+        };
+        let statements: HashSet<_> = file
+            .syntax_tree
+            .into_iter()
+            .filter_map(|node| {
+                let RefNode::SubroutineCallStatement(
+                    sv_parser::SubroutineCallStatement::SubroutineCall(statement),
+                ) = node
+                else {
+                    return None;
+                };
+                let sv_parser::SubroutineCall::SystemTfCall(call) = &statement.0 else {
+                    return None;
+                };
+                file.node_span(RefNode::SystemTfCall(call))
+            })
+            .collect();
+        for node in &file.syntax_tree {
+            let RefNode::SystemTfCall(call) = node else {
+                continue;
+            };
+            if !system_tf_call_parts(call, &file.syntax_tree)
+                .is_some_and(|(name, _)| name == "$printtimescale")
+            {
+                continue;
+            }
+            let span = file.span(RefNode::SystemTfCall(call))?;
+            let site = if statements.contains(&span) {
+                system_functions::CallSite::Statement(system_functions::Body::Subroutine)
+            } else {
+                system_functions::CallSite::Expression
+            };
+            file.print_tasks.push(PrintTask {
+                span,
+                call: call.clone(),
+                site,
+            });
+        }
+        file.print_tasks.sort_by_key(|task| task.span.0);
+        Ok(file)
     }
 
     /// The span of the tokens of `node`, without the white space and comments
@@ -2211,13 +2258,13 @@ impl<'a> Design<'a> {
                     let RefNode::SystemTfCall(call) = node else {
                         return false;
                     };
-                    system_tf_call_parts(call, &file.syntax_tree)
-                        .is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
-                        && super::timescales::argument(call).is_some_and(|argument| {
-                            file.syntax_tree
-                                .get_str_trim(argument)
-                                .is_some_and(|text| text.contains('.'))
-                        })
+                    system_tf_call_parts(call, &file.syntax_tree).is_some_and(|(name, _)| {
+                        matches!(name, "$timeunit" | "$timeprecision" | "$printtimescale")
+                    }) && super::timescales::argument(call).is_some_and(|argument| {
+                        file.syntax_tree
+                            .get_str_trim(argument)
+                            .is_some_and(|text| text.contains('.'))
+                    })
                 });
         if handles.is_empty()
             && child_instantiations.is_empty()
@@ -2252,11 +2299,13 @@ impl<'a> Design<'a> {
         // A bare interface handle is legal as a timescale query operand.
         // Resolve it using the instance/port binding before that handle is
         // flattened away, including each clone of a generic interface port.
-        let query_edit = |call: &sv_parser::SystemTfCall| -> Result<Option<Edit>, AnalyzerError> {
+        let query_edit = |call: &sv_parser::SystemTfCall,
+                          site|
+         -> Result<Option<Edit>, AnalyzerError> {
             let Some((function, args)) = system_tf_call_parts(call, &file.syntax_tree) else {
                 return Ok(None);
             };
-            if !matches!(function, "$timeunit" | "$timeprecision") {
+            if !matches!(function, "$timeunit" | "$timeprecision" | "$printtimescale") {
                 return Ok(None);
             }
             let Some(argument) = super::timescales::argument(call) else {
@@ -2264,12 +2313,8 @@ impl<'a> Design<'a> {
             };
             let name =
                 normalize_identifier(file.syntax_tree.get_str_trim(argument).unwrap_or_default());
-            let (span, value) = if handles.contains(&name) {
-                system_functions::check_call(
-                    function,
-                    args.as_deref(),
-                    system_functions::CallSite::Expression,
-                )?;
+            let (span, text) = if handles.contains(&name) {
+                system_functions::check_call(function, args.as_deref(), site)?;
                 let span = file.span(RefNode::SystemTfCall(call))?;
                 let handle = handles.at(&name, span).ok_or_else(|| {
                     unsupported(format!("reference to interface `{name}` outside the generate block that declares it"))
@@ -2279,15 +2324,21 @@ impl<'a> Design<'a> {
                 }
                 (
                     span,
-                    scales.definition_value(&handle.interface, function == "$timeprecision")?,
+                    scales.interface_replacement(
+                        call,
+                        &file.syntax_tree,
+                        &handle.interface,
+                        &name,
+                        site,
+                    )?,
                 )
             } else if name.contains('.') {
                 // Keep ordinary module queries for the module analyzer. Only
                 // a path ending at an interface must be frozen here.
-                let Some(value) = path_query.as_ref().unwrap()(call).ok().flatten() else {
+                let Some(text) = path_query.as_ref().unwrap()(call, site).ok().flatten() else {
                     return Ok(None);
                 };
-                (file.span(RefNode::SystemTfCall(call))?, value)
+                (file.span(RefNode::SystemTfCall(call))?, text)
             } else {
                 return Ok(None);
             };
@@ -2296,12 +2347,17 @@ impl<'a> Design<'a> {
                 span,
                 // Preserve the query's self-determined signed integer type,
                 // including when it initializes a child module's output.
-                text: format!("32'sh{:08x}", value as u32),
+                text,
             }))
         };
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             let edit = match node {
-                RefNode::SystemTfCall(call) => query_edit(call)?,
+                RefNode::SystemTfCall(call)
+                    if system_tf_call_parts(call, &file.syntax_tree)
+                        .is_none_or(|(name, _)| name != "$printtimescale") =>
+                {
+                    query_edit(call, system_functions::CallSite::Expression)?
+                }
                 RefNode::SubroutineCallStatement(statement) => {
                     let call = match statement {
                         sv_parser::SubroutineCallStatement::SubroutineCall(call) => &call.0,
@@ -2309,14 +2365,28 @@ impl<'a> Design<'a> {
                             &call.nodes.2.nodes.1.nodes.0
                         }
                     };
+                    let site =
+                        if matches!(statement, sv_parser::SubroutineCallStatement::Function(_)) {
+                            system_functions::CallSite::Expression
+                        } else {
+                            system_functions::CallSite::Statement(
+                                system_functions::Body::Subroutine,
+                            )
+                        };
                     if let sv_parser::SubroutineCall::SystemTfCall(call) = call
-                        && query_edit(call)?.is_some()
+                        && let Some(edit) = query_edit(call, site)?
                     {
                         let span = file.span(node.clone())?;
                         check_query_origin(file, file.syntax_tree.get_str_trim(statement), span)?;
                         Some(Edit {
                             span,
-                            text: ";".into(),
+                            text: if system_tf_call_parts(call, &file.syntax_tree)
+                                .is_some_and(|(name, _)| name == "$printtimescale")
+                            {
+                                format!("{};", edit.text)
+                            } else {
+                                ";".into()
+                            },
                         })
                     } else {
                         None
@@ -2492,6 +2562,7 @@ impl<'a> Design<'a> {
                     file,
                     module_span.0,
                     &|span| render(span, &references),
+                    scales,
                 )?);
             }
             // The items replacing the bare item of a generate construct
@@ -2767,11 +2838,14 @@ impl<'a> Design<'a> {
             for function in &expansion.functions {
                 let function = interface.function(function).expect("expanded function");
                 functions_text.push_str("\n    ");
-                functions_text.push_str(&interface.render(
+                functions_text.push_str(&interface.render_with_timescale_prints(
                     file_of(self.files, interface),
                     function.span,
                     &rename,
-                ));
+                    scales,
+                    port,
+                    &[],
+                )?);
             }
             let dimensions: String = interface_port
                 .dimensions
@@ -2909,6 +2983,7 @@ impl<'a> Design<'a> {
         file: &File<'_>,
         scope_start: usize,
         render: &dyn Fn(Span) -> String,
+        scales: &super::timescales::Timescales,
     ) -> Result<String, AnalyzerError> {
         let interface_file = file_of(self.files, interface);
         interface.check_context(file, interface_file, scope_start)?;
@@ -3003,11 +3078,14 @@ impl<'a> Design<'a> {
                     // rejected below.
                     let function = &interface.functions[*index];
                     if dimensions.is_empty() || !interface.accesses_members(&function.name) {
-                        declarations.push(interface.render(
+                        declarations.push(interface.render_with_timescale_prints(
                             interface_file,
                             interface.functions[*index].span,
                             &plain,
-                        ));
+                            scales,
+                            instance,
+                            &[],
+                        )?);
                     }
                 }
                 Item::Process(span) => {
@@ -3026,11 +3104,47 @@ impl<'a> Design<'a> {
                                 interface.name
                             )));
                         }
+                        for function in interface.function_closure(&called) {
+                            let function = interface.function(&function).expect("called function");
+                            let first = interface_file
+                                .print_tasks
+                                .partition_point(|task| task.span.0 < function.span.0);
+                            for task in interface_file.print_tasks[first..]
+                                .iter()
+                                .take_while(|task| task.span.0 < function.span.1)
+                            {
+                                if scales.print_needs_instance_scope(
+                                    &task.call,
+                                    &interface_file.syntax_tree,
+                                    task.site,
+                                )? {
+                                    return Err(unsupported(format!(
+                                        "call of function `{}` of interface array `{instance}`, which uses its instance scope in `$printtimescale`",
+                                        function.name
+                                    )));
+                                }
+                            }
+                        }
                     }
                     if dimensions.is_empty() {
-                        declarations.push(interface.render(interface_file, *span, &plain));
+                        declarations.push(interface.render_with_timescale_prints(
+                            interface_file,
+                            *span,
+                            &plain,
+                            scales,
+                            instance,
+                            &[],
+                        )?);
                     } else {
-                        processes.push(interface.render(interface_file, *span, &per_element));
+                        let prefix = format!("{instance}{}", "[%0d]".repeat(genvars.len()));
+                        processes.push(interface.render_with_timescale_prints(
+                            interface_file,
+                            *span,
+                            &per_element,
+                            scales,
+                            &prefix,
+                            &genvars,
+                        )?);
                     }
                 }
             }
@@ -3040,14 +3154,15 @@ impl<'a> Design<'a> {
             let mut body = processes.join("\n    ");
             for (index, (_, dimension)) in dimensions.iter().enumerate().rev() {
                 let genvar = &genvars[index];
-                let (low, high) = match dimension {
-                    sv_parser::UnpackedDimension::Expression(size) => (
-                        "0".to_string(),
+                let label = joined(instance, &format!("{SEPARATOR}g{index}"));
+                body = match dimension {
+                    sv_parser::UnpackedDimension::Expression(size) => {
+                        let size =
+                            render(file.span(RefNode::ConstantExpression(&size.nodes.0.nodes.1))?);
                         format!(
-                            "({}) - 1",
-                            render(file.span(RefNode::ConstantExpression(&size.nodes.0.nodes.1))?)
-                        ),
-                    ),
+                            "for (genvar {genvar} = 0; {genvar} < ({size}); {genvar}++) begin : {label}\n    {body}\n    end"
+                        )
+                    }
                     sv_parser::UnpackedDimension::Range(range) => {
                         let left = render(
                             file.span(RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0))?,
@@ -3055,16 +3170,16 @@ impl<'a> Design<'a> {
                         let right = render(
                             file.span(RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.2))?,
                         );
-                        (
-                            format!("(({left}) < ({right}) ? ({left}) : ({right}))"),
-                            format!("(({left}) < ({right}) ? ({right}) : ({left}))"),
+                        // Keep range direction in the generate structure.
+                        // Nested conditional expressions in a loop initializer
+                        // can otherwise lose the range endpoints during lowering.
+                        // Check both bounds so a signed 32-bit genvar wrapping
+                        // past MIN or MAX cannot re-enter the array's range.
+                        format!(
+                            "if (({left}) <= ({right})) begin\n    for (genvar {genvar} = ({left}); {genvar} >= ({left}) && {genvar} <= ({right}); {genvar}++) begin : {label}\n    {body}\n    end\n    end else begin\n    for (genvar {genvar} = ({left}); {genvar} <= ({left}) && {genvar} >= ({right}); {genvar}--) begin : {label}\n    {body}\n    end\n    end"
                         )
                     }
                 };
-                body = format!(
-                    "for (genvar {genvar} = {low}; {genvar} <= {high}; {genvar}++) begin : {}\n    {body}\n    end",
-                    joined(instance, &format!("{SEPARATOR}g{index}"))
-                );
             }
             text.push_str("\n    ");
             text.push_str(&body);
@@ -4720,6 +4835,56 @@ impl InterfaceDecl {
             .filter_map(|(span, name)| rename(name).map(|text| Edit { span: *span, text }))
             .collect();
         apply(file.code, span, &edits)
+    }
+
+    /// Preserve the declaration's time scope while copying interface procedures.
+    fn render_with_timescale_prints(
+        &self,
+        file: &File<'_>,
+        span: Span,
+        rename: &dyn Fn(&str) -> Option<String>,
+        scales: &super::timescales::Timescales,
+        handle: &str,
+        indices: &[String],
+    ) -> Result<String, AnalyzerError> {
+        let mut edits = Vec::new();
+        let first = file
+            .print_tasks
+            .partition_point(|task| task.span.0 < span.0);
+        for task in file.print_tasks[first..]
+            .iter()
+            .take_while(|task| task.span.0 < span.1)
+        {
+            let call = &task.call;
+            let call_span = task.span;
+            if call_span.0 < span.0 || call_span.1 > span.1 {
+                continue;
+            }
+            let text = scales.interface_print_statement(
+                call,
+                &file.syntax_tree,
+                task.site,
+                handle,
+                indices,
+            )?;
+            check_query_origin(file, file.syntax_tree.get_str_trim(call), call_span)?;
+            edits.push(Edit {
+                span: call_span,
+                text,
+            });
+        }
+        let replaced: Vec<_> = edits.iter().map(|edit| edit.span).collect();
+        edits.extend(
+            self.references
+                .iter()
+                .filter(|((start, end), _)| {
+                    *start >= span.0
+                        && *end <= span.1
+                        && !replaced.iter().any(|&(a, b)| a <= *start && *end <= b)
+                })
+                .filter_map(|(span, name)| rename(name).map(|text| Edit { span: *span, text })),
+        );
+        Ok(apply(file.code, span, &edits))
     }
 
     /// The data type of a member declaration with its kind keyword.

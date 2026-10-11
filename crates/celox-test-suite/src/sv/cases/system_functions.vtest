@@ -1727,3 +1727,55 @@ a=0a  10
   (assert_eq deep_u (trunc 32 -6))
   (assert_eq deep_p (trunc 32 -10))
   (assert_eq ok 1))
+
+; 20.4.2: special scope names and canonical magnitudes do not depend on the
+; external adapter's enclosing testbench instance name.
+(case printtimescale_displays_unit_and_global_precision
+  (source "print_scales.sv" #"
+    timeunit 100ps / 10fs;
+    module Top(input logic clk, input logic enabled, output logic q);
+      timeunit 1ns / 1ps;
+      always_ff @(posedge clk) begin
+        if (enabled) begin
+          $printtimescale($unit);
+          $printtimescale($root);
+        end
+        q <= enabled;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 0))
+  (tick clk)
+  (expect_output "")
+  (modify (set enabled 1))
+  (tick clk)
+  (assert_eq q 1)
+  (expect_output #"Time scale of ($unit) is 100ps / 10fs
+Time scale of ($root) is 10fs / 10fs
+"#))
+
+(case printtimescale_preserves_package_subroutine_scope
+  (source "print_package.sv" #"
+    package P;
+      timeunit 100ns / 10ps;
+      function automatic int show(input int value);
+        $printtimescale;
+        return value;
+      endfunction
+    endpackage
+    module Top(input logic clk, input int data, output int q);
+      timeunit 1ns / 1ps;
+      always_ff @(posedge clk) begin
+        $printtimescale(P);
+        q <= P::show(data);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set data 7))
+  (tick clk)
+  (assert_eq q 7)
+  (expect_output #"Time scale of (P) is 100ns / 10ps
+Time scale of (P) is 100ns / 10ps
+"#))

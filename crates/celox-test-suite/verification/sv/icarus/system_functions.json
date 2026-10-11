@@ -1109,6 +1109,52 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_displays_unit_and_global_precision",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_printtimescale_operands",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_printtimescale_operands",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

@@ -8,6 +8,70 @@ const DEFAULT: Scale = Scale {
     precision: -12,
 };
 
+enum DisplayScope {
+    Relative(String),
+    Absolute(String),
+}
+
+struct ResolvedScope {
+    scale: Scale,
+    display: DisplayScope,
+    is_interface: bool,
+}
+
+impl ResolvedScope {
+    fn value(&self, name: &str) -> i32 {
+        if name == "$timeunit" {
+            self.scale.unit
+        } else {
+            self.scale.precision
+        }
+    }
+
+    fn message(&self, interface_prefix: Option<&str>) -> String {
+        let literal_name = |name: &str| name.replace('%', "%%");
+        let display = match &self.display {
+            DisplayScope::Absolute(name) => literal_name(name),
+            DisplayScope::Relative(path) => {
+                let mut name = "%m".to_string();
+                if let Some(prefix) = interface_prefix {
+                    name.push('.');
+                    name.push_str(prefix);
+                }
+                if !path.is_empty() {
+                    name.push('.');
+                    name.push_str(&literal_name(path));
+                }
+                name
+            }
+        };
+        let time = |exponent: i32| {
+            let n = (exponent + 15) as usize;
+            format!(
+                "{}{}",
+                [1, 10, 100][n % 3],
+                ["fs", "ps", "ns", "us", "ms", "s"][n / 3]
+            )
+        };
+        // SystemTaskArg::Str stores the source spelling of string contents.
+        format!(
+            "Time scale of ({display}) is {} / {}",
+            time(self.scale.unit),
+            time(self.scale.precision)
+        )
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+    }
+
+    fn replacement(&self, function: &str, prefix: Option<&str>) -> String {
+        if function == "$printtimescale" {
+            format!("$display(\"{}\")", self.message(prefix))
+        } else {
+            format!("32'sh{:08x}", self.value(function) as u32)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Scale {
     unit: i32,
@@ -507,17 +571,6 @@ impl Timescales {
         ))
     }
 
-    pub(super) fn definition_value(&self, name: &str, precision: bool) -> Converted<i32> {
-        let scope = self.definitions.get(name).ok_or_else(|| {
-            unsupported(format!("unknown timescale query design element `{name}`"))
-        })?;
-        Ok(if precision {
-            scope.scale.precision
-        } else {
-            scope.scale.unit
-        })
-    }
-
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
         #[cfg(test)]
         COLLECTIONS.with(|count| count.set(count.get() + 1));
@@ -719,48 +772,65 @@ impl Timescales {
         tree: &SyntaxTree,
         unit: &Unit,
     ) -> Converted<i32> {
-        self.query_details(call, tree, unit).map(|(value, _)| value)
+        let name = system_tf_call_parts(call, tree)
+            .ok_or_else(|| unsupported("timescale query name"))?
+            .0;
+        self.resolve(call, tree, unit, system_functions::CallSite::Expression)
+            .map(|scope| scope.value(name))
     }
 
     pub(super) fn interface_path_queries<'a>(
         &'a self,
         tree: &'a SyntaxTree,
-    ) -> Converted<impl Fn(&sv_parser::SystemTfCall) -> Converted<Option<i32>> + 'a> {
+    ) -> Converted<
+        impl Fn(&sv_parser::SystemTfCall, system_functions::CallSite) -> Converted<Option<String>> + 'a,
+    > {
         let unit = self
             .units
             .get(key(tree))
             .ok_or_else(|| unsupported("missing interface query time scope"))?;
         // Resolve the content key once for this rewrite, not for each query.
-        Ok(move |call: &sv_parser::SystemTfCall| {
-            self.query_details(call, tree, unit)
-                .map(|(value, interface)| interface.then_some(value))
+        Ok(move |call: &sv_parser::SystemTfCall, site| {
+            let name = system_tf_call_parts(call, tree)
+                .ok_or_else(|| unsupported("timescale query name"))?
+                .0;
+            self.resolve(call, tree, unit, site)
+                .map(|scope| scope.is_interface.then(|| scope.replacement(name, None)))
         })
     }
 
-    fn query_details(
+    fn resolve(
         &self,
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
         unit: &Unit,
-    ) -> Converted<(i32, bool)> {
+        site: system_functions::CallSite,
+    ) -> Converted<ResolvedScope> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        system_functions::check_call(
-            name,
-            args.as_deref(),
-            system_functions::CallSite::Expression,
-        )?;
+        system_functions::check_call(name, args.as_deref(), site)?;
         let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
         let current = scope_at(&unit.scopes, &unit.parents, at).map(|i| &unit.scopes[i]);
         let mut interface_target = false;
+        let mut display = match current {
+            Some(scope) if scope.kind == ScopeKind::Package => {
+                DisplayScope::Absolute(scope.name.clone())
+            }
+            Some(_) => DisplayScope::Relative(String::new()),
+            None => DisplayScope::Absolute("$unit".into()),
+        };
         let scale = if args.as_ref().is_some_and(|args| args.is_empty()) {
             current.map_or(unit.scale, |s| s.scale)
         } else {
             let argument = argument(call)
                 .ok_or_else(|| unsupported("timescale query design-element argument"))?;
             match tree.get_str_trim(argument).unwrap_or_default().trim() {
-                "$unit" => unit.scale,
+                "$unit" => {
+                    display = DisplayScope::Absolute("$unit".into());
+                    unit.scale
+                }
                 "$root" => {
+                    display = DisplayScope::Absolute("$root".into());
                     let precision = self.precision.unwrap_or(DEFAULT.precision);
                     Scale {
                         unit: precision,
@@ -794,10 +864,12 @@ impl Timescales {
                     let (mut target, start) = if hierarchy.nodes.0.is_none()
                         && current.is_some_and(|s| s.instances.contains_key(first))
                     {
+                        display = DisplayScope::Relative(path.join("."));
                         (current.unwrap(), 0)
                     } else if self.is_root(first)
                         && let Some(root) = self.definitions.get(first)
                     {
+                        display = DisplayScope::Absolute(path.join("."));
                         // A root instance is part of the hierarchy and takes
                         // precedence over a same-named global package.
                         (root, 1)
@@ -805,6 +877,7 @@ impl Timescales {
                         && path.len() == 1
                         && let Some(package) = self.packages.get(first)
                     {
+                        display = DisplayScope::Absolute(path.join("."));
                         // Package and definition names have separate global
                         // namespaces (3.13). An instantiated module type with
                         // this spelling does not hide the package.
@@ -819,6 +892,13 @@ impl Timescales {
                                 "timescale query names module type `{first}`, not an instance"
                             )));
                         }
+                        display = if hierarchy.nodes.0.is_none()
+                            && current.is_some_and(|scope| scope.name == *first)
+                        {
+                            DisplayScope::Relative(path[1..].join("."))
+                        } else {
+                            DisplayScope::Absolute(path.join("."))
+                        };
                         (
                             self.definitions.get(first).ok_or_else(|| {
                                 unsupported(format!(
@@ -841,15 +921,103 @@ impl Timescales {
                 }
             }
         };
-        Ok((
-            if name == "$timeunit" {
-                scale.unit
-            } else {
-                scale.precision
-            },
-            interface_target,
+        Ok(ResolvedScope {
+            scale,
+            display,
+            is_interface: interface_target,
+        })
+    }
+
+    pub(super) fn print_message(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        site: system_functions::CallSite,
+        prefix: Option<&str>,
+    ) -> Converted<String> {
+        let source = key(tree);
+        let extended = (!self.units.contains_key(source))
+            .then(|| self.including_tree(tree))
+            .transpose()?;
+        let design = extended.as_ref().unwrap_or(self);
+        design
+            .resolve(call, tree, &design.units[source], site)
+            .map(|scope| scope.message(prefix))
+    }
+
+    pub(super) fn interface_print_statement(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        site: system_functions::CallSite,
+        prefix: &str,
+        indices: &[String],
+    ) -> Converted<String> {
+        let source = key(tree);
+        let scope = self.resolve(call, tree, &self.units[source], site)?;
+        let args = if matches!(scope.display, DisplayScope::Relative(_)) && !indices.is_empty() {
+            format!(", {}", indices.join(", "))
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "$display(\"{}\"{args})",
+            scope.message(Some(prefix))
         ))
     }
+
+    pub(super) fn print_needs_instance_scope(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        site: system_functions::CallSite,
+    ) -> Converted<bool> {
+        let scope = self.resolve(call, tree, &self.units[key(tree)], site)?;
+        Ok(matches!(scope.display, DisplayScope::Relative(_)))
+    }
+
+    pub(super) fn interface_replacement(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        ty: &str,
+        handle: &str,
+        site: system_functions::CallSite,
+    ) -> Converted<String> {
+        let (name, args) =
+            system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
+        system_functions::check_call(name, args.as_deref(), site)?;
+        let scope = self
+            .definitions
+            .get(ty)
+            .ok_or_else(|| unsupported(format!("unknown timescale query design element `{ty}`")))?;
+        Ok(ResolvedScope {
+            scale: scope.scale,
+            display: DisplayScope::Relative(handle.to_string()),
+            is_interface: true,
+        }
+        .replacement(name, None))
+    }
+}
+
+pub(super) fn print_message(
+    call: &sv_parser::SystemTfCall,
+    tree: &SyntaxTree,
+    site: system_functions::CallSite,
+) -> Converted<String> {
+    DESIGN.with(|context| {
+        let context = context.borrow();
+        if let Some(prepared) = &context.prepared
+            && prepared.address == tree as *const SyntaxTree as usize
+        {
+            context
+                .design
+                .resolve(call, tree, &prepared.unit, site)
+                .map(|scope| scope.message(None))
+        } else {
+            context.design.print_message(call, tree, site, None)
+        }
+    })
 }
 
 pub(super) fn argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {

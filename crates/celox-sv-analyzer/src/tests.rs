@@ -2803,7 +2803,7 @@ fn expands_nested_references_functions_and_written_arguments() {
         "assign rows$i0[cfg$N - 2] = v;",
         ".l$i0(rows$i0[cfg$N - 1])",
         // Loop helper names cannot collide with the items `i0` and `g0`.
-        "for (genvar rows$$i0 = 0; rows$$i0 <= (cfg$N) - 1; rows$$i0++) begin : rows$$g0",
+        "for (genvar rows$$i0 = 0; rows$$i0 < (cfg$N); rows$$i0++) begin : rows$$g0",
         "assign rows$g0[rows$$i0] = rows$inc(rows$i0[rows$$i0]);",
         // A function a declaration calls is declared with the port.
         "function automatic int l$bits();",
@@ -2868,7 +2868,7 @@ fn infers_writes_through_child_ports_and_scoped_subroutines() {
         "output var logic [7:0] p$y",
         "input var logic [7:0] p$z",
         // The items of a generate region are placed in the array loop.
-        "for (genvar g$$i0 = 0; g$$i0 <= (2) - 1; g$$i0++) begin : g$$g0",
+        "for (genvar g$$i0 = 0; g$$i0 < (2); g$$i0++) begin : g$$g0",
     ] {
         assert!(
             elaborated.contains(expected),

@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 81,
+    "compile_error": 83,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -884,6 +884,28 @@
       "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:23: error: System function $timeunit not defined in system table or SFT file(s).\n<case>/source_0.sv:23: internal error: Failed to synthesize expression: bool<32>($timeunit(<scope=celox_suite_tb.dut.child.info>))\n<case>/source_0.sv:24: error: System function $timeprecision not defined in system table or SFT file(s).\n<case>/source_0.sv:24: internal error: Failed to synthesize expression: bool<32>($timeprecision(<scope=celox_suite_tb.dut.child.info>))\n<case>/source_0.sv:25: error: System function $timeunit not defined in system table or SFT file(s).\n<case>/source_0.sv:25: internal error: Failed to synthesize expression: bool<32>($timeunit(<scope=celox_suite_tb.dut.child.leaf.nested>))\n<case>/source_0.sv:26: error: System function $timeprecision not defined in system table or SFT file(s).\n<case>/source_0.sv:26: internal error: Failed to synthesize expression: bool<32>($timeprecision(<scope=celox_suite_tb.dut.child.leaf.nested>))\n<case>/source_0.sv:27: warning: always_comb process has no sensitivities.\n<case>/source_0.sv:28: warning: System task ($timeunit) cannot be synthesized in an always_comb process.\n8 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "system_functions::timescale_queries_resolve_hierarchical_interface_instances",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_displays_unit_and_global_precision",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,
