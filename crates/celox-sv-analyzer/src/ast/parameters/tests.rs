@@ -958,6 +958,26 @@ fn referenced_value_projection_matches_full_environment() {
         ),
         p("P", id("A"), Some(8), false),
         p(
+            "resized",
+            ConstExpr::Resize {
+                expr: Box::new(id("A")),
+                width: 16,
+                signed: true,
+            },
+            None,
+            false,
+        ),
+        p(
+            "resized_again",
+            ConstExpr::Resize {
+                expr: Box::new(id("resized")),
+                width: 4,
+                signed: false,
+            },
+            None,
+            false,
+        ),
+        p(
             "B",
             ConstExpr::Function {
                 name: "missing".into(),

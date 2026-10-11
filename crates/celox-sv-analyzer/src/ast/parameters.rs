@@ -1140,7 +1140,9 @@ pub(super) fn parameter_value_env_for_references(
                         expressions.push(bit);
                     }
                     ConstExpr::Function { args, .. } => expressions.extend(args),
-                    ConstExpr::Unary { expr, .. } => expressions.push(expr),
+                    ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                        expressions.push(expr)
+                    }
                     ConstExpr::Binary { left, right, .. } => {
                         expressions.push(left);
                         expressions.push(right);
