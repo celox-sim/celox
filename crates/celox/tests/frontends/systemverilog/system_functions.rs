@@ -1,6 +1,7 @@
 use super::*;
 
 sv_backends! {
+    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
     fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
     fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
     fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }

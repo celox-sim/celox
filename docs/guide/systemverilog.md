@@ -314,4 +314,6 @@ module is instantiated; visible hierarchy instances, including roots, take
 precedence over a namesake package. Leading zeros in integer or fixed-point
 time magnitudes do not change their numeric value. Interface functions retain
 their declaration's time scope and compilation unit when copied into modules
-during elaboration.
+during elaboration. Queries of scalar interface instances and ports are
+resolved using their bound interface type before flattening, including generic
+interface ports and handles declared within a generate block.

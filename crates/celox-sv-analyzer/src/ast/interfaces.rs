@@ -68,7 +68,13 @@ pub fn elaborate_interfaces(
     // queries before copying, using all files' original scopes and precision.
     // The original interface declarations remain in the rewritten sources,
     // so their precision still contributes to module-level $root queries.
-    let rewritten = resolve_interface_timescale_queries(&files, sources)?;
+    let trees: Vec<_> = files
+        .iter()
+        .zip(sources)
+        .map(|(file, (_, path))| (&file.syntax_tree, *path))
+        .collect();
+    let scales = super::timescales::Timescales::collect(&trees)?;
+    let rewritten = resolve_interface_timescale_queries(&files, &scales)?;
     let rewritten_files = rewritten
         .as_ref()
         .map(|codes| {
@@ -108,19 +114,13 @@ pub fn elaborate_interfaces(
             }
         }
     }
-    design.elaborate().map(Some)
+    design.elaborate(&scales).map(Some)
 }
 
 fn resolve_interface_timescale_queries(
     files: &[File<'_>],
-    sources: &[(&str, &Path)],
+    scales: &super::timescales::Timescales,
 ) -> Result<Option<Vec<String>>, AnalyzerError> {
-    let trees: Vec<_> = files
-        .iter()
-        .zip(sources)
-        .map(|(file, (_, path))| (&file.syntax_tree, *path))
-        .collect();
-    let scales = super::timescales::Timescales::collect(&trees)?;
     let is_query = |call, tree| {
         system_tf_call_parts(call, tree)
             .is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
@@ -179,6 +179,18 @@ fn resolve_interface_timescale_queries(
         })
         .collect::<Result<_, AnalyzerError>>()?;
     Ok(changed.then_some(codes))
+}
+
+/// Reject a rewrite that would edit a macro origin rather than its call.
+fn check_query_origin(
+    file: &File<'_>,
+    text: Option<&str>,
+    span: Span,
+) -> Result<(), AnalyzerError> {
+    if file.text(span).trim() != text.unwrap_or_default().trim() {
+        return Err(unsupported("macro-origin interface timescale query"));
+    }
+    Ok(())
 }
 
 /// A parsed source and its tokens.
@@ -1129,7 +1141,10 @@ impl<'a> Design<'a> {
         Err(unsupported(format!("module `{}`", module.name)))
     }
 
-    fn elaborate(&self) -> Result<Vec<String>, AnalyzerError> {
+    fn elaborate(
+        &self,
+        scales: &super::timescales::Timescales,
+    ) -> Result<Vec<String>, AnalyzerError> {
         let mut edits: Vec<Vec<Edit>> = vec![Vec::new(); self.files.len()];
         let mut names: Vec<String> = self.modules.keys().cloned().collect();
         names.sort();
@@ -1145,7 +1160,7 @@ impl<'a> Design<'a> {
                 // Copied per binding below; the original is not usable.
                 continue;
             }
-            if let Some(text) = self.rewrite_module(name, &[], None, &mut clones)? {
+            if let Some(text) = self.rewrite_module(name, &[], None, &mut clones, scales)? {
                 let module = &self.modules[name];
                 edits[module.file].push(Edit {
                     span: module.span,
@@ -1158,14 +1173,19 @@ impl<'a> Design<'a> {
             if !cloned.insert(clone_name.clone()) {
                 continue;
             }
-            let text =
-                match self.rewrite_module(&name, &bindings, Some(&clone_name), &mut clones)? {
-                    Some(text) => text,
-                    None => {
-                        let module = &self.modules[&name];
-                        self.files[module.file].text(module.span).to_string()
-                    }
-                };
+            let text = match self.rewrite_module(
+                &name,
+                &bindings,
+                Some(&clone_name),
+                &mut clones,
+                scales,
+            )? {
+                Some(text) => text,
+                None => {
+                    let module = &self.modules[&name];
+                    self.files[module.file].text(module.span).to_string()
+                }
+            };
             // Beside the original, under the same compiler directives.
             let module = &self.modules[&name];
             edits[module.file].push(Edit {
@@ -1735,6 +1755,7 @@ impl<'a> Design<'a> {
         bindings: &[(String, String)],
         clone_name: Option<&str>,
         clones: &mut Vec<(String, Vec<(String, String)>)>,
+        scales: &super::timescales::Timescales,
     ) -> Result<Option<String>, AnalyzerError> {
         let module = &self.modules[module_name];
         let file = &self.files[module.file];
@@ -1878,9 +1899,86 @@ impl<'a> Design<'a> {
         // references themselves: `(span, flattened name, selects)`.
         let mut selected = Vec::new();
         let mut consumed: Vec<Span> = Vec::new();
+        // A bare interface handle is legal as a timescale query operand.
+        // Resolve it using the instance/port binding before that handle is
+        // flattened away, including each clone of a generic interface port.
+        let query_edit = |call: &sv_parser::SystemTfCall| -> Result<Option<Edit>, AnalyzerError> {
+            let Some((function, args)) = system_tf_call_parts(call, &file.syntax_tree) else {
+                return Ok(None);
+            };
+            if !matches!(function, "$timeunit" | "$timeprecision") {
+                return Ok(None);
+            }
+            let Some(argument) = super::timescales::argument(call) else {
+                return Ok(None);
+            };
+            let name =
+                normalize_identifier(file.syntax_tree.get_str_trim(argument).unwrap_or_default());
+            if !handles.contains(&name) {
+                return Ok(None);
+            }
+            system_functions::check_call(
+                function,
+                args.as_deref(),
+                system_functions::CallSite::Expression,
+            )?;
+            let span = file.span(RefNode::SystemTfCall(call))?;
+            check_query_origin(file, file.syntax_tree.get_str_trim(call), span)?;
+            let handle = handles.at(&name, span).ok_or_else(|| {
+                unsupported(format!(
+                    "reference to interface `{name}` outside the generate block that declares it"
+                ))
+            })?;
+            if handle.arrayed {
+                return Err(unsupported("interface array in timescale query"));
+            }
+            let value = scales.definition_value(&handle.interface, function == "$timeprecision")?;
+            Ok(Some(Edit {
+                span,
+                // Preserve the query's self-determined signed integer type,
+                // including when it initializes a child module's output.
+                text: format!("32'sh{:08x}", value as u32),
+            }))
+        };
+        for node in RefNode::ModuleDeclarationAnsi(declaration) {
+            let edit = match node {
+                RefNode::SystemTfCall(call) => query_edit(call)?,
+                RefNode::SubroutineCallStatement(statement) => {
+                    let call = match statement {
+                        sv_parser::SubroutineCallStatement::SubroutineCall(call) => &call.0,
+                        sv_parser::SubroutineCallStatement::Function(call) => {
+                            &call.nodes.2.nodes.1.nodes.0
+                        }
+                    };
+                    if let sv_parser::SubroutineCall::SystemTfCall(call) = call
+                        && query_edit(call)?.is_some()
+                    {
+                        let span = file.span(node.clone())?;
+                        check_query_origin(file, file.syntax_tree.get_str_trim(statement), span)?;
+                        Some(Edit {
+                            span,
+                            text: ";".into(),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(edit) = edit {
+                consumed.push(edit.span);
+                references.push(edit);
+            }
+        }
         // Bare handles and modport selections, valid only as port connections.
         let mut pending: Vec<(Span, String)> = Vec::new();
         for reference in file.handle_references(module_span, |name| handles.contains(name)) {
+            if consumed
+                .iter()
+                .any(|span| span.0 <= reference.span.0 && reference.span.1 <= span.1)
+            {
+                continue;
+            }
             let handle = handles
                 .at(&reference.handle, reference.span)
                 .ok_or_else(|| {

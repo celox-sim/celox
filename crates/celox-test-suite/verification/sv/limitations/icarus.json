@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 78,
+    "compile_error": 79,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -854,6 +854,17 @@
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: error: Unable to evaluate parameter P value: bool<32>($timeprecision())\n<case>/source_0.sv:5: error: Unable to evaluate parameter U value: bool<32>($timeunit())\n<case>/source_0.sv:6: error: Unable to evaluate parameter P value: bool<32>($timeprecision())\n<case>/source_0.sv:5: error: Unable to evaluate parameter U value: bool<32>($timeunit())\n4 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "system_functions::timescale_queries_survive_type_parameter_specialization",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: Errors in port declarations.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_resolve_interface_instances_and_ports",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

@@ -360,6 +360,17 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
 }
 
 impl Timescales {
+    pub(super) fn definition_value(&self, name: &str, precision: bool) -> Converted<i32> {
+        let scope = self.definitions.get(name).ok_or_else(|| {
+            unsupported(format!("unknown timescale query design element `{name}`"))
+        })?;
+        Ok(if precision {
+            scope.scale.precision
+        } else {
+            scope.scale.unit
+        })
+    }
+
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
         #[cfg(test)]
         COLLECTIONS.with(|count| count.set(count.get() + 1));
@@ -588,24 +599,8 @@ impl Timescales {
         let scale = if args.as_ref().is_some_and(|args| args.is_empty()) {
             current.map_or(unit.scale, |s| s.scale)
         } else {
-            let argument = match call {
-                sv_parser::SystemTfCall::ArgExpression(call) => {
-                    call.nodes.1.nodes.1.0.contents()[0].as_ref()
-                }
-                sv_parser::SystemTfCall::ArgOptionl(call) => {
-                    call.nodes
-                        .1
-                        .as_ref()
-                        .and_then(|paren| match &paren.nodes.1 {
-                            sv_parser::ListOfArguments::Ordered(args) => {
-                                args.nodes.0.contents()[0].as_ref()
-                            }
-                            _ => None,
-                        })
-                }
-                _ => None,
-            }
-            .ok_or_else(|| unsupported("timescale query design-element argument"))?;
+            let argument = argument(call)
+                .ok_or_else(|| unsupported("timescale query design-element argument"))?;
             match tree.get_str_trim(argument).unwrap_or_default().trim() {
                 "$unit" => unit.scale,
                 "$root" => {
@@ -723,6 +718,32 @@ impl Timescales {
         } else {
             scale.precision
         })
+    }
+}
+
+pub(super) fn argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
+    match call {
+        sv_parser::SystemTfCall::ArgExpression(call) => call
+            .nodes
+            .1
+            .nodes
+            .1
+            .0
+            .contents()
+            .first()
+            .and_then(|arg| arg.as_ref()),
+        sv_parser::SystemTfCall::ArgOptionl(call) => {
+            call.nodes
+                .1
+                .as_ref()
+                .and_then(|paren| match &paren.nodes.1 {
+                    sv_parser::ListOfArguments::Ordered(args) => {
+                        args.nodes.0.contents().first().and_then(|arg| arg.as_ref())
+                    }
+                    _ => None,
+                })
+        }
+        _ => None,
     }
 }
 
@@ -859,6 +880,43 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn interface_handle_queries_reject_invalid_operands_and_macro_edits() {
+        for (instance, expression) in [
+            ("I i();", "$timeunit(i, 1)"),
+            ("I i();", "$timeprecision(i + 1)"),
+            ("I i[2]();", "$timeunit(i)"),
+            ("I i[2]();", "$timeprecision(i[0])"),
+            ("if (1) begin : g I i(); end", "$timeunit(i)"),
+        ] {
+            let code = format!(
+                "interface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; {instance} assign y = {expression}; endmodule"
+            );
+            assert!(
+                crate::elaborate_interfaces(&[(&code, Path::new("invalid_handle_query.sv"))])
+                    .is_err(),
+                "accepted {expression} with {instance}"
+            );
+        }
+        for (definition, call) in [
+            ("`define QUERY(h) $timeunit(h)", "`QUERY(i)"),
+            ("`define QUERY $timeunit(i)", "`QUERY"),
+            ("`define QUERY \\\n$timeunit(i)", "`QUERY"),
+        ] {
+            let code = format!(
+                "{definition}\ninterface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; I i(); assign y = {call}; endmodule"
+            );
+            let error = crate::elaborate_interfaces(&[(&code, Path::new("macro_handle_query.sv"))])
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("macro-origin interface timescale query"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 11,
+    "mismatch": 12,
     "emission_error": 0,
     "compile_error": 15,
     "runtime_error": 1,
@@ -278,6 +278,17 @@
       "name": "system_functions::timescale_queries_survive_type_parameter_specialization",
       "phase": "compile",
       "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::timescale_queries_resolve_interface_instances_and_ports at 1663:3: assert_eq direct_u: expected 0xfffffff9, got 0xfffffffd",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_resolve_interface_instances_and_ports",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

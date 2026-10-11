@@ -1019,6 +1019,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 rejects the typed and generic interface port declarations in this timescale-query case with syntax errors in port declarations. IEEE 1800-2023 25.3 permits these interface ports; 20.4.1 selects the queried design element time scope. The case retains its assertions for direct instances, typed/modport ports, differently bound generic ports and local generate handles.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interface_timescale_handles",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the typed and generic interface port declarations in this timescale-query case with syntax errors in port declarations. IEEE 1800-2023 25.3 permits these interface ports; 20.4.1 selects the queried design element time scope. The case retains its assertions for direct instances, typed/modport ports, differently bound generic ports and local generate handles.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_interface_instances_and_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
       "expectation": "Simulation",
       "known_issue": {

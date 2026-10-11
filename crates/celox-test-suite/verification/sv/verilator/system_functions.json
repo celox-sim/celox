@@ -580,6 +580,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 ignores an interface-instance operand of $timeunit: the Top caller has unit 1ms and returns -3 for i, whose interface declares 100ns and requires -7. IEEE 1800-2023 20.4.1 queries the selected design element; 25.3 defines hierarchical interface instances and interface ports. Slang 12.0.0 also reports ExpectedModuleName for interface-instance query arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_timescale_interface_argument",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 ignores an interface-instance operand of $timeunit: the Top caller has unit 1ms and returns -3 for i, whose interface declares 100ns and requires -7. IEEE 1800-2023 20.4.1 queries the selected design element; 25.3 defines hierarchical interface instances and interface ports. Slang 12.0.0 also reports ExpectedModuleName for interface-instance query arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_interface_instances_and_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator 5.052 ignores bare package arguments of $timeunit/$timeprecision and returns the caller unit/global precision. IEEE 1800-2023 20.4.1 requires the selected design element scale; 3.13 gives packages and definitions separate namespaces. A standalone probe reproduces the wrong package and instance results. Slang 12.0.0 also rejects bare package query arguments, including a package without a same-named module.",
       "expectation": "Simulation",
       "known_issue": {

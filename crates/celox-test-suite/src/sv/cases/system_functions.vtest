@@ -1611,3 +1611,63 @@ a=0a  10
   (assert_eq wide 1)
   (assert_eq narrow 1)
   (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_interface_instances_and_ports
+  (source "interface_handle_times.sv" #"
+    timeunit 1ns / 1ps;
+    interface I;
+      timeunit 100ns / 10ps;
+      logic v;
+      modport reader(input v);
+    endinterface
+    interface J; timeunit 1us / 100ps; logic v; endinterface
+    module Reader(I.reader info, output int u, p);
+      timeunit 10us / 1ns;
+      assign u = $timeunit(info);
+      assign p = $timeprecision(info);
+    endmodule
+    module GenericReader(interface info, output int u, p);
+      timeunit 10ns / 1ps;
+      assign u = $timeunit(info);
+      assign p = $timeprecision(info);
+    endmodule
+    module Top(output int direct_u, direct_p, fixed_u, fixed_p,
+               output int generic_i_u, generic_i_p, generic_j_u, generic_j_p,
+               output int generated_u, generated_p, output logic ok);
+      timeunit 1ms / 1us;
+      I i(); J j();
+      assign i.v = 0;
+      assign j.v = 0;
+      Reader reader(.info(i), .u(fixed_u), .p(fixed_p));
+      GenericReader a(.info(i), .u(generic_i_u), .p(generic_i_p));
+      GenericReader b(.info(j), .u(generic_j_u), .p(generic_j_p));
+      assign direct_u = $timeunit(i);
+      assign direct_p = $timeprecision(i);
+      if (1) begin : g
+        J local_info();
+        assign local_info.v = 0;
+        assign generated_u = $timeunit(local_info);
+        assign generated_p = $timeprecision(local_info);
+      end
+      always_comb begin
+        $timeunit(i);
+        void'($timeprecision(j));
+        ok = ($timeunit() == -3) && ($timeprecision() == -6)
+          && ($bits($timeunit(i)) == 32) && ($timeunit(i) < 0);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_u (trunc 32 -7))
+  (assert_eq direct_p (trunc 32 -11))
+  (assert_eq fixed_u (trunc 32 -7))
+  (assert_eq fixed_p (trunc 32 -11))
+  (assert_eq generic_i_u (trunc 32 -7))
+  (assert_eq generic_i_p (trunc 32 -11))
+  (assert_eq generic_j_u (trunc 32 -6))
+  (assert_eq generic_j_p (trunc 32 -10))
+  (assert_eq generated_u (trunc 32 -6))
+  (assert_eq generated_p (trunc 32 -10))
+  (assert_eq ok 1))
