@@ -56,6 +56,13 @@ fn joined(handle: &str, item: &str) -> String {
 pub fn elaborate_interfaces(
     sources: &[(&str, &Path)],
 ) -> Result<Option<Vec<String>>, AnalyzerError> {
+    elaborate_interfaces_with_roots(sources, None)
+}
+
+pub(crate) fn elaborate_interfaces_with_roots(
+    sources: &[(&str, &Path)],
+    roots: Option<&[&str]>,
+) -> Result<Option<Vec<String>>, AnalyzerError> {
     let files = sources
         .iter()
         .map(|(code, path)| File::new(code, path))
@@ -73,7 +80,10 @@ pub fn elaborate_interfaces(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect();
-    let scales = super::timescales::Timescales::collect(&trees)?;
+    let mut scales = super::timescales::Timescales::collect(&trees)?;
+    if let Some(roots) = roots {
+        scales.select_roots(roots);
+    }
     let rewritten = resolve_interface_timescale_queries(&files, &scales)?;
     let rewritten_files = rewritten
         .as_ref()

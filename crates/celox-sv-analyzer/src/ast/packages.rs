@@ -154,7 +154,18 @@ impl Packages {
     /// Analyze the packages declared in the source files `trees`, each after
     /// the packages it depends on, and then their compilation units.
     pub fn analyze(trees: &[(&SyntaxTree, &Path)]) -> Result<Self, AnalyzerError> {
-        let timescales = Arc::new(timescales::Timescales::collect(trees)?);
+        Self::analyze_with_roots(trees, None)
+    }
+
+    pub(crate) fn analyze_with_roots(
+        trees: &[(&SyntaxTree, &Path)],
+        roots: Option<&[&str]>,
+    ) -> Result<Self, AnalyzerError> {
+        let mut timescales = timescales::Timescales::collect(trees)?;
+        if let Some(roots) = roots {
+            timescales.select_roots(roots);
+        }
+        let timescales = Arc::new(timescales);
         let _timescales = timescales::install(timescales.clone());
         let mut packages = Self::analyze_packages(trees)?;
         packages.timescales = timescales;

@@ -47,6 +47,7 @@ pub(super) struct Timescales {
     packages: HashMap<String, Scope>,
     precision: Option<i32>,
     instantiated: HashSet<String>,
+    roots: Option<HashSet<String>>,
 }
 
 #[cfg(test)]
@@ -360,6 +361,17 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
 }
 
 impl Timescales {
+    pub(super) fn select_roots(&mut self, roots: &[&str]) {
+        self.roots = Some(roots.iter().map(|name| (*name).to_string()).collect());
+    }
+
+    fn is_root(&self, name: &str) -> bool {
+        self.roots.as_ref().map_or_else(
+            || !self.instantiated.contains(name),
+            |roots| roots.contains(name),
+        )
+    }
+
     pub(super) fn definition_value(&self, name: &str, precision: bool) -> Converted<i32> {
         let scope = self.definitions.get(name).ok_or_else(|| {
             unsupported(format!("unknown timescale query design element `{name}`"))
@@ -641,7 +653,7 @@ impl Timescales {
                         && current.is_some_and(|s| s.instances.contains_key(first))
                     {
                         (current.unwrap(), 0)
-                    } else if !self.instantiated.contains(first)
+                    } else if self.is_root(first)
                         && let Some(root) = self.definitions.get(first).or_else(|| {
                             unit.scopes
                                 .iter()
@@ -664,8 +676,14 @@ impl Timescales {
                         // this spelling does not hide the package.
                         (package, 1)
                     } else {
-                        if self.instantiated.contains(first)
-                            && current.is_none_or(|scope| scope.name != *first)
+                        if !self.is_root(first)
+                            && (hierarchy.nodes.0.is_some()
+                                || current.is_none_or(|scope| scope.name != *first))
+                            && (self.definitions.contains_key(first)
+                                || unit
+                                    .scopes
+                                    .iter()
+                                    .any(|s| s.kind == ScopeKind::Definition && s.name == *first))
                         {
                             return Err(unsupported(format!(
                                 "timescale query names module type `{first}`, not an instance"
@@ -880,6 +898,53 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn explicitly_selected_roots_keep_multiple_roots_and_exclude_unused_definitions() {
+        let code = "module A(); timeunit 1ns / 1ps; Child c(); endmodule module B(); timeunit 1us / 1ns; endmodule module Harness(); timeunit 1ms / 1us; A a(); B b(); endmodule module Child(); timeunit 1ns / 1ps; localparam U=$timeunit($root.A); localparam P=$timeprecision($root.B); endmodule";
+        let source = crate::ParsedSource::parse(code, Path::new("roots.sv")).unwrap();
+        let packages =
+            crate::ParsedSource::analyze_packages_with_roots(&[&source], &["A", "B"]).unwrap();
+        let ir = source
+            .analyze_module(
+                "Child",
+                &HashMap::default(),
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        let values: Vec<_> = ir.modules()[0]
+            .parameters()
+            .iter()
+            .map(|p| p.resolved_value())
+            .collect();
+        assert_eq!(values, [Some(-9), Some(-9)]);
+        for expression in [
+            "$timeunit($root.Harness)",
+            "$timeprecision(Harness)",
+            "$timeunit($root.Child)",
+        ] {
+            let code = format!(
+                "module Top(); timeunit 1ns / 1ps; Child c(); endmodule module Harness(); timeunit 1ms / 1us; endmodule module Child(); timeunit 1ns / 1ps; localparam U={expression}; endmodule"
+            );
+            let source = crate::ParsedSource::parse(&code, Path::new("non_roots.sv")).unwrap();
+            let packages =
+                crate::ParsedSource::analyze_packages_with_roots(&[&source], &["Top"]).unwrap();
+            assert!(
+                source
+                    .analyze_module(
+                        "Child",
+                        &HashMap::default(),
+                        &[],
+                        &ModuleInterfaces::default(),
+                        &packages
+                    )
+                    .is_err(),
+                "accepted {expression}"
+            );
+        }
     }
 
     #[test]

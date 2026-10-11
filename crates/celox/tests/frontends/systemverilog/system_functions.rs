@@ -11,6 +11,38 @@ sv_backends! {
     fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
     fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
 
+    fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
+        @setup {
+            let source = r#"
+                package P;
+                    timeunit 100ps / 10fs;
+                    function automatic int root_precision(); return $timeprecision($root.Top); endfunction
+                endpackage
+                interface I;
+                    timeunit 100ns / 10ps;
+                    function automatic int root_unit(); return $timeunit($root.Top); endfunction
+                endinterface
+                module Child(output logic ok);
+                    timeunit 1us / 1ns;
+                    assign ok = ($timeunit($root.Top) == -9) && ($timeprecision($root.Top) == -12)
+                        && ($timeunit(Top) == -9) && ($timeprecision(Top) == -12)
+                        && (P::root_precision() == -12);
+                endmodule
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    logic child_ok;
+                    I info();
+                    Child child(.ok(child_ok));
+                    assign ok = child_ok && (info.root_unit() == -9);
+                endmodule
+                module Harness(); timeunit 1ms / 1us; Top unused_top(); endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("selected_root.sv"))], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
     fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
         @setup {
             let source = r#"

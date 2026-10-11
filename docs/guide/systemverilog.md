@@ -311,7 +311,9 @@ inherited scales with implementation defaults are rejected (3.14.2.3).
 Module definitions and packages retain independent scales even when their names
 coincide (3.13). A bare package query remains available when a same-named
 module is instantiated; visible hierarchy instances, including roots, take
-precedence over a namesake package. Leading zeros in integer or fixed-point
+precedence over a namesake package. Simulator root lookup uses the selected
+top and reachable hierarchy; instantiations in unused supplied modules do not
+hide the selected root. Leading zeros in integer or fixed-point
 time magnitudes do not change their numeric value. Interface functions retain
 their declaration's time scope and compilation unit when copied into modules
 during elaboration. Queries of scalar interface instances and ports are
