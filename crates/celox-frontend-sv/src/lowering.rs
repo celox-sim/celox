@@ -1674,7 +1674,9 @@ fn const_expr_references_identifier(expr: &sv::ir::ConstExpr) -> bool {
         sv::ir::ConstExpr::Function { args, .. } => {
             args.iter().any(const_expr_references_identifier)
         }
-        sv::ir::ConstExpr::Unary { expr, .. } => const_expr_references_identifier(expr),
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_expr_references_identifier(expr)
+        }
         sv::ir::ConstExpr::Binary { left, right, .. } => {
             const_expr_references_identifier(left) || const_expr_references_identifier(right)
         }
@@ -5171,6 +5173,15 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
             msb: (**bit).clone(),
             lsb: (**bit).clone(),
             signed: false,
+        },
+        sv::ir::ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => sv::ir::Expr::Resize {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            width: *width,
+            signed: *signed,
         },
         sv::ir::ConstExpr::Function { .. } => return None,
         sv::ir::ConstExpr::Unary { op, expr } => sv::ir::Expr::Unary {

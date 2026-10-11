@@ -527,6 +527,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 expr: Box::new(self.hoist_const(expr, calls)?),
                 bit: Box::new(self.hoist_const(bit, calls)?),
             },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                width: *width,
+                signed: *signed,
+            },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
                 expr: Box::new(self.hoist_const(expr, calls)?),
@@ -674,6 +683,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|arg| self.freeze_const(arg, copies))
                     .collect::<Result<_, _>>()?,
                 site: *site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                width: *width,
+                signed: *signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
@@ -2294,6 +2312,15 @@ fn substitute_overlay_const(
             name: name.clone(),
             site: *site,
             args: args.iter().map(go).collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(go(expr)),
+            width: *width,
+            signed: *signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op: *op,

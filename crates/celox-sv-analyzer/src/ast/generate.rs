@@ -250,7 +250,7 @@ impl Item<'_> {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.constant(e));
             }
-            ConstExpr::Unary { expr, .. } => self.constant(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => self.constant(expr),
             ConstExpr::Binary { left, right, .. } => {
                 self.constant(left);
                 self.constant(right);
@@ -465,7 +465,9 @@ impl<'a> Elaborator<'a, '_> {
                     ))?;
                 }
             }
-            ConstExpr::Unary { expr, .. } => self.expand_constant_calls(expr, scope)?,
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.expand_constant_calls(expr, scope)?
+            }
             ConstExpr::Select { expr, bit } => {
                 self.expand_constant_calls(expr, scope)?;
                 self.expand_constant_calls(bit, scope)?;
