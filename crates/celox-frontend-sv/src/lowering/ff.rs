@@ -505,6 +505,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     );
                 }
                 let call = sv::ir::Expr::Call {
+                    arg_order: Vec::new(),
                     name: name.clone(),
                     args: lowered,
                 };
@@ -724,7 +725,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, args } if self.m.dpi_imports.contains_key(name) => {
+            Expr::Call { name, args, .. } if self.m.dpi_imports.contains_key(name) => {
                 let import = self.m.dpi_imports[name].clone();
                 let Some(r#type) = import.return_type() else {
                     return Err(unsupported(format!(
@@ -744,7 +745,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store(temp, SIROffset::Static(0), r#type.width(), result);
                 Expr::Ident(temp_name)
             }
-            Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.subroutines.contains_key(name) => {
                 let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
                 let subroutine = self
                     .m
@@ -757,7 +762,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     )));
                 };
                 let (width, signed, is_4state) = self.m.type_shape(&r#type)?;
-                let result = self.call(name, &args)?;
+                let result = self.call(name, &args, arg_order)?;
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
                 let Some(result) = result else {
                     return Err(unsupported(format!(
@@ -797,7 +802,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     else_expr: Box::new(else_expr),
                 }
             }
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: name.clone(),
                 args: args
                     .iter()
@@ -1544,7 +1554,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.jump(return_block);
                 Ok(false)
             }
-            sv::ir::Stmt::Call { name, args } => {
+            sv::ir::Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => {
                 if let Some(import) = self.m.dpi_imports.get(name).cloned() {
                     self.dpi_call(&import, args)?;
                     return Ok(true);
@@ -1552,7 +1566,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
-                self.call(name, args)?;
+                self.call(name, args, arg_order)?;
                 Ok(true)
             }
             sv::ir::Stmt::Eval(expr) => {
@@ -2055,6 +2069,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         name: &str,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<String>, sv::AnalyzerError> {
         let subroutine = self
             .m
@@ -2076,7 +2091,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
-        for (position, param) in subroutine.params.iter().enumerate() {
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        for position in positions {
+            let param = subroutine
+                .params
+                .get(position)
+                .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             let id = self
                 .m
                 .id(&param.name)
@@ -2398,7 +2422,12 @@ fn substitute_overlay(
             then_expr: Box::new(go(then_expr)),
             else_expr: Box::new(go(else_expr)),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
             args: args.iter().map(go).collect(),
         },

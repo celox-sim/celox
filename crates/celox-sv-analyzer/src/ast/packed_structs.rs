@@ -27,6 +27,10 @@ impl PackedMember {
         self
     }
 
+    pub(in crate::ast) fn offset(&self) -> usize {
+        self.offset
+    }
+
     pub(in crate::ast) fn name(&self) -> &str {
         &self.name
     }

@@ -493,7 +493,7 @@ impl Flow<'_> {
                 }
                 Ok(Exits::default())
             }
-            Stmt::Call { name, args } => {
+            Stmt::Call { name, args, .. } => {
                 let mut outputs = false;
                 for (index, arg) in args.iter().enumerate() {
                     let Some(arg) = arg else {
@@ -577,7 +577,7 @@ impl Flow<'_> {
                 }
                 // A task may write an output or inout argument; one of a
                 // subroutine whose directions are unknown may be either.
-                Stmt::Call { name, args } => {
+                Stmt::Call { name, args, .. } => {
                     let directions = self.directions.get(name);
                     writes |= args.iter().enumerate().any(|(index, arg)| {
                         arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
@@ -668,7 +668,7 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
 fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Expr])) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
-        Expr::Call { name, args } => {
+        Expr::Call { name, args, .. } => {
             f(name, args);
             for arg in args {
                 visit_calls(arg, f);

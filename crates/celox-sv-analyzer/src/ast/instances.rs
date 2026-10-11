@@ -468,6 +468,15 @@ fn parameter_override(
             .ok_or_else(|| AnalyzerError::Unsupported("parameter type override".to_string()))?;
         return Ok(ParameterOverride::type_override(name, text));
     }
+    if RefNode::ParamExpression(expr)
+        .into_iter()
+        .any(|node| matches!(node, RefNode::AssignmentPatternExpression(_)))
+    {
+        let text = constant_pattern_text(expr, syntax_tree, packed_dimensions)?;
+        let mut bound = ParameterOverride::new(name, None);
+        bound.pattern_text = Some(text);
+        return Ok(bound);
+    }
     let value = const_expr_from_param_expression(expr, syntax_tree)?
         .ok_or_else(|| AnalyzerError::Unsupported("parameter override expression".to_string()))?;
     // A bare name that denotes a type (a typedef, or the instantiating
@@ -502,4 +511,99 @@ fn type_source_text(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<
         text.push_str(&format!(" [{left}:{right}]"));
     }
     Some(text)
+}
+
+/// Freeze pattern leaves in the instantiating module's constant environment.
+/// Reparse in the callee to apply the target array/structure shape.
+fn constant_pattern_text(
+    expression: &sv_parser::ParamExpression,
+    tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Result<String, AnalyzerError> {
+    let node = RefNode::ParamExpression(expression);
+    let tokens: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter_map(|node| {
+            if let RefNode::Locate(locate) = node {
+                Some(locate)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let start = tokens
+        .iter()
+        .map(|locate| locate.offset)
+        .min()
+        .ok_or_else(|| unsupported("parameter pattern"))?;
+    let end = tokens
+        .iter()
+        .map(|locate| locate.offset + locate.len)
+        .max()
+        .unwrap();
+    let original = tree
+        .get_str(&sv_parser::Locate {
+            offset: start,
+            line: 0,
+            len: end - start,
+        })
+        .ok_or_else(|| unsupported("parameter pattern text"))?;
+    let types = parameter_types_from_const_env(&dimensions.const_env)
+        .into_iter()
+        .map(|(name, ty)| (name, (ty.width, ty.signed)))
+        .collect();
+    let mut edits = Vec::new();
+    for child in node {
+        let expression = match child {
+            RefNode::Expression(expr) if patterns::pattern_expression(expr).is_none() => {
+                RefNode::Expression(expr)
+            }
+            // Repeat counts and index keys are constant expressions too;
+            // freeze them before entering the child module's scope.
+            RefNode::ConstantExpression(expr) => RefNode::ConstantExpression(expr),
+            _ => continue,
+        };
+        let value = indexed_select_base(expression.clone(), tree, dimensions)?;
+        let literal = typecheck::eval_const_integral_literal_with_types(
+            &value.into(),
+            &dimensions.const_env,
+            &types,
+        )
+        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?;
+        let tokens: Vec<_> = expression
+            .into_iter()
+            .filter_map(|node| {
+                if let RefNode::Locate(locate) = node {
+                    Some(locate)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let low = tokens.iter().map(|locate| locate.offset).min().unwrap();
+        let high = tokens
+            .iter()
+            .map(|locate| locate.offset + locate.len)
+            .max()
+            .unwrap();
+        edits.push((
+            low,
+            high,
+            typecheck::format_integral_literal_binary(&literal),
+        ));
+    }
+    edits.sort_by_key(|(low, high, _)| (*low, std::cmp::Reverse(*high)));
+    let mut result = String::new();
+    let mut cursor = start;
+    for (low, high, replacement) in edits {
+        if low < cursor {
+            continue;
+        }
+        result.push_str(&original[cursor - start..low - start]);
+        result.push_str(&replacement);
+        cursor = high;
+    }
+    result.push_str(&original[cursor - start..]);
+    Ok(result)
 }

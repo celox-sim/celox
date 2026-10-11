@@ -129,3 +129,66 @@ pub(crate) fn apply_type_parameter_overrides(
     }
     Ok(None)
 }
+
+/// Override array/structure value parameters before their target shapes are
+/// lowered. Only overridable module parameters may be rebound, never locals.
+pub(crate) fn apply_pattern_parameter_overrides(
+    code: &str,
+    tree: &SyntaxTree,
+    module_name: &str,
+    overrides: &[(String, String)],
+) -> Result<Option<String>, AnalyzerError> {
+    if overrides.is_empty() {
+        return Ok(None);
+    }
+    for node in tree {
+        let RefNode::ModuleDeclarationAnsi(module) = node else {
+            continue;
+        };
+        let node = RefNode::ModuleDeclarationAnsi(module);
+        if module_name_from_node(node.clone(), tree)? != module_name {
+            continue;
+        }
+        let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
+        let mut edits = Vec::new();
+        let mut found = HashSet::default();
+        let declarations = module_parameter_port_list(node.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        for child in declarations.into_iter().flat_map(|node| node.into_iter()) {
+            let RefNode::ParamAssignment(param) = child else {
+                continue;
+            };
+            let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
+            let Some((_, bound)) = overrides.iter().find(|(candidate, _)| *candidate == name)
+            else {
+                continue;
+            };
+            if !allowed.contains(&name) || !array_parameters::is_array_parameter(param) {
+                return Err(unsupported(format!(
+                    "pattern override of non-array parameter `{name}`"
+                )));
+            }
+            let Some((_, value)) = &param.nodes.2 else {
+                return Err(unsupported(format!(
+                    "array parameter `{name}` without a default"
+                )));
+            };
+            let (start, end) = node_span(RefNode::ConstantParamExpression(value), tree)
+                .ok_or_else(|| unsupported("array parameter source span"))?;
+            edits.push(Edit {
+                start,
+                end,
+                replacement: bound.clone(),
+            });
+            found.insert(name);
+        }
+        for (name, _) in overrides {
+            if !found.contains(name) {
+                return Err(unsupported(format!("unknown array parameter `{name}`")));
+            }
+        }
+        return Ok(Some(apply_edits(code, (0, code.len()), edits)));
+    }
+    Err(unsupported(format!("module `{module_name}`")))
+}

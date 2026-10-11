@@ -733,9 +733,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.tree,
                 )
                 .ok_or_else(|| unsupported("subroutine call"))?;
-                let args =
+                let (args, arg_order) =
                     self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
-                Ok(vec![Stmt::Call { name, args }])
+                Ok(vec![Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                }])
             }
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
@@ -860,38 +864,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &self,
         name: &str,
         args: Option<&sv_parser::ListOfArguments>,
-    ) -> Result<Vec<Option<Expr>>, AnalyzerError> {
-        let Some(args) = args else {
-            return Ok(Vec::new());
-        };
-        let (positional, named): (Vec<Option<&sv_parser::Expression>>, Vec<_>) = match args {
-            sv_parser::ListOfArguments::Ordered(args) => {
-                let contents = args.nodes.0.contents();
-                let positional = if contents.len() == 1 && contents[0].is_none() {
-                    Vec::new()
-                } else {
-                    contents.into_iter().map(|arg| arg.as_ref()).collect()
-                };
-                let named = args
-                    .nodes
-                    .1
-                    .iter()
-                    .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref()))
-                    .collect();
-                (positional, named)
-            }
-            sv_parser::ListOfArguments::Named(args) => {
-                let mut named = vec![(&args.nodes.1, args.nodes.2.nodes.1.as_ref())];
-                named.extend(
-                    args.nodes
-                        .3
-                        .iter()
-                        .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref())),
-                );
-                (Vec::new(), named)
-            }
-        };
-        let mut lowered: Vec<Option<Expr>> = positional
+    ) -> Result<(Vec<Option<Expr>>, Vec<usize>), AnalyzerError> {
+        let (bindings, order) =
+            expressions::bind_call_arguments(name, args, self.tree, self.state.subroutine_params)?;
+        let args = bindings
             .into_iter()
             .enumerate()
             .map(|(position, arg)| {
@@ -899,28 +875,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        if !named.is_empty() {
-            let params = self
-                .state
-                .subroutine_params
-                .get(name)
-                .ok_or_else(|| unsupported(format!("named arguments to `{name}`")))?;
-            for (identifier, value) in named {
-                let formal = identifier_text(RefNode::Identifier(identifier), self.tree)
-                    .ok_or_else(|| unsupported("named argument"))?;
-                let position = params
-                    .iter()
-                    .position(|param| *param == formal)
-                    .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
-                if lowered.len() <= position {
-                    lowered.resize(position + 1, None);
-                }
-                lowered[position] = value
-                    .map(|value| self.call_argument(name, position, value))
-                    .transpose()?;
-            }
-        }
-        Ok(lowered)
+        Ok((args, order))
     }
 
     /// One subroutine argument; an assignment pattern takes the formal's shape.
@@ -974,6 +929,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => Vec::new(),
         };
         for (condition, then_body) in branches.into_iter().rev() {
+            // A generate index or parameter can make a procedural branch
+            // unreachable. Remove its writes before checking process drivers.
+            let constant = if inlining::calls_subroutine(&condition) {
+                // Even a constant return value does not make the run-time
+                // call's display, output or module-variable effects optional.
+                None
+            } else {
+                expr_to_const(condition.clone())
+                    .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
+            };
+            if let Some(value) = constant {
+                if value != 0 {
+                    else_body = then_body;
+                }
+                continue;
+            }
             else_body = vec![Stmt::If {
                 condition,
                 then_body,

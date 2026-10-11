@@ -231,7 +231,7 @@ impl Item<'_> {
                     }
                 }
             }
-            Expr::Call { name, args } => {
+            Expr::Call { name, args, .. } => {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.expr(e));
             }

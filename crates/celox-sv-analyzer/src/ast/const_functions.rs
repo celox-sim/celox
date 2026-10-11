@@ -492,7 +492,7 @@ impl Frame<'_> {
                     self.lower(else_expr)?
                 }
             }
-            Expr::Call { name, args } => ConstExpr::Function {
+            Expr::Call { name, args, .. } => ConstExpr::Function {
                 name: name.clone(),
                 args: args
                     .iter()

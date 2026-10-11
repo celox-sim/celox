@@ -447,7 +447,9 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 if expr.into_iter().any(|node| {
                     matches!(
                         node,
-                        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                        RefNode::ConstantIndexedRange(_)
+                            | RefNode::IndexedRange(_)
+                            | RefNode::ConstantCast(_)
                     )
                 }) {
                     let mut dimensions = PackedDimensions::new(
@@ -1388,6 +1390,7 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             signed,
         },
         ConstExpr::Function { name, args, .. } => Expr::Call {
+            arg_order: Vec::new(),
             name,
             args: args.into_iter().map(const_expr_to_expr).collect(),
         },

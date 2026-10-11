@@ -658,7 +658,7 @@ fn size_function_expression_type_from_dimensions(
                 // (IEEE 1800-2023 6.20.2), even without explicit dimensions.
                 Expr::Ident(name) => variable_size_function_width(const_env, name, true)
                     .or_else(|| parameter_type_from_const_env(const_env, name).map(|ty| ty.width)),
-                Expr::Call { name, args } => {
+                Expr::Call { name, args, .. } => {
                     typecheck::bit_vector_function_return_type(name, args.len())
                         .map(|(width, _)| width)
                         .or_else(|| {

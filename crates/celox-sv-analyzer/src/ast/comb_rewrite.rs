@@ -79,14 +79,16 @@ pub(super) fn expr_static_width(
             expr_static_width(then_expr, packed_dimensions)?
                 .max(expr_static_width(else_expr, packed_dimensions)?),
         ),
-        Expr::Call { name, args } => typecheck::bit_vector_function_return_type(name, args.len())
-            .map(|(width, _)| width)
-            .or_else(|| {
-                packed_dimensions
-                    .function_return_types
-                    .get(name)
-                    .and_then(|metadata| metadata.width)
-            }),
+        Expr::Call { name, args, .. } => {
+            typecheck::bit_vector_function_return_type(name, args.len())
+                .map(|(width, _)| width)
+                .or_else(|| {
+                    packed_dimensions
+                        .function_return_types
+                        .get(name)
+                        .and_then(|metadata| metadata.width)
+                })
+        }
     }
 }
 

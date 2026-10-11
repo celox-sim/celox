@@ -633,7 +633,12 @@ impl Renamer<'_> {
                 then_expr: boxed(then_expr),
                 else_expr: boxed(else_expr),
             },
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: self.name(&name),
                 args: args.into_iter().map(|arg| self.expr(arg)).collect(),
             },
@@ -678,7 +683,12 @@ impl Renamer<'_> {
 
     pub fn stmt(&self, stmt: Stmt) -> Stmt {
         let stmt = match stmt {
-            Stmt::Call { name, args } => Stmt::Call {
+            Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => Stmt::Call {
+                arg_order: arg_order.clone(),
                 name: self.name(&name),
                 args,
             },
@@ -751,7 +761,12 @@ impl Renamer<'_> {
     /// expressions were renamed already.
     fn stmt_names(&self, stmt: Stmt) -> Stmt {
         let stmt = match stmt {
-            Stmt::Call { name, args } => Stmt::Call {
+            Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => Stmt::Call {
+                arg_order: arg_order.clone(),
                 name: self.name(&name),
                 args,
             },

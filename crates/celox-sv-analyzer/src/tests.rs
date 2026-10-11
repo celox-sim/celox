@@ -1409,12 +1409,15 @@ fn converts_unknowns_when_constant_casting_to_two_state_types() {
             module Top;
                 typedef bit [1:0] two_t;
                 localparam logic [1:0] P = two_t'(2'bx1);
+                localparam logic [7:0] X = 8'b10xz_01zx;
+                localparam byte unsigned U = unsigned'(byte'(X));
             endmodule
         "#,
         Path::new("two_state_constant_cast.sv"),
     )
     .expect("two-state constant casts should convert unknown bits to zero");
     assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(0x84));
 }
 
 #[test]
@@ -3968,4 +3971,25 @@ fn isunbounded_argument_validation_is_not_skipped_by_bits() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
+    let ir = analyze_source(
+        r#"
+            module Top(output logic y);
+                function automatic int choose(input int v);
+                    $display("choose %0d", v);
+                    return 1;
+                endfunction
+                always_comb if (choose(1)) y = 1; else y = 0;
+            endmodule
+        "#,
+        Path::new("conditional_call.sv"),
+    )
+    .unwrap();
+    assert!(matches!(
+        ir.modules()[0].comb_processes()[0].body()[0],
+        crate::ir::Stmt::If { .. }
+    ));
 }

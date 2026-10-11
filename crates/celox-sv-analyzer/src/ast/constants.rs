@@ -376,7 +376,11 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => {
             let args: Vec<_> = args
                 .into_iter()
                 .map(|arg| {
@@ -400,9 +404,20 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 }
             } else if name == "$countbits" {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
-                fold_const_integral_expr_preserving_mask(Expr::Call { name, args }, const_env)
+                fold_const_integral_expr_preserving_mask(
+                    Expr::Call {
+                        name,
+                        args,
+                        arg_order,
+                    },
+                    const_env,
+                )
             } else {
-                Expr::Call { name, args }
+                Expr::Call {
+                    name,
+                    args,
+                    arg_order,
+                }
             }
         }
     }
@@ -760,10 +775,19 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             then_expr: Box::new(expr_to_const(*then_expr)?),
             else_expr: Box::new(expr_to_const(*else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call {
             name,
-            args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
-        )),
+            args,
+            arg_order,
+        } => {
+            if !arg_order.is_empty() {
+                return None;
+            }
+            Some(ConstExpr::call(
+                name,
+                args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
+            ))
+        }
         Expr::Select { .. }
         | Expr::Concat(_)
         | Expr::RepeatConcat { .. }
@@ -816,12 +840,23 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
             else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call {
             name,
-            args.into_iter()
-                .map(|arg| expr_to_index_const(arg, dimensions))
-                .collect::<Option<_>>()?,
-        )),
+            args,
+            arg_order,
+        } => {
+            // Pure calls were expanded before index conversion. Retaining a
+            // named call here would discard the order of its procedural effects.
+            if !arg_order.is_empty() {
+                return None;
+            }
+            Some(ConstExpr::call(
+                name,
+                args.into_iter()
+                    .map(|arg| expr_to_index_const(arg, dimensions))
+                    .collect::<Option<_>>()?,
+            ))
+        }
         Expr::Select {
             expr,
             msb,
@@ -1579,7 +1614,7 @@ fn countbits_constant_call(
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let Expr::Call { name, mut args } = expression else {
+    let Expr::Call { name, mut args, .. } = expression else {
         return None;
     };
     let operand = args.remove(0);

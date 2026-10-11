@@ -701,6 +701,7 @@ impl Module {
             }
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
+        packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
         let mut instances = instances_from_module_node(
             node.clone(),
             syntax_tree,
@@ -1441,6 +1442,7 @@ pub struct ParameterOverride {
     value: Option<ConstExpr>,
     /// The source text of a data type, for a `parameter type` override.
     type_text: Option<String>,
+    pattern_text: Option<String>,
 }
 
 impl ParameterOverride {
@@ -1449,6 +1451,7 @@ impl ParameterOverride {
             name,
             value,
             type_text: None,
+            pattern_text: None,
         }
     }
 
@@ -1457,7 +1460,13 @@ impl ParameterOverride {
             name,
             value: None,
             type_text: Some(type_text),
+            pattern_text: None,
         }
+    }
+
+    /// A constant assignment pattern, evaluated in the caller scope.
+    pub fn pattern_text(&self) -> Option<&str> {
+        self.pattern_text.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -2034,6 +2043,8 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
+        /// Formal positions in source evaluation/copy-out order; empty means positional.
+        arg_order: Vec<usize>,
     },
     /// `expr inside { items }`: true when `expr` matches any item.
     Inside {
@@ -2185,6 +2196,7 @@ struct PackedDimensions {
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
+    subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
 }
 
 impl PackedDimensions {
@@ -2204,6 +2216,7 @@ impl PackedDimensions {
             constant_indexed_base: false,
             scope_types_complete: false,
             subroutine_param_shapes: Arc::default(),
+            subroutine_param_names: Arc::default(),
         }
     }
 }

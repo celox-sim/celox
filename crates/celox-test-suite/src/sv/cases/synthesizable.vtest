@@ -624,3 +624,41 @@
     (assert_eq ones (popcount value))
     (assert_eq chain (trunc 8 (+ (* (+ value 1) 2) 3)))
     (assert_eq swapped (| (trunc 8 (<< value 4)) (>> value 4)))))
+
+; IEEE 1800-2023 6.21: a nested local is a distinct binding from a top port.
+(case nested_block_locals_shadow_ports
+  (source "nested_scope.sv" #"
+    module Top(input logic c, a, b, output logic t, y);
+        always_comb begin
+            t = 1'b0;
+            if (c) begin
+                logic t;
+                t = a;
+                y = t;
+            end else begin
+                y = b;
+            end
+        end
+    endmodule
+  "#)
+  (top Top)
+  (for (c a b) (list (0 0 1) (1 1 0) (1 0 1) (0 1 0))
+    (modify (set c c) (set a a) (set b b))
+    (assert_eq t 0)
+    (if c (assert_eq y a) (assert_eq y b))))
+
+; Same source names in separate processes must keep separate identities.
+(case block_local_names_shadow_other_signals
+  (source "process_scopes.sv" #"
+    module Top(input logic a, b, output logic t, y, z);
+        assign t = b;
+        always_comb begin logic t; t = a; y = t; end
+        always_comb begin logic t; t = ~a; z = t; end
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0 1) (1 0) (1 1) (0 0))
+    (modify (set a a) (set b b))
+    (assert_eq t b)
+    (assert_eq y a)
+    (assert_eq z (^ a 1))))

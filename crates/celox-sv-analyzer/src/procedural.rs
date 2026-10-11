@@ -51,6 +51,7 @@ pub enum StmtBase<E, L> {
     Call {
         name: String,
         args: Vec<Option<E>>,
+        arg_order: Vec<usize>,
     },
     /// A system function called as a statement, such as `$countones(a);`:
     /// the expression is evaluated like any other operand and its value is
@@ -227,7 +228,12 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::Break => StmtBase::Break,
             StmtBase::Continue => StmtBase::Continue,
             StmtBase::Return(value) => StmtBase::Return(value.map(fe)),
-            StmtBase::Call { name, args } => StmtBase::Call {
+            StmtBase::Call {
+                name,
+                args,
+                arg_order,
+            } => StmtBase::Call {
+                arg_order: arg_order.clone(),
                 name,
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
@@ -332,7 +338,7 @@ impl<E, L> StmtBase<E, L> {
                     fe(value);
                 }
             }
-            StmtBase::Call { name, args } => {
+            StmtBase::Call { name, args, .. } => {
                 fname(name);
                 for arg in args.iter_mut().flatten() {
                     fe(arg);

@@ -19,9 +19,6 @@ all_backends! {
         @case "veryl_language::parameter_expression_type_cast_widths";
     }
     fn packed_union_members_alias(sim) {
-        // SV frontend does not support packed unions:
-        // "unpacked struct, union, or unsupported packed struct member" (#440).
-        @ignore_on(sv);
         @case "veryl_language::packed_union_members_alias";
     }
     fn wide_shift_amount_out_of_range(sim) {

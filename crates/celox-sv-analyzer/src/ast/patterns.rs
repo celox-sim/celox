@@ -358,6 +358,11 @@ pub(super) fn expr_from_pattern(
         });
     }
     if !shape.members.is_empty() {
+        // Overlapping members denote a union. A structure pattern would
+        // concatenate the aliases and silently produce a different value.
+        if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
+            return Err(unsupported("assignment pattern for a packed union"));
+        }
         return struct_pattern(pattern, shape, tree, dims);
     }
     if let Some((dimension, rest)) = shape.packed.split_first()

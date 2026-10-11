@@ -210,7 +210,12 @@ pub(super) fn simplify_constant_mux_conditions(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name,
             args: args
                 .into_iter()
@@ -369,7 +374,7 @@ fn constant_with_folded_selections_with_lookup(
             then_expr: Box::new(convert(then_expr)?),
             else_expr: Box::new(convert(else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call { name, args, .. } => Some(ConstExpr::call(
             name.clone(),
             args.iter().map(convert).collect::<Option<Vec<_>>>()?,
         )),

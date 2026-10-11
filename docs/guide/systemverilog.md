@@ -43,7 +43,7 @@ synthesis and is tested at the design level.
 | --- | --- |
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
-| Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
 | Continuous logic | `assign`, `wire w = expr;` |
@@ -55,7 +55,7 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
-| Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
+| Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
@@ -103,10 +103,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
-  array, ANSI port default values, packed unions
-  ([#440](https://github.com/celox-sim/celox/issues/440)), multidimensional packed ranges that are not zero-based and
-  descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)), block-local
-  variables that share a name with a variable of another process ([#445](https://github.com/celox-sim/celox/issues/445)),
+  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, multidimensional packed ranges that are not zero-based and
+  descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs, strings and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
   plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists, and both edges of one clock ([#443](https://github.com/celox-sim/celox/issues/443)) or one
@@ -237,8 +235,14 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   writes it. A top module with an interface port therefore has ports such as
   `bus$data`. A module with a generic `interface` port is copied once per
   interface it is connected to, as `M$I`.
-- **Block-local variables** of an `always_comb` become signals of the module; a
-  name that clashes with another signal is rejected.
+- **Block-local variables** have lexical scope in `always_comb` and `always_ff`.
+  Locals may shadow module signals and reuse names in separate blocks or processes.
+- **Hard packed untagged unions** share one bit vector between all members;
+  every member must have the same width (IEEE 1800-2023 7.3.1).
+- **Named subroutine arguments** bind by formal name. Input evaluation and output
+  copy-out retain source order. Function expressions currently require every
+  formal argument; call statements also support omitted/defaulted arguments.
+  Named calls with procedural effects in selection indices are rejected.
 - **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
   procedural block, function or task is static unless it, its subroutine or
   its module (`module automatic`) is declared `automatic`. A static local of a

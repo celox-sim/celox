@@ -128,6 +128,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
         ),
         (
             Expr::Call {
+                arg_order: Vec::new(),
                 name: "$countones".into(),
                 args: vec![ident("A")],
             },
@@ -135,6 +136,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
         ),
         (
             Expr::Call {
+                arg_order: Vec::new(),
                 name: "unresolved_function".into(),
                 args: vec![ident("B")],
             },

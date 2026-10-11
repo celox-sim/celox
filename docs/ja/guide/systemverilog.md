@@ -39,7 +39,7 @@ let mut sim = Simulator::from_sv_sources(
 | --- | --- |
 | モジュール | ANSI ポート、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ・配列・構造体、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ・配列・構造体、hard packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
@@ -50,7 +50,7 @@ let mut sim = Simulator::from_sv_sources(
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
-| パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
+| パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
@@ -72,9 +72,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
-  多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、別の
-  プロセスの変数と同名のブロックローカル変数（[#445](https://github.com/celox-sim/celox/issues/445)）、unpacked 構造体、文字列、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、0 起点の降順でない
+  多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
   オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、プロセスをまたいだ同一クロック（[#443](https://github.com/celox-sim/celox/issues/443)）・同一リセット
   （[#471](https://github.com/celox-sim/celox/issues/471)）の両エッジの使用。
@@ -124,8 +123,13 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   コンパイル単位の項目 `x` を指します。コンパイル単位の変数は、そのファイルのモジュールが共有する 1 つの
   オブジェクトで、package 変数と同じく `$unit::v` という名前になります。これを宣言できるソースファイルは
   1 つだけです。コンパイル単位での DPI import は未対応です。
-- **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
-  名前が衝突するものは拒否します。
+- **ブロックローカル変数**は、`always_comb` と `always_ff` で字句スコープを持ちます。
+  モジュールの信号と同名の変数や、別のブロック・プロセスでの同名変数を扱えます。
+- **hard packed untagged union** のメンバーは、同じビットベクタを共有します。
+  全メンバーの幅が一致する必要があります（IEEE 1800-2023 7.3.1）。
+- **名前付きサブルーチン引数**は仮引数の名前で束縛し、入力の評価と出力のコピーアウトは
+  ソースに書かれた順序で行います。関数を式として呼ぶ場合は全引数が必要です。
+  文としての呼び出しでは省略・既定値も扱えます。選択の添字での副作用を伴う名前付き呼び出しは拒否します。
 - **変数の寿命**は IEEE 1800-2023 6.21 に従います。プロセスのブロック、関数、タスクの中で宣言した
   変数は、その変数自身、そのサブルーチン、またはそのモジュール（`module automatic`）が `automatic`
   と宣言されていない限り static です。ブロックの static なローカル変数は、ブロックの実行をまたいで値を

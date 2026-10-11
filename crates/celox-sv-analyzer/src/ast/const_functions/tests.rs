@@ -70,6 +70,7 @@ fn functions() -> ConstantFunctions {
         vec![("x", fixed_ty(32, true))],
         vec![Stmt::Return(Some(binary(
             Expr::Call {
+                arg_order: Vec::new(),
                 name: "read".into(),
                 args: vec![],
             },
@@ -85,6 +86,7 @@ fn functions() -> ConstantFunctions {
             then_body: vec![Stmt::Return(Some(ident("GLOBAL")))],
             else_body: vec![Stmt::Return(Some(binary(
                 Expr::Call {
+                    arg_order: Vec::new(),
                     name: "recursive".into(),
                     args: vec![binary(ident("n"), BinaryOp::Sub, literal("1"))],
                 },
