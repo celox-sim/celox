@@ -1560,3 +1560,54 @@ a=0a  10
   (assert_eq port_unit (trunc 32 -7))
   (assert_eq port_precision (trunc 32 -11))
   (assert_eq ok 1))
+
+
+(case timescale_queries_accept_leading_zero_magnitudes
+  (source "leading_zero_times.sv" #"
+    timeunit 001.0ns / 001ps;
+    package P;
+      timeunit 010.00ns / 0010.0ps;
+      function automatic int unit_value(); return $timeunit(); endfunction
+      function automatic int precision_value(); return $timeprecision(); endfunction
+    endpackage
+    module Child(output logic ok);
+      timeunit 00100ns / 00100.00ps;
+      assign ok = ($timeunit() == -7) && ($timeprecision() == -10);
+    endmodule
+    module Top(output logic ok);
+      timeunit 01ns / 001ps;
+      logic child_ok;
+      Child child(.ok(child_ok));
+      assign ok = child_ok && ($timeunit() == -9) && ($timeprecision() == -12)
+        && (P::unit_value() == -8) && (P::precision_value() == -11);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_survive_type_parameter_specialization
+  (source "typed_times.sv" #"
+    timeunit 10ns / 1ps;
+    module Child #(parameter type T = logic)(output T value, output logic ok);
+      timeunit 1us / 1ns;
+      localparam int U = $timeunit();
+      localparam int P = $timeprecision();
+      assign value = T'(1);
+      assign ok = (U == -6) && (P == -9) && ($timeunit() == -6)
+        && ($timeprecision() == -9) && ($timeprecision($root) == -15);
+    endmodule
+    module Unused(); timeunit 1ns / 1fs; endmodule
+    module Top(output logic ok, output logic [7:0] wide, output logic [3:0] narrow);
+      timeunit 1ms / 1us;
+      logic a, b;
+      Child #(.T(logic [7:0])) first(.value(wide), .ok(a));
+      Child #(.T(logic [3:0])) second(.value(narrow), .ok(b));
+      assign ok = a && b && ($timeunit() == -3) && ($timeprecision() == -6);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq wide 1)
+  (assert_eq narrow 1)
+  (assert_eq ok 1))

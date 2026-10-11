@@ -868,6 +868,7 @@
     ],
     "cases": {
       "verilator": [
+        "system_functions::timescale_queries_accept_leading_zero_magnitudes",
         "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
         "system_functions::timescale_queries_preserve_procedural_and_package_scopes",
         "system_functions::timescale_queries_resolve_directives_and_hierarchy"
@@ -892,7 +893,8 @@
         "system_functions::timescale_queries_distinguish_unit_and_global_precision",
         "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
         "system_functions::timescale_queries_resolve_declarations_and_return_types",
-        "system_functions::timescale_queries_resolve_directives_and_hierarchy"
+        "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+        "system_functions::timescale_queries_survive_type_parameter_specialization"
       ]
     }
   },
@@ -983,6 +985,40 @@
     "cases": {
       "icarus": [
         "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_timescale_root_argument",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects the standalone $root argument of $timeprecision, expecting a dotted hierarchical name. IEEE 1800-2023 20.4.1 explicitly accepts $root and returns the global simulation time unit. Slang 12.0.0 accepts the argument syntax but separately rejects the constant timescale initializers in this type-specialization case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::timescale_queries_survive_type_parameter_specialization"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_leading_zero_time_magnitudes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 checks the first digit of timeunit/timeprecision literals and rejects leading-zero integer or fixed-point spellings whose numeric magnitudes are 1, 10 or 100. IEEE 1800-2023 5.8 permits integer/fixed-point time literals, and 3.14.2.2 permits their use in time declarations. A standalone declaration without queries reproduces the failure; Verilator and Slang 12.0.0 accept these declarations.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::timescale_queries_accept_leading_zero_magnitudes"
       ]
     }
   }

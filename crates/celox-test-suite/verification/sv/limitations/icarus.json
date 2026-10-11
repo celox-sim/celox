@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 76,
+    "compile_error": 78,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -832,6 +832,28 @@
       "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:13: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:13: sorry: modport task/function ports are not yet supported.\n<case>/source_1.sv:2: error: Repeat timeunit does not match the initial timeunit for this scope.\n<case>/source_1.sv:2: error: Repeat timeprecision does not match the initial timeprecision for this scope.\n<case>/source_1.sv:3: syntax error\n<case>/source_1.sv:3: Errors in port declarations.\n<case>/source_1.sv:16: syntax error\n<case>/source_1.sv:15: error: Syntax error in continuous assignment\n",
       "expectation": "Simulation",
       "name": "system_functions::timescale_queries_preserve_interface_scopes_when_flattened",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:2: error: Invalid timeunit constant (1st digit).\n<case>/source_0.sv:2: error: Invalid timeprecision constant (1st digit).\n<case>/source_0.sv:4: error: Invalid timeunit constant (1st digit).\n<case>/source_0.sv:4: error: Invalid timeprecision constant (1st digit).\n<case>/source_0.sv:9: error: Invalid timeunit constant (1st digit).\n<case>/source_0.sv:9: error: Invalid timeprecision constant (1st digit).\n<case>/source_0.sv:13: error: Invalid timeunit constant (1st digit).\n<case>/source_0.sv:13: error: Invalid timeprecision constant (1st digit).\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_accept_leading_zero_magnitudes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: error: Unable to evaluate parameter P value: bool<32>($timeprecision())\n<case>/source_0.sv:5: error: Unable to evaluate parameter U value: bool<32>($timeunit())\n<case>/source_0.sv:6: error: Unable to evaluate parameter P value: bool<32>($timeprecision())\n<case>/source_0.sv:5: error: Unable to evaluate parameter U value: bool<32>($timeunit())\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::timescale_queries_survive_type_parameter_specialization",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

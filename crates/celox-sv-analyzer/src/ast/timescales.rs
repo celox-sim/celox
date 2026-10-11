@@ -42,25 +42,91 @@ struct Unit {
 pub(super) struct Timescales {
     // Identical preprocessed text has identical scope offsets. Content keys
     // remain valid when ParsedSource values move or their trees are dropped.
-    units: HashMap<String, Unit>,
+    units: HashMap<String, Arc<Unit>>,
     definitions: HashMap<String, Scope>,
     packages: HashMap<String, Scope>,
     precision: Option<i32>,
     instantiated: HashSet<String>,
 }
 
+#[cfg(test)]
 thread_local! {
-    static DESIGN: RefCell<Arc<Timescales>> = RefCell::new(Arc::default());
+    static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-pub(super) struct Installed(Arc<Timescales>);
-impl Drop for Installed {
+thread_local! {
+    static DESIGN: RefCell<QueryContext> = RefCell::new(QueryContext::default());
+}
+
+#[derive(Default)]
+struct QueryContext {
+    design: Arc<Timescales>,
+    prepared: Option<PreparedTree>,
+}
+
+struct PreparedTree {
+    address: usize,
+    unit: Arc<Unit>,
+    local: Option<Timescales>,
+}
+
+pub(super) struct Installed<'a> {
+    previous: QueryContext,
+    // A prepared tree's address is used only while this guard borrows it.
+    // The guard must also stay on the thread whose context it installed.
+    _tree: Option<&'a SyntaxTree>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl Drop for Installed<'_> {
     fn drop(&mut self) {
-        DESIGN.with(|current| *current.borrow_mut() = self.0.clone());
+        DESIGN.with(|current| {
+            *current.borrow_mut() = std::mem::take(&mut self.previous);
+        });
     }
 }
-pub(super) fn install(design: Arc<Timescales>) -> Installed {
-    Installed(DESIGN.with(|current| current.replace(design)))
+pub(super) fn install(design: Arc<Timescales>) -> Installed<'static> {
+    install_context(
+        QueryContext {
+            design,
+            prepared: None,
+        },
+        None,
+    )
+}
+
+pub(super) fn install_for_tree(
+    design: Arc<Timescales>,
+    tree: &SyntaxTree,
+) -> Converted<Installed<'_>> {
+    let source = key(tree);
+    // Type overrides change the preprocessed text and offsets. Collect that
+    // tree once per analysis; queries keep the original cross-file design.
+    let local = (!design.units.contains_key(source))
+        .then(|| Timescales::collect(&[(tree, Path::new(""))]))
+        .transpose()?;
+    let unit = design
+        .units
+        .get(source)
+        .or_else(|| local.as_ref().and_then(|local| local.units.get(source)))
+        .unwrap()
+        .clone();
+    let prepared = Some(PreparedTree {
+        address: tree as *const SyntaxTree as usize,
+        unit,
+        local,
+    });
+    Ok(install_context(
+        QueryContext { design, prepared },
+        Some(tree),
+    ))
+}
+
+fn install_context(context: QueryContext, tree: Option<&SyntaxTree>) -> Installed<'_> {
+    Installed {
+        previous: DESIGN.with(|current| current.replace(context)),
+        _tree: tree,
+        _thread: std::marker::PhantomData,
+    }
 }
 
 fn key(tree: &SyntaxTree) -> &str {
@@ -96,10 +162,10 @@ fn exponent(number: &str, suffix: &str) -> Converted<i32> {
         .map_or(Some(number), |(whole, fractional)| {
             fractional.chars().all(|c| c == '0').then_some(whole)
         });
-    let magnitude = match number {
-        Some("1") => 0,
-        Some("10") => 1,
-        Some("100") => 2,
+    let magnitude = match number.and_then(|number| number.parse::<u16>().ok()) {
+        Some(1) => 0,
+        Some(10) => 1,
+        Some(100) => 2,
         _ => {
             return Err(unsupported(
                 "time unit or precision magnitude (expected 1, 10, or 100)",
@@ -295,6 +361,8 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
 
 impl Timescales {
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
+        #[cfg(test)]
+        COLLECTIONS.with(|count| count.set(count.get() + 1));
         let mut design = Self::default();
         // Each bit records whether a design element uses a default (1) or an
         // explicit/inherited setting (2), independently for unit and precision.
@@ -466,10 +534,10 @@ impl Timescales {
             }
             design.units.insert(
                 key(tree).to_string(),
-                Unit {
+                Arc::new(Unit {
                     scale: unit,
                     scopes,
-                },
+                }),
             );
         }
         if specified.contains(&3) {
@@ -485,6 +553,25 @@ impl Timescales {
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
     ) -> Converted<i32> {
+        let source = key(tree);
+        let local = (!self.units.contains_key(source))
+            .then(|| Self::collect(&[(tree, Path::new(""))]))
+            .transpose()?;
+        let unit = self
+            .units
+            .get(source)
+            .or_else(|| local.as_ref().and_then(|local| local.units.get(source)))
+            .unwrap();
+        self.query_in_unit(call, tree, unit, local.as_ref())
+    }
+
+    fn query_in_unit(
+        &self,
+        call: &sv_parser::SystemTfCall,
+        tree: &SyntaxTree,
+        unit: &Unit,
+        local: Option<&Self>,
+    ) -> Converted<i32> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
         system_functions::check_call(
@@ -492,15 +579,6 @@ impl Timescales {
             args.as_deref(),
             system_functions::CallSite::Expression,
         )?;
-        // A type override may reparse the source with different offsets.
-        let local = (!self.units.contains_key(key(tree)))
-            .then(|| Self::collect(&[(tree, Path::new(""))]))
-            .transpose()?;
-        let unit = self
-            .units
-            .get(key(tree))
-            .or_else(|| local.as_ref().and_then(|local| local.units.get(key(tree))))
-            .unwrap();
         let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
         let current = unit
             .scopes
@@ -533,7 +611,7 @@ impl Timescales {
                 "$root" => {
                     let precision = self
                         .precision
-                        .or_else(|| local.as_ref().and_then(|local| local.precision))
+                        .or_else(|| local.and_then(|local| local.precision))
                         .unwrap_or(DEFAULT.precision);
                     Scale {
                         unit: precision,
@@ -568,6 +646,16 @@ impl Timescales {
                         && current.is_some_and(|s| s.instances.contains_key(first))
                     {
                         (current.unwrap(), 0)
+                    } else if !self.instantiated.contains(first)
+                        && let Some(root) = self.definitions.get(first).or_else(|| {
+                            unit.scopes
+                                .iter()
+                                .find(|s| s.kind == ScopeKind::Definition && s.name == *first)
+                        })
+                    {
+                        // A root instance is part of the hierarchy and takes
+                        // precedence over a same-named global package.
+                        (root, 1)
                     } else if hierarchy.nodes.0.is_none()
                         && path.len() == 1
                         && let Some(package) = self.packages.get(first).or_else(|| {
@@ -639,7 +727,18 @@ impl Timescales {
 }
 
 pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Converted<i32> {
-    DESIGN.with(|design| design.borrow().query(call, tree))
+    DESIGN.with(|context| {
+        let context = context.borrow();
+        if let Some(prepared) = &context.prepared
+            && prepared.address == tree as *const SyntaxTree as usize
+        {
+            context
+                .design
+                .query_in_unit(call, tree, &prepared.unit, prepared.local.as_ref())
+        } else {
+            context.design.query(call, tree)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -760,6 +859,118 @@ mod tests {
             .map(|p| p.resolved_value())
             .collect();
         assert_eq!(values, [Some(-6), Some(-9)]);
+    }
+
+    #[test]
+    fn root_instances_take_precedence_over_namesake_packages() {
+        let code = "package P; timeunit 100ns / 10ps; endpackage module P(); timeunit 1us / 1ns; localparam U=$timeunit(P); localparam T=$timeprecision(P); endmodule module Top(); timeunit 1ms / 1us; localparam U=$timeunit(P); localparam T=$timeprecision(P); endmodule";
+        let result = crate::analyze_source(code, Path::new("root_package_query.sv")).unwrap();
+        for module in result.modules() {
+            let values: Vec<_> = module
+                .parameters()
+                .iter()
+                .map(|p| p.resolved_value())
+                .collect();
+            assert_eq!(values, [Some(-6), Some(-9)], "{}", module.name());
+        }
+    }
+
+    #[test]
+    fn interface_macro_queries_are_not_rewritten_into_shared_definitions() {
+        let prefix = "`define SCALE $timeunit()\ninterface I; timeunit 100ps / 10fs; function automatic int u(); return `SCALE; endfunction endinterface";
+        let code =
+            format!("{prefix} module Top(); timeunit 1ms / 1us; localparam U=`SCALE; endmodule");
+        let rewritten =
+            crate::elaborate_interfaces(&[(&code, Path::new("unused_macro_interface.sv"))])
+                .unwrap()
+                .unwrap();
+        let ir =
+            crate::analyze_source(&rewritten[0], Path::new("unused_macro_interface.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-3));
+        let code = format!("{prefix} module Top(); timeunit 1ms / 1us; I i(); endmodule");
+        let error = crate::elaborate_interfaces(&[(&code, Path::new("used_macro_interface.sv"))])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("macro or compiler directive in interface `I`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn prepared_tree_context_is_restored_after_nested_analysis_and_errors() {
+        let a = crate::syntax::parse_source(
+            "module A(); timeunit 1us / 1ns; localparam U=$timeunit(); endmodule",
+            Path::new("a.sv"),
+        )
+        .unwrap();
+        let b = crate::syntax::parse_source(
+            "module B(); timeunit 1ns / 1ps; localparam U=$timeunit(); endmodule",
+            Path::new("b.sv"),
+        )
+        .unwrap();
+        let invalid = crate::syntax::parse_source(
+            "module Invalid(); timeunit 2ns; endmodule",
+            Path::new("invalid.sv"),
+        )
+        .unwrap();
+        let design = Arc::new(
+            Timescales::collect(&[(&a, Path::new("a.sv")), (&b, Path::new("b.sv"))]).unwrap(),
+        );
+        fn call(tree: &SyntaxTree) -> &sv_parser::SystemTfCall {
+            tree.into_iter()
+                .find_map(|node| match node {
+                    RefNode::SystemTfCall(call) => Some(call),
+                    _ => None,
+                })
+                .unwrap()
+        }
+        let _outer = install_for_tree(design.clone(), &a).unwrap();
+        assert_eq!(query(call(&a), &a).unwrap(), -6);
+        {
+            let _inner = install_for_tree(design.clone(), &b).unwrap();
+            assert_eq!(query(call(&b), &b).unwrap(), -9);
+            assert!(install_for_tree(design, &invalid).is_err());
+            assert_eq!(query(call(&b), &b).unwrap(), -9);
+        }
+        assert_eq!(query(call(&a), &a).unwrap(), -6);
+    }
+
+    #[test]
+    fn typed_specializations_collect_time_scopes_once() {
+        let mut code = "timeunit 10ns / 1ps; module Child #(parameter type T = logic)(output T y); timeunit 1us / 1ns;".to_string();
+        for i in 0..16 {
+            code.push_str(&format!("localparam U{i}=$timeunit(); localparam P{i}=$timeprecision(); localparam R{i}=$timeprecision($root);"));
+        }
+        code.push_str("assign y = 1; endmodule");
+        let source = crate::ParsedSource::parse(&code, Path::new("typed_times.sv")).unwrap();
+        let unused = crate::ParsedSource::parse(
+            "module Unused(); timeunit 1ns / 1fs; endmodule",
+            Path::new("unused_times.sv"),
+        )
+        .unwrap();
+        let packages = crate::ParsedSource::analyze_packages(&[&source, &unused]).unwrap();
+        for ty in ["logic [7:0]", "logic [3:0]", "logic [7:0]"] {
+            let before = COLLECTIONS.with(std::cell::Cell::get);
+            let result = source
+                .analyze_module(
+                    "Child",
+                    &HashMap::default(),
+                    &[("T".into(), ty.into())],
+                    &ModuleInterfaces::default(),
+                    &packages,
+                )
+                .unwrap();
+            let after = COLLECTIONS.with(std::cell::Cell::get);
+            assert_eq!(after - before, 1, "recollected time scopes for {ty}");
+            let values: Vec<_> = result.modules()[0]
+                .parameters()
+                .iter()
+                .filter_map(|p| p.resolved_value())
+                .collect();
+            assert_eq!(values, [-6, -9, -15].repeat(16));
+        }
     }
 
     #[test]

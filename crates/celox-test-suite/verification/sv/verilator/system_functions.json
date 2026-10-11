@@ -372,6 +372,29 @@
     },
     {
       "category": "Functions",
+      "detail": "Verilator 5.052 ignores the design-element argument of $timeunit and returns the caller module unit, while $timeprecision returns the design-wide minimum even in a package function. IEEE 1800-2023 20.4.1 requires the selected/current design element scale. A standalone probe with own, child, leaf and package scales reproduces the disagreement without the suite testbench; Slang accepts the sources in SV 2023 mode.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_timescale_scope",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 ignores the design-element argument of $timeunit and returns the caller module unit, while $timeprecision returns the design-wide minimum even in a package function. IEEE 1800-2023 20.4.1 requires the selected/current design element scale. A standalone probe with own, child, leaf and package scales reproduces the disagreement without the suite testbench; Slang accepts the sources in SV 2023 mode.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_accept_leading_zero_magnitudes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Verilator 5.052 parses $unit only as the start of a qualified name and rejects $timeunit($unit). IEEE 1800-2023 20.4.1 explicitly accepts $unit and $root as standalone query arguments; Slang in SV 2023 mode accepts this source.",
       "expectation": "Simulation",
       "known_issue": {
@@ -572,6 +595,29 @@
         "upstream": []
       },
       "name": "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects the standalone $root argument of $timeprecision, expecting a dotted hierarchical name. IEEE 1800-2023 20.4.1 explicitly accepts $root and returns the global simulation time unit. Slang 12.0.0 accepts the argument syntax but separately rejects the constant timescale initializers in this type-specialization case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_timescale_root_argument",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects the standalone $root argument of $timeprecision, expecting a dotted hierarchical name. IEEE 1800-2023 20.4.1 explicitly accepts $root and returns the global simulation time unit. Slang 12.0.0 accepts the argument syntax but separately rejects the constant timescale initializers in this type-specialization case.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_survive_type_parameter_specialization",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,

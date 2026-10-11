@@ -134,6 +134,12 @@ fn resolve_interface_timescale_queries(
                 if !matches!(interface, RefNode::InterfaceDeclaration(_)) {
                     continue;
                 }
+                // Macro expansion origins may point into a shared definition,
+                // not the call in this interface. Leave such text untouched;
+                // check_context rejects copying macro-bearing interfaces.
+                if has_directive(file.text(file.span(interface.clone())?)) {
+                    continue;
+                }
                 for node in interface {
                     match node {
                         RefNode::SystemTfCall(call) if is_query(call, &file.syntax_tree) => {

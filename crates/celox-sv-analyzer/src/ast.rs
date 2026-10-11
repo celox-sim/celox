@@ -215,7 +215,7 @@ impl Source {
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
-        let _timescales = timescales::install(packages.timescales.clone());
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -300,7 +300,7 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
-        let _timescales = timescales::install(packages.timescales.clone());
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
