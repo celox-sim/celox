@@ -3,8 +3,8 @@
 Celox simulates [Veryl](https://veryl-lang.org/) and a **synthesizable subset of
 SystemVerilog**. Both frontends lower into the same intermediate representation,
 so they share scheduling, optimization, backends, and the runtime. A design can
-also mix the two languages: a Veryl top level may instantiate SystemVerilog
-modules.
+also mix the two languages: either language may be the top level, and module
+hierarchies may cross the language boundary in both directions.
 
 The SystemVerilog frontend is a Rust API behind the `systemverilog` Cargo
 feature of the `celox` crate. The TypeScript package and the Vite plugin
@@ -31,8 +31,36 @@ let mut sim = Simulator::from_sv_sources(
 .build()?;
 ```
 
-`Simulator::from_mixed_sources` combines Veryl sources with SystemVerilog
-children.
+`Simulator::from_mixed_sources` combines both source lists in one simulation.
+Veryl instantiates an SV module with `$sv::Module`; SV instantiates a Veryl
+module by its name. A Veryl module and an SV module may share a name;
+`$sv::Module` selects the SV definition. Numeric module parameters are resolved by the owning
+frontend, including parameters of Veryl children instantiated from SV.
+
+Interfaces and `input` / `output` modports may cross the boundary in either
+direction. In Veryl, use `inst bus: $sv::Bus;` and
+`bus: modport $sv::Bus::slave` for an SV interface. SV can instantiate an
+interface declared in Veryl and connect it to either language's modules.
+Interface parameters, instance arrays and generic SV interface ports are
+bound to the actual interface. Logic inside an SV interface instantiated
+from Veryl runs in the SV frontend.
+
+Declared parameter widths retain dependencies on earlier interface parameters,
+including when SV supplies named overrides in a different order.
+Constant functions used by interface defaults are expanded into declaration
+expressions when the native analyzer can represent their bodies that way.
+Header-dependent functions with statement bodies that cannot be expressed in
+the contract, such as loops, produce an unsupported diagnostic. Functions with
+header-dependent formal or return widths also produce an unsupported diagnostic;
+the contract cannot represent those symbolic type conversions yet. Declaration
+casts whose target size depends on interface parameters and constant functions
+that cannot be lowered symbolically are also rejected instead of retaining a
+value computed from default parameters.
+
+The bridge exchanges declaration contracts and links native symbolic modules;
+it does not require the Veryl-to-SV emitter. Cross-language interface function
+calls and function `import` / `export` modports are not supported yet. They
+remain available within their owning language's supported subset.
 
 ## What is supported
 

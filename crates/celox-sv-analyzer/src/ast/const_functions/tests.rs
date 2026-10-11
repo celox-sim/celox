@@ -41,6 +41,7 @@ fn fixed_ty(width: usize, signed: bool) -> crate::ir::Type {
 
 fn function(name: &str, params: Vec<(&str, crate::ir::Type)>, body: Vec<Stmt>) -> ConstantFunction {
     ConstantFunction {
+        automatic: false,
         params: params
             .into_iter()
             .map(|(name, ty)| (name.into(), ty))

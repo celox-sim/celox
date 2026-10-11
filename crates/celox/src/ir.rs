@@ -397,6 +397,10 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
     #[error("Signal is not an event: {path}")]
     NotAnEvent { path: String },
+    #[error(
+        "Signal {path} was removed by dead store elimination; nothing in the design reads it, so declare it with `live_signal()` or use `DeadStorePolicy::Off`"
+    )]
+    DeadStoreEliminated { path: String },
 }
 
 /// Internal consistency failure while consuming the frontend projection into

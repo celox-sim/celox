@@ -29,7 +29,7 @@ pub(super) fn dpi_imports_from_module_node(
     Ok(imports)
 }
 
-fn dpi_import(
+pub(super) fn dpi_import(
     declaration: &sv_parser::DpiImportExport,
     tree: &SyntaxTree,
 ) -> Result<DpiImport, AnalyzerError> {
@@ -90,6 +90,11 @@ fn dpi_import(
                 return Err(unsupported("DPI-C output, inout or ref argument"));
             }
             let Some((identifier, dimensions, default)) = declarator else {
+                // sv-parser represents an empty `()` as one unnamed,
+                // empty implicit-type port, rather than an empty list.
+                if tree.get_str(item).is_none_or(|text| text.trim().is_empty()) {
+                    continue;
+                }
                 return Err(unsupported("DPI-C argument without a name"));
             };
             if !dimensions.is_empty() {

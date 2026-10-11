@@ -345,6 +345,25 @@ pub struct ProcessEventCounters<A> {
     pub falls: A,
 }
 
+/// Controls which combinational stores dead store elimination preserves.
+///
+/// The policy is part of the runtime contract: host-side handles resolve
+/// only to state the policy guarantees to keep, so a design that happens to
+/// read a signal today cannot make a testbench depend on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum DeadStorePolicy {
+    /// Keep all stores (no dead store elimination). Default for user-facing builds.
+    #[default]
+    Off,
+    /// Eliminate stores except those explicitly marked live via `live_signal()`
+    /// and those loaded by execution units.
+    PreserveListedSignals,
+    /// Eliminate stores except those to top-module ports and those loaded by EUs.
+    PreserveTopPorts,
+    /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
+    PreserveAllPorts,
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -363,6 +382,12 @@ pub struct RuntimeSchema<A> {
     /// derived from the other state, so state files recompute rather than
     /// compare them.
     pub comb_writes: HashSet<A>,
+    /// Dead store elimination policy the program was compiled with. Together
+    /// with `live_signals` and the design it decides which combinationally
+    /// written state the host may observe.
+    pub dead_store_policy: DeadStorePolicy,
+    /// State explicitly declared observable for dead store elimination.
+    pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
@@ -378,6 +403,8 @@ impl<A> Default for RuntimeSchema<A> {
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
+            dead_store_policy: DeadStorePolicy::Off,
+            live_signals: HashSet::default(),
             processes: Vec::new(),
             process_event_counters: Vec::new(),
         }

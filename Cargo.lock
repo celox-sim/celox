@@ -561,6 +561,7 @@ dependencies = [
  "clap",
  "fxhash",
  "libc",
+ "object 0.37.3",
  "pathdiff",
  "serde",
  "serde_json",

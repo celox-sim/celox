@@ -2,6 +2,8 @@ mod builder;
 #[cfg(feature = "host-runtime")]
 mod checkpoint;
 mod error;
+#[cfg(feature = "systemverilog")]
+pub(crate) mod mixed;
 #[cfg(feature = "host-runtime")]
 mod state_file;
 
@@ -1304,6 +1306,86 @@ mod host {
             Ok(())
         }
 
+        /// Advance several events as one coincident edge.
+        ///
+        /// Every triggered domain samples the state settled before the edge,
+        /// then all of them update, then combinational logic settles once.
+        /// This is the behaviour of clocks that share an edge in hardware,
+        /// such as a divided clock and its source, which sequential
+        /// [`Self::tick`] calls cannot express: each of them would settle
+        /// the design between the domains. Events of the same domain are
+        /// applied once. A single event behaves like [`Self::tick`].
+        pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
+            use celox_runtime::backend::EventHandle;
+            // Deduplicate domains before requiring split kernels: a design
+            // with a single domain has no split kernels, and aliases of one
+            // domain are an ordinary tick.
+            let mut unique: Vec<(crate::ir::AbsoluteAddr, B::Event)> =
+                Vec::with_capacity(events.len());
+            for event in events {
+                let addr = self.backend.id_to_addr_slice()[event.id()];
+                let canonical = self.program.design.events.canonical(addr);
+                if unique.iter().all(|(existing, _)| *existing != canonical) {
+                    unique.push((canonical, *event));
+                }
+            }
+            // Split kernels exist for every active domain once a design has
+            // more than one. A domain without them drives no FF, unless the
+            // design has at most one active domain and no split kernels at
+            // all; then ticking each event in turn is exact, because at most
+            // one of them changes state.
+            let mut domains = Vec::with_capacity(unique.len());
+            let mut unsplit = Vec::new();
+            for (canonical, event) in unique {
+                match (
+                    self.backend.resolve_eval_only_event(&canonical),
+                    self.backend.resolve_apply_event(&canonical),
+                ) {
+                    (Some(eval_only), Some(apply)) => domains.push((event, eval_only, apply)),
+                    _ => unsplit.push(event),
+                }
+            }
+            match domains.as_slice() {
+                [] => {
+                    for event in unsplit {
+                        self.tick(event)?;
+                    }
+                    return Ok(());
+                }
+                [(event, _, _)] => return self.tick(*event),
+                _ => {}
+            }
+            let timing_enabled = self.diagnostics.tick_timing_every.is_some();
+            let mut eval_comb_ns = 0u64;
+            let mut eval_apply_ns = 0u64;
+            if self.dirty {
+                let start = timing_enabled.then(crate::timing::now);
+                self.eval_comb_checked()?;
+                if let Some(start) = start {
+                    eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+                }
+                self.dirty = false;
+            }
+            let start = timing_enabled.then(crate::timing::now);
+            for (_, eval_only, _) in &domains {
+                self.eval_only_ff_at_checked(*eval_only)?;
+            }
+            for (_, _, apply) in &domains {
+                self.apply_ff_at_checked(*apply)?;
+            }
+            if let Some(start) = start {
+                eval_apply_ns = eval_apply_ns.saturating_add(start.elapsed().as_nanos() as u64);
+            }
+            let start = timing_enabled.then(crate::timing::now);
+            self.eval_comb_checked()?;
+            if let Some(start) = start {
+                eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+                self.record_tick_timing(eval_apply_ns, eval_comb_ns);
+            }
+            self.dirty = false;
+            Ok(())
+        }
+
         /// Advance one event while deferring the post-edge combinational settle.
         /// Native testbenches use this between observable expressions so the
         /// preceding comb phase and this FF phase can share one compiled function.
@@ -1347,9 +1429,15 @@ mod host {
 
         /// Resolves a signal path into a performance-optimized [`SignalRef`].
         /// This handle allows for direct memory access without `HashMap` lookups.
+        ///
+        /// # Panics
+        ///
+        /// Panics when the path does not resolve, including when the dead
+        /// store elimination policy does not guarantee the signal; see
+        /// [`Self::try_signal`].
         pub fn signal(&self, path: &str) -> SignalRef {
-            let addr = self.program.get_addr(&[], &[path]).unwrap();
-            self.backend.resolve_signal(&addr)
+            self.try_signal(path)
+                .unwrap_or_else(|error| panic!("cannot resolve signal: {error}"))
         }
 
         /// Resolve a port name to an event handle.
@@ -1360,8 +1448,7 @@ mod host {
 
         /// Try to resolve a signal path. Returns `Err` if the path is not found or ambiguous.
         pub fn try_signal(&self, path: &str) -> Result<SignalRef, crate::ir::AddrLookupError> {
-            let addr = self.program.get_addr(&[], &[path])?;
-            Ok(self.backend.resolve_signal(&addr))
+            self.try_child_signal(&[], path)
         }
 
         /// Try to resolve a port name to an event handle.
@@ -1518,12 +1605,21 @@ mod host {
             instance_id: crate::ir::InstanceId,
         ) -> Vec<NamedSignal> {
             let instance = self.program.design.instance(instance_id).unwrap();
+            let in_root = self
+                .program
+                .design
+                .root_instance()
+                .is_some_and(|root| root.id == instance.id);
 
             let mut result = Vec::new();
             for address in instance.state_addresses() {
                 let variable = self.program.design.variable(address).unwrap();
                 // Skip variables whose VarPath is ambiguous (None in the path index).
                 if !instance.resolves_path_to(&variable.path, *address) {
+                    continue;
+                }
+                // Enumeration exposes the same handles path lookup would.
+                if !self.observable_under_dead_store_policy(*address, in_root) {
                     continue;
                 }
                 let name = variable.path.join(".");
@@ -1607,18 +1703,70 @@ mod host {
 
         /// Resolves a signal inside a child instance.
         pub fn child_signal(&self, instance_path: &[(&str, usize)], var: &str) -> SignalRef {
-            let addr = self.program.get_addr(instance_path, &[var]).unwrap();
-            self.backend.resolve_signal(&addr)
+            self.try_child_signal(instance_path, var)
+                .unwrap_or_else(|error| panic!("cannot resolve signal: {error}"))
         }
 
         /// Try to resolve a signal inside a child instance.
+        ///
+        /// [`Self::named_signals`], [`Self::instance_signals`] and
+        /// [`Self::named_hierarchy`] omit the same signals.
+        ///
+        /// Under a dead store elimination policy, only state the policy
+        /// guarantees to keep resolves: ports the policy preserves, signals
+        /// listed with `live_signal()`, and state no combinational logic
+        /// writes. Anything else may have lost its stores, and a handle to it
+        /// would only read memory that never updates.
         pub fn try_child_signal(
             &self,
             instance_path: &[(&str, usize)],
             var: &str,
         ) -> Result<SignalRef, crate::ir::AddrLookupError> {
             let addr = self.program.get_addr(instance_path, &[var])?;
+            let in_root = self
+                .program
+                .design
+                .root_instance()
+                .is_some_and(|root| root.state_addresses().contains(&addr));
+            if !self.observable_under_dead_store_policy(addr, in_root) {
+                let path = instance_path
+                    .iter()
+                    .map(|(name, index)| format!("{name}[{index}]."))
+                    .chain(std::iter::once(var.to_string()))
+                    .collect::<String>();
+                return Err(crate::ir::AddrLookupError::DeadStoreEliminated { path });
+            }
             Ok(self.backend.resolve_signal(&addr))
+        }
+
+        /// Whether the dead store elimination policy guarantees that `addr`
+        /// stays current. `in_root` says whether it belongs to the top
+        /// instance, whose ports `PreserveTopPorts` keeps.
+        fn observable_under_dead_store_policy(
+            &self,
+            addr: crate::ir::AbsoluteAddr,
+            in_root: bool,
+        ) -> bool {
+            use crate::DeadStorePolicy;
+            let schema = &self.program.runtime_schema;
+            if schema.dead_store_policy == DeadStorePolicy::Off
+                || !schema.comb_writes.contains(&addr)
+                || schema.live_signals.contains(&addr)
+                || schema.testbench_read_roots.contains(&addr)
+            {
+                return true;
+            }
+            let is_port = self
+                .program
+                .design
+                .variable(&addr)
+                .is_some_and(|variable| variable.var_kind.is_port());
+            match schema.dead_store_policy {
+                DeadStorePolicy::Off => true,
+                DeadStorePolicy::PreserveListedSignals => false,
+                DeadStorePolicy::PreserveTopPorts => in_root && is_port,
+                DeadStorePolicy::PreserveAllPorts => is_port,
+            }
         }
 
         /// Returns the full instance hierarchy starting from the top module.
@@ -1719,7 +1867,7 @@ mod host {
             SimulatorBuilder::<Simulator>::from_sv_sources(sources, top)
         }
 
-        /// Build a simulator from a Veryl hierarchy with SystemVerilog children.
+        /// Build a mixed Veryl/SystemVerilog hierarchy with a top in either language.
         #[cfg(feature = "systemverilog")]
         pub fn from_mixed_sources<'a>(
             sources: Vec<(&'a str, &'a std::path::Path)>,
