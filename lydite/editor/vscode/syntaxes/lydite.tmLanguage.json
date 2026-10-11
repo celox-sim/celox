@@ -100,7 +100,7 @@
     "declaration-modifiers": {
       "patterns": [
         {
-          "match": "(?:^|(?<=[{};(,]))\\s*(input|output|state|parameter|observation)\\b(?=\\s+[A-Za-z_])",
+          "match": "(?:^|(?<=[{};(,])|(?<=\"))\\s*(input|output|state|parameter|observation)\\b(?=\\s+[A-Za-z_])",
           "captures": {
             "1": { "name": "storage.modifier.lydite" }
           }
@@ -110,7 +110,7 @@
     "sections": {
       "patterns": [
         {
-          "match": "(?:^|(?<=[{};]))\\s*(accept|all|any|assume|bind|binding|bound|can_step|cases|claim|commit|component|components|composition|compositions|context|contract|cover_depth|depends|enabled|endpoints|ensure|example|examples|expect|execution|expectation|exists|forall|from|guard|hold_when|implementation|impl|initial|init|inputs|instances|invariant|lemma|let|members|mode|next|no_comb_path|observe|observations|operation|operations|outputs|parameter|parameters|partition|partitioning|pending|post|postcondition|pre|precondition|progress|proof|quantifiers|rank|reset|reset_input|responses|result|rhs|spec|specs|split|state|states|steps|structure|target|terminal|to|trace|wires)\\b(?!\\s*(?:=(?!=)|:))",
+          "match": "(?:^|(?<=[{};])|(?<=\"))\\s*(accept|all|any|assume|bind|binding|bound|can_step|cases|claim|commit|component|components|composition|compositions|context|contract|cover_depth|depends|enabled|endpoints|ensure|example|examples|expect|execution|expectation|exists|forall|from|guard|hold_when|implementation|impl|initial|init|inputs|instances|invariant|lemma|let|members|mode|next|no_comb_path|observe|observations|operation|operations|outputs|parameter|parameters|partition|partitioning|pending|post|postcondition|pre|precondition|progress|proof|quantifiers|rank|reset|reset_input|responses|result|rhs|spec|specs|split|state|states|steps|structure|target|terminal|to|trace|wires)\\b(?!\\s*(?:=(?!=)|:|\\.))",
           "captures": {
             "1": { "name": "keyword.other.lydite" }
           }
@@ -130,11 +130,12 @@
     "types": {
       "patterns": [
         {
-          "match": "(:)\\s*(bool)\\b",
-          "captures": {
-            "1": { "name": "punctuation.separator.key-value.lydite" },
-            "2": { "name": "storage.type.lydite" }
-          }
+          "match": "(?<=\\b(?:input|output|state|parameter|observation)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*:\\s*)bool\\b",
+          "name": "storage.type.lydite"
+        },
+        {
+          "match": "(?<=\\w\\s*:\\s*)bool\\b(?=\\s*;)",
+          "name": "storage.type.lydite"
         },
         {
           "match": "\\b(bv|mem)\\s*(<)\\s*(\\d+)(?:\\s*(,)\\s*(\\d+))?\\s*(>)",
@@ -194,7 +195,10 @@
     },
     "frame-variables": {
       "patterns": [
-        { "match": "\\b(pre|goal|lhs|rhs)\\b", "name": "variable.language.lydite" }
+        {
+          "match": "(?<![A-Za-z0-9_.])(pre|goal|lhs|rhs)\\b(?!\\s*(?:=(?!=)|:|\\.))",
+          "name": "variable.language.lydite"
+        }
       ]
     },
     "operators": {

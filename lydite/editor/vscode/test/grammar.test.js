@@ -152,7 +152,7 @@ spec Counter(output count: bv<4>) {
   }
 }
 composition Completed(output count: bv<4>) {
-  use counter: Counter(count: count);
+  use counter: Counter(flag: bool);
 }
 implementation {
   composition Completed;
@@ -183,6 +183,8 @@ component Counter {
   invariant o.count == s.value;
   steps { add = n.value == s.value + i.amount; }
   structure { no_comb_path isolated { from i.amount; to o.value; } }
+  state pre: bool;
+  invariant s.pre == false;
   operation advance { expect n.value == s.value + 1u4; }
   example small {
     expect positive;
@@ -193,7 +195,7 @@ component Counter {
     exists amount: bv<4>;
     execution not_exists;
     initial { value = 0u4; }
-    trace { add(amount: 3u4) => true; }
+    trace { add(flag: bool) => true; }
   }
 }`;
 
@@ -206,6 +208,8 @@ samples.recovery = `design "Recovery" {
   input bool: bool;
   inputs { state: bool; }
   state design: bool;
+  binding true
+    && impl.x == spec.x;
   reset {
     design = false;
   }
@@ -215,6 +219,9 @@ samples.recovery = `design "Recovery" {
 // A header being typed keeps its string scope without leaking to the next line.
 samples.header = `design "Unfinished
 input rst: bool;`;
+
+// An unbraced document may keep its first entry on the header line.
+samples.inline = `specification "Inline" component Counter { init true; invariant true; steps { tick = true; } }`;
 
 // [sample, line, token, occurrence, expected innermost scope]
 const expectations = [
@@ -291,7 +298,7 @@ const expectations = [
   ['specification', '    pre true;', 'pre', 1, 'keyword.other.lydite'],
   ['specification', '    split { pc = range(s.value, 0, 2); }', 'split', 1, 'keyword.other.lydite'],
   ['specification', '    split { pc = range(s.value, 0, 2); }', 'range', 1, 'support.function.builtin.lydite'],
-  ['specification', '  use counter: Counter(count: count);', 'use', 1, 'keyword.control.lydite'],
+  ['specification', '  use counter: Counter(flag: bool);', 'use', 1, 'keyword.control.lydite'],
   ['specification', '  composition Completed;', 'composition', 1, 'keyword.other.lydite'],
   ['specification', '  reset_input rst;', 'reset_input', 1, 'keyword.other.lydite'],
   ['specification', '    bind counter { value = s.count; }', 'bind', 1, 'keyword.other.lydite'],
@@ -319,8 +326,22 @@ const expectations = [
   ['expectations', '    execution not_exists;', 'execution', 1, 'keyword.other.lydite'],
   ['expectations', '    execution not_exists;', 'not_exists', 1, 'constant.language.lydite'],
   // A user operation sharing a built-in name is an invocation, not a built-in.
-  ['expectations', '    trace { add(amount: 3u4) => true; }', 'add', 1, 'entity.name.function.lydite'],
-  ['expectations', '    trace { add(amount: 3u4) => true; }', '=>', 1, 'keyword.operator.lydite'],
+  ['expectations', '    trace { add(flag: bool) => true; }', 'add', 1, 'entity.name.function.lydite'],
+  ['expectations', '    trace { add(flag: bool) => true; }', '=>', 1, 'keyword.operator.lydite'],
+  // Connection and invocation values are identifiers, not type positions.
+  ['expectations', '    trace { add(flag: bool) => true; }', 'bool', 1, 'variable.other.lydite'],
+  ['specification', '  use counter: Counter(flag: bool);', 'bool', 1, 'variable.other.lydite'],
+  // A field named after a proof frame variable stays an ordinary variable.
+  ['expectations', '  state pre: bool;', 'pre', 1, 'variable.other.lydite'],
+  ['expectations', '  state pre: bool;', 'bool', 1, 'storage.type.lydite'],
+  ['expectations', '  invariant s.pre == false;', 'pre', 1, 'variable.other.lydite'],
+  // A line-start dotted reference keeps its namespace qualifier.
+  ['recovery', '    && impl.x == spec.x;', 'impl', 1, 'variable.language.namespace.lydite'],
+  ['recovery', '    && impl.x == spec.x;', 'spec', 1, 'variable.language.namespace.lydite'],
+  // An unbraced document may start its entries on the header line.
+  ['inline', 'specification "Inline" component Counter { init true; invariant true; steps { tick = true; } }', 'specification', 1, 'keyword.other.document.lydite'],
+  ['inline', 'specification "Inline" component Counter { init true; invariant true; steps { tick = true; } }', 'component', 1, 'keyword.other.lydite'],
+  ['inline', 'specification "Inline" component Counter { init true; invariant true; steps { tick = true; } }', 'Counter', 1, 'entity.name.section.lydite'],
   // An unfinished type stays local, so later lines keep their scopes.
   ['recovery', '  input half: bv<8', 'bv', 1, 'variable.other.lydite'],
   ['recovery', '  input half: bv<8', '8', 1, 'constant.numeric.integer.lydite'],
@@ -369,7 +390,11 @@ async function run() {
     for (const [lineIndex, line] of result.lines.entries()) {
       for (const token of result.tokens[lineIndex]) {
         const text = line.slice(token.startIndex, token.endIndex);
-        assert(token.scopes[token.scopes.length - 1] !== 'source.lydite' || !/[A-Za-z_]/.test(text), `${path.relative(lydite, file)}:${lineIndex + 1} leaves ${JSON.stringify(text)} unscoped`);
+        const scope = token.scopes[token.scopes.length - 1];
+        assert(scope !== 'source.lydite' || !/[A-Za-z_]/.test(text), `${path.relative(lydite, file)}:${lineIndex + 1} leaves ${JSON.stringify(text)} unscoped`);
+        // A keyword never qualifies a dotted reference, so no keyword scope may
+        // sit directly before a dot.
+        assert(!/^(?:keyword|storage|constant)\./.test(scope) || line[token.endIndex] !== '.', `${path.relative(lydite, file)}:${lineIndex + 1} colors ${JSON.stringify(text)} as ${scope} before a dot`);
       }
     }
   }
