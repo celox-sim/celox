@@ -39,6 +39,9 @@ pub(super) struct ScopeSymbols {
     pub initial_processes: Vec<InitialProcess>,
     /// The names imports make visible, and the qualified names they denote.
     pub aliases: HashMap<String, String>,
+    /// The names the imports of a generate block bind there to another
+    /// declaration than outside it, by the source offset of the block.
+    pub generate_imports: HashMap<usize, HashMap<String, String>>,
 }
 
 thread_local! {
@@ -103,7 +106,7 @@ pub(super) fn imported() -> Arc<ScopeSymbols> {
 
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
-fn split_marker(key: &str) -> Option<(&str, &str)> {
+pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
     const FIXED: [&str; 12] = [
         "__parameter::local::",
         "__parameter::unbounded::",
@@ -492,6 +495,7 @@ impl ScopeSymbols {
                 })
                 .collect(),
             aliases: HashMap::default(),
+            generate_imports: HashMap::default(),
         }
     }
 }
@@ -559,6 +563,15 @@ impl Renamer<'_> {
                 name: self.name(&name),
                 args: args.into_iter().map(|arg| self.const_expr(arg)).collect(),
                 site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.const_expr(*expr)),
+                width,
+                signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op,

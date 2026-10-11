@@ -597,6 +597,13 @@ pub enum ConstExpr {
         lsb: Box<ConstExpr>,
         signed: bool,
     },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
+        signed: bool,
+    },
     Function {
         name: String,
         args: Vec<ConstExpr>,
@@ -944,6 +951,15 @@ impl From<ast::ConstExpr> for ConstExpr {
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
+            ast::ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
+            },
             ast::ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: op.into(),
                 expr: Box::new((*expr).into()),
@@ -990,6 +1006,15 @@ impl From<ConstExpr> for ast::ConstExpr {
                 name,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ast::ConstExpr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
             },
             ConstExpr::Unary { op, expr } => ast::ConstExpr::Unary {
                 op: op.into(),

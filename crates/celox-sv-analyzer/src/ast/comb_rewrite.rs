@@ -17,11 +17,11 @@ pub(super) fn expr_static_width(
         Expr::Literal(literal) => {
             typecheck::parse_integral_literal(literal).map(|literal| literal.width)
         }
-        Expr::Select { msb, lsb, .. } => {
-            let msb = eval_ast_const_expr(msb, &packed_dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(lsb, &packed_dimensions.const_env)?;
-            usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
-        }
+        Expr::Select { msb, lsb, .. } => typecheck::select_range_width(
+            &msb.clone().into(),
+            &lsb.clone().into(),
+            &packed_dimensions.const_env,
+        ),
         Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
             width.checked_add(expr_static_width(part, packed_dimensions)?)
         }),

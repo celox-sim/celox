@@ -281,7 +281,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             ConstExpr::Function { args, .. } => {
                 args.iter_mut().for_each(|arg| self.rename_const(arg));
             }
-            ConstExpr::Unary { expr, .. } => self.rename_const(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.rename_const(expr)
+            }
             ConstExpr::Binary { left, right, .. } => {
                 self.rename_const(left);
                 self.rename_const(right);

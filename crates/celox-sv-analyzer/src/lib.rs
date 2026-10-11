@@ -169,6 +169,15 @@ pub fn elaborate_interfaces(
     ast::interfaces::elaborate_interfaces(sources)
 }
 
+/// Expand interfaces using the design roots selected by the hierarchy
+/// elaborator when resolving queries before flattening.
+pub fn elaborate_interfaces_with_roots(
+    sources: &[(&str, &Path)],
+    roots: &[&str],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces_with_roots(sources, Some(roots))
+}
+
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
     ast::with_call_sites(|| {

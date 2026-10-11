@@ -45,7 +45,7 @@ fn erase_sites(expr: &mut ConstExpr) {
             erase_sites(expr);
             erase_sites(bit);
         }
-        ConstExpr::Unary { expr, .. } => erase_sites(expr),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => erase_sites(expr),
         ConstExpr::Binary { left, right, .. } => {
             erase_sites(left);
             erase_sites(right);
@@ -250,4 +250,69 @@ fn compare_lazy_and_copied_scalar_call_contexts() {
         lazy.sort_by(f64::total_cmp);
         println!("{count},{count},{:.3},{:.3}", copied[3], lazy[3]);
     }
+}
+
+#[test]
+fn nested_array_indices_keep_continuous_drivers_disjoint() {
+    // A parser-level regression: the index must select an 8-bit element,
+    // otherwise the analyzer incorrectly diagnoses overlapping net drivers.
+    let code = r#"
+    module Top(input logic [7:0] data, input logic [1:0] idx,
+               output logic [7:0] y, output wire [3:0] bits);
+        localparam logic [7:0] map [2] = '{1, 3};
+        wire [7:0] mem [4];
+        assign mem[map[1]] = data;
+        assign mem[0] = 8'h10;
+        assign mem[1] = 8'h21;
+        assign mem[2] = 8'h32;
+        assign y = mem[idx];
+        assign bits[map[1]] = data[0];
+        assign bits[2:0] = 3'b101;
+    endmodule
+  "#;
+    let ir = crate::analyze_source(code, Path::new("nested_net_index.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let assignment = module.assignments().iter().find(|assignment| {
+        matches!(assignment.lhs_value(), crate::ir::LValue::Select { name, .. } if name == "mem")
+    }).unwrap();
+    let crate::ir::LValue::Select { msb, lsb, .. } = assignment.lhs_value() else {
+        panic!("expected a selected net target");
+    };
+    let constants = module
+        .parameters()
+        .iter()
+        .filter_map(|parameter| Some((parameter.name().to_owned(), parameter.resolved_value()?)))
+        .collect();
+    // The array localparam is retained as a constant driver in the IR, so
+    // these bounds can remain symbolic. Its selected element is still 8 bits.
+    assert_eq!(typecheck::select_range_width(msb, lsb, &constants), Some(8));
+}
+
+#[test]
+fn concat_slice_indices_accept_dynamic_array_elements() {
+    // The parser accepts standard concatenation selections independently
+    // of Icarus, which does not parse that syntax.
+    let code = r#"
+        module Top(input logic idx, input logic signed [7:0] data,
+                   output logic [7:0] joined);
+            logic signed [7:0] map [2];
+            logic [7:0] mem [-2:1];
+            always_comb begin
+                map[0] = data;
+                map[1] = ~data;
+                mem[-2] = 8'h10;
+                mem[-1] = 8'h20;
+                mem[0] = 8'h30;
+                mem[1] = 8'h40;
+            end
+            assign joined = mem[$signed({2'b00, map[idx]}[1:0])];
+        endmodule
+    "#;
+    let ir = crate::analyze_source(code, Path::new("nested_concat_index.sv")).unwrap();
+    assert!(
+        ir.modules()[0]
+            .assignments()
+            .iter()
+            .any(|assignment| assignment.lhs() == "joined")
+    );
 }

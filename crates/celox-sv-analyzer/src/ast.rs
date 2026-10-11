@@ -55,6 +55,7 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -78,7 +79,7 @@ use constant_folding::{
 use constants::{
     binary_op_from_symbol, bind_generate_parameter, const_expr_from_constant_param_with_env,
     const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
-    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_lvalue_const,
+    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_index_const,
     left_associate_expr_binary, next_genvar_value, primary_literal_text,
     substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
     substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
@@ -214,6 +215,7 @@ impl Source {
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -298,6 +300,7 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -1014,6 +1017,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.
@@ -1642,6 +1646,13 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         msb: Box<ConstExpr>,
         lsb: Box<ConstExpr>,
+        signed: bool,
+    },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
         signed: bool,
     },
     Function {

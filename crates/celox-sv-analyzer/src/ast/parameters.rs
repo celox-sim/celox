@@ -66,7 +66,9 @@ pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String
         ConstExpr::Function { args, .. } => {
             args.iter().any(|arg| contains_unbounded_operand(arg, env))
         }
-        ConstExpr::Unary { expr, .. } => contains_unbounded_operand(expr, env),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            contains_unbounded_operand(expr, env)
+        }
         ConstExpr::Binary { left, right, .. } => {
             contains_unbounded_operand(left, env) || contains_unbounded_operand(right, env)
         }
@@ -1092,6 +1094,89 @@ pub(super) fn parameter_value_env(
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, Expr> {
+    parameter_value_env_filtered(parameters, const_env, None)
+}
+
+/// Materialize only referenced values and their initializer dependencies.
+/// Preserve the full declaration-order type prefix, including unused parameters.
+pub(super) fn parameter_value_env_for_references(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+    references: &HashSet<String>,
+) -> HashMap<String, Expr> {
+    let mut needed: HashSet<String> = parameters
+        .iter()
+        .filter(|parameter| references.contains(parameter.name()))
+        .map(|parameter| parameter.name().to_string())
+        .collect();
+    if needed.is_empty() {
+        return HashMap::default();
+    }
+    if needed.iter().all(|name| const_env.contains_key(name)) {
+        return parameter_value_env_filtered(parameters, const_env, Some(&needed));
+    }
+    // Include all declarations of a name so the projection preserves even
+    // repeated-name prefixes used during preliminary collection.
+    let mut by_name: HashMap<&str, Vec<&Parameter>> = HashMap::default();
+    for parameter in parameters {
+        by_name.entry(parameter.name()).or_default().push(parameter);
+    }
+    let mut pending: Vec<_> = needed.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        // The original value environment uses an inherited number directly.
+        // Its initializer's values are not needed; types are handled below.
+        if const_env.contains_key(&name) {
+            continue;
+        }
+        let Some(declarations) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        for parameter in declarations {
+            let mut expressions: Vec<_> = parameter.value().into_iter().collect();
+            while let Some(expr) = expressions.pop() {
+                match expr {
+                    ConstExpr::Ident(name) => {
+                        if by_name.contains_key(name.as_str()) && needed.insert(name.clone()) {
+                            pending.push(name.clone());
+                        }
+                    }
+                    ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                        expressions.extend([&**expr, &**msb, &**lsb]);
+                    }
+                    ConstExpr::Select { expr, bit } => {
+                        expressions.push(expr);
+                        expressions.push(bit);
+                    }
+                    ConstExpr::Function { args, .. } => expressions.extend(args),
+                    ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                        expressions.push(expr)
+                    }
+                    ConstExpr::Binary { left, right, .. } => {
+                        expressions.push(left);
+                        expressions.push(right);
+                    }
+                    ConstExpr::Mux {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        expressions.push(condition);
+                        expressions.push(then_expr);
+                        expressions.push(else_expr);
+                    }
+                    ConstExpr::Literal(_) => {}
+                }
+            }
+        }
+    }
+    parameter_value_env_filtered(parameters, const_env, Some(&needed))
+}
+
+fn parameter_value_env_filtered(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+    needed: Option<&HashSet<String>>,
+) -> HashMap<String, Expr> {
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
@@ -1099,7 +1184,11 @@ pub(super) fn parameter_value_env(
             .value()
             .is_some_and(|value| is_unbounded(value, const_env))
         {
-            values.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+            if needed.is_none_or(|needed| needed.contains(parameter.name())) {
+                #[cfg(test)]
+                PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+                values.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+            }
             continue;
         }
         let inferred_type = parameter.value().and_then(|value| {
@@ -1115,6 +1204,12 @@ pub(super) fn parameter_value_env(
         if let Some(width) = width {
             parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
         }
+
+        if needed.is_some_and(|needed| !needed.contains(parameter.name())) {
+            continue;
+        }
+        #[cfg(test)]
+        PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
 
         let mut value = if let Some(value) = const_env.get(parameter.name()).copied() {
             if let Some(width) = width {
@@ -1227,6 +1322,15 @@ fn replace_oob_const_selects_with_unknown(
                 .map(|arg| replace_oob_const_selects_with_unknown(arg, const_env))
                 .collect(),
         },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
+            width,
+            signed,
+        },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
@@ -1270,7 +1374,9 @@ fn const_expr_contains_unknown_literal(expr: &ConstExpr) -> bool {
             const_expr_contains_unknown_literal(expr) || const_expr_contains_unknown_literal(bit)
         }
         ConstExpr::Function { args, .. } => args.iter().any(const_expr_contains_unknown_literal),
-        ConstExpr::Unary { expr, .. } => const_expr_contains_unknown_literal(expr),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_expr_contains_unknown_literal(expr)
+        }
         ConstExpr::Binary { left, right, .. } => {
             const_expr_contains_unknown_literal(left) || const_expr_contains_unknown_literal(right)
         }
@@ -1306,6 +1412,15 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             msb: (*bit).clone(),
             lsb: *bit,
             signed: false,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(const_expr_to_expr(*expr)),
+            width,
+            signed,
         },
         ConstExpr::Function { name, args, .. } => Expr::Call {
             name,
@@ -1429,6 +1544,19 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
                 })
                 .collect(),
         },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(substitute_typed_parameter_literals_with_lookup(
+                *expr,
+                constants,
+                parameter_types,
+            )),
+            width,
+            signed,
+        },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(substitute_typed_parameter_literals_with_lookup(
@@ -1495,6 +1623,10 @@ pub(super) fn infer_const_expr_type(
                 &(**lsb).clone().into(),
                 &HashMap::default(),
             )?,
+            signed: *signed,
+        }),
+        ConstExpr::Resize { width, signed, .. } => Some(ExprType {
+            width: *width,
             signed: *signed,
         }),
         ConstExpr::Select { .. } => Some(ExprType {
@@ -1596,6 +1728,7 @@ pub(super) fn infer_parameter_value_type(
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static PARAMETER_VALUE_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static LITERAL_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

@@ -896,6 +896,15 @@ impl<'p, 'a> Comb<'p, 'a> {
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
                 bit: Box::new(self.hoist_const(store, frames, bit, calls)?),
             },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
+                width: *width,
+                signed: *signed,
+            },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
@@ -1089,6 +1098,15 @@ impl<'p, 'a> Comb<'p, 'a> {
                     .map(|arg| self.freeze_const(store, frames, arg, copies))
                     .collect::<Result<_, _>>()?,
                 site: *site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
+                width: *width,
+                signed: *signed,
             },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
@@ -3594,6 +3612,15 @@ fn substitute_literals(
                 site: *site,
                 args: args.iter().map(|arg| constant(arg, literals)).collect(),
             },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: Box::new(constant(expr, literals)),
+                width: *width,
+                signed: *signed,
+            },
             ConstExpr::Unary { op, expr } => ConstExpr::Unary {
                 op: *op,
                 expr: Box::new(constant(expr, literals)),
@@ -3638,7 +3665,9 @@ fn substitute_literals(
                     }
                     ConstExpr::Select { expr, bit } => has_ident(expr) || has_ident(bit),
                     ConstExpr::Function { args, .. } => args.iter().any(has_ident),
-                    ConstExpr::Unary { expr, .. } => has_ident(expr),
+                    ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                        has_ident(expr)
+                    }
                     ConstExpr::Binary { left, right, .. } => has_ident(left) || has_ident(right),
                     ConstExpr::Mux {
                         condition,
