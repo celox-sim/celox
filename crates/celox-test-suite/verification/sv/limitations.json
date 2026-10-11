@@ -1,5 +1,22 @@
 [
   {
+    "id": "sv_icarus_genvar_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of the implicit integer localparam in a loop-generate body. IEEE 1800-2023 27.4 and 20.7 require one packed dimension for this predefined integer type. A standalone reproducer returns 0 in Icarus and 1 in Verilator; Celox and Verilator pass the unchanged shared assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_genvar_dimensions.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "generate::genvar_shadows_inherited_parameter_shapes"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_generate_binding",
     "category": "simulator_compile_limitation",
     "phase": "compile",

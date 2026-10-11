@@ -1,0 +1,49 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.10.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "include_ignored": false,
+  "note": "Focused failure observed before the genvar-dimension exclusion; assertions are unchanged. IEEE 1800-2023 27.4 defines the implicit integer localparam, and 20.7 gives predefined integer types one packed dimension.",
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 0,
+    "mismatch": 1,
+    "emission_error": 0,
+    "compile_error": 0,
+    "runtime_error": 0,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "generate::genvar_shadows_inherited_parameter_shapes at 122:3: assert_eq dimensions: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "generate::genvar_shadows_inherited_parameter_shapes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "standalone_reproducer": {
+    "source": "module Top;\n  for (genvar i=0; i<1; i++) begin : g\n    initial begin\n      $display(\"dimensions=%0d\", $dimensions(i));\n      $finish;\n    end\n  end\nendmodule\n",
+    "expected_output": "dimensions=1",
+    "icarus": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "compile_command": "iverilog -g2012 -s Top -o repro.vvp repro.sv",
+      "run_command": "vvp repro.vvp",
+      "output": "dimensions=0"
+    },
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "compile_command": "verilator --binary --timing --top-module Top --Mdir obj repro.sv",
+      "run_command": "obj/VTop",
+      "output": "dimensions=1"
+    }
+  }
+}
