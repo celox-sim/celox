@@ -1112,6 +1112,259 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_function_outputs",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_accepts_function_result_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_unpacked_dimensions_partial_array",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "system_functions::unpacked_dimensions_checks_unevaluated_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_dimensions_element",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_is_independent_of_unknown_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_wildcard_typedef_shadowing",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "system_functions::unpacked_dimensions_prefers_values_over_imported_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_dimensions_partial_array",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_resolves_package_array_constants",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_subroutine_unpacked_ports",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_resolves_procedural_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_subroutine_unpacked_ports",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_types_function_pattern_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_function_outputs",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects output and inout function arguments (function port is not an input port).",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_validates_writable_function_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
       "expectation": "Simulation",
       "name": "system_functions::printtimescale_displays_unit_and_global_precision",
@@ -1155,6 +1408,29 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::unpacked_dimensions_publishes_dependent_array_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

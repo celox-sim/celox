@@ -3,6 +3,39 @@ use std::path::Path;
 use super::*;
 
 #[test]
+fn function_result_queries_preserve_expression_bodies() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        module Top(output int y);
+            localparam logic [31:0] P = 32'bx;
+            function int g(output int x); x = 99; g = 0; endfunction
+            function int f(input int P);
+                f = P;
+                f = f + $unpacked_dimensions(g(f)) + $unpacked_dimensions(g(P));
+            endfunction
+            assign y = f(9);
+        endmodule
+        "#,
+        Path::new("function_result_query.sv"),
+    )
+    .unwrap();
+    let source = Source::from_syntax(&tree).unwrap();
+    let module = &source.modules()[0];
+    let env = const_env_from_parameters(module.parameters());
+    let node = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+        .unwrap();
+    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &env).unwrap();
+    let mut dimensions =
+        packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
+    dimensions.extend(parameter_packed_dimensions(module.parameters()));
+    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
+    let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
+    assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
+}
+
+#[test]
 fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations() {
     let code = r#"
         module Top(input logic signed [1:0][3:0] a, input logic [7:0] b);
@@ -19,7 +52,10 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                      + $bits(p.nibble) + $size(p.nibble) + $bits(f(b)) + $size(f(b))
                      + $bits(P) + $bits(P[0]) + $bits(pair_t) + $size(pair_t)
                      + $size(a, 2) + $size(memory, 2) + $size(memory, 3)
-                     + $size(pair_t, 1);
+                     + $size(pair_t, 1)
+                     + $unpacked_dimensions(memory) + $unpacked_dimensions(memory[0])
+                     + $unpacked_dimensions(a) + $unpacked_dimensions(p.nibble)
+                     + $unpacked_dimensions(pair_t);
         endmodule
     "#;
     let tree = crate::syntax::parse_source(code, Path::new("query_context.sv")).unwrap();
@@ -42,6 +78,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             (
                 name.clone(),
                 FunctionReturnMetadata {
+                    arguments: Some(function_argument_metadata(&f.params)),
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
                     dimensions: f.return_dimensions,
@@ -62,8 +99,18 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
         calls
             .iter()
             .map(|call| {
-                size_system_function_call_type(call, &tree, &env, &aliases, Some(dimensions))
-                    .map(|ty| (ty.width, ty.signed))
+                unpacked_dimensions_call_value(call, &tree, &env, &aliases, Some(dimensions))
+                    .map(|count| (count, false))
+                    .or_else(|| {
+                        size_system_function_call_type(
+                            call,
+                            &tree,
+                            &env,
+                            &aliases,
+                            Some(dimensions),
+                        )
+                        .map(|ty| (ty.width, ty.signed))
+                    })
             })
             .collect::<Vec<_>>()
     };
@@ -100,6 +147,11 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             Some((4, false)),
             Some((3, false)),
             Some((5, false)),
+            Some((2, false)),
+            Some((1, false)),
+            Some((0, false)),
+            Some((0, false)),
+            Some((0, false)),
         ]
     );
 }
@@ -236,13 +288,15 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         assert_eq!(reused.unwrap().0, expected_width, "{declaration}");
     }
 }
+
 #[test]
 fn nonansi_validation_leaves_generate_queries_to_elaboration() {
     let code = r#"
         module Top(y);
             output y;
             if (0) begin : inactive
-                localparam N = $dimensions(missing);
+                localparam N = $unpacked_dimensions(missing);
+                localparam M = $dimensions(missing);
             end else begin : active
                 assign y = 0;
             end
@@ -262,4 +316,174 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         &HashMap::default(),
     )
     .unwrap();
+}
+
+#[test]
+fn unpacked_dimensions_discovers_local_dpi_return_types() {
+    let source = r#"
+        module Top(output int y);
+            import "DPI-C" function int f();
+            localparam N = $unpacked_dimensions(f());
+            assign y = N + $unpacked_dimensions(f());
+        endmodule
+    "#;
+    let tree = crate::syntax::parse_source(source, Path::new("dpi_query.sv")).unwrap();
+    Source::from_syntax(&tree).unwrap();
+    for call in tree.into_iter().filter_map(|node| match node {
+        RefNode::SystemTfCall(call) => Some(call),
+        _ => None,
+    }) {
+        assert_eq!(
+            unpacked_dimensions_call_value(
+                call,
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            ),
+            Some(0)
+        );
+    }
+}
+
+#[test]
+fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
+    let source = r#"
+        module Top(input int index_value, output int y);
+            logic [7:0] a [0:1][0:2];
+            assign y = $unpacked_dimensions(a[0][index_value +: 1]);
+        endmodule
+    "#;
+    let tree = crate::syntax::parse_source(source, Path::new("runtime_query_range.sv")).unwrap();
+    Source::from_syntax(&tree).unwrap();
+    let call = tree
+        .into_iter()
+        .find_map(|node| match node {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &HashMap::default(), None),
+        Some(1)
+    );
+}
+
+#[test]
+fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
+    for declaration in [
+        "module Top; logic [7:0] a [0:1]; logic [$unpacked_dimensions(a):0] b;",
+        "module Top(input logic [7:0] a [0:1], output logic [$unpacked_dimensions(a):0] b);",
+        "module Top; logic [7:0] a [0:1], b [0:$unpacked_dimensions(a)];",
+        "module Top; wire [7:0] a [0:1], b [0:$unpacked_dimensions(a)];",
+        "module Top; typedef logic [7:0] byte_t; byte_t a [0:1], b [0:$unpacked_dimensions(a)];",
+    ] {
+        let code = format!("{declaration} localparam W = $bits(b); endmodule");
+        let tree = crate::syntax::parse_source(&code, Path::new("preceding_query.sv")).unwrap();
+        let module = tree
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                )
+            })
+            .unwrap();
+        let aliases = type_aliases_from_module_node(module, &tree).unwrap();
+        let calls = tree
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::SystemTfCall(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unpacked_dimensions_call_value(calls[0], &tree, &HashMap::default(), &aliases, None),
+            Some(1),
+            "{declaration}",
+        );
+        assert_eq!(
+            size_system_function_call_type(calls[1], &tree, &HashMap::default(), &aliases, None)
+                .map(|ty| ty.width),
+            Some(if declaration.contains("b [") { 16 } else { 2 }),
+            "{declaration}",
+        );
+    }
+}
+
+#[test]
+fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_ranges() {
+    for declaration in [
+        "module Top #(parameter logic [7:0] A [0:1] = '{default:0}) (output logic [$unpacked_dimensions(A):0] b);",
+        "module Top; localparam logic [7:0] A [0:1] = '{default:0}; logic [$unpacked_dimensions(A):0] b;",
+        "module Top; logic [7:0] a [0:1]; localparam logic [7:0] A [0:$unpacked_dimensions(a)] = '{default:0}; logic [1:0] b;",
+    ] {
+        let code = format!("{declaration} localparam W = $bits(b); endmodule");
+        let tree =
+            crate::syntax::parse_source(&code, Path::new("array_parameter_query.sv")).unwrap();
+        let calls = tree
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::SystemTfCall(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unpacked_dimensions_call_value(
+                calls[0],
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            ),
+            Some(1),
+            "{declaration}"
+        );
+        assert_eq!(
+            size_system_function_call_type(
+                calls[1],
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            )
+            .map(|ty| ty.width),
+            Some(2),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        package P;
+            typedef logic [7:0] row_t [0:1];
+        endpackage
+        module Top;
+            import P::*;
+            logic row_t;
+            localparam N = $unpacked_dimensions(row_t);
+        endmodule
+        "#,
+        Path::new("imported_query.sv"),
+    )
+    .unwrap();
+    let package = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
+        .unwrap();
+    let aliases = type_aliases_from_module_node(package, &tree).unwrap();
+    let call = tree
+        .into_iter()
+        .find_map(|node| match node {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &aliases, None),
+        Some(0)
+    );
 }

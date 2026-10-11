@@ -107,7 +107,7 @@ pub(super) fn imported() -> Arc<ScopeSymbols> {
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 12] = [
+    const FIXED: [&str; 13] = [
         "__parameter::local::",
         "__parameter::unbounded::",
         "__parameter::width::",
@@ -119,6 +119,7 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
         "__variable::bits::",
         "__variable::size::",
         "__variable::signed::",
+        "__variable::unpacked_dimensions::",
         "__variable::dimensions::",
     ];
     for prefix in FIXED {
@@ -416,7 +417,7 @@ impl ScopeSymbols {
             function_return_types: self
                 .function_return_types
                 .iter()
-                .map(|(name, value)| (key(name), *value))
+                .map(|(name, value)| (key(name), value.clone()))
                 .collect(),
             constant_functions: self
                 .constant_functions

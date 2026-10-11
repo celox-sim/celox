@@ -103,7 +103,7 @@ use dimensions::{
     parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
     size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
     variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
-    variable_size_marker,
+    variable_size_marker, variable_unpacked_dimensions_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -815,7 +815,7 @@ impl Module {
             packed_dimensions
                 .function_return_types
                 .entry(name.clone())
-                .or_insert(*metadata);
+                .or_insert_with(|| metadata.clone());
         }
         packed_dimensions
             .function_return_types
@@ -823,6 +823,7 @@ impl Module {
                 (
                     name.clone(),
                     FunctionReturnMetadata {
+                        arguments: Some(function_argument_metadata(&function.params)),
                         width: function.return_width,
                         first_packed_dimension_width: function.return_first_packed_dimension_width,
                         dimensions: function.return_dimensions,
@@ -844,6 +845,7 @@ impl Module {
                 Some((
                     import.name().to_string(),
                     FunctionReturnMetadata {
+                        arguments: Some(dpi_argument_metadata(import)),
                         width: Some(r#type.width()),
                         first_packed_dimension_width: (r#type.width() > 1)
                             .then_some(r#type.width()),
@@ -2060,6 +2062,27 @@ struct Function {
     return_is_2state: bool,
 }
 
+fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
+    params
+        .iter()
+        .map(|param| FunctionArgumentMetadata {
+            direction: param.direction,
+            has_default: param.has_default,
+        })
+        .collect()
+}
+
+fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgumentMetadata]> {
+    import
+        .arguments()
+        .iter()
+        .map(|_| FunctionArgumentMetadata {
+            direction: ParamDirection::Input,
+            has_default: false,
+        })
+        .collect()
+}
+
 /// How a function argument is passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParamDirection {
@@ -2089,6 +2112,7 @@ impl ParamDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionParam {
+    has_default: bool,
     direction: ParamDirection,
     name: String,
     width: Option<usize>,
@@ -2269,8 +2293,16 @@ struct VariableDimensions {
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionArgumentMetadata {
+    direction: ParamDirection,
+    has_default: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FunctionReturnMetadata {
+    /// Validate calls in type queries without retaining or executing bodies.
+    arguments: Option<Arc<[FunctionArgumentMetadata]>>,
     width: Option<usize>,
     first_packed_dimension_width: Option<usize>,
     dimensions: Option<usize>,
@@ -2291,6 +2323,8 @@ struct PackedDimensions {
     /// The current lexical scope has already collected its visible declarations.
     /// Preliminary parameter/function/range lowering must keep this false.
     scope_types_complete: bool,
+    /// Calls are checked for legality while their operands remain unexecuted.
+    type_query: bool,
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
@@ -2312,6 +2346,7 @@ impl PackedDimensions {
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             scope_types_complete: false,
+            type_query: false,
             subroutine_param_shapes: Arc::default(),
         }
     }
