@@ -107,6 +107,47 @@ impl ConstantEnvironment for HashMap<String, i128> {
     }
 }
 
+/// Width of flattened select bounds that differ by a constant offset.
+pub fn select_range_width(
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    constants: &HashMap<String, i128>,
+) -> Option<usize> {
+    fn offset<'a>(
+        expr: &'a ConstExpr,
+        constants: &HashMap<String, i128>,
+    ) -> Option<(Option<&'a ConstExpr>, i128)> {
+        if let Some(value) = eval_const_expr(expr, constants) {
+            return Some((None, value));
+        }
+        if let ConstExpr::Binary { left, op, right } = expr {
+            if let Some(value) = eval_const_expr(right, constants) {
+                let (base, addend) = offset(left, constants)?;
+                match op {
+                    BinaryOp::Add => return Some((base, addend.checked_add(value)?)),
+                    BinaryOp::Sub => return Some((base, addend.checked_sub(value)?)),
+                    _ => {}
+                }
+            }
+            if *op == BinaryOp::Add
+                && let Some(value) = eval_const_expr(left, constants)
+            {
+                let (base, addend) = offset(right, constants)?;
+                return Some((base, addend.checked_add(value)?));
+            }
+        }
+        Some((Some(expr), 0))
+    }
+    let (msb_base, msb_offset) = offset(msb, constants)?;
+    let (lsb_base, lsb_offset) = offset(lsb, constants)?;
+    if msb_base != lsb_base {
+        return None;
+    }
+    usize::try_from(msb_offset.abs_diff(lsb_offset))
+        .ok()?
+        .checked_add(1)
+}
+
 pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<i128> {
     eval_const_expr_in_env(expr, constants)
 }
@@ -118,6 +159,28 @@ pub(crate) fn eval_const_expr_in_env(
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
+        ConstExpr::SelectRange {
+            expr: operand,
+            msb,
+            lsb,
+            signed,
+        } => {
+            if let Some(literal) = integral_literal_from_const_expr(expr) {
+                return integral_literal_as_i128(&literal, *signed);
+            }
+            let value = eval_const_expr_in_env(operand, constants)?;
+            let selected = ConstExpr::SelectRange {
+                expr: Box::new(ConstExpr::Literal(format!("128'sh{:x}", value as u128))),
+                msb: Box::new(ConstExpr::Literal(
+                    eval_const_expr_in_env(msb, constants)?.to_string(),
+                )),
+                lsb: Box::new(ConstExpr::Literal(
+                    eval_const_expr_in_env(lsb, constants)?.to_string(),
+                )),
+                signed: *signed,
+            };
+            integral_literal_as_i128(&integral_literal_from_const_expr(&selected)?, *signed)
+        }
         ConstExpr::Select { expr, bit } => {
             let bit = eval_const_expr_in_env(bit, constants)?;
             let bit = usize::try_from(bit).ok()?;
@@ -417,6 +480,23 @@ fn substitute_typed_constants_with_lookup(
             _ => ConstExpr::Ident(name),
         },
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_typed_constants_with_lookup(
+                *expr, constants, types,
+            )),
+            msb: Box::new(substitute_typed_constants_with_lookup(
+                *msb, constants, types,
+            )),
+            lsb: Box::new(substitute_typed_constants_with_lookup(
+                *lsb, constants, types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_typed_constants_with_lookup(
                 *expr, constants, types,
@@ -897,6 +977,44 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             };
             let value = eval_const_function(name, args, &HashMap::default())?;
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
+        }
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let operand = integral_literal_from_const_expr(expr)?;
+            let msb = integral_literal_from_const_expr(msb)?;
+            let lsb = integral_literal_from_const_expr(lsb)?;
+            let msb = integral_literal_as_i128(&msb, msb.signed)?;
+            let lsb = integral_literal_as_i128(&lsb, lsb.signed)?;
+            let low = msb.min(lsb);
+            let width = usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?;
+            if width > 65_536 {
+                return None;
+            }
+            let mut value = BigUint::default();
+            let mut mask = BigUint::default();
+            for offset in 0..width {
+                let index = usize::try_from(low.checked_add(i128::try_from(offset).ok()?)?)
+                    .ok()
+                    .filter(|index| *index < operand.width);
+                let (v, m) = index.map_or((true, true), |index| {
+                    (
+                        operand.value.bit(index as u64),
+                        operand.mask.bit(index as u64),
+                    )
+                });
+                value.set_bit(offset as u64, v);
+                mask.set_bit(offset as u64, m);
+            }
+            Some(IntegralLiteral {
+                width,
+                signed: *signed,
+                value,
+                mask,
+            })
         }
         ConstExpr::Select { expr, bit } => {
             let literal = integral_literal_from_const_expr(expr)?;

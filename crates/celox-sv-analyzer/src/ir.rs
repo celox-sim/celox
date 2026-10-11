@@ -590,6 +590,13 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
     },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
+    },
     Function {
         name: String,
         args: Vec<ConstExpr>,
@@ -921,6 +928,17 @@ impl From<ast::ConstExpr> for ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
+            ast::ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new((*expr).into()),
+                msb: Box::new((*msb).into()),
+                lsb: Box::new((*lsb).into()),
+                signed,
+            },
             ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name,
                 site,
@@ -956,6 +974,17 @@ impl From<ConstExpr> for ast::ConstExpr {
             ConstExpr::Select { expr, bit } => ast::ConstExpr::Select {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
+            },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ast::ConstExpr::SelectRange {
+                expr: Box::new((*expr).into()),
+                msb: Box::new((*msb).into()),
+                lsb: Box::new((*lsb).into()),
+                signed,
             },
             ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
                 name,

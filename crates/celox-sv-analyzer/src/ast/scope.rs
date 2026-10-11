@@ -540,6 +540,17 @@ impl Renamer<'_> {
         match expr {
             ConstExpr::Ident(name) => ConstExpr::Ident(self.name(&name)),
             ConstExpr::Literal(value) => ConstExpr::Literal(value),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.const_expr(*expr)),
+                msb: Box::new(self.const_expr(*msb)),
+                lsb: Box::new(self.const_expr(*lsb)),
+                signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.const_expr(*expr)),
                 bit: Box::new(self.const_expr(*bit)),

@@ -929,3 +929,140 @@
       (assert_eq q (bit value p) "q")
       (tick clk)
       (assert_eq q_ff (bit value p) "q_ff"))))
+
+(case nested_array_indices_preserve_elements_and_ranges
+  ; The inner selection is an entire element, including in an assignment
+  ; target and in a sequential read. Use nonzero descending unpacked bounds.
+  (source "nested_array_indices.sv" #"
+    module Top(input logic clk, input logic [7:0] idx, data,
+               output logic [7:0] nested, arithmetic, packed_index, q, w1, w3);
+        logic [7:0] map [2:1];
+        logic [7:0] mem [4];
+        logic [7:0] written [4];
+        logic [0:7] packed_value;
+        assign packed_value = 8'h30;
+        always_comb begin
+            map[2] = data;
+            map[1] = 3;
+            mem[0] = 0;
+            mem[1] = 11;
+            mem[2] = 22;
+            mem[3] = 33;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            written[map[idx]] = 8'h5a;
+        end
+        assign nested = mem[map[idx]];
+        assign arithmetic = mem[map[idx] + 8'd1];
+        assign packed_index = mem[packed_value[0:3]];
+        assign w1 = written[1];
+        assign w3 = written[3];
+        always_ff @(posedge clk) q <= mem[map[idx]];
+    endmodule
+  "#)
+  (top Top)
+  (for (index value mapped) (list (1 1 3) (2 1 1) (2 2 2) (1 2 3))
+    (modify (set idx index) (set data value))
+    (assert_eq nested (* mapped 11))
+    (assert_eq packed_index 33)
+    (assert_eq w1 (? (== mapped 1) 0x5a 0))
+    (assert_eq w3 (? (== mapped 3) 0x5a 0))
+    (if (< mapped 3) (assert_eq arithmetic (* (+ mapped 1) 11)))
+    (tick clk)
+    (assert_eq q (* mapped 11))))
+
+(case nested_array_indices_preserve_invalid_reads_and_writes
+  ; Invalid or unknown inner and outer indices read X and write nothing
+  ; (IEEE 1800-2023 7.4.5).
+  (four_state)
+  (source "nested_invalid_array_indices.sv" #"
+    module Top(input logic clk, input logic [7:0] idx, data,
+               output logic [7:0] nested, q, w1, w3);
+        logic [7:0] map [2];
+        logic [7:0] mem [4];
+        logic [7:0] written [4];
+        always_comb begin
+            map[0] = data;
+            map[1] = 3;
+            mem[0] = 0;
+            mem[1] = 11;
+            mem[2] = 22;
+            mem[3] = 33;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            written[map[idx]] = 8'h5a;
+        end
+        assign nested = mem[map[idx]];
+        assign w1 = written[1];
+        assign w3 = written[3];
+        always_ff @(posedge clk) q <= mem[map[idx]];
+    endmodule
+  "#)
+  (top Top)
+  (for (index value) (list (0 1) (1 1) (0 4) (2 1) (255 1)
+                            ((fourstate 0xff 0xff) 1)
+                            (0 (fourstate 0xff 0xff))
+                            (0 (fourstate 0 0xff)))
+    (modify (set idx index) (set data value))
+    (let valid (&& (== (xmask index) 0) (== (xmask value) 0)
+                   (< index 2) (|| (== index 1) (< value 4))))
+    (let mapped (? (== index 1) 3 value))
+    (let expected (? valid (* mapped 11) (fourstate 0xff 0xff)))
+    (assert_eq nested expected)
+    (assert_eq w1 (? (&& valid (== mapped 1)) 0x5a 0))
+    (assert_eq w3 (? (&& valid (== mapped 3)) 0x5a 0))
+    (tick clk)
+    (assert_eq q expected)))
+
+(case nested_array_indices_freeze_concat_targets
+  ; Keep the index values from the assignment when later blocking writes
+  ; change the map, in both combinational and sequential processes.
+  (source "nested_array_concat_targets.sv" #"
+    module Top(input logic clk, input logic [7:0] data,
+               output logic [7:0] w1, w2, w3, q1, q2, q3);
+        logic [7:0] map [2];
+        logic [7:0] written [4];
+        logic [7:0] ff_map [2];
+        logic [7:0] ff_written [4];
+        always_comb begin
+            map[0] = data;
+            map[1] = 3;
+            written[0] = 0;
+            written[1] = 0;
+            written[2] = 0;
+            written[3] = 0;
+            {written[map[0]], written[map[1]]} = 16'h5a3c;
+            map[0] = 2;
+        end
+        assign w1 = written[1];
+        assign w2 = written[2];
+        assign w3 = written[3];
+        always_ff @(posedge clk) begin
+            ff_map[0] = data;
+            ff_map[1] = 3;
+            ff_written[0] = 0;
+            ff_written[1] = 0;
+            ff_written[2] = 0;
+            ff_written[3] = 0;
+            {ff_written[ff_map[0]], ff_written[ff_map[1]]} = 16'h5a3c;
+            ff_map[0] = 2;
+            q1 <= ff_written[1];
+            q2 <= ff_written[2];
+            q3 <= ff_written[3];
+        end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 1 2 1 2)
+    (modify (set data value))
+    (assert_eq w1 (? (== value 1) 0x5a 0))
+    (assert_eq w2 (? (== value 2) 0x5a 0))
+    (assert_eq w3 0x3c)
+    (tick clk)
+    (assert_eq q1 (? (== value 1) 0x5a 0))
+    (assert_eq q2 (? (== value 2) 0x5a 0))
+    (assert_eq q3 0x3c)))

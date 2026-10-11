@@ -523,6 +523,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .collect::<Result<_, _>>()?,
                 site: *site,
             },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                msb: Box::new(self.hoist_const(msb, calls)?),
+                lsb: Box::new(self.hoist_const(lsb, calls)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(expr, calls)?),
                 bit: Box::new(self.hoist_const(bit, calls)?),
@@ -644,6 +655,30 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                signed,
+            } if matches!(&**base, ConstExpr::Ident(name) if self.m.id(name).is_some()) => {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let msb = self.freeze_const(msb, copies)?;
+                let lsb = self.freeze_const(lsb, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                };
+                let value = self.eval(&read, None)?;
+                let width = self.b.register(&value).width();
+                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                self.store(temp, SIROffset::Static(0), width, value);
+                ConstExpr::Ident(temp_name)
+            }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
             {
                 let ConstExpr::Ident(name) = &**base else {
@@ -663,6 +698,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                msb: Box::new(self.freeze_const(msb, copies)?),
+                lsb: Box::new(self.freeze_const(lsb, copies)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.freeze_const(expr, copies)?),
                 bit: Box::new(self.freeze_const(bit, copies)?),
@@ -2286,6 +2332,26 @@ fn substitute_overlay_const(
             None => expr.clone(),
         },
         ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(
+                if matches!(&**expr, ConstExpr::Ident(_))
+                    && (const_expr_references_identifier(msb)
+                        || const_expr_references_identifier(lsb))
+                {
+                    (**expr).clone()
+                } else {
+                    go(expr)
+                },
+            ),
+            msb: Box::new(go(msb)),
+            lsb: Box::new(go(lsb)),
+            signed: *signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),

@@ -881,6 +881,17 @@ impl<'p, 'a> Comb<'p, 'a> {
                     .collect::<Result<_, _>>()?,
                 site: *site,
             },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
+                msb: Box::new(self.hoist_const(store, frames, msb, calls)?),
+                lsb: Box::new(self.hoist_const(store, frames, lsb, calls)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
                 bit: Box::new(self.hoist_const(store, frames, bit, calls)?),
@@ -1011,6 +1022,30 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.write(store, temp, full(width), value)?;
                 ConstExpr::Ident(temp_name)
             }
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                signed,
+            } if matches!(&**base, ConstExpr::Ident(name) if self.m.id(name).is_some()) => {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let msb = self.freeze_const(store, frames, msb, copies)?;
+                let lsb = self.freeze_const(store, frames, lsb, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                };
+                let (node, sources) = self.eval(store, frames, &read, None)?;
+                let width = celox_slt::get_width(node, self.arena);
+                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                self.write(store, temp, full(width), (node, sources))?;
+                ConstExpr::Ident(temp_name)
+            }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
             {
                 let ConstExpr::Ident(name) = &**base else {
@@ -1032,6 +1067,17 @@ impl<'p, 'a> Comb<'p, 'a> {
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
+                msb: Box::new(self.freeze_const(store, frames, msb, copies)?),
+                lsb: Box::new(self.freeze_const(store, frames, lsb, copies)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
                 bit: Box::new(self.freeze_const(store, frames, bit, copies)?),
@@ -3522,6 +3568,23 @@ fn substitute_literals(
                 None => expr.clone(),
             },
             ConstExpr::Literal(_) => expr.clone(),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                // Keep the declaration available: bounds may be in declared
+                // packed coordinates, or select an unpacked element at run time.
+                expr: Box::new(if matches!(&**expr, ConstExpr::Ident(_)) {
+                    (**expr).clone()
+                } else {
+                    constant(expr, literals)
+                }),
+                msb: Box::new(constant(msb, literals)),
+                lsb: Box::new(constant(lsb, literals)),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(constant(expr, literals)),
                 bit: Box::new(constant(bit, literals)),
@@ -3570,6 +3633,9 @@ fn substitute_literals(
                 match expr {
                     ConstExpr::Ident(_) => true,
                     ConstExpr::Literal(_) => false,
+                    ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                        has_ident(expr) || has_ident(msb) || has_ident(lsb)
+                    }
                     ConstExpr::Select { expr, bit } => has_ident(expr) || has_ident(bit),
                     ConstExpr::Function { args, .. } => args.iter().any(has_ident),
                     ConstExpr::Unary { expr, .. } => has_ident(expr),

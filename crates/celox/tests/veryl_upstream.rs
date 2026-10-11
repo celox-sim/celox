@@ -40,9 +40,6 @@ all_backends! {
         @case "veryl_regressions::wide_ternary_narrow_branch_no_spill";
     }
     fn nested_array_index_const_array(sim) {
-        // SV frontend rejects `mem[A[idx]]` (index read from an unpacked-array localparam):
-        // "combinational expression assigned to `nested`" (#88).
-        @ignore_on(sv);
         @case "veryl_regressions::nested_array_index_const_array";
     }
     fn inst_port_default_value_connected_not_folded(sim) {

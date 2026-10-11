@@ -242,6 +242,11 @@ impl Item<'_> {
         match expr {
             ConstExpr::Ident(name) => *name = self.name(name),
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.constant(expr);
+                self.constant(msb);
+                self.constant(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.constant(expr);
                 self.constant(bit);
@@ -420,6 +425,11 @@ impl<'a> Elaborator<'a, '_> {
                 }
             }
             ConstExpr::Unary { expr, .. } => self.expand_constant_calls(expr, scope)?,
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.expand_constant_calls(expr, scope)?;
+                self.expand_constant_calls(msb, scope)?;
+                self.expand_constant_calls(lsb, scope)?;
+            }
             ConstExpr::Select { expr, bit } => {
                 self.expand_constant_calls(expr, scope)?;
                 self.expand_constant_calls(bit, scope)?;
