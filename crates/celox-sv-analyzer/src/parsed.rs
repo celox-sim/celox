@@ -53,8 +53,37 @@ impl ParsedSource {
         self.index.names()
     }
 
+    /// Module and interface declarations share the SV design-element namespace.
+    pub fn component_names(&self) -> fxhash::FxHashSet<String> {
+        let mut names = self
+            .module_names()
+            .iter()
+            .cloned()
+            .collect::<fxhash::FxHashSet<_>>();
+        for node in &self.tree {
+            let identifier = match node {
+                sv_parser::RefNode::InterfaceDeclarationAnsi(interface) => {
+                    &interface.nodes.0.nodes.3
+                }
+                sv_parser::RefNode::InterfaceDeclarationNonansi(interface) => {
+                    &interface.nodes.0.nodes.3
+                }
+                _ => continue,
+            };
+            if let Some(name) = ast::component_identifier(identifier, &self.tree) {
+                names.insert(name);
+            }
+        }
+        names
+    }
+
     pub fn module_interfaces(&self) -> &ModuleInterfaces {
         &self.index.interfaces
+    }
+
+    /// Module and interface names referenced by instantiations and ports.
+    pub fn component_references(&self) -> fxhash::FxHashSet<String> {
+        ast::interfaces::component_references(&self.tree)
     }
 
     /// Analyze the packages declared in `sources`, each once, after the

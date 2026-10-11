@@ -243,6 +243,36 @@ impl ConstantFunctions {
         }
     }
 
+    pub(super) fn declarations(&self) -> Vec<crate::ir::Subroutine> {
+        self.functions
+            .iter()
+            .map(|(name, function)| crate::ir::Subroutine {
+                name: name.clone(),
+                is_task: false,
+                return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
+                return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
+                params: function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(position, (name, ty))| crate::ir::SubroutineParam {
+                        name: name.clone(),
+                        source_name: function.argument_names[position].clone(),
+                        direction: crate::procedural::ParamDirection::Input,
+                        r#type: ty.clone(),
+                        default: function.argument_defaults[position].clone().map(Into::into),
+                    })
+                    .collect(),
+                body: function
+                    .body
+                    .iter()
+                    .cloned()
+                    .map(|statement| statement.map(&mut |expr| expr.into(), &mut |lhs| lhs.into()))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// The names of the locals of these functions.
     pub(super) fn local_names(&self) -> impl Iterator<Item = &String> {
         self.locals.keys()
@@ -255,6 +285,24 @@ pub(super) fn module_constant_functions(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
+) -> ConstantFunctions {
+    symbolic_module_constant_functions(
+        node,
+        tree,
+        const_env,
+        type_aliases,
+        parameter_literals,
+        &HashSet::default(),
+    )
+}
+
+pub(super) fn symbolic_module_constant_functions(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_literals: &HashMap<String, Expr>,
+    symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
     if !node
         .clone()
@@ -277,6 +325,7 @@ pub(super) fn module_constant_functions(
             const_env,
             type_aliases,
             parameter_literals,
+            symbolic_parameters,
         );
     }
     let mut roots = generate::with_root_subroutines(|| {
@@ -286,11 +335,19 @@ pub(super) fn module_constant_functions(
             const_env,
             type_aliases,
             parameter_literals,
+            symbolic_parameters,
         )
     });
     roots.extend_missing(&scope::imported().constant_functions);
     let _installed = install(roots);
-    collect_module_constant_functions(node, tree, const_env, type_aliases, parameter_literals)
+    collect_module_constant_functions(
+        node,
+        tree,
+        const_env,
+        type_aliases,
+        parameter_literals,
+        symbolic_parameters,
+    )
 }
 
 fn collect_module_constant_functions(
@@ -299,6 +356,7 @@ fn collect_module_constant_functions(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
+    symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
     let has_functions = node
         .clone()
@@ -307,6 +365,24 @@ fn collect_module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
+    // Native evaluation uses concrete types. Declaration dependency metadata
+    // must also retain parameters appearing only in typedef dimensions.
+    let symbolic_aliases;
+    let type_aliases = if symbolic_parameters.is_empty() {
+        type_aliases
+    } else {
+        let constants = const_env
+            .iter()
+            .filter(|(name, _)| !symbolic_parameters.contains(*name))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+        symbolic_aliases =
+            match type_aliases_from_module_node_with_env(node.clone(), tree, &constants) {
+                Ok(aliases) => aliases,
+                Err(error) => return ConstantFunctions::unconverted(error),
+            };
+        &symbolic_aliases
+    };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
         match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
             Ok(names) => names,
@@ -326,7 +402,7 @@ fn collect_module_constant_functions(
         statics: Vec::new(),
     };
     let mut rejected = HashMap::default();
-    let subroutines = match procedural::subroutines_from_module_node_with(
+    let subroutines = match procedural::subroutines_with_symbolic_parameters(
         node,
         tree,
         const_env,
@@ -334,6 +410,7 @@ fn collect_module_constant_functions(
         parameter_literals,
         &mut state,
         Some(&mut rejected),
+        symbolic_parameters,
     ) {
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),

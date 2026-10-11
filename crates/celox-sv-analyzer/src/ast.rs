@@ -395,6 +395,9 @@ pub struct Module {
     dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.
     constant_functions: const_functions::ConstantFunctions,
+    /// Expression bodies used to publish symbolic declaration contracts.
+    symbolic_functions: HashMap<String, Function>,
+    declaration_subroutines: Vec<crate::ir::Subroutine>,
     /// The package parameters the module sees, by qualified name and by the
     /// names its imports bind.
     imported_parameters: Vec<Parameter>,
@@ -403,6 +406,25 @@ pub struct Module {
 }
 
 impl Module {
+    pub(crate) fn declaration_expr(
+        &self,
+        expr: &ConstExpr,
+        signedness: &HashMap<String, bool>,
+    ) -> ConstExpr {
+        let expanded = expand_expr_calls(
+            const_expr_to_expr(expr.clone()),
+            &self.symbolic_functions,
+            signedness,
+            0,
+            true,
+        );
+        expr_to_index_const(expanded, &PackedDimensions::default()).unwrap_or_else(|| expr.clone())
+    }
+
+    pub(crate) fn declaration_subroutines(&self) -> &[crate::ir::Subroutine] {
+        &self.declaration_subroutines
+    }
+
     /// Make the module's constant functions available to the constant
     /// evaluator until the guard is dropped.
     pub(crate) fn install_constant_functions(&self) -> impl Drop {
@@ -515,6 +537,22 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        // Contract dependency analysis must see module parameter references
+        // before the normal procedural lowering substitutes default literals.
+        let symbolic_parameters = parameters
+            .iter()
+            .map(|parameter| parameter.name().to_string())
+            .collect();
+        let declaration_subroutines =
+            with_imported(const_functions::symbolic_module_constant_functions(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+                &imported.parameter_values,
+                &symbolic_parameters,
+            ))
+            .declarations();
         const_functions::replace(with_imported(const_functions::module_constant_functions(
             node.clone(),
             syntax_tree,
@@ -1061,6 +1099,50 @@ impl Module {
         imported_parameters
             .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
 
+        // Expression construction tracks only whole-variable assignments.
+        // Leave calls of functions with selected/concatenated writes symbolic
+        // in declaration contracts rather than publishing a partial body.
+        // Expression inlining also sizes formal and return conversions at the
+        // default specialization; symbolic signature widths cannot be inlined.
+        for subroutine in &declaration_subroutines {
+            let mut selected_write = false;
+            for statement in &subroutine.body {
+                statement.walk(&mut |statement| {
+                    selected_write |= matches!(
+                        statement,
+                        crate::procedural::StmtBase::Assign {
+                            lhs: crate::ir::LValue::Select { .. },
+                            ..
+                        } | crate::procedural::StmtBase::AssignConcat { .. }
+                    );
+                });
+            }
+            let symbolic_type = subroutine
+                .return_type
+                .as_ref()
+                .is_some_and(crate::ir::Type::has_symbolic_ranges)
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.r#type.has_symbolic_ranges());
+            if (selected_write || symbolic_type)
+                && let Some(function) = functions.get_mut(&subroutine.name)
+            {
+                function.body = None;
+            }
+        }
+
+        // A native default value is not evidence of a representable symbolic
+        // body. Keep failed declaration lowerings visible to contract checking.
+        for function in functions.values_mut() {
+            if !declaration_subroutines
+                .iter()
+                .any(|subroutine| subroutine.name == function.name)
+            {
+                function.body = None;
+            }
+        }
+
         Ok(Self {
             name,
             parameters,
@@ -1075,6 +1157,8 @@ impl Module {
             subroutines,
             dpi_imports,
             constant_functions: const_functions::installed(),
+            symbolic_functions: functions,
+            declaration_subroutines,
             imported_parameters,
             symbols,
         })
@@ -1132,6 +1216,20 @@ impl Module {
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
     }
+}
+
+pub(crate) fn component_identifier(
+    identifier: &sv_parser::InterfaceIdentifier,
+    tree: &SyntaxTree,
+) -> Option<String> {
+    identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
+}
+
+pub(crate) fn generated_time_declarations(
+    sources: &[(&str, &std::path::Path)],
+    roots: Option<&[&str]>,
+) -> Result<String, AnalyzerError> {
+    timescales::generated_source_declarations(sources, roots)
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
@@ -1280,6 +1378,10 @@ impl Parameter {
             .or(inferred.map(|r#type| r#type.signed))
             .unwrap_or(false);
         Some(ExprType { width, signed })
+    }
+
+    pub(crate) fn packed_ranges(&self) -> &[PackedRange] {
+        &self.packed_ranges
     }
 
     pub(crate) fn declared_width(&self) -> Option<usize> {

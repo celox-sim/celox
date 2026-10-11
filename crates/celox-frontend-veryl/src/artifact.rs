@@ -29,6 +29,81 @@ pub struct VerylSymbolicRtl<'a> {
     pub source_id_maps: HashMap<celox_design::ModuleId, HashMap<VarId, SourceVarId>>,
 }
 
+/// Export source-neutral port signatures before either language's hierarchy is
+/// linked. The bodies stay in the Veryl IR and are lowered by this frontend.
+pub fn external_signatures(
+    ir: &veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+) -> Result<crate::symbolic::artifact::ExternalHierarchy, ParserError> {
+    use crate::symbolic::artifact::{ExternalHierarchy, ExternalModule};
+    use veryl_analyzer::ir::Component;
+
+    let mut external = ExternalHierarchy::default();
+    for component in &ir.components {
+        let Component::Module(module) = component else {
+            continue;
+        };
+        if module
+            .variables
+            .values()
+            .any(|variable| variable.r#type.is_unknown())
+        {
+            continue;
+        }
+        let empty = VerylSimModule {
+            name: module.name,
+            variables: module.variables.clone(),
+            ff_access_summaries: HashMap::default(),
+            eval_only_ff_blocks: HashMap::default(),
+            apply_ff_blocks: HashMap::default(),
+            eval_apply_ff_blocks: HashMap::default(),
+            parallel_ff_parts: HashMap::default(),
+            glue_blocks: HashMap::default(),
+            indexed_instance_names: crate::HashSet::default(),
+            comb_blocks: Vec::new(),
+            comb_observers: Vec::new(),
+            runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
+            initial_memory_values: Vec::new(),
+            comb_boundaries: HashMap::default(),
+            arena: SLTNodeArena::new(),
+            store: SymbolicStore::default(),
+            reset_clock_map: HashMap::default(),
+        };
+        let ids = project_id_map(module)?;
+        let mut port_ids = module.ports.values().copied().collect::<Vec<_>>();
+        port_ids.sort();
+        let port_order = port_ids.iter().map(|id| ids[id]).collect();
+        let (sim_module, _) =
+            project_module_with_ids(&empty, module, config, ids, &HashMap::default())?;
+        let id = celox_design::ModuleId(external.modules.len());
+        external.roots.insert(sim_module.name.clone(), id);
+        external.modules.insert(
+            id,
+            ExternalModule {
+                sim_module,
+                port_order,
+                unresolved_instances: module
+                    .declarations
+                    .iter()
+                    .filter_map(|declaration| {
+                        let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
+                            return None;
+                        };
+                        let name = match instance.component.as_ref() {
+                            Component::Module(module) => module.name,
+                            Component::SystemVerilog(module) => module.name,
+                            Component::Interface(_) => return None,
+                        };
+                        Some(veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
+                    })
+                    .collect(),
+            },
+        );
+    }
+    Ok(external)
+}
+
 #[derive(Clone)]
 pub struct VerylSimModule {
     pub name: StrId,

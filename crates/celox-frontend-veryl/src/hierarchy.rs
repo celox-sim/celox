@@ -44,6 +44,36 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     config: &BuildConfig,
     top: &StrId,
 ) -> Result<VerylSymbolicRtl<'a>, ParserError> {
+    parse_external_hierarchy(ir, loop_provenance, external, config, top, None)
+}
+
+/// Link the explicitly identified Veryl exports without matching SV namesakes.
+pub fn parse_ir_with_external_hierarchy_and_native_modules<'a>(
+    ir: &'a veryl_analyzer::ir::Ir,
+    loop_provenance: &LoopProvenance,
+    external: &'a ExternalHierarchy,
+    config: &BuildConfig,
+    top: &StrId,
+    native_modules: &HashSet<String>,
+) -> Result<VerylSymbolicRtl<'a>, ParserError> {
+    parse_external_hierarchy(
+        ir,
+        loop_provenance,
+        external,
+        config,
+        top,
+        Some(native_modules),
+    )
+}
+
+fn parse_external_hierarchy<'a>(
+    ir: &'a veryl_analyzer::ir::Ir,
+    loop_provenance: &LoopProvenance,
+    external: &'a ExternalHierarchy,
+    config: &BuildConfig,
+    top: &StrId,
+    native_modules: Option<&HashSet<String>>,
+) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     // Token-to-scope resolution uses process-global analyzer state and is not
     // safe while independent compilations run on other test threads. Snapshot
     // the thread-local symbols once for hierarchy-bearing designs instead.
@@ -83,32 +113,43 @@ pub fn parse_ir_with_external_hierarchy<'a>(
 
     let root_id = ModuleId(next_id);
     next_id += 1;
-    let root_ir = name_to_ir
-        .get(top)
-        .ok_or_else(|| ParserError::TopNotFound {
-            name: resource_table::get_str_value(*top).unwrap_or_default(),
-        })?;
+    let top_name = resource_table::get_str_value(*top).unwrap_or_default();
+    let root_ir = name_to_ir.get(top).copied();
+    let external_root = external.roots.get(&top_name).copied().filter(|_| {
+        root_ir.is_none() || native_modules.is_none_or(|names| names.contains(&top_name))
+    });
+    if root_ir.is_none() && external_root.is_none() {
+        return Err(ParserError::TopNotFound { name: top_name });
+    }
     if generic_names.contains(top) {
         return Err(ParserError::GenericTop {
             name: resource_table::get_str_value(*top).unwrap_or_default(),
         });
     }
-    signature_to_id.insert(root_ir.signature.clone(), root_id);
-    module_names.insert(
-        root_id,
-        resource_table::get_str_value(*top).unwrap_or_default(),
-    );
-    module_ir.insert(root_id, *root_ir);
+    if let Some(root_ir) = root_ir {
+        signature_to_id.insert(root_ir.signature.clone(), root_id);
+        module_ir.insert(root_id, root_ir);
+    }
+    module_names.insert(root_id, top_name);
 
     let mut external_ids = HashMap::default();
     let mut external_module_ids = external.modules.keys().copied().collect::<Vec<_>>();
     external_module_ids.sort_by_key(|id| id.0);
     for local_id in external_module_ids {
-        let global_id = ModuleId(next_id);
-        next_id += 1;
+        let global_id = if Some(local_id) == external_root {
+            root_id
+        } else {
+            let id = ModuleId(next_id);
+            next_id += 1;
+            id
+        };
         external_ids.insert(local_id, global_id);
     }
 
+    let mut worklist = root_ir
+        .into_iter()
+        .map(|module| (root_id, module))
+        .collect::<Vec<_>>();
     let mut external_modules_by_global = HashMap::default();
     for (&local_id, external_module) in &external.modules {
         let global_id = external_ids[&local_id];
@@ -131,13 +172,29 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             binding.package = external_ids[&binding.package];
         }
         module_names.insert(global_id, external_module.sim_module.name.clone());
+        let native_name = resource_table::insert_str(&external_module.sim_module.name);
+        if let Some(&native_module) = name_to_ir.get(&native_name)
+            && native_modules.is_none_or(|names| names.contains(&external_module.sim_module.name))
+            && !module_ir.contains_key(&global_id)
+        {
+            module_ir.insert(global_id, native_module);
+            signature_to_id.insert(native_module.signature.clone(), global_id);
+            worklist.push((global_id, native_module));
+        }
         modules.insert(global_id, external_module.sim_module.clone());
         external_modules_by_global.insert(global_id, external_module);
     }
 
-    let mut worklist = vec![(root_id, *root_ir)];
     let mut inst_sequences = HashMap::default();
     let mut validated_external = HashSet::default();
+    if let Some(root) = external_root {
+        validate_external_module_graph(
+            root,
+            external,
+            &mut HashSet::default(),
+            &mut validated_external,
+        )?;
+    }
     let mut index = 0;
     while index < worklist.len() {
         let (module_id, ir_module) = worklist[index];
@@ -222,7 +279,6 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     let file_dependencies = crate::file_dependencies::current();
     let tasks = module_ir
         .iter()
-        .filter(|(module_id, _)| !external_modules_by_global.contains_key(module_id))
         .map(|(&module_id, &ir_module)| {
             let inst_ids = inst_sequences
                 .get(&module_id)
@@ -301,22 +357,21 @@ pub fn parse_ir_with_external_hierarchy<'a>(
         .map(|(&module_id, module)| Ok((module_id, project_id_map(module)?)))
         .collect::<Result<HashMap<_, _>, ParserError>>()?;
     for (&module_id, module) in &external_modules_by_global {
-        source_id_maps.insert(
-            module_id,
+        source_id_maps.entry(module_id).or_insert_with(|| {
             module
                 .sim_module
                 .variables
                 .keys()
                 .map(|id| (veryl_analyzer::ir::VarId::from_raw(id.0), *id))
-                .collect(),
-        );
+                .collect()
+        });
     }
     for (module_id, mut sim_module) in parsed_modules {
         let ir_module = module_ir[&module_id];
         if let Some(symbols) = &symbols
             && let Some(module_symbol) = symbols.iter().find(|symbol| {
                 matches!(symbol.kind, SymbolKind::Module(_))
-                    && symbol.token.text == ir_module.name
+                    && symbol.id == ir_module.signature.symbol
                     && symbol.token.source == ir_module.token.beg.source
             })
         {
@@ -340,6 +395,36 @@ pub fn parse_ir_with_external_hierarchy<'a>(
         modules.insert(module_id, sim_module);
         source_id_maps.insert(module_id, id_map);
     }
+
+    fn check_cycles(
+        id: ModuleId,
+        modules: &HashMap<ModuleId, crate::symbolic::artifact::SimModule>,
+        active: &mut HashSet<ModuleId>,
+        done: &mut HashSet<ModuleId>,
+    ) -> Result<(), ParserError> {
+        if done.contains(&id) {
+            return Ok(());
+        }
+        if !active.insert(id) {
+            return Err(ParserError::illegal_context(
+                "recursive mixed-language module instantiation",
+                modules[&id].name.clone(),
+                None,
+            ));
+        }
+        for block in modules[&id].glue_blocks.values().flatten() {
+            check_cycles(block.module_id, modules, active, done)?;
+        }
+        active.remove(&id);
+        done.insert(id);
+        Ok(())
+    }
+    check_cycles(
+        root_id,
+        &modules,
+        &mut HashSet::default(),
+        &mut HashSet::default(),
+    )?;
 
     Ok(VerylSymbolicRtl {
         symbolic: SymbolicRtl {
