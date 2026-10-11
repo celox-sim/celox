@@ -304,8 +304,9 @@
   ; 11.5.1, including partially out-of-range indexed part-selects.
   (four_state)
   (source "overhanging_parameter_selections.sv" #"
-    module Top(output logic [6:0] checks, output int width);
+    module Top(output logic [8:0] checks, output int width);
       parameter logic [7:0] W = 8'hab;
+      parameter bit [7:0] B = 8'hab;
       parameter logic [11:4] D = 8'hab;
       parameter logic [4:11] U = 8'hab;
       localparam ABOVE = W[8:5];
@@ -315,14 +316,17 @@
       localparam OUTSIDE = W[12:9];
       localparam OFFSET = D[12:9];
       localparam UP = U[3:6];
+      localparam BIT_ABOVE = B[8:5];
+      localparam BIT_PLUS = B[6 +: 4];
       assign checks = {ABOVE === 4'bx101, BELOW === 4'b011x,
         PLUS === 4'bxx10, MINUS === 4'b11xx, OUTSIDE === 4'bxxxx,
-        OFFSET === 4'bx101, UP === 4'bx101};
+        OFFSET === 4'bx101, UP === 4'bx101,
+        BIT_ABOVE === 4'bx101, BIT_PLUS === 4'bxx10};
       assign width = $bits(ABOVE);
     endmodule
   "#)
   (top Top)
-  (assert_eq checks 127)
+  (assert_eq checks 511)
   (assert_eq width 4))
 
 (case constant_parameter_initializers_shape_ports_and_generate

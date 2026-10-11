@@ -869,6 +869,8 @@ fn preserves_overhanging_constant_parameter_part_selects() {
         ("logic [7:0] W = 8'hab", "W[6 +: 4]", "4'bxx10"),
         ("logic [7:0] W = 8'hab", "W[1 -: 4]", "4'b11xx"),
         ("logic [7:0] W = 8'hab", "W[12:9]", "4'bxxxx"),
+        ("bit [7:0] W = 8'hab", "W[8:5]", "4'bx101"),
+        ("bit [7:0] W = 8'hab", "W[6 +: 4]", "4'bxx10"),
         ("logic [11:4] W = 8'hab", "W[12:9]", "4'bx101"),
         ("logic [4:11] W = 8'hab", "W[3:6]", "4'bx101"),
         ("logic [1:0][7:4] W = 8'hab", "W[0][8:5]", "4'bx101"),
@@ -898,6 +900,24 @@ fn preserves_overhanging_constant_parameter_part_selects() {
         assert_eq!(parameters[1].resolved_signed(), Some(false), "{selection}");
         assert_eq!(parameters[2].resolved_value(), Some(1), "{selection}");
     }
+}
+
+#[test]
+fn bounds_constant_parameter_part_select_folding() {
+    for selection in ["W[65536:0]", "W[1000000000:0]", "W[0 +: 1000000000]"] {
+        let source = format!(
+            "module Top; parameter logic [7:0] W = 0; localparam N = {selection}; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("oversized_parameter_select.sv"))
+            .expect_err("oversized selections must be rejected before allocating their bits");
+        assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
+    }
+    let source = "module Top; parameter logic [7:0] W = 0; \
+        localparam N = W[65535:0]; localparam BITS = $bits(N); endmodule";
+    let ir = analyze_source(source, Path::new("maximum_parameter_select.sv")).unwrap();
+    let parameters = ir.modules()[0].parameters();
+    assert_eq!(parameters[1].resolved_width(), Some(65_536));
+    assert_eq!(parameters[2].resolved_value(), Some(65_536));
 }
 
 #[test]

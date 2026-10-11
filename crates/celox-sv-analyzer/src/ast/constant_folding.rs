@@ -251,11 +251,14 @@ fn eval_const_integral_expr_preserving_mask(
             lsb,
             signed,
         } => {
-            let operand =
-                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
             let msb = eval_ast_const_expr(msb, const_env)?;
             let lsb = eval_ast_const_expr(lsb, const_env)?;
             let width = usize::try_from(msb.checked_sub(lsb)?.checked_add(1)?).ok()?;
+            if width > MAX_CONSTANT_CONCAT_BITS {
+                return None;
+            }
+            let operand =
+                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
             let mut value = num_bigint::BigUint::default();
             let mut mask = num_bigint::BigUint::default();
             for offset in 0..width {
