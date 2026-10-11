@@ -42,7 +42,12 @@ fn compile(design: &Value) -> Result<Compiled, String> {
     let errors = errors
         .into_iter()
         .filter(|error| {
-            if matches!(
+            // Celox validates output destinations in its own lowerer, just
+            // as the simulator builder does. Keep that rejection and its
+            // diagnostic identity instead of stopping at Veryl's SV rule.
+            if matches!(error, AnalyzerError::NonConstantOutputSelect { .. }) {
+                false
+            } else if matches!(
                 error,
                 AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
                     | AnalyzerError::FunctionOutputInAlwaysFf { .. }
@@ -169,5 +174,24 @@ mod tests {
             }],
         });
         assert!(compile(&design).is_ok());
+    }
+
+    #[test]
+    fn dynamic_output_destinations_are_rejected_by_celox_lowering() {
+        let design = json!({
+            "top": "Top",
+            "four_state": false,
+            "sources": [{
+                "path": "test.veryl",
+                "text": r#"
+                    module Child (y: output logic) { assign y = 1'b1; }
+                    module Top (index: input logic, y: output logic<2>) {
+                        inst child: Child (y: y[index]);
+                    }
+                "#,
+            }],
+        });
+        let error = compile(&design).unwrap_err();
+        assert!(error.starts_with("lower: IllegalContext"), "{error}");
     }
 }
