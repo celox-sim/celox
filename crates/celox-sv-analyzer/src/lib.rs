@@ -23,7 +23,10 @@ pub mod system_functions;
 pub mod typecheck;
 
 pub use ast::interfaces::elaborate_interfaces_with_bindings;
-pub use ast::interfaces::{InterfaceElaboration, elaborate_interfaces_with_metadata};
+pub use ast::interfaces::{
+    InterfaceElaboration, elaborate_interfaces_with_metadata,
+    elaborate_interfaces_with_metadata_and_roots,
+};
 pub use ast::interfaces::{InterfacePrototype, interface_prototypes};
 pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
@@ -170,6 +173,15 @@ pub fn elaborate_interfaces(
     sources: &[(&str, &Path)],
 ) -> Result<Option<Vec<String>>, AnalyzerError> {
     ast::interfaces::elaborate_interfaces(sources)
+}
+
+/// Expand interfaces using the design roots selected by the hierarchy
+/// elaborator when resolving queries before flattening.
+pub fn elaborate_interfaces_with_roots(
+    sources: &[(&str, &Path)],
+    roots: &[&str],
+) -> Result<Option<Vec<String>>, AnalyzerError> {
+    ast::interfaces::elaborate_interfaces_with_roots(sources, Some(roots))
 }
 
 /// Parse and analyze a SystemVerilog source string.

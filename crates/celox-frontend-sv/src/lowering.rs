@@ -174,8 +174,16 @@ impl LoweredSvModuleKey {
 
 fn analyze_sources(
     sources: &[(&str, &Path)],
+    roots: &[&str],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
-    analyze_sources_with_foreign(sources, &ExternalHierarchy::default(), &[])
+    analyze_sources_with_requests(
+        sources,
+        &ExternalHierarchy::default(),
+        &[],
+        &[],
+        Some(roots),
+    )
+    .map(|(modules, _)| modules)
 }
 
 /// The type and modport contract of an SV interface, without translating its
@@ -217,7 +225,11 @@ pub fn interface_signatures_for(
             .iter()
             .map(|prototype| (prototype.probe_source.as_str(), probe_path)),
     );
-    let analyzed = analyze_sources(&all_sources)?;
+    let probe_roots = prototypes
+        .iter()
+        .map(|prototype| prototype.probe_name.as_str())
+        .collect::<Vec<_>>();
+    let analyzed = analyze_sources(&all_sources, &probe_roots)?;
     prototypes
         .into_iter()
         .map(|prototype| {
@@ -239,14 +251,6 @@ pub fn interface_signatures_for(
         .collect()
 }
 
-fn analyze_sources_with_foreign(
-    sources: &[(&str, &Path)],
-    foreign: &ExternalHierarchy,
-    declarations: &[(&str, &Path)],
-) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
-    analyze_sources_with_requests(sources, foreign, declarations, &[]).map(|(modules, _)| modules)
-}
-
 #[derive(Clone, Debug)]
 pub struct SvModuleRequest {
     pub alias: String,
@@ -260,6 +264,7 @@ fn analyze_sources_with_requests(
     foreign: &ExternalHierarchy,
     declarations: &[(&str, &Path)],
     requests: &[SvModuleRequest],
+    roots: Option<&[&str]>,
 ) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
     if !declarations.is_empty() {
         for (code, path) in sources {
@@ -287,7 +292,23 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::elaborate_interfaces_with_metadata(sources, &bindings)?;
+    let selected_roots = roots.map(|roots| {
+        roots
+            .iter()
+            .map(|root| {
+                requests
+                    .iter()
+                    .find(|request| request.alias == *root)
+                    .map(|request| request.module.as_str())
+                    .unwrap_or(root)
+            })
+            .collect::<Vec<_>>()
+    });
+    let elaboration = sv::elaborate_interfaces_with_metadata_and_roots(
+        sources,
+        &bindings,
+        selected_roots.as_deref(),
+    )?;
     let elaborated = elaboration.sources;
     let root_names = elaboration.root_names;
     let elaborated_sources: Vec<(&str, &Path)>;
@@ -339,7 +360,17 @@ fn analyze_sources_with_requests(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
+    let packages = match roots {
+        Some(roots) => {
+            let roots = roots
+                .iter()
+                .map(|root| root_names.get(*root).map(String::as_str).unwrap_or(root))
+                .collect::<Vec<_>>();
+            sv::ParsedSource::analyze_packages_with_roots(&parsed, &roots)?
+        }
+        None => sv::ParsedSource::analyze_packages(&parsed)?,
+    };
+    let packages = std::sync::Arc::new(packages);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -1085,8 +1116,13 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
 ) -> Result<ExternalHierarchy, FrontendError> {
-    let (analyzed, bound_names) =
-        analyze_sources_with_requests(sources, foreign, declarations, requests)?;
+    let (analyzed, bound_names) = analyze_sources_with_requests(
+        sources,
+        foreign,
+        declarations,
+        requests,
+        Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
+    )?;
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -1454,7 +1490,7 @@ pub fn schedule_sources(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let analyzed = analyze_sources(sources, &[top])?;
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),

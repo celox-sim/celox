@@ -48,11 +48,27 @@ impl ParsedSource {
     /// Analyze the packages declared in `sources`, each once, after the
     /// packages it depends on.
     pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {
+        Self::analyze_packages_impl(sources, None)
+    }
+
+    /// Analyze packages and time queries using the roots selected by the
+    /// hierarchy elaborator, rather than inferring roots from all sources.
+    pub fn analyze_packages_with_roots(
+        sources: &[&ParsedSource],
+        roots: &[&str],
+    ) -> Result<Packages, AnalyzerError> {
+        Self::analyze_packages_impl(sources, Some(roots))
+    }
+
+    fn analyze_packages_impl(
+        sources: &[&ParsedSource],
+        roots: Option<&[&str]>,
+    ) -> Result<Packages, AnalyzerError> {
         let trees: Vec<_> = sources
             .iter()
             .map(|source| (&source.tree, source.path.as_path()))
             .collect();
-        ast::with_call_sites(|| Packages::analyze(&trees))
+        ast::with_call_sites(|| Packages::analyze_with_roots(&trees, roots))
     }
 
     /// Analyze a module that may use `packages`, rewriting its type
