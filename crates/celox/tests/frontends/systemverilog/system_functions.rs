@@ -1,6 +1,7 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
     fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
     fn unpacked_dimensions_selects_integral_atoms(sim) { @case "system_functions::unpacked_dimensions_selects_integral_atoms"; }
     fn unpacked_dimensions_publishes_array_parameters_before_declarations(sim) { @case "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations"; }
@@ -979,6 +980,31 @@ fn unpacked_dimensions_rejects_nonwritable_function_arguments() {
                 build_error(&format!(
                     "module Top(output int y); int a; localparam int P = 1; function int f({direction} int x); x = 4; return x; endfunction {use_site} endmodule"
                 ));
+            }
+        }
+    }
+}
+
+#[test]
+fn dimension_queries_reject_four_state_parameter_output_actuals() {
+    for query in ["$unpacked_dimensions", "$dimensions"] {
+        for direction in ["output", "inout"] {
+            for value in ["4'bxxxx", "4'bzzzz", "4'b10xz"] {
+                for operand in ["P", "P[0]", "{a, P}", "{P, a}"] {
+                    for use_site in [
+                        format!("assign y = {query}(f({operand}));"),
+                        format!("localparam N = {query}(f({operand})); assign y = N;"),
+                    ] {
+                        let diagnostic = build_error(&format!(
+                            "module Top(output int y); logic [3:0] a; localparam logic [3:0] P = {value}; function int f({direction} logic [7:0] x); x = 0; f = 1; endfunction {use_site} endmodule"
+                        ));
+                        assert!(
+                            diagnostic.contains("non-writable argument")
+                                || diagnostic.contains("operand of"),
+                            "{query}({operand}), {direction}, {value}, {use_site}: {diagnostic}"
+                        );
+                    }
+                }
             }
         }
     }

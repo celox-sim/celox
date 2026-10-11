@@ -830,7 +830,12 @@ pub(super) fn expr_from_tf_call(
 fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
     match expression {
         Expr::Ident(name) => {
-            dimensions.get(name).is_some() && !dimensions.const_env.contains_key(name)
+            dimensions.get(name).is_some()
+                && !dimensions.const_env.contains_key(name)
+                && !dimensions.parameter_values.contains_key(name)
+                && !dimensions
+                    .const_env
+                    .contains_key(&parameters::unbounded_parameter_marker(name))
         }
         Expr::Select { expr, .. } => query_actual_is_writable(expr, dimensions),
         Expr::Concat(parts) => {

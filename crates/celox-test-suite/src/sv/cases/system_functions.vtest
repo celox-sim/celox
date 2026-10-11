@@ -2077,6 +2077,57 @@ a=0a  10
   (assert_eq untouched 7)
   (expect_output ""))
 
+; IEEE 1800-2023 13.4.1: the function name denotes its result variable.
+(case unpacked_dimensions_accepts_function_result_arguments
+  (source "function_result_query_arguments.sv" #"
+    module Child(input int value, output int copied);
+      assign copied = value;
+    endmodule
+    module Top(output int ansi_result, legacy_result, implicit_result, inline_result);
+      localparam logic [31:0] P = 32'bx;
+      function automatic int g(output int x);
+        $display("must not execute");
+        x = 99;
+        g = 0;
+      endfunction
+      function automatic int update(inout int x);
+        $display("must not execute");
+        x = 99;
+        update = 0;
+      endfunction
+      function automatic int f(input int P);
+        f = P;
+        f = f + $unpacked_dimensions(g(f))
+              + $unpacked_dimensions(update(f[31:0]))
+              + $unpacked_dimensions(g(P));
+      endfunction
+      function automatic int legacy;
+        int P;
+        begin
+          P = 11;
+          legacy = P;
+          legacy = legacy + $unpacked_dimensions(update({legacy[31:16], legacy[15:0]}))
+                          + $unpacked_dimensions(g(P));
+        end
+      endfunction
+      function automatic implicit_f;
+        implicit_f = 1;
+        implicit_f = implicit_f + $unpacked_dimensions(g(implicit_f));
+      endfunction
+      assign ansi_result = f(9);
+      assign legacy_result = legacy();
+      assign implicit_result = implicit_f();
+      Child child(.value(f(9)), .copied(inline_result));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ansi_result 9)
+  (assert_eq legacy_result 11)
+  (assert_eq implicit_result 1)
+  (assert_eq inline_result 9)
+  (expect_output ""))
+
 (case unpacked_dimensions_resolves_preceding_module_declarations
   (source "preceding_module_shapes.sv" #"
     module Top(input logic [7:0] port_array [0:1],

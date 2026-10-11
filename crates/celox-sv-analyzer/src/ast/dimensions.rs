@@ -102,13 +102,7 @@ fn query_operand_dimensions(
             const_env,
             type_aliases,
         ) {
-            for (name, ty) in &locals {
-                context.const_env.insert(
-                    variable_dimensions_marker(name),
-                    (ty.unpacked.len() + ty.packed.len()) as i128,
-                );
-            }
-            context.extend(locals);
+            extend_query_local_dimensions(&mut context, locals);
         }
         context
     };
@@ -879,6 +873,16 @@ fn size_function_expression_type(
             .function_return_types
             .extend(dimensions.function_return_types.clone());
     }
+    // The supplied module context can reintroduce constant values hidden by
+    // function formals, locals or the implicit result variable.
+    if let Some(locals) = containing_function_dimensions(
+        RefNode::Expression(argument),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    ) {
+        extend_query_local_dimensions(&mut packed_dimensions, locals);
+    }
     let mut shapes = containing_subroutine_param_shapes(
         RefNode::Expression(argument),
         syntax_tree,
@@ -1105,11 +1109,34 @@ fn containing_packed_dimensions(
         if let Some(locals) =
             containing_function_dimensions(target.clone(), syntax_tree, const_env, type_aliases)
         {
-            dimensions.extend(locals);
+            extend_query_local_dimensions(&mut dimensions, locals);
         }
         return Some(dimensions);
     }
     None
+}
+
+/// Locals shadow every constant projection of the enclosing binding. Retain
+/// their declared shapes while checking unevaluated output/inout actuals.
+pub(super) fn extend_query_local_dimensions(
+    context: &mut PackedDimensions,
+    locals: impl IntoIterator<Item = (String, VariableDimensions)>,
+) {
+    for (name, ty) in locals {
+        for key in parameters::binding_keys(&name, &context.const_env, ty.packed.len()) {
+            context.const_env.remove(&key);
+        }
+        context.parameter_values.remove(&name);
+        context.const_env.insert(
+            variable_dimensions_marker(&name),
+            (ty.unpacked.len() + ty.packed.len()) as i128,
+        );
+        context.const_env.insert(
+            variable_unpacked_dimensions_marker(&name),
+            ty.unpacked.len() as i128,
+        );
+        context.insert(name, ty);
+    }
 }
 
 /// Publish each completed declaration before resolving the next range.
@@ -1178,6 +1205,7 @@ fn containing_function_dimensions(
                 syntax_tree,
                 const_env,
                 type_aliases,
+                (target_start, target_end),
             ),
         }?;
         dimensions.extend(locals);

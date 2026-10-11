@@ -3,6 +3,39 @@ use std::path::Path;
 use super::*;
 
 #[test]
+fn function_result_queries_preserve_expression_bodies() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        module Top(output int y);
+            localparam logic [31:0] P = 32'bx;
+            function int g(output int x); x = 99; g = 0; endfunction
+            function int f(input int P);
+                f = P;
+                f = f + $unpacked_dimensions(g(f)) + $unpacked_dimensions(g(P));
+            endfunction
+            assign y = f(9);
+        endmodule
+        "#,
+        Path::new("function_result_query.sv"),
+    )
+    .unwrap();
+    let source = Source::from_syntax(&tree).unwrap();
+    let module = &source.modules()[0];
+    let env = const_env_from_parameters(module.parameters());
+    let node = tree
+        .into_iter()
+        .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+        .unwrap();
+    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &env).unwrap();
+    let mut dimensions =
+        packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
+    dimensions.extend(parameter_packed_dimensions(module.parameters()));
+    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
+    let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
+    assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
+}
+
+#[test]
 fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations() {
     let code = r#"
         module Top(input logic signed [1:0][3:0] a, input logic [7:0] b);
