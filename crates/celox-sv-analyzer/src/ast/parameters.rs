@@ -61,7 +61,9 @@ pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String
         ConstExpr::Function { args, .. } => {
             args.iter().any(|arg| contains_unbounded_operand(arg, env))
         }
-        ConstExpr::Unary { expr, .. } => contains_unbounded_operand(expr, env),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            contains_unbounded_operand(expr, env)
+        }
         ConstExpr::Binary { left, right, .. } => {
             contains_unbounded_operand(left, env) || contains_unbounded_operand(right, env)
         }
@@ -1211,6 +1213,15 @@ fn replace_oob_const_selects_with_unknown(
                 .map(|arg| replace_oob_const_selects_with_unknown(arg, const_env))
                 .collect(),
         },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
+            width,
+            signed,
+        },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
@@ -1249,7 +1260,9 @@ fn const_expr_contains_unknown_literal(expr: &ConstExpr) -> bool {
             const_expr_contains_unknown_literal(expr) || const_expr_contains_unknown_literal(bit)
         }
         ConstExpr::Function { args, .. } => args.iter().any(const_expr_contains_unknown_literal),
-        ConstExpr::Unary { expr, .. } => const_expr_contains_unknown_literal(expr),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_expr_contains_unknown_literal(expr)
+        }
         ConstExpr::Binary { left, right, .. } => {
             const_expr_contains_unknown_literal(left) || const_expr_contains_unknown_literal(right)
         }
@@ -1274,6 +1287,15 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             msb: (*bit).clone(),
             lsb: *bit,
             signed: false,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(const_expr_to_expr(*expr)),
+            width,
+            signed,
         },
         ConstExpr::Function { name, args, .. } => Expr::Call {
             name,
@@ -1374,6 +1396,19 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
                 })
                 .collect(),
         },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(substitute_typed_parameter_literals_with_lookup(
+                *expr,
+                constants,
+                parameter_types,
+            )),
+            width,
+            signed,
+        },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(substitute_typed_parameter_literals_with_lookup(
@@ -1432,6 +1467,10 @@ pub(super) fn infer_const_expr_type(
             })
         }
         ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::Resize { width, signed, .. } => Some(ExprType {
+            width: *width,
+            signed: *signed,
+        }),
         ConstExpr::Select { .. } => Some(ExprType {
             width: 1,
             signed: false,

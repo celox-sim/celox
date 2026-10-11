@@ -210,7 +210,7 @@ pub(super) fn bit_select_index(
                 0,
                 true,
             ),
-            &dimensions.const_env,
+            dimensions,
         )
         .ok_or_else(index_error)
     }
@@ -243,7 +243,7 @@ pub(super) fn lvalue_from_select(
                     0,
                     true,
                 ),
-                &packed_dimensions.const_env,
+                packed_dimensions,
             )
             .ok_or_else(|| unsupported(format!("index of assignment target `{name}`")))
         })
@@ -431,7 +431,7 @@ pub(super) fn lvalue_from_constant_select(
                         0,
                         true,
                     ),
-                    &packed_dimensions.const_env,
+                    packed_dimensions,
                 )
                 .ok_or_else(|| unsupported(format!("index of `{name}`")))
             }
@@ -1945,6 +1945,7 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             }
             Some((width, variable.signed))
         }
+        ConstExpr::Resize { width, signed, .. } => Some((*width, *signed)),
         ConstExpr::Select { .. } => Some((1, false)),
         ConstExpr::Function { .. } => None,
         ConstExpr::Unary { op, expr } => match op {
@@ -2053,6 +2054,15 @@ fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) ->
             left: go(left),
             op,
             right: go(right),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: go(expr),
+            width,
+            signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary { op, expr: go(expr) },
         ConstExpr::Mux {

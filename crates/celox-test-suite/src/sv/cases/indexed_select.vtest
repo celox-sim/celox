@@ -1029,3 +1029,85 @@
     (for (index expected) (list (0 0x10) (1 0x21) (2 value) (3 0x43))
       (modify (set c (+ 0xf0 index)))
       (assert_eq y expected))))
+
+(case constant_part_select_indices_of_concatenations
+  ; IEEE 1800-2023 11.4.12: concatenation selections use [n-1:0]
+  ; coordinates, independently of their operands' declared ranges.
+  (source "concatenation_slice_indices.sv" #"
+                module Top(input logic clk, input logic [7:0] c,
+                           input logic [0:7] ascending, input logic [11:4] shifted,
+                           output logic [7:0] joined, repeated, crossing, nested, up, offset, single,
+                           output logic [3:0] written, registered);
+                    logic [7:0] mem [4];
+                    always_comb begin
+                        mem[0] = 8'h12;
+                        mem[1] = 8'h34;
+                        mem[2] = 8'h56;
+                        mem[3] = 8'h78;
+                        written = '0;
+                        written[{2'b00, c}[1:0]] = 1'b1;
+                    end
+                    always_ff @(posedge clk) begin
+                        registered <= '0;
+                        registered[{2{c}}[9:8]] <= 1'b1;
+                    end
+                    assign joined = mem[{2'b00, c}[1:0]];
+                    assign repeated = mem[{2{c}}[9:8]];
+                    assign crossing = mem[{c[0], c[7:1]}[7:6]];
+                    assign nested = mem[{1'b0, {2{c[1:0]}}}[3:2]];
+                    assign up = mem[{2'b00, ascending}[1:0]];
+                    assign offset = mem[{2'b00, shifted}[1:0]];
+                    assign single = mem[{c}[1:1]];
+                endmodule
+            "#)
+  (top Top)
+  (let stored 0x78563412)
+  (for value (list 0 1 2 3 0x81 0x42 0xa5 0xff)
+    (modify (set c value) (set ascending value) (set shifted value))
+    (let index (& value 3))
+    (let expected (& (>> stored (* index 8)) 255))
+    (expand name (joined repeated nested up offset)
+      (assert_eq {name} expected))
+    (let cross (| (<< (& value 1) 1) (& (>> value 7) 1)))
+    (assert_eq crossing (& (>> stored (* cross 8)) 255))
+    (assert_eq single (& (>> stored (* (& (>> value 1) 1) 8)) 255))
+    (assert_eq written (<< 1 index))
+    (tick clk)
+    (assert_eq registered (<< 1 index))))
+
+(case constant_part_select_indices_of_signed_slices
+  ; IEEE 1800-2023 7.4.2: negative unpacked indices are valid when
+  ; they lie inside the declared range. Preserve cast widths in arithmetic.
+  (source "signed_slice_indices.sv" #"
+                module Top(input logic clk, input logic [7:0] c, input logic [7:0] d,
+                           output logic [7:0] direct, casted, wrapped, widened, registered,
+                           output logic [31:0] contents);
+                    logic [7:0] mem [-2:1];
+                    always_comb begin
+                        mem[-2] = 8'h10;
+                        mem[-1] = 8'h20;
+                        mem[0] = 8'h30;
+                        mem[1] = 8'h40;
+                        mem[$signed(c[1:0])] = d;
+                        direct = mem[$signed(c[1:0])];
+                        casted = mem[signed'(c[1:0])];
+                        widened = mem[int'(signed'(c[1:0]))];
+                        wrapped = mem[$signed(c[1:0]) + 2'sd1];
+                        contents = {mem[1], mem[0], mem[-1], mem[-2]};
+                    end
+                    always_ff @(posedge clk) registered <= direct;
+                endmodule
+            "#)
+  (top Top)
+  (let initial 0x40302010)
+  (let by_index 0x20104030)
+  (for (bits value) (list (2 0x22) (3 0x33) (0 0x44) (1 0x55) (2 0xab) (1 0xcd))
+    (modify (set c (+ 0xc0 bits)) (set d value))
+    (expand name (direct casted widened)
+      (assert_eq {name} value))
+    (let offset (* (& (+ bits 2) 3) 8))
+    (assert_eq contents (| (& initial (~ (<< 255 offset))) (<< value offset)))
+    (let next (& (+ bits 1) 3))
+    (assert_eq wrapped (& (>> by_index (* next 8)) 255))
+    (tick clk)
+    (assert_eq registered value)))

@@ -489,6 +489,20 @@ fn substitute_const_expr_constants_impl(
                 })
                 .collect(),
         },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            width,
+            signed,
+        },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(substitute_const_expr_constants_impl(
@@ -758,76 +772,54 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
     }
 }
 
-pub(super) fn expr_to_index_const(
-    expr: Expr,
-    const_env: &HashMap<String, i128>,
-) -> Option<ConstExpr> {
+pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> Option<ConstExpr> {
     match expr {
         Expr::Resize {
             expr,
             width,
             signed,
         } => {
-            let expr = expr_to_index_const(*expr, const_env)?;
             if width == 0 {
-                return Some(ConstExpr::Literal("0".to_string()));
+                return Some(ConstExpr::Literal("0".into()));
             }
-            if width == 1 && !signed {
-                return Some(ConstExpr::Select {
-                    expr: Box::new(expr),
-                    bit: Box::new(ConstExpr::Literal("0".to_string())),
-                });
-            }
-            let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
-            let truncated = ConstExpr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::BitAnd,
-                right: Box::new(ConstExpr::Literal(format!("{width}'h{mask:x}"))),
-            };
-            if signed {
-                Some(ConstExpr::Mux {
-                    condition: Box::new(ConstExpr::Select {
-                        expr: Box::new(truncated.clone()),
-                        bit: Box::new(ConstExpr::Literal((width - 1).to_string())),
-                    }),
-                    // Every negative packed index is out of range. A stable
-                    // positive sentinel preserves that selection behavior
-                    // without requiring a signed-resize node in ConstExpr.
-                    then_expr: Box::new(ConstExpr::Literal(i128::MAX.to_string())),
-                    else_expr: Box::new(truncated),
-                })
-            } else {
-                Some(truncated)
-            }
+            Some(ConstExpr::Resize {
+                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                width,
+                signed,
+            })
         }
         Expr::Ident(name) => Some(ConstExpr::Ident(name)),
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_index_const(*expr, const_env)?),
+            expr: Box::new(expr_to_index_const(*expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_index_const(*left, const_env)?),
+            left: Box::new(expr_to_index_const(*left, dimensions)?),
             op,
-            right: Box::new(expr_to_index_const(*right, const_env)?),
+            right: Box::new(expr_to_index_const(*right, dimensions)?),
         }),
-        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
-            expr: Box::new(expr_to_index_const(*expr, const_env)?),
-            bit: Box::new(msb),
-        }),
+        Expr::Select { expr, msb, lsb, .. }
+            if msb == lsb && !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) =>
+        {
+            Some(ConstExpr::Select {
+                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                bit: Box::new(msb),
+            })
+        }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_index_const(*condition, const_env)?),
-            then_expr: Box::new(expr_to_index_const(*then_expr, const_env)?),
-            else_expr: Box::new(expr_to_index_const(*else_expr, const_env)?),
+            condition: Box::new(expr_to_index_const(*condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
         }),
         Expr::Call { name, args } => Some(ConstExpr::call(
             name,
             args.into_iter()
-                .map(|arg| expr_to_index_const(arg, const_env))
+                .map(|arg| expr_to_index_const(arg, dimensions))
                 .collect::<Option<_>>()?,
         )),
         Expr::Select {
@@ -836,58 +828,235 @@ pub(super) fn expr_to_index_const(
             lsb,
             signed: false,
         } => {
-            let msb = eval_ast_const_expr(&msb, const_env)?;
-            let lsb = eval_ast_const_expr(&lsb, const_env)?;
+            let msb = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
             let width = usize::try_from(msb.abs_diff(lsb).checked_add(1)?).ok()?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
-            let expr = expr_to_index_const(*expr, const_env)?;
-            // Symbolic indices only have single-bit selects. Assemble a constant
-            // part-select from those nodes, keeping its own unsigned width rather
-            // than the source vector's width (IEEE 1800-2023 11.5.1, 11.8.1).
-            // Select bits individually so X/Z outside the slice cannot taint it.
-            let mut bits = (0..width)
-                .map(|offset| {
-                    let bit = if msb >= lsb {
-                        lsb + offset as i128
-                    } else {
-                        lsb - offset as i128
-                    };
-                    ConstExpr::Binary {
-                        left: Box::new(ConstExpr::Select {
+            // Concatenations have [n-1:0] coordinates. Resolve just the
+            // selected bits in their operands, retaining each operand's range.
+            let positions = (0..width).map(|offset| {
+                if msb >= lsb {
+                    lsb + offset as i128
+                } else {
+                    lsb - offset as i128
+                }
+            });
+            let bits = match *expr {
+                expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+                    // Extracting only some operands must not discard calls
+                    // with effects. Pure calls have already been expanded.
+                    if inlining::calls_subroutine(&expr) {
+                        return None;
+                    }
+                    let source = IndexBitSource::from_expr(expr, dimensions)?;
+                    positions
+                        .map(|bit| source.bit(bit))
+                        .collect::<Option<_>>()?
+                }
+                expr => {
+                    let expr = expr_to_index_const(expr, dimensions)?;
+                    positions
+                        .map(|bit| ConstExpr::Select {
                             expr: Box::new(expr.clone()),
                             bit: Box::new(const_expr_from_i128(bit)),
-                        }),
-                        op: BinaryOp::Shl,
-                        right: Box::new(ConstExpr::Literal(offset.to_string())),
-                    }
-                })
-                .collect::<Vec<_>>();
-            // A balanced tree also bounds recursion for wider slices.
-            while bits.len() > 1 {
-                let mut remaining = bits.into_iter();
-                bits = std::iter::from_fn(|| {
-                    let left = remaining.next()?;
-                    Some(match remaining.next() {
-                        Some(right) => ConstExpr::Binary {
-                            left: Box::new(left),
-                            op: BinaryOp::BitOr,
-                            right: Box::new(right),
-                        },
-                        None => left,
-                    })
-                })
-                .collect();
-            }
-            Some(ConstExpr::Binary {
-                left: Box::new(ConstExpr::Literal(format!("{width}'b0"))),
-                op: BinaryOp::BitOr,
-                right: Box::new(bits.pop()?),
-            })
+                        })
+                        .collect()
+                }
+            };
+            assemble_index_bits(bits)
         }
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => {
             None
+        }
+    }
+}
+
+/// Assemble single bits at their own unsigned result width. A balanced tree
+/// keeps the recursion bounded for wider slices.
+fn assemble_index_bits(bits: Vec<ConstExpr>) -> Option<ConstExpr> {
+    let width = bits.len();
+    let mut bits = bits
+        .into_iter()
+        .enumerate()
+        .map(|(offset, bit)| ConstExpr::Binary {
+            left: Box::new(bit),
+            op: BinaryOp::Shl,
+            right: Box::new(ConstExpr::Literal(offset.to_string())),
+        })
+        .collect::<Vec<_>>();
+    while bits.len() > 1 {
+        let mut remaining = bits.into_iter();
+        bits = std::iter::from_fn(|| {
+            let left = remaining.next()?;
+            Some(match remaining.next() {
+                Some(right) => ConstExpr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::BitOr,
+                    right: Box::new(right),
+                },
+                None => left,
+            })
+        })
+        .collect();
+    }
+    Some(ConstExpr::Binary {
+        left: Box::new(ConstExpr::Literal(format!("{width}'b0"))),
+        op: BinaryOp::BitOr,
+        right: Box::new(bits.pop()?),
+    })
+}
+
+/// A concatenation operand prepared once, so copied bits retain call sites
+/// and replications do not expand their complete bit vectors.
+enum IndexBitSource {
+    Scalar {
+        expr: ConstExpr,
+        width: usize,
+        right: i128,
+        step: i128,
+    },
+    Concat {
+        parts: Vec<Self>,
+        width: usize,
+    },
+    Repeat {
+        part: Box<Self>,
+        width: usize,
+    },
+    Slice {
+        part: Box<Self>,
+        width: usize,
+        right: i128,
+        step: i128,
+    },
+    Resize {
+        part: Box<Self>,
+        width: usize,
+        extend_signed: bool,
+    },
+}
+
+impl IndexBitSource {
+    fn from_expr(expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
+        let width = expr_static_width(&expr, dimensions)?;
+        Some(match expr {
+            Expr::Concat(parts) => Self::Concat {
+                parts: parts
+                    .into_iter()
+                    .map(|part| Self::from_expr(part, dimensions))
+                    .collect::<Option<_>>()?,
+                width,
+            },
+            Expr::RepeatConcat { parts, .. } => Self::Repeat {
+                part: Box::new(Self::from_expr(Expr::Concat(parts), dimensions)?),
+                width,
+            },
+            Expr::Resize { expr, .. } => {
+                let extend_signed = expr_signedness_with_return_types(
+                    &expr,
+                    &dimensions.expression_signedness,
+                    &dimensions.functions,
+                    &dimensions.function_return_types,
+                )?;
+                Self::Resize {
+                    part: Box::new(Self::from_expr(*expr, dimensions)?),
+                    width,
+                    extend_signed,
+                }
+            }
+            Expr::Select { expr, msb, lsb, .. } => {
+                let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+                let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                let step = if left >= right { 1 } else { -1 };
+                match *expr {
+                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => Self::Slice {
+                        part: Box::new(Self::from_expr(expr, dimensions)?),
+                        width,
+                        right,
+                        step,
+                    },
+                    expr => Self::Scalar {
+                        expr: expr_to_index_const(expr, dimensions)?,
+                        width,
+                        right,
+                        step,
+                    },
+                }
+            }
+            expr => {
+                let (right, step) = if let Expr::Ident(name) = &expr
+                    && let Some(variable) = dimensions.get(name)
+                    && variable.packed.len() == 1
+                    && !variable.packed[0].normalize_single
+                {
+                    let range = &variable.packed[0];
+                    let left = eval_ast_const_expr(&range.left, &dimensions.const_env)?;
+                    let right = eval_ast_const_expr(&range.right, &dimensions.const_env)?;
+                    (right, if left >= right { 1 } else { -1 })
+                } else {
+                    (0, 1)
+                };
+                Self::Scalar {
+                    expr: expr_to_index_const(expr, dimensions)?,
+                    width,
+                    right,
+                    step,
+                }
+            }
+        })
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Self::Scalar { width, .. }
+            | Self::Concat { width, .. }
+            | Self::Repeat { width, .. }
+            | Self::Slice { width, .. }
+            | Self::Resize { width, .. } => *width,
+        }
+    }
+
+    fn bit(&self, bit: i128) -> Option<ConstExpr> {
+        let Some(mut offset) = usize::try_from(bit).ok().filter(|bit| *bit < self.width()) else {
+            return Some(ConstExpr::Literal("1'bx".into()));
+        };
+        match self {
+            Self::Scalar {
+                expr, right, step, ..
+            } => Some(ConstExpr::Select {
+                expr: Box::new(expr.clone()),
+                bit: Box::new(const_expr_from_i128(
+                    right.checked_add(step.checked_mul(bit)?)?,
+                )),
+            }),
+            Self::Concat { parts, .. } => {
+                for part in parts.iter().rev() {
+                    if offset < part.width() {
+                        return part.bit(offset as i128);
+                    }
+                    offset -= part.width();
+                }
+                None
+            }
+            Self::Repeat { part, .. } => part.bit((offset % part.width()) as i128),
+            Self::Slice {
+                part, right, step, ..
+            } => part.bit(right.checked_add(step.checked_mul(bit)?)?),
+            Self::Resize {
+                part,
+                extend_signed,
+                ..
+            } => {
+                if offset < part.width() {
+                    part.bit(bit)
+                } else if *extend_signed && part.width() > 0 {
+                    part.bit((part.width() - 1) as i128)
+                } else {
+                    Some(ConstExpr::Literal("1'b0".into()))
+                }
+            }
         }
     }
 }

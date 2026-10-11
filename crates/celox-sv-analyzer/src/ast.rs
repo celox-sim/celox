@@ -1637,6 +1637,13 @@ pub enum ConstExpr {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
     },
+    /// An integral cast whose width and signedness remain independent of
+    /// the enclosing index arithmetic.
+    Resize {
+        expr: Box<ConstExpr>,
+        width: usize,
+        signed: bool,
+    },
     Function {
         name: String,
         args: Vec<ConstExpr>,

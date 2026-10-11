@@ -109,14 +109,14 @@ pub(super) fn expr_signedness_with_return_types(
 }
 
 /// Whether `expr` calls a subroutine, which may have side effects.
-fn calls_subroutine(expr: &Expr) -> bool {
+pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
             ConstExpr::Function { name, args, .. } => {
                 !system_functions::is_system_name(name) || args.iter().any(constant)
             }
             ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
-            ConstExpr::Unary { expr, .. } => constant(expr),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant(expr),
             ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
             ConstExpr::Mux {
                 condition,

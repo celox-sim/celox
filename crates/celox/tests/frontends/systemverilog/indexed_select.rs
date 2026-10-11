@@ -3,6 +3,15 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+
+    fn constant_part_select_indices_of_concatenations(sim) {
+        @case "indexed_select::constant_part_select_indices_of_concatenations";
+    }
+
+    fn constant_part_select_indices_of_signed_slices(sim) {
+        @case "indexed_select::constant_part_select_indices_of_signed_slices";
+    }
+
     fn constant_part_select_indices_in_continuous_targets(sim) {
         @case "indexed_select::constant_part_select_indices_in_continuous_targets";
     }
