@@ -144,7 +144,9 @@ jobs:
 
   veryl-proof-corpus:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    # The corpus and subsequent symbolic gates can exceed an hour on Veryl's
+    # develop pin; leave enough time for every gate and evidence upload.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
