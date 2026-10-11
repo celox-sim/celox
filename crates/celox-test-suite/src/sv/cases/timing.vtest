@@ -398,3 +398,20 @@
   (top Top)
   (run_to_finish)
   (assert_eq done 1))
+
+(case plain_always_processes_start_after_host_inputs
+  (source "always.sv" #"module Top(input bit a, output bit y); always begin y=a; #1; end endmodule"#)
+  (top Top)
+  (set a 1)
+  (run_until 0)
+  (assert_eq y 1))
+
+(case timed_control_names_do_not_collide_with_design_names
+  (source "names.sv" #"package celox_suite_timed_control; localparam int N=1; endpackage
+    module Top(output bit done);
+      function void celox_suite_finish_design(); done=0; endfunction
+      initial begin #1; done=1; $finish; end
+    endmodule"#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq done 1))

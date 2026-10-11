@@ -71,18 +71,19 @@ pub(crate) fn stage(
     let prepared =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
+    let control_names = timed_names(&prepared.sources);
     let timescale = directory.join("timescale.sv");
     write_if_changed(&timescale, TIMESCALE.as_bytes())?;
     let mut paths = vec![timescale];
     if design.timed {
         let control = directory.join("timed_control.sv");
-        write_if_changed(&control, TIMED_CONTROL.as_bytes())?;
+        write_if_changed(&control, control_names.generated(TIMED_CONTROL).as_bytes())?;
         paths.push(control);
     }
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
         let source = if design.timed {
-            timed_source(source)
+            timed_source(source, &control_names)
         } else {
             source.clone()
         };
@@ -119,7 +120,13 @@ pub(crate) fn stage(
             .as_ref()
             .ok_or("the frontend gives no port information for a generated testbench")?;
         let path = directory.join("testbench.sv");
-        write_if_changed(&path, generate_testbench(case, info)?.as_bytes())?;
+        let bench = generate_testbench(case, info)?;
+        let bench = if design.timed {
+            control_names.generated(&bench)
+        } else {
+            bench
+        };
+        write_if_changed(&path, bench.as_bytes())?;
         paths.push(path);
         top = TESTBENCH_TOP.to_string();
         testbench = true;
@@ -150,20 +157,79 @@ const TIMED_CONTROL: &str = r#"package celox_suite_timed_control;
 endpackage
 "#;
 
-fn timed_source(source: &str) -> String {
-    let mut output = String::from("import celox_suite_timed_control::*;\n");
+struct TimedNames {
+    package: String,
+    start: String,
+    finish: String,
+}
+
+fn timed_names(sources: &[String]) -> TimedNames {
+    let words = sources
+        .iter()
+        .flat_map(|source| sv_words(source).into_iter().map(|(_, _, word)| word))
+        .collect::<std::collections::BTreeSet<_>>();
+    for suffix in 0u64.. {
+        let name = |base: &str| {
+            if suffix == 0 {
+                base.to_string()
+            } else {
+                format!("{base}_{suffix}")
+            }
+        };
+        let names = TimedNames {
+            package: name("celox_suite_timed_control"),
+            start: name("celox_suite_start_design"),
+            finish: name("celox_suite_finish_design"),
+        };
+        if [&names.package, &names.start, &names.finish]
+            .into_iter()
+            .all(|name| !words.contains(name.as_str()))
+        {
+            return names;
+        }
+    }
+    unreachable!()
+}
+impl TimedNames {
+    fn generated(&self, source: &str) -> String {
+        let mut output = String::new();
+        let mut previous = 0;
+        for (start, end, word) in sv_words(source) {
+            // Generated package references and unqualified helper calls; leave
+            // source signal paths (dut.name) and quoted script text intact.
+            if source[..start].trim_end().ends_with('.') {
+                continue;
+            }
+            let replacement = match word {
+                "celox_suite_timed_control" => &self.package,
+                "celox_suite_start_design" => &self.start,
+                "celox_suite_finish_design" => &self.finish,
+                _ => continue,
+            };
+            output.push_str(&source[previous..start]);
+            output.push_str(replacement);
+            previous = end;
+        }
+        output.push_str(&source[previous..]);
+        output
+    }
+}
+
+fn timed_source(source: &str, names: &TimedNames) -> String {
+    let mut output = format!("import {}::*;\n", names.package);
     let mut previous = 0;
     for (start, end, word) in sv_words(source) {
         let replacement = match word {
-            "initial" => "initial wait (celox_suite_timed_control::started)",
-            "$finish" if after_trivia(&source[end..]).starts_with('(') => {
-                "celox_suite_finish_design"
+            "initial" => format!("initial wait ({}::started)", names.package),
+            "always" if !after_trivia(&source[end..]).starts_with('@') => {
+                format!("always wait ({}::started)", names.package)
             }
-            "$finish" => "celox_suite_finish_design()",
+            "$finish" if after_trivia(&source[end..]).starts_with('(') => names.finish.clone(),
+            "$finish" => format!("{}()", names.finish),
             _ => continue,
         };
         output.push_str(&source[previous..start]);
-        output.push_str(replacement);
+        output.push_str(&replacement);
         previous = end;
     }
     output.push_str(&source[previous..]);
