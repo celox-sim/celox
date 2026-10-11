@@ -1556,3 +1556,31 @@ fn unrolled_loop_indices_record_hidden_edges() {
     sim.run_until(2).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
 }
+
+#[test]
+fn inactive_batches_retrigger_the_same_ff_domain() {
+    let mut sim = simulation(
+        r#"module Top(output bit [7:0] q);
+        bit clk = 0; bit [7:0] d = 0;
+        always @(posedge clk) q <= d;
+        initial begin d = 1; clk = 1; #0 clk = 0; #0 d = 2; clk = 1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+}
+
+#[test]
+fn blocking_ff_pulses_wake_process_event_waiters() {
+    let mut sim = simulation(
+        r#"module Top(input bit clk, output bit seen);
+        bit a = 0;
+        always @(posedge clk) begin a = 1; a = 0; end
+        initial begin @(posedge a); seen = 1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}

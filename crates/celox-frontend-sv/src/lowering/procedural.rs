@@ -479,8 +479,13 @@ impl<'a> ProcModule<'a> {
         signed: bool,
         is_4state: bool,
     ) -> (SourceVarId, String) {
-        let name = format!("{purpose}@t{}", self.temp_counter);
-        self.temp_counter += 1;
+        let name = loop {
+            let name = format!("{purpose}@t{}", self.temp_counter);
+            self.temp_counter += 1;
+            if !self.name_to_id.contains_key(&name) {
+                break name;
+            }
+        };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(
             id,
@@ -2257,3 +2262,10 @@ pub(super) fn default_calls(
         }
     }
 }
+
+/// Watchers planned before FF lowering and reused by timed processes.
+pub(super) type EventWatchPlan = (
+    Vec<EventWatcher>,
+    HashMap<SourceVarId, Vec<usize>>,
+    Vec<SourceVarId>,
+);
