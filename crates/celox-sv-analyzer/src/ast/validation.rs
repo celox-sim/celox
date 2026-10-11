@@ -202,7 +202,48 @@ fn reject_silently_ignored_constructs_with_dimensions(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
+    // Procedure locals, parameters and loop indices are installed by
+    // BodyBuilder. Validate their queries while lowering that scoped body.
+    let procedural_queries: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter(|child| {
+            matches!(
+                child,
+                RefNode::FunctionDeclaration(_)
+                    | RefNode::TaskDeclaration(_)
+                    | RefNode::AlwaysConstruct(_)
+                    | RefNode::InitialConstruct(_)
+            )
+        })
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::SystemTfCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
     for child in validation_nodes(node.clone(), is_module) {
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && !procedural_queries.contains(&call)
+        {
+            parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
+        }
+        if let RefNode::SystemTfCall(call) = child.clone()
+            && system_tf_call_parts(call, syntax_tree)
+                .is_some_and(|(name, _)| name == "$isunbounded")
+        {
+            let (name, args) = system_tf_call_parts(call, syntax_tree).unwrap();
+            system_functions::check_call(
+                name,
+                args.as_deref(),
+                system_functions::CallSite::Expression,
+            )?;
+            let value = parameters::isunbounded_call(call, syntax_tree, const_env)?;
+            if value.is_none() && !procedural_queries.contains(&call) {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "argument must name a value parameter".into(),
+                });
+            }
+        }
         // A parameter initializer with an indexed select is lowered through
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
@@ -224,11 +265,25 @@ fn reject_silently_ignored_constructs_with_dimensions(
         match child {
             RefNode::SystemTfCall(call)
                 if system_tf_call_parts(call, syntax_tree)
-                    .is_some_and(|(name, _)| name == "$unpacked_dimensions") =>
+                    .is_some_and(|(name, _)| name == "$dimensions")
+                    && !procedural_queries.contains(&call) =>
             {
+                // Preliminary parameter lowering may defer a type query.
+                // Check even unused declarations once their scope is known.
+                dimensions::dimensions_system_function_call_value(
+                    call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
+                ).ok_or_else(|| unsupported(format!("operand of `$dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
+            }
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$unpacked_dimensions")
+                    && !procedural_queries.contains(&call) =>
+            {
+                // Preliminary parameter lowering may defer a type query.
+                // Check even unused declarations once their scope is known.
                 dimensions::unpacked_dimensions_call_value(
                     call, syntax_tree, const_env, type_aliases, Some(indexed_dimensions),
-                ).ok_or_else(|| unsupported("operand of `$unpacked_dimensions`"))?;
+                ).ok_or_else(|| unsupported(format!("operand of `$unpacked_dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
             }
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
@@ -404,13 +459,6 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 ));
             }
             RefNode::FunctionDeclaration(function)
-                if function_has_static_local_state(function) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "static function-local state".to_string(),
-                ));
-            }
-            RefNode::FunctionDeclaration(function)
                 if RefNode::FunctionDeclaration(function)
                     .into_iter()
                     .any(non_input_function_port) =>
@@ -462,17 +510,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 }
             }
             // Package scopes and imports resolve through the imported
-            // packages; compilation-unit declarations are not analyzed.
-            RefNode::PackageExportDeclaration(_) => {
-                return Err(AnalyzerError::Unsupported(
-                    "package export declaration".to_string(),
-                ));
-            }
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
-                return Err(AnalyzerError::Unsupported(
-                    "compilation-unit scope reference `$unit::`".to_string(),
-                ));
-            }
+            // packages and the compilation unit.
             RefNode::ParamAssignment(parameter)
                 if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
                     matches!(
@@ -544,35 +582,6 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
             matches!(&**direction, sv_parser::PortDirection::Ref(_))
         }
         Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
-    }
-}
-
-fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) -> bool {
-    let function_is_static = !matches!(function.nodes.1, Some(sv_parser::Lifetime::Automatic(_)));
-    let local_is_static = |item: &sv_parser::BlockItemDeclaration| {
-        let sv_parser::BlockItemDeclaration::Data(item) = item else {
-            return false;
-        };
-        let sv_parser::DataDeclaration::Variable(variable) = &item.nodes.1 else {
-            return false;
-        };
-        match &variable.nodes.2 {
-            Some(sv_parser::Lifetime::Automatic(_)) => false,
-            Some(sv_parser::Lifetime::Static(_)) => true,
-            None => function_is_static,
-        }
-    };
-    match &function.nodes.2 {
-        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-            body.nodes.5.iter().any(local_is_static)
-        }
-        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
-            matches!(
-                item,
-                sv_parser::TfItemDeclaration::BlockItemDeclaration(item)
-                    if local_is_static(item)
-            )
-        }),
     }
 }
 

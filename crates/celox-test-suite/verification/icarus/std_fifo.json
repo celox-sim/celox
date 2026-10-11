@@ -1,0 +1,119 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "std_fifo::test_fifo_clear",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "std_fifo::test_fifo_full",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "std_fifo::test_fifo_initial_empty",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "std_fifo::test_fifo_ordering",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-assignment-patterns"
+        ],
+        "id": "icarus_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
+        "upstream": []
+      },
+      "name": "std_fifo::test_fifo_push_pop_single",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

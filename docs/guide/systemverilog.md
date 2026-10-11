@@ -56,7 +56,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -211,9 +211,21 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
   variable are rejected, counting every instance of a module that writes it.
   A package variable cannot be a clock or reset yet, and its initializer must
-  be constant. Package nets,
-  `export` declarations and compilation-unit (`$unit`) declarations are not
-  supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
+  be constant. `export` declarations (26.6) make imported declarations
+  visible to the importers of a package: `export p::*;` exports only the
+  names the package actually imports from `p`, and an import through an
+  export denotes the original declaration, so importing it along two paths
+  is not ambiguous; `q::x` names the declaration `q` exports as `x`. Package
+  nets are not supported ([#1146](https://github.com/celox-sim/celox/issues/1146)).
+- **Compilation units.** Each source file is a compilation unit of its own
+  (IEEE 1800-2023 3.12.1). Its parameters, types, subroutines, variables and
+  imports outside any module or package form the scope `$unit`, which
+  encloses the modules of the file: a module sees the unit's items and
+  imports declared before it, and every subroutine of the unit, after its own
+  declarations and imports. `$unit::x` names the unit's item `x`. A
+  compilation-unit variable is one object shared by the modules of the file,
+  named `$unit::v` like a package variable; only one source file may declare
+  them. DPI imports at compilation-unit scope are not supported.
 - **Interfaces** are expanded into the modules that use them before
   analysis. The members of an interface instance `h` become signals `h$m` of
   the module that instantiates it, and its logic runs in that module. An
@@ -225,9 +237,28 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   interface it is connected to, as `M$I`.
 - **Block-local variables** of an `always_comb` become signals of the module; a
   name that clashes with another signal is rejected.
+- **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
+  procedural block, function or task is static unless it, its subroutine or
+  its module (`module automatic`) is declared `automatic`. A static local of a
+  block keeps its value from one execution of the block to the next, and its
+  initializer runs once at time zero: in `always_ff`, `int count; count++;`
+  counts. An automatic local is initialized on every entry. A static local
+  whose value on entry is never read, because every path writes it before
+  reading it, behaves the same either way. Because a static local keeps its
+  value, a local of `always_comb` that only some paths write is a latch, and
+  is rejected like any other latch. A static local of a function or task
+  that keeps its value between calls is not supported, nor is a static local
+  whose initializer is not constant; declare them `automatic`. The result of
+  a static function is static too, so one with a path that does not assign
+  it (other than a `case` whose items cover every value of a two-state
+  argument) is
+  rejected as well. An interface
+  whose default lifetime (`interface automatic`) differs from that of the
+  module it is used in is rejected.
 - **Run-time loops.** A loop in `always_ff` whose iteration count depends on
   run-time values runs as a loop in the generated code; one that stops making
   progress reports a runtime error naming its loop variable.
+- **Unbounded parameters.** `$isunbounded(P)` returns a one-bit unsigned result: 1 for a value parameter assigned `$`, otherwise 0. The symbolic value survives parameter aliases and instance overrides (IEEE 1800-2023 6.20.7, 20.6.3).
 - **System functions called as statements**, such as `$countones(f(a));`, are
   checked and evaluated like the same call in an expression, and their value
   is discarded. `$bits` and `$size` do not evaluate their operand.

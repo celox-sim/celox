@@ -1,0 +1,389 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-unpacked-subroutines"
+        ],
+        "id": "icarus_unpacked_subroutines",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 explicitly reports that subroutine ports with unpacked dimensions are not supported.",
+        "upstream": []
+      },
+      "name": "system_function::test_comb_function_body_bits_size_system_functions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_comb_function_body_clog2_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_comb_function_body_onehot_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_comb_function_body_signed_unsigned_system_functions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_bits_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_bits_type_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-runtime-system-calls"
+        ],
+        "id": "veryl_runtime_system_calls",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_comb_clog2_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-runtime-system-calls"
+        ],
+        "id": "veryl_runtime_system_calls",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_comb_onehot_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_signed_system_function_sign_extends_to_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_signed_unsigned_system_functions_affect_comparison",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_size_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_comb_unsigned_system_function_zero_extends_to_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_bits_array_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_bits_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_bits_type_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-runtime-system-calls"
+        ],
+        "id": "veryl_runtime_system_calls",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_ff_clog2_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-runtime-system-calls"
+        ],
+        "id": "veryl_runtime_system_calls",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 requires an evaluable argument for these direct $clog2/$onehot calls (UnevaluableValue). Runtime operands prevent emission.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_ff_onehot_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_signed_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_signed_system_function_sign_extends_to_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_size_packed_multidimensional_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects type-name operands of $size and reports an elaboration internal error. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-type-queries"
+        ],
+        "id": "icarus_type_queries",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects type-name operands of $size and reports an elaboration internal error. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_ff_size_packed_multidimensional_type_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_size_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects type-name operands of $size and reports an elaboration internal error. The corresponding Verilator runs pass.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-type-queries"
+        ],
+        "id": "icarus_type_queries",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects type-name operands of $size and reports an elaboration internal error. The corresponding Verilator runs pass.",
+        "upstream": []
+      },
+      "name": "system_function::test_direct_ff_size_type_system_function",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_unsigned_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_direct_ff_unsigned_system_function_zero_extends_to_context",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_ff_function_body_clog2_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_function::test_ff_function_body_onehot_system_function",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

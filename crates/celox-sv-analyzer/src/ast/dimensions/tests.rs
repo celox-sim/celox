@@ -45,8 +45,10 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             (
                 name.clone(),
                 FunctionReturnMetadata {
+                    argument_count: Some(function_argument_count(&f.params)),
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
+                    dimensions: f.return_dimensions,
                     signed: f.return_signed,
                     is_2state: f.return_is_2state,
                 },
@@ -261,6 +263,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
             output y;
             if (0) begin : inactive
                 localparam N = $unpacked_dimensions(missing);
+                localparam M = $dimensions(missing);
             end else begin : active
                 assign y = 0;
             end
@@ -280,4 +283,32 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         &HashMap::default(),
     )
     .unwrap();
+}
+
+#[test]
+fn unpacked_dimensions_discovers_local_dpi_return_types() {
+    let source = r#"
+        module Top(output int y);
+            import "DPI-C" function int f();
+            localparam N = $unpacked_dimensions(f());
+            assign y = N + $unpacked_dimensions(f());
+        endmodule
+    "#;
+    let tree = crate::syntax::parse_source(source, Path::new("dpi_query.sv")).unwrap();
+    Source::from_syntax(&tree).unwrap();
+    for call in tree.into_iter().filter_map(|node| match node {
+        RefNode::SystemTfCall(call) => Some(call),
+        _ => None,
+    }) {
+        assert_eq!(
+            unpacked_dimensions_call_value(
+                call,
+                &tree,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            ),
+            Some(0)
+        );
+    }
 }

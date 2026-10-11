@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_accepts_defaulted_function_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_defaulted_function_arguments"; }
+
     fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
     fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
 
@@ -25,6 +27,55 @@ sv_backends! {
 
     fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
         @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
+    }
+
+    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
+    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
+    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
+    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
+    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
+    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
+    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
+    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
+    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
+    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
+    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
+    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
+    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
+    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
+
+    fn dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::dimensions_resolves_procedural_scopes";
+    }
+    fn dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::dimensions_resolves_package_array_constants";
+    }
+    fn dimensions_preserves_one_bit_vectors(sim) {
+        @case "system_functions::dimensions_preserves_one_bit_vectors";
+    }
+    fn dimensions_resolves_imported_function_returns(sim) {
+        @case "system_functions::dimensions_resolves_imported_function_returns";
+    }
+
+    fn dimensions_of_nonarray_handle_types(sim) {
+        @case "system_functions::dimensions_of_nonarray_handle_types";
+    }
+
+    fn dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::dimensions_is_independent_of_unknown_values";
+    }
+
+    fn dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::dimensions_counts_declared_arrays";
+    }
+
+    fn dimensions_preserves_selected_and_expression_types(sim) {
+        @case "system_functions::dimensions_preserves_selected_and_expression_types";
+    }
+
+    fn dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
     }
 
     fn array_query_evaluates_dimension_function_once(sim) {
@@ -203,6 +254,7 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
         "$onehot",
         "$onehot0",
         "$isunknown",
+        "$dimensions",
         "$unpacked_dimensions",
     ] {
         for args in ["", "a, a", ", a", "a,"] {
@@ -419,6 +471,9 @@ fn value_functions_called_as_statements_check_their_operands() {
         endmodule",
         "module Top(input logic a, output logic y);
             always_comb begin $bits(no_such_signal); y = a; end
+        endmodule",
+        "module Top(input logic a, output logic y);
+            always_comb begin $dimensions(no_such_signal); y = a; end
         endmodule",
     ] {
         build_error(source);
@@ -678,6 +733,40 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
 }
 
 #[test]
+fn dimensions_rejects_undefined_constant_operands() {
+    for source in [
+        "module Top(output int y); localparam N = $dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+    ] {
+        build_error(source);
+    }
+}
+
+#[test]
+fn dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $dimensions(logic)'(1'b1);",
+        "localparam P = $dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $dimensions(logic); assign y = N'(1'b1);",
+        "localparam N = $dimensions(real); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
+    }
+}
+
+#[test]
 fn unpacked_dimensions_rejects_undefined_operands() {
     for source in [
         "module Top(output int y); assign y = $unpacked_dimensions(missing); endmodule",
@@ -725,4 +814,49 @@ fn unpacked_dimensions_rejects_malformed_pattern_arguments() {
             "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
         ));
     }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_invalid_range_bounds() {
+    for operand in [
+        "a[0][MISSING:0]",
+        "a[0][0:MISSING]",
+        "a[0][MISSING +: 1]",
+        "a[0][(MISSING == 0) +: 1]",
+        "a[0][(0 << MISSING) +: 1]",
+        "a[0][0 +: MISSING]",
+        "a[0][0 +: 0]",
+    ] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions({operand});"),
+            format!("localparam N = $unpacked_dimensions({operand}); assign y = 0;"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); logic [7:0] a [0:1][0:2]; {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_function_argument_count() {
+    for declaration in [
+        "function int f(input int a); return a; endfunction",
+        "function int f; input int a; begin f = a; end endfunction",
+        "function int f(input int a, input int b = 2); return a + b; endfunction",
+    ] {
+        for arguments in ["", "1, 2, 3"] {
+            for use_site in [
+                format!("assign y = $unpacked_dimensions(f({arguments}));"),
+                format!("localparam N = $unpacked_dimensions(f({arguments})); assign y = 0;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); {declaration} {use_site} endmodule"
+                ));
+            }
+        }
+    }
+    build_error(
+        "module Top(output int y); function int f(input int a); return a; endfunction assign y = $unpacked_dimensions(f(1, 2)); endmodule",
+    );
 }

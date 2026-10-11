@@ -15,6 +15,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+mod report;
+pub use report::read_report;
+
 #[derive(Parser)]
 #[command(about = "Check a suite's assertions against an independent simulator")]
 struct Args {
@@ -25,8 +28,8 @@ struct Args {
     /// Build artifacts and complete per-case logs.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Also retain the results at this path, without run-specific metadata
-    /// (counts, fingerprints, timestamps), so it only changes with results.
+    /// Retain a portable index here and group files next to it, without
+    /// run-specific metadata (counts, fingerprints, timestamps).
     #[arg(long)]
     report: Option<PathBuf>,
     /// Execute known discrepancies and toolchain limitations too.
@@ -310,13 +313,7 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
     let contents = serde_json::to_string_pretty(&report)? + "\n";
     std::fs::write(output.join("results.json"), &contents)?;
     if let Some(path) = args.report {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(
-            path,
-            serde_json::to_string_pretty(&retained(&report))? + "\n",
-        )?;
+        report::write_report(&path, &retained(&report))?;
     }
     println!(
         "{}; {} fresh, {} reused; report: {}",

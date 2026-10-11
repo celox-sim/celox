@@ -109,9 +109,13 @@ test("measurement queues are independent and retain only one pending run", () =>
 test("publication keeps comparisons and retries without pushing a stale shared history", () => {
   const publish = job(bench, "publish");
   assert.match(publish, /if: github.ref == 'refs\/heads\/master'/);
-  assert.match(publish, /node scripts\/publish-bench\.mjs rust-converted\.json verilator-converted\.json ts-converted\.json/);
+  assert.match(publish, /node scripts\/publish-bench\.mjs rust-converted\.json verilator-converted\.json ts-converted\.json --host artifacts\/bench-host\/benchmark-host\.txt/);
   assert.doesNotMatch(publish, /auto-push: true/);
   assert.equal([...publish.matchAll(/comment-on-alert: true/g)].length, 3);
+  // Each history records the CPU that produced it, so the dashboard can keep
+  // one series per CPU model.
+  assert.match(job(bench, "bench-comparison"), /name: bench-host/);
+  assert.match(job(heliodor, "linux-suite"), /HELIODOR_PUBLISH_HOST: .*heliodor-suite-host\.txt/);
 });
 
 

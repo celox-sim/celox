@@ -2,6 +2,183 @@
 
 use super::*;
 
+/// Presence also distinguishes a bounded value parameter from a variable or
+/// enum constant; the payload is 1 for `$` and 0 for a bounded value.
+pub(crate) fn unbounded_parameter_marker(name: &str) -> String {
+    format!("__parameter::unbounded::{name}")
+}
+
+/// All constant/type projections of one binding. Include the old and new
+/// packed bounds so scope exit can remove newly introduced dimension keys.
+pub(super) fn binding_keys(
+    name: &str,
+    env: &HashMap<String, i128>,
+    packed_count: usize,
+) -> Vec<String> {
+    let count = env
+        .get(&parameter_dimensions_marker(name))
+        .and_then(|count| usize::try_from(*count).ok())
+        .unwrap_or(0)
+        .max(packed_count);
+    let mut keys = vec![
+        name.to_string(),
+        parameter_marker(name),
+        local_parameter_marker(name),
+        unbounded_parameter_marker(name),
+        parameter_width_marker(name),
+        parameter_signed_marker(name),
+        parameter_rank_marker(name),
+        parameter_dimensions_marker(name),
+        parameter_signed_element_marker(name),
+        enum_marker(name),
+        variable_bits_marker(name),
+        variable_size_marker(name),
+        variable_signed_marker(name),
+        variable_dimensions_marker(name),
+    ];
+    for index in 0..count {
+        keys.push(parameter_dimension_marker(name, index, "left"));
+        keys.push(parameter_dimension_marker(name, index, "right"));
+    }
+    keys
+}
+
+pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+    match value {
+        ConstExpr::Literal(value) => value == "$",
+        ConstExpr::Ident(name) => env.get(&unbounded_parameter_marker(name)) == Some(&1),
+        _ => false,
+    }
+}
+
+pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+    match value {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => is_unbounded(value, env),
+        ConstExpr::Select { expr, bit } => {
+            contains_unbounded_operand(expr, env) || contains_unbounded_operand(bit, env)
+        }
+        ConstExpr::Function { name, .. } if name == "$isunbounded" => false,
+        ConstExpr::Function { args, .. } => {
+            args.iter().any(|arg| contains_unbounded_operand(arg, env))
+        }
+        ConstExpr::Unary { expr, .. } => contains_unbounded_operand(expr, env),
+        ConstExpr::Binary { left, right, .. } => {
+            contains_unbounded_operand(left, env) || contains_unbounded_operand(right, env)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            contains_unbounded_operand(condition, env)
+                || contains_unbounded_operand(then_expr, env)
+                || contains_unbounded_operand(else_expr, env)
+        }
+    }
+}
+
+/// 6.20.7 permits a `$` parameter only in the symbolic-value contexts it
+/// lists; `$isunbounded` is the query provided for that value. Other data
+/// queries do not admit a bare unbounded value, even without evaluation.
+pub(super) fn reject_unbounded_data_query(
+    call: &sv_parser::SystemTfCall,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    complete: bool,
+) -> Result<(), AnalyzerError> {
+    let Some((name, _)) = system_tf_call_parts(call, tree) else {
+        return Ok(());
+    };
+    if !matches!(
+        name,
+        "$bits"
+            | "$size"
+            | "$dimensions"
+            | "$unpacked_dimensions"
+            | "$left"
+            | "$right"
+            | "$low"
+            | "$high"
+            | "$increment"
+    ) {
+        return Ok(());
+    }
+    let sv_parser::SystemTfCall::ArgExpression(call) = call else {
+        return Ok(());
+    };
+    if let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first() {
+        let mut query_depth = 0usize;
+        for event in RefNode::Expression(argument).into_iter().event() {
+            let (entering, child) = match event {
+                sv_parser::NodeEvent::Enter(child) => (true, child),
+                sv_parser::NodeEvent::Leave(child) => (false, child),
+            };
+            if let RefNode::SystemTfCall(nested) = &child
+                && system_tf_call_parts(nested, tree)
+                    .is_some_and(|(name, _)| name == "$isunbounded")
+            {
+                if entering {
+                    if complete && isunbounded_call(nested, tree, env)?.is_none() {
+                        return Err(AnalyzerError::InvalidSystemTfCall {
+                            name: "$isunbounded".into(),
+                            detail: "argument must name a value parameter".into(),
+                        });
+                    }
+                    query_depth += 1;
+                } else {
+                    query_depth -= 1;
+                }
+                continue;
+            }
+            if !entering || query_depth != 0 {
+                continue;
+            }
+            let unbounded = match child {
+                RefNode::Primary(sv_parser::Primary::Dollar(_))
+                | RefNode::ConstantPrimary(sv_parser::ConstantPrimary::Dollar(_)) => true,
+                RefNode::Primary(sv_parser::Primary::Hierarchical(primary)) => {
+                    reference_name(RefNode::PrimaryHierarchical(primary), tree)
+                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
+                }
+                RefNode::PsParameterIdentifier(identifier) => {
+                    reference_name(RefNode::PsParameterIdentifier(identifier), tree)
+                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
+                }
+                _ => false,
+            };
+            if unbounded {
+                return Err(AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "unbounded parameter is not valid in this data query".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Query the parameter binding, without evaluating its value. An unavailable
+/// binding is deferred by preliminary declaration collection; expression
+/// lowering requires a resolved parameter. The result is a one-bit unsigned
+/// value, including when the enclosing expression requests a wider type.
+pub(super) fn isunbounded_call(
+    call: &sv_parser::SystemTfCall,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+) -> Converted<Option<ConstExpr>> {
+    let argument = expressions::single_expression_argument(call)
+        .and_then(|arg| const_expr_from_expr(arg, tree).ok().flatten());
+    let Some(ConstExpr::Ident(name)) = argument else {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: "$isunbounded".into(),
+            detail: "argument must name a value parameter".into(),
+        });
+    };
+    Ok(env
+        .get(&unbounded_parameter_marker(&name))
+        .map(|value| ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))))
+}
+
 pub(super) fn apply_parameter_overrides(
     parameters: &mut [Parameter],
     overrides: &HashMap<String, ConstExpr>,
@@ -68,6 +245,10 @@ pub(super) struct ParameterEnvironment<'a> {
     values: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
+    // Only a nonnumeric prefix binding with an inherited numeric value makes
+    // the range-lowering and width-evaluation projections differ. Track that
+    // conservatively as the prefix grows, without rescanning its literals.
+    has_inherited_literal_shadow: bool,
     // Numeric environments cannot represent X/Z. Keep resolved literals for
     // evaluating later declarations without dropping their state bits.
     literals: HashMap<String, Expr>,
@@ -83,6 +264,9 @@ impl<'a> ParameterEnvironment<'a> {
         }
         let mut constants = base.clone();
         constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
+        let has_inherited_literal_shadow = literals
+            .keys()
+            .any(|name| !values.contains_key(name) && base.contains_key(name));
         for name in literals.keys() {
             if !values.contains_key(name) {
                 constants.remove(name);
@@ -93,6 +277,7 @@ impl<'a> ParameterEnvironment<'a> {
             values,
             types,
             constants,
+            has_inherited_literal_shadow,
             literals,
         }
     }
@@ -104,19 +289,34 @@ impl<'a> ParameterEnvironment<'a> {
             &mut self.literals,
             parameter,
         ) {
+            // A type query does not evaluate its operand. Preserve a known
+            // rank for following declarations even when an imported alias's
+            // value is deferred; do not publish an inherited numeric value.
+            if let Some(ty) = parameter.resolved_type(&self.types) {
+                let rank = if parameter.packed_ranges.is_empty() {
+                    usize::from(!parameter.has_declared_type || ty.width > 1)
+                } else {
+                    parameter.packed_ranges.len()
+                };
+                self.constants
+                    .insert(parameter_rank_marker(parameter.name()), rank as i128);
+            }
             return;
         }
         let name = parameter.name();
         if self.literals.contains_key(name) && !self.values.contains_key(name) {
             self.constants.remove(name);
+            self.has_inherited_literal_shadow |= self.base.contains_key(name);
         }
         let mut keys = vec![
             name.to_string(),
             parameter_marker(name),
+            unbounded_parameter_marker(name),
             local_parameter_marker(name),
             parameter_width_marker(name),
             parameter_signed_marker(name),
             parameter_dimensions_marker(name),
+            parameter_rank_marker(name),
             parameter_signed_element_marker(name),
         ];
         for index in 0..parameter.packed_ranges.len() {
@@ -221,6 +421,10 @@ pub(super) fn parameters_from_ref_node_with_environment(
         function_type_from_ref_node(type_node.clone(), syntax_tree, base_const_env, type_aliases)
             .map(|ty| ty.packed_ranges().to_vec())
             .unwrap_or_default();
+    let simple_bit_vector = parameter_ranges.len() <= 1
+        && declared_alias
+            .as_ref()
+            .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
     let parameter_is_2state = declared_alias
         .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
@@ -228,6 +432,11 @@ pub(super) fn parameters_from_ref_node_with_environment(
         if let RefNode::ParamAssignment(param) = child {
             // An unpacked array parameter is a constant variable, not a value.
             if array_parameters::is_array_parameter(param) {
+                let name =
+                    parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
+                let marker = unbounded_parameter_marker(&name);
+                environment.values.insert(marker.clone(), 0);
+                environment.constants.insert(marker, 0);
                 continue;
             }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -275,6 +484,32 @@ pub(super) fn parameters_from_ref_node_with_environment(
             if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
                 value = Some(override_value.clone());
             }
+            if value
+                .as_ref()
+                .is_some_and(|expression| is_unbounded(expression, const_env))
+                && !simple_bit_vector
+            {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "unbounded parameter `{name}` requires a simple bit vector type"
+                )));
+            }
+            if let Some(expression) = &value
+                && !is_unbounded(expression, const_env)
+                && contains_unbounded_operand(expression, const_env)
+            {
+                let lowered = substitute_expr_idents(
+                    const_expr_to_expr(expression.clone()),
+                    &environment.literals,
+                );
+                if !matches!(
+                    fold_const_integral_expr_preserving_mask(lowered, const_env),
+                    Expr::Literal(_)
+                ) {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "numeric use of unbounded parameter in `{name}`"
+                    )));
+                }
+            }
             let mut parameter = Parameter::new(
                 name,
                 value,
@@ -314,11 +549,12 @@ fn parameter_declared_width(
             .map(|ty| ty.width)
             .or_else(|| unwrap_node!(node, IntegerVectorType).is_some().then_some(1));
     }
-    // With the same immutable base and a numeric-only prefix, both former
-    // copies have exactly the contents of `constants`. A pure type header has
-    // no sibling assignments to seed or self-values to mask.
+    // With the same immutable base and no inherited numeric value shadowed
+    // by a nonnumeric literal, both former copies have exactly the contents
+    // of `constants`. A pure type header has no sibling assignments to seed
+    // or self-values to mask.
     if std::ptr::eq(environment.base, base_const_env)
-        && environment.literals.is_empty()
+        && !environment.has_inherited_literal_shadow
         && !node
             .clone()
             .into_iter()
@@ -482,7 +718,7 @@ pub(super) fn extend_const_env_with_parameters(
     }
 }
 
-fn bind_parameter(
+pub(super) fn bind_parameter(
     env: &mut HashMap<String, i128>,
     types: &mut HashMap<String, ExprType>,
     literals: &mut HashMap<String, Expr>,
@@ -490,18 +726,45 @@ fn bind_parameter(
 ) -> bool {
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
-    let value = parameter.resolved_value_with_literals(env, types, literals);
-    let literal = if value.is_none() {
-        let Some(literal) = parameter.resolved_literal(env, types, literals) else {
-            return false;
-        };
-        Some(literal)
-    } else {
-        None
-    };
+    // `$` is an elaboration value, never an integer sentinel. Preserve it
+    // separately so typed parameters, aliases and overrides cannot turn it
+    // into an ordinary number (IEEE 1800-2023 6.20.7, 20.6.3).
+    if parameter
+        .value()
+        .is_some_and(|value| is_unbounded(value, env))
+    {
+        env.remove(parameter.name());
+        env.remove(&parameter_marker(parameter.name()));
+        env.remove(&local_parameter_marker(parameter.name()));
+        env.insert(unbounded_parameter_marker(parameter.name()), 1);
+        literals.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+        if let Some(ty) = parameter.resolved_type(types) {
+            types.insert(parameter.name().to_string(), ty);
+            insert_parameter_type_markers(env, parameter.name(), ty);
+            let rank = if parameter.packed_ranges.is_empty() {
+                usize::from(!parameter.has_declared_type || ty.width > 1)
+            } else {
+                parameter.packed_ranges.len()
+            };
+            env.insert(parameter_rank_marker(parameter.name()), rank as i128);
+        }
+        insert_parameter_dimension_markers(env, parameter);
+        return true;
+    }
+    let (value, literal) = parameter.resolved_value_and_literal(env, types, literals);
+    if value.is_none() && literal.is_none() {
+        return false;
+    }
+    env.insert(unbounded_parameter_marker(parameter.name()), 0);
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
+        let rank = if parameter.packed_ranges.is_empty() {
+            usize::from(!parameter.has_declared_type || ty.width > 1)
+        } else {
+            parameter.packed_ranges.len()
+        };
+        env.insert(parameter_rank_marker(parameter.name()), rank as i128);
     }
     if let Some(literal) = literal {
         // Shadow a numeric inherited binding with the four-state declaration.
@@ -824,9 +1087,98 @@ pub(super) fn parameter_value_env(
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, Expr> {
+    parameter_value_env_filtered(parameters, const_env, None)
+}
+
+/// Materialize only referenced values and their initializer dependencies.
+/// Preserve the full declaration-order type prefix, including unused parameters.
+pub(super) fn parameter_value_env_for_references(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+    references: &HashSet<String>,
+) -> HashMap<String, Expr> {
+    let mut needed: HashSet<String> = parameters
+        .iter()
+        .filter(|parameter| references.contains(parameter.name()))
+        .map(|parameter| parameter.name().to_string())
+        .collect();
+    if needed.is_empty() {
+        return HashMap::default();
+    }
+    if needed.iter().all(|name| const_env.contains_key(name)) {
+        return parameter_value_env_filtered(parameters, const_env, Some(&needed));
+    }
+    // Include all declarations of a name so the projection preserves even
+    // repeated-name prefixes used during preliminary collection.
+    let mut by_name: HashMap<&str, Vec<&Parameter>> = HashMap::default();
+    for parameter in parameters {
+        by_name.entry(parameter.name()).or_default().push(parameter);
+    }
+    let mut pending: Vec<_> = needed.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        // The original value environment uses an inherited number directly.
+        // Its initializer's values are not needed; types are handled below.
+        if const_env.contains_key(&name) {
+            continue;
+        }
+        let Some(declarations) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        for parameter in declarations {
+            let mut expressions: Vec<_> = parameter.value().into_iter().collect();
+            while let Some(expr) = expressions.pop() {
+                match expr {
+                    ConstExpr::Ident(name) => {
+                        if by_name.contains_key(name.as_str()) && needed.insert(name.clone()) {
+                            pending.push(name.clone());
+                        }
+                    }
+                    ConstExpr::Select { expr, bit } => {
+                        expressions.push(expr);
+                        expressions.push(bit);
+                    }
+                    ConstExpr::Function { args, .. } => expressions.extend(args),
+                    ConstExpr::Unary { expr, .. } => expressions.push(expr),
+                    ConstExpr::Binary { left, right, .. } => {
+                        expressions.push(left);
+                        expressions.push(right);
+                    }
+                    ConstExpr::Mux {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        expressions.push(condition);
+                        expressions.push(then_expr);
+                        expressions.push(else_expr);
+                    }
+                    ConstExpr::Literal(_) => {}
+                }
+            }
+        }
+    }
+    parameter_value_env_filtered(parameters, const_env, Some(&needed))
+}
+
+fn parameter_value_env_filtered(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+    needed: Option<&HashSet<String>>,
+) -> HashMap<String, Expr> {
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
+        if parameter
+            .value()
+            .is_some_and(|value| is_unbounded(value, const_env))
+        {
+            if needed.is_none_or(|needed| needed.contains(parameter.name())) {
+                #[cfg(test)]
+                PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+                values.insert(parameter.name().to_string(), Expr::Literal("$".into()));
+            }
+            continue;
+        }
         let inferred_type = parameter.value().and_then(|value| {
             infer_parameter_value_type(value, parameter.has_declared_type, &parameter_types)
         });
@@ -840,6 +1192,12 @@ pub(super) fn parameter_value_env(
         if let Some(width) = width {
             parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
         }
+
+        if needed.is_some_and(|needed| !needed.contains(parameter.name())) {
+            continue;
+        }
+        #[cfg(test)]
+        PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
 
         let mut value = if let Some(value) = const_env.get(parameter.name()).copied() {
             if let Some(width) = width {
@@ -1085,6 +1443,15 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
                 parameter_types,
             )),
         },
+        ConstExpr::Function { name, args, site } if name == "$isunbounded" => {
+            if let [ConstExpr::Ident(parameter)] = args.as_slice()
+                && let Some(value) = constants.get(&unbounded_parameter_marker(parameter))
+            {
+                ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))
+            } else {
+                ConstExpr::Function { name, args, site }
+            }
+        }
         ConstExpr::Function { name, args, site } => ConstExpr::Function {
             name,
             site,
@@ -1168,7 +1535,7 @@ pub(super) fn infer_const_expr_type(
                 width: 32,
                 signed: true,
             }),
-            "$onehot" | "$onehot0" | "$isunknown" => Some(ExprType {
+            "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some(ExprType {
                 width: 1,
                 signed: false,
             }),
@@ -1252,8 +1619,11 @@ pub(super) fn infer_parameter_value_type(
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static PARAMETER_VALUE_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DECLARATION_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static LITERAL_ENV_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static LITERAL_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

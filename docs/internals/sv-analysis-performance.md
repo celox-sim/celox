@@ -557,6 +557,202 @@ exclude backend compilation and simulation. The change removes the visible
 environment factor from constant-folding type substitution; it does not establish
 linear behavior for every expression shape or scope pattern.
 
+## Borrowing four-state parameter environments
+
+This step starts from `7e4f3f1bc`, synchronizing master `3cefd457f` and retaining
+the constant-folding lookup change. Resolving an X/Z or otherwise nonnumeric
+parameter copied the numeric environment to remove the parameter's stale value.
+When that name is absent, removal changes nothing: literal resolution now borrows
+the same immutable map. A stale numeric self-value still selects the previous
+copied and masked environment.
+
+Range headers also no longer require an entirely numeric prefix for borrowing.
+The range-lowering and width-evaluation projections differ only when a nonnumeric
+prefix binding masks an inherited numeric value. `ParameterEnvironment` determines
+that condition during construction and conservatively updates it for each appended
+binding with a direct inherited-name lookup. It does not rescan the growing prefix.
+Different base identities, headers containing assignments and inherited numeric
+shadows retain the copied projections. Explicit parameter widths, signedness and
+unknown masks are preserved (IEEE 1800-2023 6.20.2).
+
+Owning-crate regressions count zero range-context and literal-resolution copies
+for 16/64/256 four-state module declarations and reverse generate dependencies,
+through complete AST construction and IR conversion. They check every module
+parameter's 32-bit X mask, generated signal width/name and assigned X mask.
+Additional comparisons use the former copied literal resolver with a 4,096-entry
+unrelated environment, stale self-values, signed shifts, two-state conversions,
+wide values and unresolved names. Borrowed/copied range projection comparisons
+check constructor/appended-prefix parity and preserve an inherited numeric value
+used by the old width-evaluation projection. Existing override/alias regressions
+remain in place; no shared executable cases or external adapters change.
+
+The phase-separated probe adds `--four-state-parameters`. Module parameters form
+a forward chain starting with `'x`; the generate chain is reversed and ends with
+a `$bits(P0)` signal declaration and a continuous assignment of its unknown value.
+The probe verifies IR widths and masks before reporting medians of three fresh runs:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev --example type_queries -- --four-state-parameters 32 128 512
+```
+
+| Workload | Parameters | AST before (ms) | AST after (ms) | Parse before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| four-state module declarations | 32 | 25.513 | 71.532 | 8.853 / 25.036 |
+| four-state module declarations | 128 | 140.524 | 219.675 | 26.518 / 84.651 |
+| four-state module declarations | 512 | 1,807.363 | 633.479 | 115.117 / 166.772 |
+| four-state reverse generate dependencies | 32 | 1,033.913 | 493.074 | 24.783 / 13.301 |
+| four-state reverse generate dependencies | 128 | 6,596.133 | 2,495.723 | 54.196 / 44.447 |
+| four-state reverse generate dependencies | 512 | 10,672.026 | 9,170.822 | 146.045 / 214.184 |
+
+The after module input grows 16x (32→512), while AST time grows 8.9x; the generate
+input grows 18.6x in AST time. Module IR conversion before/after at 512 parameters
+is 7.533/10.871 ms, and generated IR conversion is 0.036/0.034 ms. The larger
+module AST sample is about 2.9x faster, but small module samples became slower as
+parsing also slowed. Shared-machine load varied substantially across both sets.
+Timing ratios alone do not establish a universal gain; counters establish the
+removed per-declaration copies independently of load.
+
+The generated query remains costly: preliminary `$bits` discovery can rebuild
+enclosing declarations. This step does not optimize that separate path or claim a
+material overall generate speedup. Existing numeric and ranged modes also pass
+at 32/128/512, checking values and widths. These probes exclude backend compilation
+and simulation, and do not establish linear behavior for every scope pattern.
+
+## Retaining resolved parameter literals
+
+After synchronizing master `ef37b2c6c` (#1170), parameter binding still resolved a
+nonnumeric literal twice. The numeric resolver first tried a literal fallback,
+then discarded that literal when it could not represent the result as `i128`.
+Module binding, generate binding and AST-to-IR conversion each called the literal
+resolver again to publish the X/Z or wide value.
+
+The internal resolver now returns the numeric result and its fallback literal
+together. A directly numeric value skips literal resolution. A number recovered
+from a literal (for example, after two-state conversion of an unknown dependency)
+still takes precedence and publishes no fallback literal. Otherwise the caller
+retains that literal, including an unresolved `None`. Type publication order,
+numeric formatting and the generate binder's unresolved-expression fallback remain
+unchanged. The evaluator initializes constant-function frames independently for
+each invocation, consistent with IEEE 1800-2023 13.4.3; retaining a result introduces
+no cross-binding or cross-analysis cache.
+
+Owning-crate tests compare the combined result with the former separate resolution
+for unknown and wide values, dependencies/selects, signed shifts, stale self-values,
+two-state conversion and unresolved names. They check zero literal calls for a
+direct numeric result, one for a numeric result recovered from an unknown literal,
+and one for generated unknown/unresolved bindings. Through full module AST and IR
+construction, 16/64/256 unknown parameters make exactly one literal-resolution call
+per binding and one per exported IR parameter. Existing type, mask, override and
+scope regressions remain in place. No shared executable language cases are added.
+
+A manual owning-crate probe replays the same synthetic unknown parameter prefix
+with the old two-stage resolver and the retained-result resolver in one process.
+It publishes type/literal metadata and checks every 32-bit X mask. It alternates
+execution order and reports medians of seven runs without timing thresholds:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib compare_retained_and_repeated_parameter_resolution -- --ignored --nocapture
+```
+
+| Parameters | Repeated resolution (ms) | Retained result (ms) | Literal calls before/after |
+| ---: | ---: | ---: | ---: |
+| 32 | 0.570 | 0.361 | 64 / 32 |
+| 128 | 6.296 | 1.548 | 256 / 128 |
+| 512 | 28.168 | 10.178 | 1,024 / 512 |
+
+The 512-entry replay sample is about 2.8x faster. This measures resolution,
+publication and mask assertions; it excludes source parsing, declaration discovery,
+backend compilation and simulation. Shared-machine variation remains possible
+even with alternating paired measurements. Counts establish the eliminated second
+literal evaluation independently of elapsed time.
+
+The complete four-state probe before/after this patch gives:
+
+| Workload | Parameters | AST before/after (ms) | Parse before/after (ms) | IR before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| module declarations | 32 | 18.634 / 23.414 | 5.550 / 11.286 | 0.303 / 0.202 |
+| module declarations | 128 | 72.677 / 79.250 | 20.908 / 30.394 | 1.216 / 0.834 |
+| module declarations | 512 | 285.531 / 481.522 | 80.219 / 137.527 | 5.204 / 5.861 |
+| reverse generate dependencies | 32 | 277.599 / 346.573 | 7.326 / 8.659 | 0.017 / 0.026 |
+| reverse generate dependencies | 128 | 1,067.596 / 1,711.479 | 22.990 / 26.694 | 0.019 / 0.029 |
+| reverse generate dependencies | 512 | 3,961.605 / 8,534.573 | 85.630 / 209.199 | 0.019 / 0.033 |
+
+These separate process samples do not establish an overall AST speedup: parsing
+also became substantially slower, and preliminary generated size-query discovery
+remains expensive. Numeric and ranged modes also pass at 32/128/512 with IR
+value/width assertions. This step reduces repeated resolution rather than removing
+the remaining preliminary declaration walks or establishing universal linearity.
+
+## Borrowed constant-function environments
+
+A constant-function call previously copied every visible numeric binding and
+rebuilt the complete parameter type table. Calls now borrow the caller's
+value environment and own only their formal arguments, local variables,
+return variable, and typed temporaries. Width and signedness markers are
+queried for referenced names. Nested calls borrow the preceding frame, retaining
+its value precedence without copying its contents. Public evaluator signatures
+still accept the existing maps.
+
+The literal evaluator now checks whether it supports a function before calling
+it. Previously it executed user functions with an empty environment, discarded
+the result because their literal return types were unsupported, and then retried
+through numeric evaluation. In a recursive expression that repeated work could
+multiply at each level. An internal regression verifies that a 12-level recursion
+executes 13 calls and that exceeding the depth limit executes only 64 calls.
+Unsupported literal evaluation executes no user calls. Existing width, signedness,
+local shadowing, selected assignments, symbolic argument widths, unresolved values,
+and depth restoration are checked against the former copied frame initialization.
+
+A counted environment verifies identical lookup counts with 16, 256, and 4,096
+unrelated bindings, including nested calls. A paired manual probe compares the
+former initialization with the borrowed frame in one optimized process. Each row
+executes as many leaf calls as unrelated parameters, reads the same signed global,
+and checks every result. Seven repetitions alternate the two orders; times are
+medians and have no pass/fail threshold:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_borrowed_and_copied_function_environments -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Copied frame (ms) | Borrowed frame (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.292 | 0.029 |
+| 128 | 128 | 3.273 | 0.082 |
+| 512 | 512 | 53.946 | 0.305 |
+| 2,048 | 2,048 | 2,241.757 | 1.944 |
+
+This isolates frame initialization and evaluation; parsing, declaration discovery,
+and backend compilation are excluded. With a fixed body and bounded call depth,
+frame setup no longer performs work proportional to unrelated bindings.
+
+The standalone probe also supports a chain of `next_value(P_previous)` parameter
+initializers and checks the final IR value:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+Separate three-sample medians comparing `21eb07cf3` with this change were:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 4.382 / 4.926 | 26.663 / 16.563 | 0.152 / 0.084 |
+| 128 | 21.416 / 16.421 | 232.298 / 121.052 | 0.887 / 0.372 |
+| 512 | 56.719 / 51.676 | 2,652.147 / 1,170.084 | 5.608 / 0.957 |
+
+These samples show lower costs for this workload, with shared-machine timing
+variation. Whole AST lowering still scales nonlinearly: other collectors repeatedly
+resolve parameter prefixes. Removing per-call copies and speculative recursive
+execution does not eliminate those repeated bindings or establish universal
+linear scaling. Borrowed value lookup traverses enclosing frames, bounded by the
+existing depth limit; expressions, locals, temporaries, and loop iterations still
+contribute to evaluation cost. The debug AST probe at 256 parameters also
+exceeds a default Rust test thread's stack on the baseline commit; its regression
+uses an 8 MiB thread stack. The optimized standalone probe passes at 512. This
+change does not remove the existing stack use in recursive parameter substitution.
+
 ## Remaining boundaries
 
 Type-parameter substitutions and package inlining rewrite source text and still
@@ -574,8 +770,10 @@ Those preliminary queries still discover enclosing declarations by walking
 syntax. Query contexts still clone alias/function-type tables. Parameter ranges and
 modules with enums still rebuild some environments. Consecutive single-parameter
 generate runs now reuse their prefixes; grouped declarations and interruptions
-can still rebuild them. Numeric range headers borrow compatible environments,
-while four-state or assignment-containing headers retain their copied contexts. Dimension/literal views now materialize once per
+can still rebuild them. Numeric and four-state range headers borrow compatible
+environments; inherited numeric shadows and assignment-containing headers retain
+their copied contexts. Literal resolution still copies when masking a stale numeric
+self-value. Dimension/literal views now materialize once per
 immutable scope in each collector. Many distinct scopes with large inherited
 parameter/function tables can therefore differ from a single large block of
 signals. Applying parameter dimensions and materializing scoped literals still
@@ -616,3 +814,135 @@ cargo test --locked -p celox-test-suite --features verilator,icarus
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-verilator -- --filter generate::size_queries_use_generate_local_parameter_types
 cargo run --locked -p celox-test-suite --features verilator,icarus --bin verify-sv-icarus -- --filter generate::size_queries_use_generate_local_parameter_types
 ```
+
+## Constant-call argument contexts
+
+Lowering each user-function parameter initializer used to construct a
+`PackedDimensions` context by cloning every visible numeric binding and alias.
+Profiling a 512-parameter `next_value(P_previous)` chain with the borrowed-frame
+optimization applied attributed about 20% of samples directly to the numeric
+map clone in this constructor; allocation and copying also contributed.
+A counted diagnostic run at 16/64/256 parameters executed 18N function calls.
+The call count itself is linear; repeating collection passes alone does not
+explain the nonlinear timings. Per-call environment copies and early unresolved
+parameter-expression expansion remain distinct sources of growing costs.
+
+Constant-call lowering now classifies the operands before constructing that
+context. Literals, bare identifiers, unary/binary expressions, parentheses, and
+nested user calls with those operands use an empty context, because their
+expression-lowering branches do not consult declaration metadata. Parameter
+types are still substituted during evaluation. Selections, casts, system calls,
+patterns, conditional expressions, named arguments, and omitted arguments retain
+the complete contextual path. An empty argument list retains its existing meaning.
+
+The owning-crate regression compares the resulting constant expressions against
+the former full-context path with 4,096 unrelated bindings, including signed
+parameters, symbolic cast widths, typedef casts, selected operands, size queries,
+zero divisions, nested calls, and unsupported argument forms. At 16/64/256
+parameters, a source-to-IR arithmetic argument chain verifies every value and
+zero context copies. The large debug probe uses an 8 MiB thread stack for the
+existing recursive parameter substitution, as in the earlier standalone probe.
+
+A manual paired probe alternates old/new order over seven repetitions in one
+optimized process. It converts and checks the same scalar call once per
+unrelated parameter, excluding source parsing and function-body execution:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_lazy_and_copied_scalar_call_contexts -- --ignored --nocapture
+```
+
+| Unrelated parameters | Calls | Full context (ms) | Classified context (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 32 | 0.153 | 0.085 |
+| 128 | 128 | 1.702 | 0.384 |
+| 512 | 512 | 23.827 | 1.473 |
+| 2,048 | 2,048 | 408.296 | 5.962 |
+
+The standalone source probe supports constant-function parameter chains:
+
+```sh
+cargo run --locked -p celox-sv-analyzer --profile heliodor-dev \
+  --example type_queries -- --constant-functions 32 128 512
+```
+
+These separate three-sample medians compare master `281f7bd9c` with the classified
+context change, independently of the borrowed-frame optimization:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 5.272 / 5.431 | 19.841 / 22.680 | 0.171 / 0.246 |
+| 128 | 14.900 / 20.624 | 181.059 / 158.147 | 0.575 / 0.645 |
+| 512 | 49.174 / 53.607 | 2,699.106 / 1,720.513 | 5.114 / 5.489 |
+
+Shared-machine timing varies, and the smallest sample became slower. Operand
+classification and its lowering now avoid work proportional to unrelated
+bindings for the accepted forms. Whole AST lowering still scales nonlinearly;
+this change does not eliminate full-context work for other operands, function
+frame copies, preliminary declaration walks, or expanded unresolved expressions.
+
+## Referenced parameter literal values
+
+Generate-item collection previously expanded every parameter into a literal or
+symbolic expression before collecting functions and RTL objects. During initial
+function discovery, a function used in an initializer may not be installed yet.
+A chain such as `P_i = next_value(P_previous)` then retained nested symbolic calls:
+storing all prefixes copied progressively longer trees. Referring to the previous
+value twice could multiply the tree at every declaration, even when none of those
+expressions were needed by the items being collected.
+
+Collection now finds parameter references in non-parameter items, including
+function bodies, type-bearing declarations, and all nested or inactive generate
+branches. Array parameter initializers remain reference roots. An iterative
+initializer dependency closure selects the values to materialize. Inherited
+numeric values keep their former precedence and bypass value dependencies;
+the full declaration-order type prefix still supplies inferred width/signedness.
+The original full-map helper remains available to consumers that need every value.
+Identifier collection is deliberately conservative: declarations and shadowed names
+may select additional values rather than hide a required binding.
+
+Owning-crate regressions compare projected values with the full map for X/Z,
+wide/signed values, selects, conditionals, forward references, repeated names,
+self/cyclic references, and numeric overrides with inferred types. After syncing
+`bd10acc4c`, unbounded values and aliases also match the full map, while unrequested
+`$` values are omitted. Reference scans
+cover packages, escaped identifiers, arrays, and nested/inactive branches. Cold
+item collection stores no unused expressions for incrementing and doubling
+function-call chains at 16/64/256 parameters; source-to-IR checks verify every
+result, including signed 32-bit wraparound. The 256-element chains pass on the
+default Rust test thread stack after the unused expansion is removed.
+
+A manual paired probe materializes one referenced root (`P0`) from an uninstalled
+function chain. It checks that this root matches the full environment and that
+only one value is produced. Seven repetitions alternate old/new order; medians
+include building and dropping the maps, excluding syntax parsing, declaration
+collection, and numeric function evaluation. The old deep expansion uses a
+16 MiB comparison-thread stack:
+
+```sh
+cargo test --locked -p celox-sv-analyzer --profile heliodor-dev --lib \
+  compare_full_and_referenced_parameter_values -- --ignored --nocapture
+```
+
+| Parameters | Full values | Projected values | Full map (ms) | Projection (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 32 | 1 | 0.173 | 0.014 |
+| 128 | 128 | 1 | 2.319 | 0.083 |
+| 512 | 512 | 1 | 79.692 | 0.148 |
+
+The standalone `type_queries --constant-functions 32 128 512` probe also passes
+with IR value assertions. Separate three-sample medians compare `65dff8a23`
+(including the borrowed-frame and classified-context optimizations) with this
+projection change:
+
+| Parameters | Parse before / after (ms) | AST before / after (ms) | IR before / after (ms) |
+| ---: | ---: | ---: | ---: |
+| 32 | 6.429 / 6.746 | 19.777 / 19.390 | 0.126 / 0.112 |
+| 128 | 14.662 / 20.474 | 60.054 / 58.018 | 0.245 / 0.377 |
+| 512 | 61.172 / 57.386 | 325.627 / 222.730 | 0.916 / 0.925 |
+
+Shared-machine timing varies. Unused initializer chains no longer require their
+expanded trees; this does not establish linearity for every workload. A referenced
+unresolved root still expands its dependency prefixes, and repeated symbolic
+references can still multiply those live trees. Conservative roots, preliminary
+type queries, scope environments, and consumers of the full map retain costs.

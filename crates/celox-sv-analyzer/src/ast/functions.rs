@@ -546,6 +546,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -624,6 +630,12 @@ pub(super) fn function_from_declaration(
                 outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
+                return_dimensions: function_return_dimensions(
+                    &body.nodes.0,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -716,6 +728,7 @@ pub(super) fn task_from_declaration(
         outputs,
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })
@@ -897,6 +910,22 @@ pub(super) fn function_return_type(
     }
 }
 
+/// The declared return shape is needed by `$dimensions`, before call inlining.
+pub(super) fn function_return_dimensions(
+    node: &sv_parser::FunctionDataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<usize> {
+    function_type_from_ref_node(
+        RefNode::FunctionDataTypeOrImplicit(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .map(|ty| ty.unpacked_ranges().len() + ty.packed_ranges().len())
+}
+
 pub(super) fn function_return_first_packed_dimension_width(
     node: &sv_parser::FunctionDataTypeOrImplicit,
     syntax_tree: &SyntaxTree,
@@ -1034,6 +1063,11 @@ pub(super) fn tf_params(
         previous_packed_dimensions = packed_dimensions.clone();
         previous_signed_element_depth = signed_element_depth;
         params.push(FunctionParam {
+            has_default: port
+                .nodes
+                .4
+                .as_ref()
+                .is_some_and(|(_, _, default)| default.is_some()),
             direction,
             name,
             width: r#type.map(|r#type| r#type.width),
@@ -1086,12 +1120,13 @@ pub(super) fn tf_item_params(
             syntax_tree,
             type_aliases,
         );
-        for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
+        for (identifier, _, default) in declaration.nodes.4.nodes.0.contents() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
                 continue;
             };
             params.push(FunctionParam {
+                has_default: default.is_some(),
                 direction: ParamDirection::from_tf_port(&declaration.nodes.1)
                     .unwrap_or(ParamDirection::Input),
                 name,
@@ -1897,6 +1932,12 @@ fn function_signature_from_declaration(
         outputs: Vec::new(),
         return_width: return_type.map(|r#type| r#type.width),
         return_first_packed_dimension_width,
+        return_dimensions: function_return_dimensions(
+            return_node,
+            syntax_tree,
+            const_env,
+            type_aliases,
+        ),
         return_signed: return_type.is_some_and(|r#type| r#type.signed),
         return_is_2state: function_return_is_2state(return_node, syntax_tree, type_aliases),
     })
@@ -1932,6 +1973,7 @@ fn task_signature_from_declaration(
         outputs: Vec::new(),
         return_width: None,
         return_first_packed_dimension_width: None,
+        return_dimensions: None,
         return_signed: false,
         return_is_2state: false,
     })

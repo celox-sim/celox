@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { checkExternalSuiteReport } from "./check-external-suite-report.mjs";
+import { readVerificationReport } from "./read-verification-report.mjs";
 
 const statuses = [
   "passed",
@@ -241,9 +241,7 @@ test("all four retained baselines accept only their existing failures", () => {
   for (const suite of ["veryl", "sv"]) {
     for (const tool of ["verilator", "icarus"]) {
       const file = `../crates/celox-test-suite/verification/${suite === "sv" ? "sv/" : ""}${tool}.json`;
-      const baseline = JSON.parse(
-        readFileSync(new URL(file, import.meta.url), "utf8"),
-      );
+      const baseline = readVerificationReport(new URL(file, import.meta.url));
       const current = {
         ...structuredClone(baseline),
         suite,

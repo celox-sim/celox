@@ -328,7 +328,9 @@ pub(super) fn items<'a>(
     };
     let parameters =
         parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
-    let mut literals = parameter_value_env(&parameters, env);
+    let references = parameter_literal_references(node.clone(), tree);
+    let mut literals =
+        parameters::parameter_value_env_for_references(&parameters, env, &references);
     if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
         elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
     }
@@ -362,6 +364,50 @@ pub(super) fn items<'a>(
         }
     }
     Ok(elaborator.items)
+}
+
+/// All references in executable/type-bearing items, including inactive and
+/// nested generate branches. Direct scalar parameter initializers are accounted
+/// for by the dependency closure rather than expanded as independent roots.
+fn parameter_literal_references(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+    let items: Vec<_> = match node {
+        RefNode::PackageDeclaration(package) => package_declarations(package)
+            .map(RefNode::PackageOrGenerateItemDeclaration)
+            .collect(),
+        node => module_non_port_items(node)
+            .into_iter()
+            .map(RefNode::NonPortModuleItem)
+            .collect(),
+    };
+    let mut references = HashSet::default();
+    for node in items {
+        let declaration = match node.clone() {
+            RefNode::PackageOrGenerateItemDeclaration(declaration) => Some(declaration),
+            RefNode::NonPortModuleItem(item) => {
+                declarations::package_or_generate_declaration_from_non_port_item(item)
+            }
+            _ => None,
+        };
+        if declaration.is_some_and(|declaration| matches!(declaration,
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
+                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)))
+            && !node.clone().into_iter().any(|child| matches!(child,
+                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(assignment)))
+        {
+            continue;
+        }
+        references.extend(
+            node.into_iter()
+                .filter(|child| {
+                    matches!(
+                        child,
+                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                    )
+                })
+                .filter_map(|child| identifier_text(child, tree)),
+        );
+    }
+    references
 }
 
 impl<'a> Elaborator<'a, '_> {
@@ -793,10 +839,12 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
@@ -897,10 +945,12 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
+                    parameters::unbounded_parameter_marker(&name),
                     local_parameter_marker(&name),
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    parameter_rank_marker(&name),
                     variable_bits_marker(&name),
                     variable_size_marker(&name),
                     variable_signed_marker(&name),
@@ -951,6 +1001,30 @@ impl<'a> Elaborator<'a, '_> {
                     Some(&name),
                     &mut signals,
                 )?;
+                // Validate before exporting this type: a symbolic bound must
+                // never reach IR resolution with a same-named outer number.
+                for signal in &signals {
+                    let ty = signal.r#type();
+                    for bound in ty
+                        .packed_ranges()
+                        .iter()
+                        .flat_map(|r| [r.left(), r.right()])
+                        .chain(
+                            ty.unpacked_ranges()
+                                .iter()
+                                .flat_map(|r| [r.left(), r.right()]),
+                        )
+                    {
+                        if parameters::contains_unbounded_operand(bound, &scope.env)
+                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                        {
+                            return Err(AnalyzerError::Unsupported(
+                                "numeric use of unbounded parameter in generate signal range"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
                 extend_const_env_with_variable_types(
                     &mut scope.env,
                     signals
@@ -1177,6 +1251,7 @@ impl<'a> Elaborator<'a, '_> {
                 for key in [
                     signal.name.clone(),
                     parameter_marker(&signal.name),
+                    parameters::unbounded_parameter_marker(&signal.name),
                     local_parameter_marker(&signal.name),
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),
@@ -1723,14 +1798,18 @@ mod tests {
             .unwrap();
         let active = items(module, &tree, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
+            argument_count: None,
             width: Some(8),
             first_packed_dimension_width: Some(2),
+            dimensions: Some(2),
             signed: false,
             is_2state: false,
         };
         let inner = FunctionReturnMetadata {
+            argument_count: None,
             width: Some(4),
             first_packed_dimension_width: Some(4),
+            dimensions: Some(1),
             signed: true,
             is_2state: true,
         };
@@ -1959,6 +2038,138 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("unexpected success: {body}"));
             assert!(error.to_string().contains(expected), "{body}: {error}");
+        }
+    }
+
+    #[test]
+    fn reference_scan_covers_nested_branches_arrays_packages_and_escaped_names() {
+        let code = r#"
+            module Top;
+                localparam UNUSED = missing(ONLY_INITIALIZER);
+                localparam A = 'x;
+                localparam B = A;
+                localparam logic [7:0] ARR [0:0] = '{ARRAY_INPUT};
+                function automatic logic f(); return FUNCTION_INPUT; endfunction
+                generate
+                    if (0) begin : inactive
+                        assign out = INACTIVE_INPUT;
+                    end
+                    for (genvar i = 0; i < LOOP_BOUND; i++) begin : loop_scope
+                        localparam C = NESTED_INPUT;
+                    end
+                endgenerate
+                assign out = \escaped.name ;
+            endmodule
+            package pkg;
+                localparam UNUSED = only_in_initializer;
+                function automatic logic f(); return PACKAGE_INPUT; endfunction
+            endpackage
+        "#;
+        let tree = crate::syntax::parse_source(code, Path::new("literal_references.sv")).unwrap();
+        for node in &tree {
+            if matches!(
+                node,
+                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+            ) {
+                let refs = parameter_literal_references(node, &tree);
+                for name in [
+                    "ARRAY_INPUT",
+                    "FUNCTION_INPUT",
+                    "INACTIVE_INPUT",
+                    "LOOP_BOUND",
+                    "NESTED_INPUT",
+                    "\\escaped.name",
+                ] {
+                    assert!(refs.contains(name), "{name}: {refs:?}");
+                }
+                assert!(!refs.contains("ONLY_INITIALIZER"));
+            } else if matches!(node, RefNode::PackageDeclaration(_)) {
+                let refs = parameter_literal_references(node, &tree);
+                assert!(refs.contains("PACKAGE_INPUT"));
+                assert!(!refs.contains("only_in_initializer"));
+            }
+        }
+    }
+
+    #[test]
+    fn unused_unresolved_chains_do_not_populate_item_literals() {
+        use std::fmt::Write;
+
+        for count in [16, 64, 256] {
+            for doubling in [false, true] {
+                let declaration = if doubling {
+                    // Expanding the previous unresolved value twice at every
+                    // declaration would make the unused expression trees grow
+                    // exponentially before this function is installed.
+                    "function automatic int next_value(input int left, right); return left + right; endfunction\n"
+                } else {
+                    "function automatic int next_value(input int value); return value + 1; endfunction\n"
+                };
+                let mut code = format!("module Top; {declaration}");
+                for i in 0..count {
+                    let arg = match (i, doubling) {
+                        (0, false) => "0".into(),
+                        (0, true) => "1, 1".into(),
+                        (_, false) => format!("P{}", i - 1),
+                        (_, true) => format!("P{0}, P{0}", i - 1),
+                    };
+                    writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
+                }
+                code.push_str("endmodule\n");
+                let tree =
+                    crate::syntax::parse_source(&code, Path::new("unused_chain.sv")).unwrap();
+                let node = (&tree)
+                    .into_iter()
+                    .find(|node| {
+                        matches!(
+                            node,
+                            RefNode::ModuleDeclarationAnsi(_)
+                                | RefNode::ModuleDeclarationNonansi(_)
+                        )
+                    })
+                    .unwrap();
+                let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+                assert!(active.iter().all(|item| item.literals.is_empty()));
+                let ir =
+                    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+                for (i, parameter) in ir.modules()[0].parameters().iter().enumerate() {
+                    let expected = if !doubling {
+                        i as i128 + 1
+                    } else if i >= 31 {
+                        0
+                    } else {
+                        (1u32 << (i + 1)) as i32 as i128
+                    };
+                    assert_eq!(parameter.resolved_value(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn referenced_four_state_dependencies_keep_their_full_values() {
+        let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
+        let tree = crate::syntax::parse_source(code, Path::new("needed_literals.sv")).unwrap();
+        let node = (&tree)
+            .into_iter()
+            .find(|node| {
+                matches!(
+                    node,
+                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+                )
+            })
+            .unwrap();
+        let env = HashMap::default();
+        let aliases = HashMap::default();
+        let parameters =
+            parameters_from_module_node(node.clone(), &tree, &aliases, &env, &HashMap::default())
+                .unwrap();
+        let full = parameter_value_env(&parameters, &env);
+        let active = items(node, &tree, &env, &aliases).unwrap();
+        for item in active {
+            assert_eq!(item.literals.get("B"), full.get("B"));
+            assert_eq!(item.literals.get("A"), full.get("A"));
+            assert!(!item.literals.contains_key("UNUSED"));
         }
     }
 }

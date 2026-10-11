@@ -1,0 +1,291 @@
+{
+  "cases": [
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::always_star_and_edge_sensitive_always_match_the_systemverilog_keywords",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::assigning_the_function_name_returns_its_last_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::block_locals_and_dependent_assignments_accumulate",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::break_and_continue_end_unrolled_loop_iterations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::casez_and_casex_treat_wildcard_bits_as_dont_care",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::enum_members_without_values_follow_their_predecessor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::exponentiation_works_in_constant_expressions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_internal_error",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_function_outputs",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments.",
+        "upstream": []
+      },
+      "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::inside_matches_values_ranges_and_wildcards",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_ascending_to_descending",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_ascending",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_descending_to_descending",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_array_unpacked_connection_offset_ranges",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_broadcast_and_slice_connections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:41: Input port connection 'b' as part of a module instance array requires 8 or 16 bits, but connection's CONST ''0' generates 1 bits. (IEEE 1800-2023 23.3.3)\n                               : ... note: In instance 'Top'\n    6 |                     Pass u[1:0](.a(a), .b('0), .y(y));\n      |                                         ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "synthesizable::instance_arrays_reject_a_fill_literal_tie_off",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:41: Input port connection 'b' as part of a module instance array requires 8 or 16 bits, but connection's CONST '?32?sh0' generates 32 bits. (IEEE 1800-2023 23.3.3)\n                               : ... note: In instance 'Top'\n    6 |                     Pass u[1:0](.a(a), .b(0), .y(y));\n      |                                         ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "synthesizable::instance_arrays_reject_an_unsized_constant_tie_off",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_with_ascending_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::instance_arrays_with_non_zero_based_range",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::net_declaration_assignment_drives_the_net",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::packages_provide_types_parameters_functions_and_enums",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::positional_ports_and_parameters_bind_in_declaration_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::struct_assignment_patterns_follow_the_target_layout",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::tasks_without_timing_write_their_outputs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::type_parameters_are_bound_by_instantiations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "synthesizable::typedef_unpacked_arrays_are_not_instance_arrays",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

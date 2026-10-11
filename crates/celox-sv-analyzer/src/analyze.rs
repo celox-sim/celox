@@ -35,15 +35,21 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 parameter_table.insert(module, parameter)?;
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
-            let resolved_value = parameter.resolved_value_with_literals(
+            let (resolved_value, literal) = parameter.resolved_value_and_literal(
                 &constants,
                 &parameter_types,
                 &parameter_literals,
             );
-            if resolved_value.is_none()
-                && let Some(literal) =
-                    parameter.resolved_literal(&constants, &parameter_types, &parameter_literals)
-            {
+            // Deferred queries must see the same symbolic binding during
+            // AST-to-IR publication as during declaration collection.
+            constants.insert(
+                ast::unbounded_parameter_marker(parameter.name()),
+                i128::from(matches!(
+                    &literal,
+                    Some(ast::Expr::Literal(value)) if value == "$"
+                )),
+            );
+            if let Some(literal) = literal {
                 parameter_literals.insert(parameter.name().to_string(), literal);
             }
             if let Some(resolved_value) = resolved_value {

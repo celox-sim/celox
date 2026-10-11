@@ -51,7 +51,7 @@ let mut sim = Simulator::from_sv_sources(
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -95,6 +95,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 ## 知っておくべき挙動
 
+- **上限なしのパラメータ。** `$isunbounded(P)` は、値パラメータが `$` の場合に1、それ以外では0を1ビットの符号なし値として返します。`$` は別のパラメータへの代入やインスタンスのパラメータ上書きでも保持されます（IEEE 1800-2023 6.20.7、20.6.3）。
 - **インスタンス配列の要素。** 要素は宣言どおりの添字で参照します。`Child u[3:2](...)` の
   `u[3]` には `child_signal(&[("u", 3)], "y")` や `dut.u[3]` で届き、添字は
   `InstanceHierarchy::index` にも入ります。負の境界を持つ配列は拒否します。
@@ -111,10 +112,30 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
   モジュールのインスタンスをすべて数えて拒否します。package 変数のクロック・リセットとしての使用、定数でない package 変数の初期化子、
-  package の net、`export` 宣言、コンパイル単位（`$unit`）の宣言は未対応です
-  （[#1146](https://github.com/celox-sim/celox/issues/1146)）。
+  package の net は未対応です（[#1146](https://github.com/celox-sim/celox/issues/1146)）。`export` 宣言（26.6）は、import
+  した宣言をその package を import する側から見えるようにします。`export p::*;` が export するのは
+  package が `p` から実際に import した名前だけです。export を経由した import は元の宣言を指すため、
+  2 つの経路で同じ宣言を import しても曖昧になりません。`q::x` は `q` が `x` として export する宣言も指します。
+- **コンパイル単位。** ソースファイルはそれぞれ独立したコンパイル単位です（IEEE 1800-2023 3.12.1）。
+  モジュールや package の外にあるパラメータ、型、サブルーチン、変数、import は、そのファイルのモジュールを
+  囲むスコープ `$unit` になります。モジュールからは、自身の宣言と import の次に、それより前に宣言された
+  コンパイル単位の項目と import、およびコンパイル単位のすべてのサブルーチンが見えます。`$unit::x` は
+  コンパイル単位の項目 `x` を指します。コンパイル単位の変数は、そのファイルのモジュールが共有する 1 つの
+  オブジェクトで、package 変数と同じく `$unit::v` という名前になります。これを宣言できるソースファイルは
+  1 つだけです。コンパイル単位での DPI import は未対応です。
 - **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
   名前が衝突するものは拒否します。
+- **変数の寿命**は IEEE 1800-2023 6.21 に従います。プロセスのブロック、関数、タスクの中で宣言した
+  変数は、その変数自身、そのサブルーチン、またはそのモジュール（`module automatic`）が `automatic`
+  と宣言されていない限り static です。ブロックの static なローカル変数は、ブロックの実行をまたいで値を
+  保持し、初期化子は時刻 0 に 1 回だけ実行します。`always_ff` 内の `int count; count++;` は数を数えます。
+  automatic なローカル変数は、ブロックに入るたびに初期化します。どの経路でも読む前に書き込むため、入った
+  時点の値が読まれない static なローカル変数は、どちらでも同じ動作です。static なローカル変数は値を保持する
+  ため、一部の経路でしか書き込まない `always_comb` のローカル変数はラッチになり、ほかのラッチと同じく
+  拒否します。呼び出しをまたいで値を保持する関数・タスクの static なローカル変数と、初期化子が定数でない
+  static なローカル変数は未対応です。`automatic` と宣言してください。static な関数の結果も static なので、
+  結果を代入しない経路を持つ関数（2 値の引数のすべての値を項目が網羅する `case` を除く）も拒否します。既定の寿命（`interface automatic`）が
+  使用先のモジュールと異なる interface は拒否します。
 - **実行時のループ。** 反復回数が実行時の値で決まる `always_ff` 内のループは、生成コード内の
   ループとして実行します。進まなくなったループは、ループ変数を示す実行時エラーを報告します。
 - **文として呼び出したシステム関数**（`$countones(f(a));` など）は、式の中の同じ呼び出しと
