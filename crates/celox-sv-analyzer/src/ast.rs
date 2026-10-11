@@ -2063,7 +2063,8 @@ pub enum Expr {
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        /// Missing actuals retain their formal slots for declaration-scope defaults.
+        args: Vec<Option<Expr>>,
         /// Formal positions in source evaluation/copy-out order; empty means positional.
         arg_order: Vec<usize>,
     },

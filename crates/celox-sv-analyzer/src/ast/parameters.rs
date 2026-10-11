@@ -1427,7 +1427,10 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
         ConstExpr::Function { name, args, .. } => Expr::Call {
             arg_order: Vec::new(),
             name,
-            args: args.into_iter().map(const_expr_to_expr).collect(),
+            args: args
+                .into_iter()
+                .map(|arg| Some(const_expr_to_expr(arg)))
+                .collect(),
         },
         ConstExpr::Unary { op, expr } => Expr::Unary {
             op,

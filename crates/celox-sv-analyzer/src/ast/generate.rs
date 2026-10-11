@@ -13,6 +13,27 @@ pub(super) use scope_views::ScopeViews;
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
 // qualified, and never reach the public analyzer IR.
+thread_local! {
+    static ROOT_SUBROUTINES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn root_subroutines_only() -> bool {
+    ROOT_SUBROUTINES.with(std::cell::Cell::get)
+}
+
+/// Seed module functions before conditions need to call them. The full pass
+/// still selects generate scopes and reports every generate diagnostic.
+pub(super) fn with_root_subroutines<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ROOT_SUBROUTINES.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(ROOT_SUBROUTINES.with(|flag| flag.replace(true)));
+    f()
+}
+
 const OUTER_BINDING: &str = "\0generate_outer:";
 
 // Whitespace terminates an escaped identifier (IEEE 1800-2023 5.6.1).
@@ -105,6 +126,14 @@ impl Item<'_> {
         if !self.shadowed.is_empty() || !self.names.is_empty() {
             if !dimensions.functions.is_empty() {
                 local.functions = Arc::new(self.functions(&dimensions.functions));
+            }
+            if !dimensions.subroutine_param_names.is_empty() {
+                local.subroutine_param_names =
+                    Arc::new(self.function_aliases((*dimensions.subroutine_param_names).clone()));
+            }
+            if !dimensions.subroutine_param_shapes.is_empty() {
+                local.subroutine_param_shapes =
+                    Arc::new(self.function_aliases((*dimensions.subroutine_param_shapes).clone()));
             }
             if !dimensions.function_return_types.is_empty() {
                 local.function_return_types =
@@ -233,7 +262,7 @@ impl Item<'_> {
             }
             Expr::Call { name, args, .. } => {
                 *name = self.name(name);
-                args.iter_mut().for_each(|e| self.expr(e));
+                args.iter_mut().flatten().for_each(|e| self.expr(e));
             }
         }
     }
@@ -335,13 +364,24 @@ pub(super) fn subroutine_items<'a>(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
-    items_with_literal_use(node, tree, env, aliases, LiteralUse::Subroutines)
+    items_with_literal_use(
+        node,
+        tree,
+        env,
+        aliases,
+        if root_subroutines_only() {
+            LiteralUse::RootSubroutines
+        } else {
+            LiteralUse::Subroutines
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
 enum LiteralUse {
     All,
     Subroutines,
+    RootSubroutines,
 }
 
 fn items_with_literal_use<'a>(
@@ -383,6 +423,18 @@ fn items_with_literal_use<'a>(
         return Ok(elaborator.items);
     }
     for item in module_non_port_items(node) {
+        if matches!(literal_use, LiteralUse::RootSubroutines)
+            && RefNode::NonPortModuleItem(item).into_iter().any(|node| {
+                matches!(
+                    node,
+                    RefNode::GenerateRegion(_)
+                        | RefNode::ConditionalGenerateConstruct(_)
+                        | RefNode::LoopGenerateConstruct(_)
+                )
+            })
+        {
+            continue;
+        }
         match item {
             sv_parser::NonPortModuleItem::GenerateRegion(region) => {
                 for item in &region.nodes.1 {
@@ -422,10 +474,12 @@ fn parameter_literal_references(
         // whole generate constructs, whose conditions, imports and local
         // declarations participate in elaboration for every collector. Keep
         // procedural declarations too, as type queries can name their scopes.
-        if matches!(literal_use, LiteralUse::Subroutines)
-            && let RefNode::NonPortModuleItem(sv_parser::NonPortModuleItem::ModuleOrGenerateItem(
-                item,
-            )) = &node
+        if matches!(
+            literal_use,
+            LiteralUse::Subroutines | LiteralUse::RootSubroutines
+        ) && let RefNode::NonPortModuleItem(sv_parser::NonPortModuleItem::ModuleOrGenerateItem(
+            item,
+        )) = &node
             && let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item
             && matches!(
                 item.nodes.1,
@@ -488,10 +542,14 @@ impl<'a> Elaborator<'a, '_> {
         else {
             return Ok(None);
         };
-        let Some(mut expr) = expr_to_const(substitute_expr_idents(
-            const_expr_to_expr(expr),
-            &scope.literals,
-        )) else {
+        let dimensions = PackedDimensions {
+            const_env: scope.env.clone(),
+            ..PackedDimensions::default()
+        };
+        let Some(mut expr) = expr_to_index_const(
+            substitute_expr_idents(const_expr_to_expr(expr), &scope.literals),
+            &dimensions,
+        ) else {
             return Ok(None);
         };
         Ok(self.expand_constant_calls(&mut expr, scope).map(|()| expr))
@@ -579,11 +637,17 @@ impl<'a> Elaborator<'a, '_> {
             .collect();
         self.expression(expr, scope)?
             .and_then(|expr| {
-                typecheck::eval_const_integral_literal_with_types(&expr.into(), &scope.env, &types)
+                let expr = expr.into();
+                // Preserve four-state truth first (IEEE 1800-2023 12.4).
+                // The numeric interpreter additionally handles user functions
+                // kept symbolic for declaration-contract specialization.
+                typecheck::eval_const_integral_literal_with_types(&expr, &scope.env, &types)
+                    .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
+                    .or_else(|| {
+                        typecheck::eval_const_expr_with_types(&expr, &scope.env, &types)
+                            .map(|value| value != 0)
+                    })
             })
-            // Unknown truth takes the false branch; a known one bit still makes
-            // a vector true even when other bits are X/Z (IEEE 1800-2023 12.4).
-            .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 

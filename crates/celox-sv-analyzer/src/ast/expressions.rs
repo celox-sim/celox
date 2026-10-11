@@ -374,7 +374,10 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
         } => Expr::Call {
             arg_order: arg_order.clone(),
             name,
-            args: args.into_iter().map(guard_zero_divisions).collect(),
+            args: args
+                .into_iter()
+                .map(|arg| arg.map(guard_zero_divisions))
+                .collect(),
         },
     }
 }
@@ -667,7 +670,7 @@ fn expr_from_system_function_call(
             Ok(Expr::Call {
                 arg_order: Vec::new(),
                 name: name.to_string(),
-                args,
+                args: args.into_iter().map(Some).collect(),
             })
         }
         "$clog2" | "$countones" | "$onehot" | "$onehot0" | "$isunknown" => {
@@ -693,7 +696,7 @@ fn expr_from_system_function_call(
             Ok(Expr::Call {
                 arg_order: Vec::new(),
                 name: name.to_string(),
-                args: vec![arg],
+                args: vec![Some(arg)],
             })
         }
         _ => Err(AnalyzerError::Unsupported(format!(
@@ -752,8 +755,10 @@ pub(super) fn expr_from_tf_call(
     )?;
     let mut args = Vec::new();
     for (position, expr) in bindings.into_iter().enumerate() {
-        let expr = expr
-            .ok_or_else(|| unsupported(format!("omitted argument {} of `{name}`", position + 1)))?;
+        let Some(expr) = expr else {
+            args.push(None);
+            continue;
+        };
         let shape = packed_dimensions
             .subroutine_param_shapes
             .get(&name)
@@ -778,7 +783,7 @@ pub(super) fn expr_from_tf_call(
             }
             _ => expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?,
         };
-        args.push(arg);
+        args.push(Some(arg));
     }
     Ok(Expr::Call {
         name,

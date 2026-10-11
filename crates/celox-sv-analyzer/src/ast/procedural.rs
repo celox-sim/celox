@@ -331,7 +331,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.rename_expr(then_expr);
                 self.rename_expr(else_expr);
             }
-            Expr::Call { args, .. } => args.iter_mut().for_each(|arg| self.rename_expr(arg)),
+            Expr::Call { args, .. } => args
+                .iter_mut()
+                .flatten()
+                .for_each(|arg| self.rename_expr(arg)),
             Expr::Inside { expr, items } => {
                 self.rename_expr(expr);
                 for item in items {
@@ -880,8 +883,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         name: &str,
         args: Option<&sv_parser::ListOfArguments>,
     ) -> Result<(Vec<Option<Expr>>, Vec<usize>), AnalyzerError> {
+        let signatures = if self.dims.subroutine_param_names.is_empty() {
+            self.state.subroutine_params
+        } else {
+            &self.dims.subroutine_param_names
+        };
         let (bindings, order) =
-            expressions::bind_call_arguments(name, args, self.tree, self.state.subroutine_params)?;
+            expressions::bind_call_arguments(name, args, self.tree, signatures)?;
         let args = bindings
             .into_iter()
             .enumerate()
@@ -1671,12 +1679,9 @@ pub(super) fn subroutine_argument_names(
                 .collect();
             let param_directions: Vec<ParamDirection> =
                 params.iter().map(|(_, direction, ..)| *direction).collect();
-            directions.insert(syntax.name.clone(), param_directions.clone());
             directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
-            names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
-            shapes.insert(syntax.name.clone(), param_shapes.clone());
             shapes.insert(qualified, param_shapes);
         }
     }
@@ -1772,9 +1777,14 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 let first_static = builder.state.statics.len();
                 builder.push_scope();
+                // Defaults bind in the enclosing declaration scope, before
+                // any formal can shadow those names (IEEE 1800-2023 13.5.3).
+                let defaults = params
+                    .iter()
+                    .map(|(_, _, _, default)| default.map(|expr| builder.expr(expr)).transpose())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut lowered_params = Vec::new();
-                for (source, direction, r#type, default) in params {
-                    let default = default.map(|expr| builder.expr(expr)).transpose()?;
+                for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
                     let name = builder.declare(&source, r#type.clone());
                     lowered_params.push(SubroutineParam {
                         name,

@@ -662,3 +662,74 @@
     (assert_eq t b)
     (assert_eq y a)
     (assert_eq z (^ a 1))))
+
+(case named_calls_in_constant_contexts
+  (source "named_constants.sv" #"
+    module Top(output logic [31:0] y, output logic ok);
+      function automatic int f(input int a, b); return a*10 + b; endfunction
+      localparam N = f(.b(2), .a(3));
+      logic [f(.b(2), .a(3))-1:0] word_value;
+      assign word_value = 32'h80000001;
+      assign y = word_value;
+      if (f(.b(3), .a(2)) == 23) begin : selected
+        assign ok = (N == 32);
+      end else begin : rejected
+        assign ok = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x80000001)
+  (assert_eq ok 1))
+
+(case named_calls_respect_generate_signatures
+  (source "named_scoped_calls.sv" #"
+    module Top(input logic [7:0] x, output logic [7:0] outer_y, inner_y);
+      function automatic int f(input int a); return a + 1; endfunction
+      assign outer_y = f(.a(x));
+      if (1) begin : scoped
+        function automatic int f(input int b); return b + 10; endfunction
+        assign inner_y = f(.b(x));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set x 3))
+  (assert_eq outer_y 4)
+  (assert_eq inner_y 13)
+  (modify (set x 8))
+  (assert_eq outer_y 9)
+  (assert_eq inner_y 18))
+
+(case named_calls_preserve_defaults_and_declaration_scope
+  (source "named_defaults.sv" #"
+    module Top(input logic clk, input logic [7:0] a, v,
+               output logic [7:0] y, z, positional, q, constant_value);
+      function automatic int f(input int a = 7, b = a); return a*10 + b; endfunction
+      localparam N = f(.b(3));
+      assign constant_value = N;
+      assign y = f(.b(v));
+      assign positional = f(,v);
+      always_comb begin
+        int a;
+        a = 99;
+        z = f(.a(2));
+      end
+      always_ff @(posedge clk) q <= f(.b(v));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 5) (set v 3))
+  (assert_eq y 73)
+  (assert_eq z 25)
+  (assert_eq positional 73)
+  (assert_eq constant_value 73)
+  (tick clk)
+  (assert_eq q 73)
+  (modify (set a 9) (set v 4))
+  (assert_eq y 74)
+  (assert_eq z 29)
+  (assert_eq positional 74)
+  (tick clk)
+  (assert_eq q 74))

@@ -865,7 +865,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let call = sv::ir::Expr::Call {
                     arg_order: Vec::new(),
                     name: name.clone(),
-                    args: lowered,
+                    args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -1157,7 +1157,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 args,
                 arg_order,
             } if self.m.subroutines.contains_key(name) => {
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+                let args = args.clone();
                 let result = self.call(store, frames, name, &args, arg_order)?;
                 let Some((node, sources)) = result else {
                     return Err(unsupported(format!(
@@ -1188,7 +1188,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| self.hoist(store, frames, arg))
+                    .map(|arg| {
+                        arg.as_ref()
+                            .map(|arg| self.hoist(store, frames, arg))
+                            .transpose()
+                    })
                     .collect::<Result<_, _>>()?,
             },
             Expr::Binary { left, op, right }
@@ -3756,7 +3760,7 @@ fn substitute_literals(
         } => Expr::Call {
             arg_order: arg_order.clone(),
             name: name.clone(),
-            args: args.iter().map(go).collect(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(go(expr)),

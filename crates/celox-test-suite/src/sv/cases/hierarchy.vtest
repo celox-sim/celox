@@ -333,3 +333,34 @@
   (top Top)
   (assert_eq xfill (fourstate 0xffff 0xffff))
   (assert_eq zfill (fourstate 0 0xffff)))
+
+(case parameter_patterns_evaluate_caller_constant_functions
+  (source "constant_pattern_calls.sv" #"
+    module Child #(parameter byte signed Q[2] = '{1, 2})(output logic [15:0] y);
+      localparam Bias = 99;
+      assign y = {Q[0], Q[1]};
+    endmodule
+    module Top(output logic [15:0] y);
+      localparam Bias = 5;
+      function automatic byte signed f(input int value); return -(value + Bias); endfunction
+      function automatic byte signed g(input int value); return f(.value(value)); endfunction
+      Child #(.Q('{g(1), f(2)})) child(y);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0xfaf9))
+
+(case parameter_patterns_override_body_declarations
+  (source "body_parameter_pattern.sv" #"
+    module Ansi(output logic [15:0] y);
+      parameter byte Q[2] = '{1, 2};
+      assign y = {Q[0], Q[1]};
+    endmodule
+    module Top(output logic [15:0] y);
+      Ansi #(.Q('{3, 4})) first(y);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x0304))

@@ -123,8 +123,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `$time` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
-  function, a call with the wrong number of arguments or an omitted argument
-  of a function, and a task used as a value are errors.
+  function, a call with the wrong number of arguments, an omitted argument
+  without a declared default, and a task used as a value are errors.
 - DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
   exports, tri-state buses and multiple drivers, hierarchical references.
 
@@ -240,9 +240,12 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **Hard packed untagged unions** share one bit vector between all members;
   every member must have the same width (IEEE 1800-2023 7.3.1).
 - **Named subroutine arguments** bind by formal name. Input evaluation and output
-  copy-out retain source order. Function expressions currently require every
-  formal argument; call statements also support omitted/defaulted arguments.
-  Named calls with procedural effects in selection indices are rejected.
+  copy-out retain source order. Expressions and call statements support omitted
+  arguments with ANSI-declared defaults. Defaults are evaluated only when used,
+  in the enclosing declaration scope (IEEE 1800-2023 13.5.3). Constant calls use
+  the same formal names in parameter initializers, ranges and generate conditions;
+  generate-local declarations retain their own signatures. Named calls with
+  procedural effects in selection indices are rejected.
 - **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
   procedural block, function or task is static unless it, its subroutine or
   its module (`module automatic`) is declared `automatic`. A static local of a

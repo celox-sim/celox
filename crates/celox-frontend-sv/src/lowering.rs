@@ -2158,7 +2158,7 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             name: name.clone(),
             args: args
                 .iter()
-                .map(|arg| expr_for_state_mode(arg, four_state))
+                .map(|arg| arg.as_ref().map(|arg| expr_for_state_mode(arg, four_state)))
                 .collect(),
         },
     }
@@ -3508,6 +3508,7 @@ fn lower_glue_parent_expr(
             let mut sources = HashSet::default();
             let mut source_ids = Vec::new();
             for arg in args {
+                let arg = arg.as_ref()?;
                 let width =
                     sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
                 let (inner, arg_sources, arg_source_ids) = lower_glue_parent_expr(
@@ -3733,7 +3734,10 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
                     .flat_map(sv::ir::InsideItem::exprs)
                     .any(|operand| expr_references_ident(operand, name))
         }
-        sv::ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident(arg, name)),
+        sv::ir::Expr::Call { args, .. } => args
+            .iter()
+            .flatten()
+            .any(|arg| expr_references_ident(arg, name)),
     }
 }
 
@@ -4669,6 +4673,7 @@ fn lower_expr_with_context(
             let mut sources = HashSet::default();
 
             for arg in args {
+                let arg = arg.as_ref()?;
                 let width =
                     sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
                 let (inner, arg_sources) = lower_expr_with_context(
@@ -5745,6 +5750,7 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
         }
         sv::ir::Expr::Call { args, .. } => args
             .iter()
+            .flatten()
             .any(|arg| expr_uses_ident_as_condition(arg, name)),
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
     }

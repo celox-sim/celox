@@ -651,7 +651,10 @@ impl Renamer<'_> {
             } => Expr::Call {
                 arg_order: arg_order.clone(),
                 name: self.name(&name),
-                args: args.into_iter().map(|arg| self.expr(arg)).collect(),
+                args: args
+                    .into_iter()
+                    .map(|arg| arg.map(|arg| self.expr(arg)))
+                    .collect(),
             },
             Expr::Inside { expr, items } => Expr::Inside {
                 expr: boxed(expr),

@@ -3993,3 +3993,24 @@ fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
         crate::ir::Stmt::If { .. }
     ));
 }
+
+#[test]
+fn named_constant_calls_retain_parameter_dependencies() {
+    let source = "module Top #(parameter W=8, parameter N=f(.value(W)))(); function automatic integer f(input integer value); return value+1; endfunction endmodule";
+    let syntax =
+        crate::syntax::parse_source(source, std::path::Path::new("named_dependency.sv")).unwrap();
+    let source = ast::Source::from_syntax(&syntax).unwrap();
+    let module = &source.modules()[0];
+    let _functions = module.install_constant_functions();
+    let expression: ir::ConstExpr = module
+        .parameters()
+        .iter()
+        .find(|param| param.name() == "N")
+        .unwrap()
+        .value()
+        .unwrap()
+        .clone()
+        .into();
+    let values = fxhash::FxHashMap::from_iter([("W".to_string(), 16i128)]);
+    assert_eq!(typecheck::eval_const_expr(&expression, &values), Some(17));
+}

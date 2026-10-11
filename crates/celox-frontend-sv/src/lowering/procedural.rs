@@ -518,7 +518,7 @@ impl<'a> ProcModule<'a> {
             } => Expr::Call {
                 arg_order: arg_order.clone(),
                 name: name.clone(),
-                args: args.iter().map(go).collect(),
+                args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
             },
             Expr::Inside { expr, items } => Expr::Inside {
                 expr: Box::new(go(expr)),
@@ -1577,7 +1577,10 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
             expr_idents(then_expr, names);
             expr_idents(else_expr, names);
         }
-        sv::ir::Expr::Call { args, .. } => args.iter().for_each(|arg| expr_idents(arg, names)),
+        sv::ir::Expr::Call { args, .. } => args
+            .iter()
+            .flatten()
+            .for_each(|arg| expr_idents(arg, names)),
         sv::ir::Expr::Inside { expr, items } => {
             expr_idents(expr, names);
             for item in items {
@@ -1742,7 +1745,7 @@ pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) 
                 || expr_calls(else_expr, is_callee)
         }
         sv::ir::Expr::Call { name, args, .. } => {
-            is_callee(name) || args.iter().any(|arg| expr_calls(arg, is_callee))
+            is_callee(name) || args.iter().flatten().any(|arg| expr_calls(arg, is_callee))
         }
         sv::ir::Expr::Inside { expr, items } => {
             expr_calls(expr, is_callee)
@@ -1839,8 +1842,8 @@ pub(super) fn collect_calls(
 ) {
     match expr {
         sv::ir::Expr::Call { name, args, .. } => {
-            calls.push((name.clone(), args.iter().cloned().map(Some).collect()));
-            for arg in args {
+            calls.push((name.clone(), args.clone()));
+            for arg in args.iter().flatten() {
                 collect_calls(arg, calls);
             }
         }

@@ -513,6 +513,63 @@ fn type_source_text(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<
     Some(text)
 }
 
+fn constant_pattern_literal(
+    mut expression: ConstExpr,
+    dimensions: &PackedDimensions,
+    types: &HashMap<String, (usize, bool)>,
+) -> Converted<typecheck::IntegralLiteral> {
+    fn freeze(expr: &mut ConstExpr, constants: &HashMap<String, i128>) {
+        match expr {
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => {
+                freeze(expr, constants)
+            }
+            ConstExpr::Select { expr, bit } => {
+                freeze(expr, constants);
+                freeze(bit, constants);
+            }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                freeze(expr, constants);
+                freeze(msb, constants);
+                freeze(lsb, constants);
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                freeze(left, constants);
+                freeze(right, constants);
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                freeze(condition, constants);
+                freeze(then_expr, constants);
+                freeze(else_expr, constants);
+            }
+            ConstExpr::Function { name, args, .. } => {
+                for arg in args.iter_mut() {
+                    freeze(arg, constants);
+                }
+                let lowered = args.iter().cloned().map(Into::into).collect::<Vec<_>>();
+                if let Some(literal) = const_functions::eval_call_literal(name, &lowered, constants)
+                {
+                    *expr = ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal));
+                }
+            }
+        }
+    }
+    // System/literal expressions retain their four-state masks. User functions
+    // run through the installed interpreter, with the caller's constant scope
+    // and their declared result widths, before the leaf is serialized.
+    freeze(&mut expression, &dimensions.const_env);
+    typecheck::eval_const_integral_literal_with_types(
+        &expression.into(),
+        &dimensions.const_env,
+        types,
+    )
+    .ok_or_else(|| unsupported("nonconstant parameter pattern element"))
+}
+
 /// Freeze pattern leaves in the instantiating module's constant environment.
 /// Reparse in the callee to apply the target array/structure shape.
 fn constant_pattern_text(
@@ -578,14 +635,9 @@ fn constant_pattern_text(
                 let value = indexed_select_base(RefNode::Expression(&expr), tree, dimensions)?;
                 Some(format!(
                     "({})",
-                    typecheck::format_integral_literal_binary(
-                        &typecheck::eval_const_integral_literal_with_types(
-                            &value.into(),
-                            &dimensions.const_env,
-                            &types,
-                        )
-                        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?,
-                    )
+                    typecheck::format_integral_literal_binary(&constant_pattern_literal(
+                        value, dimensions, &types
+                    )?,)
                 ))
             }
             RefNode::ConstantPrimary(primary)
@@ -602,14 +654,9 @@ fn constant_pattern_text(
                     indexed_select_base(RefNode::ConstantExpression(&expr), tree, dimensions)?;
                 Some(format!(
                     "({})",
-                    typecheck::format_integral_literal_binary(
-                        &typecheck::eval_const_integral_literal_with_types(
-                            &value.into(),
-                            &dimensions.const_env,
-                            &types,
-                        )
-                        .ok_or_else(|| unsupported("nonconstant parameter pattern element"))?,
-                    )
+                    typecheck::format_integral_literal_binary(&constant_pattern_literal(
+                        value, dimensions, &types
+                    )?,)
                 ))
             }
             // Retain literals, operators and parentheses for the callee's

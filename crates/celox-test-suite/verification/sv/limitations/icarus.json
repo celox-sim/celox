@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 87,
+    "compile_error": 90,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -950,6 +950,39 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:2: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::parameter_patterns_override_body_declarations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: error: A reference to a net or variable (`a') is not allowed in a constant expression.\n<case>/source_0.sv:4: error: Unable to evaluate a as a port default expression.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::named_calls_preserve_defaults_and_declaration_scope",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

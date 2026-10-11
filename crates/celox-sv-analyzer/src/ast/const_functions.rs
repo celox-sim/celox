@@ -22,6 +22,8 @@ const MAX_DEPTH: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConstantFunction {
     params: Vec<(String, crate::ir::Type)>,
+    argument_names: Vec<String>,
+    argument_defaults: Vec<Option<Expr>>,
     return_var: Option<(String, crate::ir::Type)>,
     body: Vec<Stmt>,
 }
@@ -42,6 +44,8 @@ thread_local! {
     static LOCALS: RefCell<Arc<HashMap<String, crate::ir::Type>>> = RefCell::new(Arc::default());
     static ERRORS: RefCell<Arc<FunctionErrors>> = RefCell::new(Arc::default());
     static DEPTH: Cell<usize> = const { Cell::new(0) };
+    // Reuse signatures without copying every function for each initializer.
+    static ARGUMENT_NAMES: RefCell<(Arc<ConstantFunctionTable>, Arc<HashMap<String, Vec<String>>>)> = RefCell::new((Arc::default(), Arc::default()));
 }
 
 /// Restores the previously installed functions when dropped.
@@ -94,6 +98,22 @@ pub(super) fn conversion_error(name: &str) -> Option<AnalyzerError> {
     ERRORS.with(|current| {
         let errors = current.borrow();
         errors.by_name.get(name).or(errors.all.as_ref()).cloned()
+    })
+}
+
+/// Source formal names used to bind named calls in constant syntax.
+pub(super) fn argument_names() -> Arc<HashMap<String, Vec<String>>> {
+    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    ARGUMENT_NAMES.with(|cached| {
+        let mut cached = cached.borrow_mut();
+        if !Arc::ptr_eq(&cached.0, &functions) {
+            let names = functions
+                .iter()
+                .map(|(name, function)| (name.clone(), function.argument_names.clone()))
+                .collect();
+            *cached = (functions, Arc::new(names));
+        }
+        cached.1.clone()
     })
 }
 
@@ -176,6 +196,19 @@ impl ConstantFunctions {
                 (
                     name(function_name),
                     ConstantFunction {
+                        argument_names: function.argument_names.clone(),
+                        argument_defaults: function
+                            .argument_defaults
+                            .iter()
+                            .map(|default| {
+                                default.clone().map(|expr| {
+                                    let Stmt::Eval(expr) = stmt(Stmt::Eval(expr)) else {
+                                        unreachable!("renaming preserves statement variants")
+                                    };
+                                    expr
+                                })
+                            })
+                            .collect(),
                         params: function
                             .params
                             .iter()
@@ -223,6 +256,50 @@ pub(super) fn module_constant_functions(
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
+    if !node
+        .clone()
+        .into_iter()
+        .any(|child| matches!(child, RefNode::FunctionDeclaration(_)))
+    {
+        return ConstantFunctions::default();
+    }
+    let needs_bootstrap = !generate::root_subroutines_only()
+        && node.clone().into_iter().any(|child| {
+            matches!(
+                child,
+                RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
+            )
+        });
+    if !needs_bootstrap {
+        return collect_module_constant_functions(
+            node,
+            tree,
+            const_env,
+            type_aliases,
+            parameter_literals,
+        );
+    }
+    let mut roots = generate::with_root_subroutines(|| {
+        collect_module_constant_functions(
+            node.clone(),
+            tree,
+            const_env,
+            type_aliases,
+            parameter_literals,
+        )
+    });
+    roots.extend_missing(&scope::imported().constant_functions);
+    let _installed = install(roots);
+    collect_module_constant_functions(node, tree, const_env, type_aliases, parameter_literals)
+}
+
+fn collect_module_constant_functions(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> ConstantFunctions {
     let has_functions = node
         .clone()
         .into_iter()
@@ -236,6 +313,7 @@ pub(super) fn module_constant_functions(
             Err(error) => return ConstantFunctions::unconverted(error),
         };
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+    dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     let mut locals = Vec::new();
     let mut counter = 0usize;
@@ -276,6 +354,16 @@ pub(super) fn module_constant_functions(
             Some((
                 subroutine.name.clone(),
                 ConstantFunction {
+                    argument_names: subroutine
+                        .params
+                        .iter()
+                        .map(|param| param.source_name.clone())
+                        .collect(),
+                    argument_defaults: subroutine
+                        .params
+                        .iter()
+                        .map(|param| param.default.clone())
+                        .collect(),
                     params,
                     return_var: Some(return_var?),
                     body: subroutine.body,
@@ -296,6 +384,53 @@ pub(super) fn module_constant_functions(
                 .collect(),
         ),
     }
+}
+
+/// Fill defaults in the declaration's bound scope; runtime IR keeps its holes.
+pub(super) fn resolved_arguments(name: &str, args: &[Option<Expr>]) -> Option<Vec<Expr>> {
+    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let Some(function) = functions.get(name) else {
+        return args.iter().cloned().collect();
+    };
+    if args.len() > function.params.len() {
+        return None;
+    }
+    (0..function.params.len())
+        .map(|position| {
+            args.get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| function.argument_defaults[position].clone())
+        })
+        .collect()
+}
+
+/// A named constant call can be folded only when its body and actuals evaluate.
+pub(super) fn eval_expression_literal(
+    expr: &Expr,
+    constants: &HashMap<String, i128>,
+) -> Option<typecheck::IntegralLiteral> {
+    let Expr::Call { name, .. } = expr else {
+        return None;
+    };
+    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
+    let width = ty
+        .resolved_width()
+        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
+    let mut frame = Frame {
+        constants,
+        values: HashMap::default(),
+        types: HashMap::default(),
+        temporaries: 0,
+        iterations: 0,
+    };
+    let value = frame.eval(expr)?;
+    typecheck::parse_integral_literal(&format_typed_parameter_literal(
+        value,
+        width,
+        ty.is_signed(),
+    ))
 }
 
 /// The value of a call of an installed constant function.
@@ -320,19 +455,42 @@ pub(crate) fn eval_call(
     result
 }
 
+/// Preserve the declared result type when freezing a caller's function value.
+pub(super) fn eval_call_literal(
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &HashMap<String, i128>,
+) -> Option<typecheck::IntegralLiteral> {
+    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let (_, ty) = functions.get(name)?.return_var.as_ref()?;
+    let width = ty
+        .resolved_width()
+        .or_else(|| typecheck::resolve_packed_width_in_env(ty.packed_ranges(), constants))?;
+    let value = eval_call(name, args, constants)?;
+    typecheck::parse_integral_literal(&format_typed_parameter_literal(
+        value,
+        width,
+        ty.is_signed(),
+    ))
+}
+
 fn call(
     function: &ConstantFunction,
     args: &[i128],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let frame = Frame {
+    let mut frame = Frame {
         constants,
         values: HashMap::default(),
         types: HashMap::default(),
         temporaries: 0,
         iterations: 0,
     };
-    call_in_frame(function, args, frame)
+    let mut values = args.to_vec();
+    for position in args.len()..function.params.len() {
+        values.push(frame.eval(function.argument_defaults[position].as_ref()?)?);
+    }
+    call_in_frame(function, &values, frame)
 }
 
 fn call_in_frame(function: &ConstantFunction, args: &[i128], mut frame: Frame<'_>) -> Option<i128> {
@@ -494,7 +652,7 @@ impl Frame<'_> {
             }
             Expr::Call { name, args, .. } => ConstExpr::Function {
                 name: name.clone(),
-                args: args
+                args: resolved_arguments(name, args)?
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,

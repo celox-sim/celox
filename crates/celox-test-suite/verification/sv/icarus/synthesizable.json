@@ -370,6 +370,29 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Icarus 13.0 requires function port defaults to be constant expressions and rejects a reference to a net or variable. IEEE 1800-2023 13.5.3 evaluates a used default in the enclosing declaration scope on each call; the shared case retains its dynamic module-signal default.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_dynamic_argument_defaults",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 requires function port defaults to be constant expressions and rejects a reference to a net or variable. IEEE 1800-2023 13.5.3 evaluates a used default in the enclosing declaration scope on each call; the shared case retains its dynamic module-signal default.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "synthesizable::named_calls_preserve_defaults_and_declaration_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

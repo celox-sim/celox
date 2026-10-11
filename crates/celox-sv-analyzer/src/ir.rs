@@ -887,7 +887,8 @@ pub enum Expr {
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        /// Missing actuals retain their formal slots for declaration-scope defaults.
+        args: Vec<Option<Expr>>,
         /// Formal positions in source evaluation/copy-out order; empty means positional.
         arg_order: Vec<usize>,
     },
@@ -1212,7 +1213,7 @@ impl From<ast::Expr> for Expr {
             } => Expr::Call {
                 arg_order: arg_order.clone(),
                 name,
-                args: args.into_iter().map(Into::into).collect(),
+                args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
                 expr: Box::new((*expr).into()),

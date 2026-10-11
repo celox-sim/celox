@@ -142,7 +142,7 @@ pub(super) fn ports_from_module_node(
 }
 
 /// The positional interface of a module: its ports in declaration order and
-/// the overridable (non-local, non-type) parameters of its `#(...)` list.
+/// its overridable value parameters: in the header when present, otherwise body.
 pub(super) fn module_interface_from_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -166,7 +166,7 @@ pub(super) fn module_interface_from_node(
         }
     }
     let mut parameters = Vec::new();
-    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node) {
+    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node.clone()) {
         let push_declaration = |declaration: &sv_parser::ParameterPortDeclaration,
                                 parameters: &mut Vec<String>| {
             if matches!(
@@ -212,6 +212,25 @@ pub(super) fn module_interface_from_node(
                 }
             }
             sv_parser::ParameterPortList::Empty(_) => {}
+        }
+    }
+    if module_parameter_port_list(node.clone()).is_none() {
+        for declaration in scope_declarations(node) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) =
+                declaration
+            else {
+                continue;
+            };
+            for child in RefNode::ParameterDeclaration(&declaration.0) {
+                if let RefNode::ParamAssignment(parameter) = child
+                    && let Some(name) = identifier_text(
+                        RefNode::ParameterIdentifier(&parameter.nodes.0),
+                        syntax_tree,
+                    )
+                {
+                    parameters.push(name);
+                }
+            }
         }
     }
     Ok(ModuleInterface { ports, parameters })

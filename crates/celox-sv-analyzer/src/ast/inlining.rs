@@ -133,7 +133,7 @@ pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     }
     match expr {
         Expr::Call { name, args, .. } => {
-            !system_functions::is_system_name(name) || args.iter().any(calls_subroutine)
+            !system_functions::is_system_name(name) || args.iter().flatten().any(calls_subroutine)
         }
         Expr::Ident(_) | Expr::Literal(_) => false,
         Expr::Select { expr, msb, lsb, .. } => {
@@ -322,13 +322,15 @@ pub(super) fn expand_expr_calls(
             let args = args
                 .into_iter()
                 .map(|arg| {
-                    expand_expr_calls(
-                        arg,
-                        functions,
-                        expression_signedness,
-                        depth,
-                        apply_return_type,
-                    )
+                    arg.map(|arg| {
+                        expand_expr_calls(
+                            arg,
+                            functions,
+                            expression_signedness,
+                            depth,
+                            apply_return_type,
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             let Some(function) = functions.get(&name) else {
@@ -348,7 +350,10 @@ pub(super) fn expand_expr_calls(
             // Inlining copies or drops an argument with its parameter, and
             // copies the calls of the body with their sites; a subroutine call
             // in either runs once per evaluation instead.
-            if function.params.len() != args.len() || args.iter().any(calls_subroutine) {
+            if function.params.len() != args.len()
+                || args.iter().any(Option::is_none)
+                || args.iter().flatten().any(calls_subroutine)
+            {
                 return Expr::Call {
                     name,
                     args,
@@ -359,7 +364,7 @@ pub(super) fn expand_expr_calls(
             let env = function
                 .params
                 .iter()
-                .zip(args)
+                .zip(args.into_iter().flatten())
                 .map(|(param, arg)| {
                     let mut arg = if apply_return_type && let Some(width) = param.width {
                         let assigned = Expr::Resize {
@@ -502,7 +507,7 @@ pub(super) fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) ->
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_expr_idents(arg, env))
+                .map(|arg| arg.map(|arg| substitute_expr_idents(arg, env)))
                 .collect(),
         },
     }

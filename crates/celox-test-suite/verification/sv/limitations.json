@@ -152,7 +152,9 @@
         "hierarchy::parameter_patterns_keep_unknown_fill",
         "procedural::aggregate_parameters_are_constant_tables",
         "system_functions::dimensions_resolves_package_array_constants",
-        "system_functions::isunbounded_reports_bounded_array_parameters"
+        "system_functions::isunbounded_reports_bounded_array_parameters",
+        "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
+        "hierarchy::parameter_patterns_override_body_declarations"
       ]
     }
   },
@@ -1129,6 +1131,40 @@
       "icarus": [
         "system_functions::printtimescale_displays_unit_and_global_precision",
         "system_functions::printtimescale_preserves_package_subroutine_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_default_argument_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 binds the default b=a to the earlier formal a and returns 22 for f(.a(2)) when the enclosing module a is 5. IEEE 1800-2023 13.5.3 evaluates defaults in the scope containing the subroutine declaration, requiring 25. Celox passes all five backend variants.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "synthesizable::named_calls_preserve_defaults_and_declaration_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_dynamic_argument_defaults",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 requires function port defaults to be constant expressions and rejects a reference to a net or variable. IEEE 1800-2023 13.5.3 evaluates a used default in the enclosing declaration scope on each call; the shared case retains its dynamic module-signal default.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::named_calls_preserve_defaults_and_declaration_scope"
       ]
     }
   }

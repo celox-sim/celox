@@ -3,6 +3,9 @@
 use super::*;
 
 sv_backends! {
+    fn named_calls_preserve_defaults_and_declaration_scope(sim) { @case "synthesizable::named_calls_preserve_defaults_and_declaration_scope"; }
+    fn named_calls_in_constant_contexts(sim) { @case "synthesizable::named_calls_in_constant_contexts"; }
+    fn named_calls_respect_generate_signatures(sim) { @case "synthesizable::named_calls_respect_generate_signatures"; }
     fn enum_members_without_values_follow_their_predecessor(sim) {
         @case "synthesizable::enum_members_without_values_follow_their_predecessor";
     }

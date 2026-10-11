@@ -142,19 +142,33 @@ pub(crate) fn apply_pattern_parameter_overrides(
         return Ok(None);
     }
     for node in tree {
-        let RefNode::ModuleDeclarationAnsi(module) = node else {
+        if !matches!(
+            node,
+            RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
+        ) {
             continue;
-        };
-        let node = RefNode::ModuleDeclarationAnsi(module);
+        }
         if module_name_from_node(node.clone(), tree)? != module_name {
             continue;
         }
         let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
         let mut edits = Vec::new();
         let mut found = HashSet::default();
-        let declarations = module_parameter_port_list(node.clone())
+        let mut declarations = module_parameter_port_list(node.clone())
             .into_iter()
             .collect::<Vec<_>>();
+        declarations.extend(scope_declarations(node.clone()).into_iter().filter_map(
+            |declaration| {
+                if let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(
+                    declaration,
+                ) = declaration
+                {
+                    Some(RefNode::ParameterDeclaration(&declaration.0))
+                } else {
+                    None
+                }
+            },
+        ));
         for child in declarations.into_iter().flat_map(|node| node.into_iter()) {
             let RefNode::ParamAssignment(param) = child else {
                 continue;

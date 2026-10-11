@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn parameter_patterns_evaluate_caller_constant_functions(sim) { @case "hierarchy::parameter_patterns_evaluate_caller_constant_functions"; }
+    fn parameter_patterns_override_body_declarations(sim) { @case "hierarchy::parameter_patterns_override_body_declarations"; }
     fn parameter_patterns_keep_fill_and_arithmetic_context(sim) {
         @case "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context";
     }
