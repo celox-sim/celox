@@ -7,11 +7,14 @@ pub fn validate_timed_design(design: &Design) -> Result<()> {
         && design.sources.iter().any(|source| {
             sv_words(&source.text).iter().any(|(start, _, word)| {
                 matches!(*word, "timeunit" | "timeprecision")
-                    || (*word == "timescale" && source.text[..*start].ends_with('`'))
+                    || (matches!(*word, "timescale" | "resetall")
+                        && source.text[..*start].ends_with('`'))
             })
         })
     {
-        return Err("explicit time scales are not supported in timed shared cases".into());
+        return Err(
+            "explicit time scales and resetall are not supported in timed shared cases".into(),
+        );
     }
     Ok(())
 }
@@ -99,6 +102,7 @@ mod tests {
     fn explicit_scales_are_rejected_without_rejecting_literal_text() {
         for source in [
             "`timescale 10ns/1ps\nmodule Top; endmodule",
+            "`resetall\nmodule Top; endmodule",
             "module Top; timeunit 10ns; endmodule",
             "module Top; timeprecision 1fs; endmodule",
         ] {
