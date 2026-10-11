@@ -178,9 +178,9 @@ pub(crate) fn apply_pattern_parameter_overrides(
             else {
                 continue;
             };
-            if !allowed.contains(&name) || !array_parameters::is_array_parameter(param) {
+            if !allowed.contains(&name) {
                 return Err(unsupported(format!(
-                    "pattern override of non-array parameter `{name}`"
+                    "pattern override of non-overridable parameter `{name}`"
                 )));
             }
             let Some((_, value)) = &param.nodes.2 else {

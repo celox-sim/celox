@@ -799,6 +799,11 @@ impl Renamer<'_> {
         for range in &mut parameter.packed_ranges {
             *range = self.packed_range(range.clone());
         }
+        parameter.members = parameter
+            .members
+            .into_iter()
+            .map(|member| member.with_type(|ty| self.r#type(ty)))
+            .collect();
         parameter
     }
 

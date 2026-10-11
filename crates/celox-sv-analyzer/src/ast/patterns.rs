@@ -78,7 +78,8 @@ fn typed_pattern_type(
 }
 
 /// Serialize a typed constant pattern as positional values already converted
-/// to its caller-side type (IEEE 1800-2023 10.9). No caller typedef names escape.
+/// to its caller-side type (IEEE 1800-2023 10.9). Packed values become
+/// literals; only unpacked dimensions need positional patterns.
 pub(super) fn constant_typed_pattern_text(
     pattern: &sv_parser::AssignmentPatternExpression,
     tree: &SyntaxTree,
@@ -100,14 +101,13 @@ pub(super) fn constant_typed_pattern_text(
     };
     let value = typecheck::parse_integral_literal(&value)
         .ok_or_else(|| unsupported("typed parameter pattern value"))?;
-    pattern_value_text(&value, &shape, 0, true, dims)
+    pattern_value_text(&value, &shape, 0, dims)
 }
 
 fn pattern_value_text(
     value: &typecheck::IntegralLiteral,
     shape: &VariableDimensions,
     offset: usize,
-    needs_pattern: bool,
     dims: &PackedDimensions,
 ) -> Converted<String> {
     let mut parts = Vec::new();
@@ -124,39 +124,6 @@ fn pattern_value_text(
                 value,
                 &element,
                 offset + position * width,
-                false,
-                dims,
-            )?);
-        }
-    } else if needs_pattern && !shape.members.is_empty() {
-        for member in &shape.members {
-            let member_shape = procedural::dimensions_from_type(member.r#type());
-            parts.push(format!(
-                "{}: {}",
-                member.name(),
-                pattern_value_text(value, &member_shape, offset + member.offset(), false, dims,)?
-            ));
-        }
-    } else if needs_pattern && shape.packed.len() > 1 {
-        let dimension = &shape.packed[0];
-        let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
-        let element = VariableDimensions {
-            packed: shape.packed[1..].to_vec(),
-            signed: shape.signed_element_depth == Some(1),
-            signed_element_depth: shape
-                .signed_element_depth
-                .and_then(|depth| depth.checked_sub(1))
-                .filter(|depth| *depth > 0),
-            ..shape.clone()
-        };
-        let width = shape_width(&element, dims)
-            .ok_or_else(|| unsupported("typed packed pattern element width"))?;
-        for position in (0..count).rev() {
-            parts.push(pattern_value_text(
-                value,
-                &element,
-                offset + position * width,
-                false,
                 dims,
             )?);
         }
@@ -174,25 +141,7 @@ fn pattern_value_text(
             literal.value ^= &literal.value & &literal.mask;
             literal.mask = num_bigint::BigUint::default();
         }
-        if !needs_pattern {
-            return Ok(typecheck::format_integral_literal_binary(&literal));
-        }
-        // A vector pattern assigns one bit per positional item, MSB first.
-        let bit = VariableDimensions {
-            packed: Vec::new(),
-            members: Vec::new(),
-            signed: false,
-            ..shape.clone()
-        };
-        for position in (0..width).rev() {
-            parts.push(pattern_value_text(
-                value,
-                &bit,
-                offset + position,
-                false,
-                dims,
-            )?);
-        }
+        return Ok(typecheck::format_integral_literal_binary(&literal));
     }
     Ok(format!("'{{{}}}", parts.join(", ")))
 }

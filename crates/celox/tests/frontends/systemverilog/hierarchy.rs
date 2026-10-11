@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn parameter_patterns_preserve_packed_member_states(sim) { @case "hierarchy::parameter_patterns_preserve_packed_member_states"; }
+    fn parameter_patterns_transfer_packed_values(sim) { @case "hierarchy::parameter_patterns_transfer_packed_values"; }
+    fn parameter_patterns_override_scalar_defaults(sim) { @case "hierarchy::parameter_patterns_override_scalar_defaults"; }
     fn parameter_patterns_evaluate_caller_constant_functions(sim) { @case "hierarchy::parameter_patterns_evaluate_caller_constant_functions"; }
     fn parameter_patterns_override_body_declarations(sim) { @case "hierarchy::parameter_patterns_override_body_declarations"; }
     fn parameter_patterns_keep_fill_and_arithmetic_context(sim) {

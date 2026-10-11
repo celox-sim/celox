@@ -1481,7 +1481,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),
                     is_2state: parameter.declared_is_2state,
-                    members: Vec::new(),
+                    members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
                 },
             )

@@ -364,3 +364,62 @@
   (top Top)
   (eval)
   (assert_eq y 0x0304))
+
+; Typed packed patterns are values: caller field names/layout do not escape.
+(case parameter_patterns_transfer_packed_values
+  (source "packed_pattern_values.sv" #"
+    package ChildTypes;
+      typedef struct packed {logic [7:0] a; logic [7:0] b;} child_t;
+    endpackage
+    module Child #(parameter ChildTypes::child_t P = '{default: 0})
+      (output logic [15:0] y);
+      assign y = {P.a, P.b};
+    endmodule
+    module Top(output logic [15:0] renamed, regrouped);
+      typedef struct packed {logic [7:0] x; logic [7:0] y;} caller_t;
+      typedef struct packed {logic [3:0] x; logic [11:0] y;} other_t;
+      Child #(.P(caller_t'{y: 2, x: 1})) c(renamed);
+      Child #(.P(other_t'{x: 10, y: 12'h123})) d(regrouped);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq renamed 0x0102)
+  (assert_eq regrouped 0xa123))
+
+(case parameter_patterns_override_scalar_defaults
+  (source "scalar_pattern_values.sv" #"
+    module Child #(parameter int P = 0)(output logic [31:0] y);
+      assign y = P;
+    endmodule
+    module Wide #(parameter logic [63:0] P = 0)(output logic [63:0] y);
+      assign y = P;
+    endmodule
+    module Top(output logic [31:0] builtin, named, output logic [63:0] extended);
+      typedef logic [7:0] byte_t;
+      Child #(.P(int'{default: 1})) c(builtin);
+      Child #(.P(byte_t'{default: 1})) d(named);
+      Wide #(.P(int'{default: 1})) w(extended);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq builtin 0xffffffff)
+  (assert_eq named 0xff)
+  (assert_eq extended 0xffffffffffffffff))
+
+(case parameter_patterns_preserve_packed_member_states
+  (four_state)
+  (source "packed_pattern_states.sv" #"
+    package ChildTypes;
+      typedef struct packed {bit [3:0] a; logic [3:0] b;} child_t;
+    endpackage
+    module Child #(parameter ChildTypes::child_t P = '{default: 0})
+      (output logic [7:0] y);
+      assign y = {P.a, P.b};
+    endmodule
+    module Top(output logic [7:0] y);
+      typedef struct packed {bit [3:0] x; logic [3:0] y;} caller_t;
+      Child #(.P(caller_t'{x: 'x, y: 'z})) c(y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y (fourstate 0 0x0f)))
