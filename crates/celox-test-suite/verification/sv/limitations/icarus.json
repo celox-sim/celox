@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 12,
     "emission_error": 0,
-    "compile_error": 79,
+    "compile_error": 80,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -870,6 +870,14 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Arrays",
+      "detail": "Icarus build exit status: 18; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Syntax in assignment statement l-value.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Syntax in assignment statement l-value.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Syntax error in continuous assignment\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Syntax error in continuous assignment\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Syntax error in continuous assignment\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Syntax error in continuous assignment\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Syntax error in continuous assignment\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Syntax error in continuous assignment\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "indexed_select::constant_part_select_indices_of_concatenations",
+      "phase": "compile",
+      "status": "compile_error"
     }
   ]
 }

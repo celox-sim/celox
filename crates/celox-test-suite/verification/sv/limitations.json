@@ -84,6 +84,7 @@
     "cases": {
       "icarus": [
         "generate::ignores_type_aliases_in_inactive_generate_branches",
+        "indexed_select::constant_part_select_indices_of_concatenations",
         "indexed_select::indexed_constants_lower_selected_concatenations",
         "indexed_select::indexed_constants_work_in_ordinary_selection_indices",
         "indexed_select::indexed_runtime_replications_preserve_attached_selections",

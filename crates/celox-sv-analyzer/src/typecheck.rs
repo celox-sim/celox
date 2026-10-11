@@ -121,6 +121,17 @@ pub(crate) fn eval_const_expr_in_env(
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
+        ConstExpr::Resize {
+            expr: operand,
+            width,
+            signed,
+        } => {
+            if let Some(literal) = integral_literal_from_const_expr(expr) {
+                return integral_literal_as_i128(&literal, *signed);
+            }
+            let value = eval_const_expr_in_env(operand, constants)?;
+            literal_as_i128(&format_typed_constant_literal(value, *width, *signed))
+        }
         ConstExpr::Select { expr, bit } => {
             let bit = eval_const_expr_in_env(bit, constants)?;
             let bit = usize::try_from(bit).ok()?;
@@ -435,6 +446,17 @@ fn substitute_typed_constants_with_lookup(
                 .into_iter()
                 .map(|arg| substitute_typed_constants_with_lookup(arg, constants, types))
                 .collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: Box::new(substitute_typed_constants_with_lookup(
+                *expr, constants, types,
+            )),
+            width,
+            signed,
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
@@ -884,6 +906,22 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            if let Some(fill) = unbased_fill_from_const_expr(expr) {
+                let mut literal = integral_fill_literal(fill, *width)?;
+                literal.signed = *signed;
+                return Some(literal);
+            }
+            let operand = self_determined_integral_literal(expr)?;
+            let operand =
+                eval_integral_in_context(expr, (*width).max(operand.width), operand.signed)?;
+            let extension = signed_extension(&operand, operand.signed);
+            Some(resize_integral_literal(operand, *width, *signed, extension))
+        }
         ConstExpr::Function { name, args, .. } => {
             if matches!(name.as_str(), "$signed" | "$unsigned") {
                 let [arg] = args.as_slice() else { return None };
@@ -1545,6 +1583,58 @@ mod literal_tests {
             };
         }
         assert_eq!(eval_const_expr(&expr, &constants), Some(1));
+    }
+
+    #[test]
+    fn resizes_preserve_operand_extension_and_selected_unknowns() {
+        for (operand, width, signed, expected) in [
+            ("2'sb11", 4, true, "4'sb1111"),
+            ("2'sb11", 4, false, "4'b1111"),
+            ("2'b11", 4, true, "4'sb0011"),
+            ("8'hff", 2, true, "2'sb11"),
+            ("2'sbx1", 4, true, "4'sbxxx1"),
+            ("2'sbz1", 4, false, "4'bzzz1"),
+        ] {
+            let expr = ConstExpr::Resize {
+                expr: Box::new(ConstExpr::Literal(operand.into())),
+                width,
+                signed,
+            };
+            assert_eq!(
+                integral_literal_from_const_expr(&expr),
+                parse_integral_literal(expected),
+                "{operand}"
+            );
+        }
+        let expr = ConstExpr::Resize {
+            expr: Box::new(ConstExpr::Ident("value".into())),
+            width: 2,
+            signed: true,
+        };
+        assert_eq!(
+            eval_const_expr(&expr, &HashMap::from_iter([("value".into(), 3)])),
+            Some(-1)
+        );
+    }
+
+    #[test]
+    fn resize_boundaries_keep_their_width_in_larger_contexts() {
+        let sum = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2'd3".into())),
+            op: BinaryOp::Add,
+            right: Box::new(ConstExpr::Literal("2'd1".into())),
+        };
+        for (width, expected) in [(2, "8'b00000000"), (4, "8'b00000100")] {
+            let expr = ConstExpr::Resize {
+                expr: Box::new(sum.clone()),
+                width,
+                signed: false,
+            };
+            assert_eq!(
+                eval_integral_in_context(&expr, 8, false),
+                parse_integral_literal(expected)
+            );
+        }
     }
 
     #[test]
