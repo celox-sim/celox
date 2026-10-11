@@ -164,8 +164,9 @@ comparison groups' time budgets unchanged. The dashboard shows it as
 Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
 AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
 execution modes preserves useful same-CPU comparisons with time for builds.
-Different groups may use different CPUs. CPU and host identity are retained in
-each artifact. Each successful backend publishes independently.
+Different groups may use different CPUs. The CPU model is published with each
+result and the dashboard splits its series by CPU; the full host identity is
+retained in each artifact. Each successful backend publishes independently.
 Each runner has a one-hour timeout for 1/2 harts,
 three hours for 4 harts, and five and a half hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
@@ -222,9 +223,9 @@ gh workflow run heliodor-bench.yml --ref <branch> \
 
 Nightly and manual runs use the same grouping above. To compare a subset, give
 `suite_runner` a space-separated list; this narrows the groups without combining
-them. Backends execute in the supplied order within each group. CPU, runner,
-group, run/attempt, and boot identifiers are saved with the
-results. Every Veryl-CC run still gets a fresh AOT-C cache.
+them. Backends execute in the supplied order within each group. The CPU model is
+published with each result; the runner, group, run/attempt, and boot identifiers
+stay in the artifacts. Every Veryl-CC run still gets a fresh AOT-C cache.
 
 ```bash
 gh workflow run heliodor-bench.yml --ref <branch> \
@@ -239,4 +240,5 @@ before the [hosted job's six-hour limit](https://docs.github.com/en/actions/refe
 A timeout or missing backend fails CI. Completed backends still publish;
 incomplete boots do not publish timings. The per-backend limits above also apply within
 this shared budget. Separate workflow runs, including different commits, can use different
-CPUs; their history is not a same-host comparison.
+CPUs; the dashboard keeps them in separate CPU series, but their history is still not a
+same-host comparison.

@@ -417,6 +417,7 @@ jobs:
       HELIODOR_SUITE: "1"
       # Each successful backend publishes before the next backend starts.
       HELIODOR_PUBLISH_ARCH: ${{ github.ref == 'refs/heads/master' && matrix.arch || '' }}
+      HELIODOR_PUBLISH_HOST: ${{ github.ref == 'refs/heads/master' && 'heliodor-suite-host.txt' || '' }}
       HELIODOR_TESTS: ${{ matrix.test }}
       HELIODOR_RUNNERS: ${{ matrix.runner }}
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}

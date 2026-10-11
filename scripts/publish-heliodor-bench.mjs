@@ -8,6 +8,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const dataPath = "dev/bench/data.js";
 const prefix = "window.BENCHMARK_DATA = ";
 
+// Hosted runners hand out different CPU models between runs, so the same
+// backend drifts with the machine it happened to receive. Every entry records
+// the CPU model that produced it, and the dashboard keeps one series per CPU.
+export function cpuModelFromHost(hostText) {
+  const match = hostText.match(/^Model name:\s*(.+?)\s*$/m)
+    ?? hostText.match(/^Hardware:\s*(.+?)\s*$/m)
+    ?? hostText.match(/^Processor:\s*(.+?)\s*$/m);
+  if (!match) return null;
+  const model = match[1]
+    .replace(/\s*\((?:R|TM|C)\)/gi, " ")
+    .replace(/\s+@\s*[\d.]+\s*[kKmMgG]?[hH]z\s*$/i, " ")
+    .replace(/\s+(?:\d+-Core\s+)?(?:CPU|Processor)\s*$/i, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return model || null;
+}
+
+export function hostCpu(path) {
+  const cpu = cpuModelFromHost(readFileSync(path, "utf8"));
+  if (!cpu) throw new Error(`Benchmark host metadata does not name a CPU model: ${path}`);
+  return cpu;
+}
+
 function readData(source) {
   if (!source.startsWith(prefix)) throw new Error("Unexpected benchmark data format");
   return JSON.parse(source.slice(prefix.length));
@@ -95,8 +118,17 @@ export function publishResult(remote, entry, {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [results, arch] = process.argv.slice(2);
-  if (!results || !arch) throw new Error("Usage: publish-heliodor-bench.mjs <results.tsv> <arch>");
+  const positional = [];
+  let host;
+  const options = process.argv.slice(2);
+  for (let index = 0; index < options.length; index += 1) {
+    if (options[index] === "--host") host = options[++index];
+    else positional.push(options[index]);
+  }
+  const [results, arch] = positional;
+  if (!results || !arch || !host) {
+    throw new Error("Usage: publish-heliodor-bench.mjs <results.tsv> <arch> --host <host.txt>");
+  }
   if (
     process.env.GITHUB_REF !== "refs/heads/master" ||
     !["schedule", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME)
@@ -140,6 +172,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/commit/${id}`,
         },
         date: Date.now(),
+        cpu: hostCpu(host),
         tool: "customSmallerIsBetter",
         benches,
       });
