@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 13,
     "emission_error": 0,
-    "compile_error": 93,
+    "compile_error": 94,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -1018,6 +1018,17 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_publishes_dependent_array_parameters",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

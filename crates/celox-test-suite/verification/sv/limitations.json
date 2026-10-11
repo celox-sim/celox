@@ -151,7 +151,8 @@
         "system_functions::isunbounded_reports_bounded_array_parameters",
         "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
         "system_functions::unpacked_dimensions_resolves_package_array_constants",
-        "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes"
+        "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+        "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"
       ]
     }
   },

@@ -1080,20 +1080,20 @@ fn containing_packed_dimensions(
         });
         // Header array parameters can determine port ranges. Scope parameters
         // are installed with direct declarations in source order below.
-        for parameter in array_parameters::array_parameters_from_parameter_ports(
+        array_parameters::array_parameters_from_parameter_ports(
             module.clone(),
             syntax_tree,
             const_env,
             type_aliases,
+            &mut |parameter| {
+                publish_declaration_dimensions(
+                    module_span,
+                    &[],
+                    std::slice::from_ref(&parameter.signal),
+                )
+            },
         )
-        .ok()?
-        {
-            publish_declaration_dimensions(
-                module_span,
-                &[],
-                std::slice::from_ref(&parameter.signal),
-            );
-        }
+        .ok()?;
         ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
         // Discover direct value declarations without re-elaborating generate
         // conditions or parameter initializers that may contain this query.

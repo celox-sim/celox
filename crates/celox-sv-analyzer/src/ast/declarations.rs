@@ -450,20 +450,21 @@ pub(super) fn signals_from_scope_node(
             _ => None,
         };
         if let Some(parameter) = parameter {
-            for parameter in array_parameters::array_parameters_from_declaration(
+            array_parameters::array_parameters_from_declaration(
                 parameter,
                 syntax_tree,
                 const_env,
                 type_aliases,
-            )? {
-                if let Some(span) = scope_span {
-                    dimensions::publish_declaration_dimensions(
-                        span,
-                        &[],
-                        std::slice::from_ref(&parameter.signal),
-                    );
-                }
-            }
+                &mut |parameter| {
+                    if let Some(span) = scope_span {
+                        dimensions::publish_declaration_dimensions(
+                            span,
+                            &[],
+                            std::slice::from_ref(&parameter.signal),
+                        );
+                    }
+                },
+            )?;
             continue;
         }
         let declaration = match item {

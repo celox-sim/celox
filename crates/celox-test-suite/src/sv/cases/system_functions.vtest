@@ -2312,3 +2312,27 @@ Time scale of ($root) is 10fs / 10fs
   (expect_output #"Time scale of (P) is 100ns / 10ps
 Time scale of (P) is 100ns / 10ps
 "#))
+
+(case unpacked_dimensions_publishes_dependent_array_parameters
+  (source "dependent_header_arrays.sv" #"
+    module Top #(
+      parameter logic [7:0] A [0:1] = '{default:0},
+      parameter logic [7:0] B [0:$unpacked_dimensions(A)] = '{default:0},
+      parameter logic [$bits(B)-1:0] C [0:$size(B)] = '{default:16'h1234},
+      parameter logic [7:0] D [0:1] = '{default:0}, E [0:$unpacked_dimensions(D)] = '{default:0}
+    )(output logic [$bits(C)-1:0] y, output int bits_b, bits_c, size_e, body_bits);
+      localparam logic [7:0] BODY_A [0:1] = '{default:0}, BODY_B [0:$unpacked_dimensions(BODY_A)] = '{default:0};
+      assign y = {C[0], C[1], C[2]};
+      assign bits_b = $bits(B);
+      assign bits_c = $bits(C);
+      assign size_e = $size(E);
+      assign body_bits = $bits(BODY_B);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x123412341234)
+  (assert_eq bits_b 16)
+  (assert_eq bits_c 48)
+  (assert_eq size_e 2)
+  (assert_eq body_bits 16))

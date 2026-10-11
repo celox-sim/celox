@@ -76,8 +76,13 @@ pub(super) fn array_parameters_from_module_node<'a>(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
-    let mut parameters =
-        array_parameters_from_parameter_ports(node.clone(), tree, const_env, type_aliases)?;
+    let mut parameters = array_parameters_from_parameter_ports(
+        node.clone(),
+        tree,
+        const_env,
+        type_aliases,
+        &mut |_| {},
+    )?;
     for declaration in scope_declarations(node.clone()) {
         let declaration = match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
@@ -93,6 +98,7 @@ pub(super) fn array_parameters_from_module_node<'a>(
             tree,
             const_env,
             type_aliases,
+            &mut |_| {},
         )?);
     }
     Ok(parameters)
@@ -104,6 +110,7 @@ pub(super) fn array_parameters_from_parameter_ports<'a>(
     tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    publish: &mut impl FnMut(&ArrayParameter<'a>),
 ) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
     let mut declarations = Vec::new();
     if let Some(list) = module_parameter_port_list(node.clone()) {
@@ -126,6 +133,7 @@ pub(super) fn array_parameters_from_parameter_ports<'a>(
             tree,
             const_env,
             type_aliases,
+            publish,
         )?);
     }
     Ok(parameters)
@@ -137,6 +145,7 @@ pub(super) fn array_parameters_from_declaration<'a>(
     tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    publish: &mut impl FnMut(&ArrayParameter<'a>),
 ) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
     let mut parameters = Vec::new();
     for child in declaration.clone() {
@@ -160,10 +169,13 @@ pub(super) fn array_parameters_from_declaration<'a>(
         let pattern = value_pattern(param).ok_or_else(|| {
             AnalyzerError::Unsupported(format!("value of array parameter `{name}`"))
         })?;
-        parameters.push(ArrayParameter {
+        let parameter = ArrayParameter {
             signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
             pattern,
-        });
+        };
+        // Publish before the next declarator can query this array's shape.
+        publish(&parameter);
+        parameters.push(parameter);
     }
     Ok(parameters)
 }
