@@ -449,7 +449,8 @@ impl<B: SimBackend> Simulation<B> {
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
         self.simulator.eval_comb()?;
-        self.state.poll_waiting(&mut self.simulator)?;
+        let time = self.state.time();
+        self.state.settle_at(&mut self.simulator, time)?;
         Ok(())
     }
 

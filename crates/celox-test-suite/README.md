@@ -250,12 +250,19 @@ error.
 A case whose design has processes with delays or event controls, or a clock
 it generates itself, advances time with `run_until` and `run_to_finish` and
 checks the design's output with `expect_output`. Design delays count time
-units; the generated testbench for an external simulator sets a time scale of
-1 ns with 1 ps precision and settles in 1 ps steps, so its checks after
-`run_until` observe everything the design did at that time. Only checks may
-follow `run_to_finish`; they run in a `final` block, which sees the script's
-top-level bindings. A design that does not finish within the generated
-testbench's guard fails `run_to_finish` instead of passing the checks.
+units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
+and `timeprecision` declarations are rejected consistently by the Celox and
+external adapters. `tick` cannot be mixed with timed operations.
+
+Reads, output collection and `eval` settle processes due at the current
+timestamp without advancing time. External scripted adapters use an Icarus
+read/write synchronization callback or a Verilator clocking event sampled in
+the observed region. Initial blocks start after pre-run input writes settle.
+`run_until` drains its target timestamp before subsequent writes. Only checks
+may follow `run_to_finish`; they run in a `final` block that sees the script's
+top-level bindings. There is no simulated-time deadline: final checks require
+that the script reached the operation and that the design called `$finish`.
+Event exhaustion before explicit completion fails the case.
 
 For an invalid design, write `(expect reject)` and no statements.
 `TestCase::expectation` lets consumers select these separately. For additional

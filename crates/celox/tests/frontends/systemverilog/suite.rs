@@ -48,6 +48,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
+        self.0.settle()?;
         let signal = signal_of(&self.0, path);
         Ok(self.0.get_four_state(signal))
     }
@@ -63,6 +64,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn take_output(&mut self) -> Result<String> {
+        self.0.settle()?;
         collect_output(self.0.drain_runtime_events())
     }
 
@@ -83,7 +85,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_to_finish(&mut self) -> Result<()> {
-        self.0.run_until(u64::MAX - 1)?;
+        while !self.0.is_finished() && self.0.step()?.is_some() {}
         if !self.0.is_finished() {
             return Err(
                 "run_to_finish: the simulation ran out of events before a process finished it"
@@ -134,6 +136,7 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
 }
 
 fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
+    celox_test_suite::validate_timed_design(design)?;
     let sources = design
         .sources
         .iter()
@@ -219,4 +222,17 @@ pub fn run_case(name: &'static str, backend: &'static str) {
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     });
+}
+
+#[test]
+fn run_to_finish_reaches_the_last_scheduler_timestamp() {
+    let source = "module Top(output bit done); initial begin #(64'hffffffffffffffff); done = 1; $finish; end endmodule";
+    let simulation =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("last.sv"))], "Top")
+            .build()
+            .unwrap();
+    let mut backend = TimedBackend(simulation);
+    backend.run_to_finish().unwrap();
+    assert_eq!(backend.0.time(), u64::MAX);
+    assert_eq!(backend.0.get(backend.0.signal("done")), 1u8.into());
 }
