@@ -1178,3 +1178,29 @@ fn generate_scopes_follow_loop_bodies_members_and_child_blocks() {
     ));
     assert!(detail.contains("the generate block declares"), "{detail}");
 }
+
+/// Review cases: a loop body's name is declared beside the loop, and an
+/// outer block's declaration keeps an inner block's import to that block.
+#[test]
+fn generate_scopes_declare_loop_body_names_and_keep_inner_imports() {
+    let pk = "package p; localparam int X = 3; localparam int g = 1; endpackage";
+    let detail = error(&format!(
+        "{pk}
+         module Top(output logic [7:0] y);
+           if (1) begin : o import p::g; for (genvar i = 0; i < 1; i++) begin : g end end
+           assign y = 0;
+         endmodule"
+    ));
+    assert!(detail.contains("the generate block declares"), "{detail}");
+    assert_eq!(
+        output(&format!(
+            "{pk}
+             module Top(output logic [7:0] y);
+               if (1) begin : o localparam int X = 9;
+                 if (1) begin : i import p::X; assign y = X; end
+               end
+             endmodule"
+        )),
+        3
+    );
+}

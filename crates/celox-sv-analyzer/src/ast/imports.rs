@@ -485,6 +485,7 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
     if blocks.is_empty() {
         return Vec::new();
     }
+    let real_blocks = blocks.len();
     // A loop's genvar is also visible in the loop's own header.
     blocks.extend(node.clone().into_iter().filter_map(|child| match child {
         RefNode::LoopGenerateConstruct(_) => Some(node_range(child)),
@@ -593,7 +594,9 @@ fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
                     .map(|(_, name)| name)
                     .or_else(|| block.nodes.0.as_ref().map(|(name, _)| name));
                 let range = node_range(child.clone());
-                let parent = blocks
+                // Not a loop header: a loop body's name is declared beside the
+                // loop.
+                let parent = blocks[..real_blocks]
                     .iter()
                     .enumerate()
                     .filter(|(_, (start, end))| {
@@ -1276,9 +1279,14 @@ pub(super) fn resolve_imports(
             .find(|binding| binding.name == name)
             .map(|binding| binding.target.clone());
         let first = &uses[0].1;
+        // A declaration in another generate block also gives the name a
+        // meaning there.
         if outside.is_none()
             && !local.contains(&name)
             && !referenced.contains_key(&name)
+            && !all_scopes
+                .iter()
+                .any(|scope| scope.declared.contains(&name))
             && uses.iter().all(|(_, target)| target == first)
         {
             bindings.push(Binding {
