@@ -2873,8 +2873,10 @@ impl<'a> Design<'a> {
                         // Keep range direction in the generate structure.
                         // Nested conditional expressions in a loop initializer
                         // can otherwise lose the range endpoints during lowering.
+                        // Check both bounds so a signed 32-bit genvar wrapping
+                        // past MIN or MAX cannot re-enter the array's range.
                         format!(
-                            "if (({left}) <= ({right})) begin\n    for (genvar {genvar} = ({left}); {genvar} <= ({right}); {genvar}++) begin : {label}\n    {body}\n    end\n    end else begin\n    for (genvar {genvar} = ({left}); {genvar} >= ({right}); {genvar}--) begin : {label}\n    {body}\n    end\n    end"
+                            "if (({left}) <= ({right})) begin\n    for (genvar {genvar} = ({left}); {genvar} >= ({left}) && {genvar} <= ({right}); {genvar}++) begin : {label}\n    {body}\n    end\n    end else begin\n    for (genvar {genvar} = ({left}); {genvar} <= ({left}) && {genvar} >= ({right}); {genvar}--) begin : {label}\n    {body}\n    end\n    end"
                         )
                     }
                 };

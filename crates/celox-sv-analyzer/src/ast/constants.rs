@@ -244,7 +244,13 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             .cloned()
             .or_else(|| {
                 let value = *const_env.get(&name)?;
-                if const_env.contains_key(&enum_marker(&name)) {
+                // Generate indices carry the same width/signing markers as
+                // enum values. Preserve them instead of creating a literal
+                // such as "-2147483648", whose minus is an expression operator.
+                if const_env.contains_key(&enum_marker(&name))
+                    || (!const_env.contains_key(&parameter_marker(&name))
+                        && const_env.contains_key(&parameter_width_marker(&name)))
+                {
                     let width = const_env
                         .get(&parameter_width_marker(&name))
                         .and_then(|width| usize::try_from(*width).ok())?;

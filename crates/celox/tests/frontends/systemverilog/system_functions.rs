@@ -524,6 +524,37 @@ fn printtimescale_initial_instances_and_interface_arrays_keep_their_names() {
 }
 
 #[test]
+fn printtimescale_interface_arrays_preserve_integer_boundary_indices() {
+    for (range, indices) in [
+        ("-2147483647:-2147483648", vec![i32::MIN, i32::MIN + 1]),
+        ("2147483646:2147483647", vec![i32::MAX - 1, i32::MAX]),
+        ("-2147483648:-2147483648", vec![i32::MIN]),
+        ("2147483647:2147483647", vec![i32::MAX]),
+    ] {
+        let source = format!(
+            "interface I; timeunit 100ns / 10ps; initial $printtimescale; endinterface module Top(output logic y); timeunit 1ns / 1ps; I items[{range}](); assign y=0; endmodule"
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        let mut messages = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Display { message } => message,
+                event => panic!("unexpected event: {event:?}"),
+            })
+            .collect::<Vec<_>>();
+        messages.sort();
+        let mut expected = indices
+            .into_iter()
+            .map(|index| format!("Time scale of (Top.items[{index}]) is 100ns / 10ps"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(messages, expected, "range [{range}]");
+    }
+}
+
+#[test]
 fn readmem_diagnostics_identify_task_and_requested_range() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("invalid.mem");

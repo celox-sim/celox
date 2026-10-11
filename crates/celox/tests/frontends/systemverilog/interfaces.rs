@@ -11,6 +11,10 @@ sv_backends! {
         @case "interfaces::runs_interface_processes_once_per_array_element";
     }
 
+    fn runs_interface_array_processes_at_integer_boundaries(sim) {
+        @case "interfaces::runs_interface_array_processes_at_integer_boundaries";
+    }
+
     fn calls_functions_and_reads_parameters_through_instances_and_ports(sim) {
         @case "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports";
     }
