@@ -30,9 +30,11 @@ CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 RICA_CELOX_CARGO_PROFILE="${RICA_CELOX_CARGO_PROFILE:-release}"
 RICA_BUILD_CELOX_RUNNER="${RICA_BUILD_CELOX_RUNNER:-1}"
 RICA_ALLOW_UNPINNED="${RICA_ALLOW_UNPINNED:-0}"
-# Cargo builds the built-in `dev` and `test` profiles into `target/debug`.
+# Cargo builds the built-in `dev` and `test` profiles into `target/debug`
+# and `bench` into `target/release`.
 case "$RICA_CELOX_CARGO_PROFILE" in
     dev|test) RICA_CELOX_PROFILE_DIR=debug ;;
+    bench) RICA_CELOX_PROFILE_DIR=release ;;
     *) RICA_CELOX_PROFILE_DIR="$RICA_CELOX_CARGO_PROFILE" ;;
 esac
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox-rica}"

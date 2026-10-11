@@ -800,6 +800,11 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), RicaError> {
+    if !cli.native_profile_blocks.is_empty() && cli.dump_ir_dir.is_none() {
+        return Err(message(
+            "--native-profile-block writes its analysis to --dump-ir-dir; pass both",
+        ));
+    }
     let project = cli.project.canonicalize()?;
     let source = load_source(&project)?;
     let platform = load_platform(&project, cli.enable_u())?;
@@ -818,9 +823,9 @@ fn run(cli: Cli) -> Result<(), RicaError> {
         if cli.harness != Harness::Resolved {
             return Err(message("--model timed supports only --harness resolved"));
         }
-        if cli.dump_ir_dir.is_some() || !cli.native_profile_blocks.is_empty() {
+        if cli.dump_ir_dir.is_some() || !cli.native_profile_blocks.is_empty() || cli.jit_timing {
             return Err(message(
-                "--dump-ir-dir and --native-profile-block need a native-simulator model",
+                "--dump-ir-dir, --native-profile-block and --jit-timing need a native-simulator model",
             ));
         }
         if cli.compile_only {
