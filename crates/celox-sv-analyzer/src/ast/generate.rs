@@ -1195,6 +1195,10 @@ impl<'a> Elaborator<'a, '_> {
             declared.insert(genvar.to_string());
             // The implicit localparam in each loop body (IEEE 1800-2023 27.4)
             // must override inherited literals during expression substitution.
+            // Mark it as a bounded value parameter for queries such as $isunbounded.
+            scope
+                .env
+                .insert(parameters::unbounded_parameter_marker(genvar), 0);
             scope.literals.insert(
                 genvar.to_string(),
                 Expr::Literal(format_typed_parameter_literal(value, 32, true)),
@@ -1945,6 +1949,7 @@ mod tests {
             assert_eq!(item.env[&parameter_width_marker("i")], 32);
             assert_eq!(item.env[&parameter_signed_marker("i")], 1);
             assert_eq!(item.env[&parameter_rank_marker("i")], 1);
+            assert_eq!(item.env[&parameters::unbounded_parameter_marker("i")], 0);
             assert!(!item.env.contains_key(&parameter_dimensions_marker("i")));
             assert!(!item.parameter_dimensions.contains_key("i"));
             for dimension in 0..2 {
