@@ -811,7 +811,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -822,7 +822,7 @@
         "id": "sv_icarus_unpacked_array_parameters",
         "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
         "upstream": []
       },
       "name": "system_functions::unpacked_dimensions_resolves_package_array_constants",
@@ -857,7 +857,7 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_compile_limitation",
@@ -868,7 +868,7 @@
         "id": "sv_icarus_unpacked_array_parameters",
         "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
         "phase": "compile",
-        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the case.",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
         "upstream": []
       },
       "name": "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
