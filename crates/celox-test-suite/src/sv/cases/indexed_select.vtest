@@ -329,6 +329,31 @@
   (assert_eq checks 511)
   (assert_eq width 4))
 
+(case constant_parameter_initializers_preserve_unknown_indices
+  ; IEEE 1800-2023 11.5.1: X/Z indices yield X for four-state values
+  ; and zero for two-state values, with the selected element's width.
+  (four_state)
+  (source "unknown_parameter_indices.sv" #"
+    module Top(output logic [5:0] checks, output int width);
+      parameter logic [1:0][7:4] W = 8'hab;
+      parameter bit [1:0][7:4] B = 8'hab;
+      localparam IDX = 1'bz;
+      localparam OUTER = W[1'bx][5];
+      localparam INNER = W[1][1'bz];
+      localparam PART = W[IDX][7:4];
+      localparam MASKED = W[1'bx & 1'b0][4];
+      localparam KNOWN = W[1'bx === 1'bx][4];
+      localparam ZERO = B[1'bx][5];
+      assign checks = {OUTER === 1'bx, INNER === 1'bx,
+        PART === 4'bxxxx, MASKED === 1'b1, KNOWN === 1'b0,
+        ZERO === 1'b0};
+      assign width = $bits(PART);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 63)
+  (assert_eq width 4))
+
 (case constant_parameter_initializers_shape_ports_and_generate
   (source "constant_parameter_widths.sv" #"
     module Child #(parameter logic [31:0] W = 18,
@@ -342,7 +367,9 @@
     endmodule
     module Top(input logic [4:0] data, output logic [2:0] default_y,
                output logic [4:0] specialized_y, output int default_width,
-               specialized_width);
+               specialized_width, query_width);
+      localparam QUERY_WIDTH = $bits(65536'd0);
+      assign query_width = QUERY_WIDTH;
       Child defaults(.data(data[2:0]), .y(default_y), .width(default_width));
       Child #(.W(20)) specialized(.data(data), .y(specialized_y),
                                  .width(specialized_width));
@@ -350,6 +377,7 @@
   "#)
   (top Top)
   (assert_eq default_width 3)
+  (assert_eq query_width 65536)
   (assert_eq specialized_width 5)
   (for value (list 0 1 0x12 0x1f)
     (modify (set data value))

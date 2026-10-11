@@ -953,6 +953,70 @@ fn rejects_oversized_constant_parameter_operands_before_materialization() {
 }
 
 #[test]
+fn permits_wide_unevaluated_constant_parameter_query_operands() {
+    for (query, expected) in [
+        ("$bits(1000000000'd0)", 1_000_000_000),
+        ("$bits(1000000000'd0 + 1)", 1_000_000_000),
+        ("$bits(65537'bx)", 65_537),
+        ("$bits($bits(65537'd0))", 32),
+        ("$size(65537'd0)", 65_537),
+    ] {
+        let source = format!("module Top; localparam N = {query}; endmodule");
+        let ir = analyze_source(&source, Path::new("wide_query_operand.sv"))
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(expected),
+            "{query}"
+        );
+    }
+    let error = analyze_source(
+        "module Top(input logic [3:0] data); localparam N = $size(data, 65537'd1); endmodule",
+        Path::new("wide_query_dimension.sv"),
+    )
+    .expect_err("the evaluated dimension argument must still have a bounded value");
+    assert!(
+        error.to_string().contains("constant materialization limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn preserves_unknown_constant_parameter_selection_indices() {
+    for (kind, selection, expected, number, width) in [
+        ("logic", "W[1'bx][5]", "1'bx", None, 1),
+        ("logic", "W[1][1'bz]", "1'bx", None, 1),
+        ("logic", "W[1'bz][7:4]", "4'bxxxx", None, 4),
+        ("logic", "W[1'bx][7:4]", "4'bxxxx", None, 4),
+        ("logic", "W[I][5]", "1'bx", None, 1),
+        ("bit", "W[1'bx][5]", "1'b0", Some(0), 1),
+        ("bit", "W[1'bz][7:4]", "4'b0000", Some(0), 4),
+        ("logic", "W[1'bx & 1'b0][4]", "1'b1", Some(1), 1),
+        ("logic", "W[1'bx === 1'bx][4]", "1'b0", Some(0), 1),
+    ] {
+        let source = format!(
+            "module Top; parameter {kind} [1:0][7:4] W = 8'hab; \
+            localparam I = 1'bx; localparam N = {selection}; \
+            localparam SAME = N === {expected}; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("unknown_parameter_index.sv"))
+            .unwrap_or_else(|error| panic!("{kind} {selection}: {error}"));
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[2].resolved_value(), number, "{kind} {selection}");
+        assert_eq!(
+            parameters[2].resolved_width(),
+            Some(width),
+            "{kind} {selection}"
+        );
+        assert_eq!(
+            parameters[3].resolved_value(),
+            Some(1),
+            "{kind} {selection}"
+        );
+    }
+}
+
+#[test]
 fn preserves_signed_named_constant_parameter_elements() {
     let source = "module Top; typedef logic signed [3:0] nibble_t; \
         parameter nibble_t [1:0][1:0] W = '1; localparam N = W[0][0]; \

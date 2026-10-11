@@ -354,6 +354,12 @@ simulation; its exact diagnostic is retained in
 [`verification/sv/limitations/icarus.json`](verification/sv/limitations/icarus.json).
 Verilator 5.052 passes the case on its unchanged stimulus and assertions.
 
+The four-state `indexed_select::constant_parameter_initializers_preserve_unknown_indices`
+case is also covered by the existing Icarus packed-array-parameter limitation.
+Its [focused pre-exclusion diagnostic](verification/repros/sv_parameter_unknown_indices_icarus.json)
+records both rejected packed declarations. Verilator cannot validate the case's
+four-state expectations; the assertions remain enabled on all Celox variants.
+
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
 | `sv_icarus_genvar_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for `$dimensions` of a generated loop index's implicit integer localparam; IEEE 1800-2023 27.4 and 20.7 require one packed dimension. Celox and Verilator pass the unchanged assertions. The [standalone reproducer and pre-exclusion result](verification/repros/sv_genvar_dimensions.json) retain the observed disagreement. |
@@ -366,6 +372,7 @@ Verilator 5.052 passes the case on its unchanged stimulus and assertions.
 | `sv_icarus_input_port_width` | execute | icarus | 1 | Icarus 13.0 evaluates an input port connection at its self-determined width before padding, losing the carry; IEEE 1800-2023 10.8 and 11.8.2 widen the operands to the port first. Verilator agrees with the expected value. |
 | `sv_icarus_syntax` | compile | icarus | 9 | Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases. |
 | `sv_icarus_packed_array_parameters` | compile | icarus | 5 | Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported. |
+| `sv_icarus_packed_parameter_unknown_indices` | compile | icarus | 1 | Icarus 13.0 rejects both packed parameter declarations before the X/Z-index regression executes (IEEE 1800-2023 11.5.1). The focused diagnostic is retained; Verilator cannot validate its four-state expectations. |
 | `sv_icarus_unpacked_array_parameters` | compile | icarus | 3 | Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately. |
 | `sv_icarus_internal_error` | compile | icarus | 3 | Icarus 13.0 crashes on these designs: a segmentation fault while compiling, or a vvp assertion (vthread.cc of_DISABLE_FLOW) while running. Verilator passes these cases. |
 | `sv_icarus_generate_function_scope` | execute | icarus | 1 | Icarus 13.0 evaluates a size query in a generate block with a function from another scope and reaches a $fatal in an active branch. Verilator agrees with the expected value. |

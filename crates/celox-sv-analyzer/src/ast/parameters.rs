@@ -452,17 +452,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
-                // A sized literal's prefix is available without parsing or
-                // resizing its payload into a potentially enormous value.
-                for child in expr {
-                    if let RefNode::Size(size) = child {
-                        let width = syntax_tree
-                            .get_str(&size.nodes.0.nodes.0)
-                            .and_then(|size| size.replace('_', "").parse::<usize>().ok())
-                            .ok_or_else(|| unsupported("parameter literal width"))?;
-                        validate_parameter_materialization_width(Some(width))?;
-                    }
-                }
+                validate_parameter_initializer_literal_widths(expr, syntax_tree)?;
                 if selects::parameter_initializer_needs_typed_selection(expr) {
                     let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
@@ -559,6 +549,63 @@ fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), 
             "parameter width {width} exceeds the {}-bit constant materialization limit",
             constant_folding::MAX_CONSTANT_CONCAT_BITS
         )));
+    }
+    Ok(())
+}
+
+fn validate_parameter_initializer_literal_widths(
+    initializer: &sv_parser::ConstantParamExpression,
+    tree: &SyntaxTree,
+) -> Result<(), AnalyzerError> {
+    let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
+    let mut unevaluated_depth = 0usize;
+    for event in initializer.into_iter().event() {
+        let (entering, node) = match event {
+            sv_parser::NodeEvent::Enter(node) => (true, node),
+            sv_parser::NodeEvent::Leave(node) => (false, node),
+        };
+        if entering
+            && let RefNode::SystemTfCall(call) = node
+            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "$bits"
+                        | "$size"
+                        | "$left"
+                        | "$right"
+                        | "$low"
+                        | "$high"
+                        | "$increment"
+                        | "$dimensions"
+                        | "$unpacked_dimensions"
+                )
+            })
+            && let sv_parser::SystemTfCall::ArgExpression(call) = call
+            && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
+        {
+            query_operands.insert(argument as *const sv_parser::Expression);
+        }
+        if let RefNode::Expression(expression) = node
+            && query_operands.contains(&(expression as *const sv_parser::Expression))
+        {
+            if entering {
+                unevaluated_depth += 1;
+            } else {
+                unevaluated_depth -= 1;
+            }
+        }
+        // Inspect a sized literal's prefix without parsing its payload.
+        // Query operands are types; trailing dimension arguments are values.
+        if entering
+            && unevaluated_depth == 0
+            && let RefNode::Size(size) = node
+        {
+            let width = tree
+                .get_str(&size.nodes.0.nodes.0)
+                .and_then(|size| size.replace('_', "").parse::<usize>().ok())
+                .ok_or_else(|| unsupported("parameter literal width"))?;
+            validate_parameter_materialization_width(Some(width))?;
+        }
     }
     Ok(())
 }

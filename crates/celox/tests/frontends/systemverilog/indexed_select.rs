@@ -149,6 +149,10 @@ sv_backends! {
         @case "indexed_select::constant_parameter_initializers_preserve_overhanging_parts";
     }
 
+    fn constant_parameter_initializers_preserve_unknown_indices(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_unknown_indices";
+    }
+
     fn constant_parameter_initializers_shape_ports_and_generate(sim) {
         @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
     }

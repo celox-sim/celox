@@ -1447,6 +1447,20 @@ fn unpacked_index_offset(dimension: &UnpackedDimension, index: ConstExpr) -> Con
     }
 }
 
+fn const_index_has_unknown_value(index: &ConstExpr, dimensions: &PackedDimensions) -> bool {
+    // Evaluate the index's mask rather than looking for X/Z syntax: bitwise
+    // operations and case equality can make such an expression fully known.
+    typecheck::eval_const_integral_literal_with_lookup(
+        &index.clone().into(),
+        &dimensions.const_env,
+        &|name| {
+            parameter_type_from_const_env(&dimensions.const_env, name)
+                .map(|ty| (ty.width, ty.signed))
+        },
+    )
+    .is_some_and(|value| value.mask != Default::default())
+}
+
 fn const_expr_is_out_of_range(
     index: &ConstExpr,
     left: &ConstExpr,
@@ -1901,7 +1915,7 @@ fn indexed_constant_expression(
                             &range.left,
                             &range.right,
                             &dimensions.const_env,
-                        )
+                        ) || const_index_has_unknown_value(index, dimensions)
                     }) {
                         let width = product_expr(
                             &variable.packed[indices.len()..]
