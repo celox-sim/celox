@@ -1833,10 +1833,16 @@ impl<'a> ISelContext<'a> {
         offset: &SIROffset,
         width: usize,
     ) -> Vec<(i32, i32)> {
+        if width == 0 {
+            return Vec::new();
+        }
         let (start, end) = match offset {
             SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
-                let (byte, intra) = self.static_byte_and_intra(addr, *bit_offset);
-                (byte, byte + (intra + width).div_ceil(8) as i32)
+                // Logical bits can cross padded unpacked elements. Map both
+                // endpoints through the layout, including intervening padding.
+                let start = self.byte_offset(addr, *bit_offset);
+                let end = self.byte_offset(addr, bit_offset + width - 1) + 1;
+                (start, end)
             }
             SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                 let start = self.byte_offset(addr, 0);
