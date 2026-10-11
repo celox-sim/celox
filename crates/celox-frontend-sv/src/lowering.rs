@@ -174,9 +174,10 @@ impl LoweredSvModuleKey {
 
 fn analyze_sources(
     sources: &[(&str, &Path)],
+    roots: &[&str],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     // Interfaces are expanded into the modules that use them first.
-    let elaborated = sv::elaborate_interfaces(sources)?;
+    let elaborated = sv::elaborate_interfaces_with_roots(sources, roots)?;
     let elaborated_sources: Vec<(&str, &Path)>;
     let sources = match &elaborated {
         Some(codes) => {
@@ -206,7 +207,9 @@ fn analyze_sources(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages(&parsed)?);
+    let packages = std::sync::Arc::new(sv::ParsedSource::analyze_packages_with_roots(
+        &parsed, roots,
+    )?);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
@@ -590,6 +593,12 @@ fn validate_package_variable_drivers<'a>(
         let multiplicity = instances.get(&module_id).copied().unwrap_or(0);
         for (var_id, package, variable) in &module.package_variables {
             let name = &module.variables[var_id].path[0];
+            // A static package activation intentionally has concurrent
+            // procedural users. Its formals/locals are not independent RTL
+            // drivers; ordinary package variables retain the driver checks.
+            if static_activation_storage(&module.source, name) {
+                continue;
+            }
             let local = local_driver_ranges(
                 &module.source,
                 name,
@@ -630,6 +639,35 @@ fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
         drivers[index + 1..]
             .iter()
             .any(|right| net_driver_ranges_overlap(left.1, right.1))
+    })
+}
+
+fn static_activation_storage(module: &sv::ir::Module, name: &str) -> bool {
+    let name = procedural::PACKAGE_EVENT_COUNTERS
+        .iter()
+        .find_map(|purpose| name.strip_suffix(&format!("@{purpose}")))
+        .unwrap_or(name);
+    module.subroutines().iter().any(|subroutine| {
+        if !subroutine.automatic
+            && (subroutine.params.iter().any(|param| param.name == name)
+                || subroutine.return_var.as_deref() == Some(name))
+        {
+            return true;
+        }
+        let mut found = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local {
+                    name: local,
+                    r#static: true,
+                    ..
+                } = stmt
+                {
+                    found |= local == name;
+                }
+            });
+        }
+        found
     })
 }
 
@@ -900,7 +938,8 @@ pub fn prepare_external_hierarchy(
     root_names: &HashSet<String>,
     four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let roots: Vec<_> = root_names.iter().map(String::as_str).collect();
+    let analyzed = analyze_sources(sources, &roots)?;
     let mut names = root_names
         .iter()
         .filter(|&name| analyzed.contains_key(name))
@@ -1064,7 +1103,7 @@ pub fn schedule_sources(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources)?;
+    let analyzed = analyze_sources(sources, &[top])?;
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -1549,7 +1588,7 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(module, &mut variables, &name_to_id);
-    let (initial_values, processes) = lower_initial_processes(
+    let (initial_values, processes, process_event_counters) = lower_initial_processes(
         module,
         &mut variables,
         &mut name_to_id,
@@ -1629,6 +1668,10 @@ fn lower_module_with_overrides(
         }
     }
 
+    let shared_process_state = name_to_id
+        .iter()
+        .filter_map(|(name, id)| static_activation_storage(module, name).then_some(*id))
+        .collect();
     Ok(LoweredSvModule {
         source: module.clone(),
         implicit_nets_allowed,
@@ -1654,6 +1697,8 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             package_bindings: HashMap::default(),
+            shared_process_state,
+            process_event_counters,
         },
         variables,
         port_order,
@@ -1713,12 +1758,14 @@ fn evaluated_parameter_overrides(
         let Some(value) = parameter.value.as_ref() else {
             continue;
         };
-        sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "non-integer module parameter override `{}`",
-                parameter.name
-            ))
-        })?;
+        if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
+            sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "non-integer module parameter override `{}`",
+                    parameter.name
+                ))
+            })?;
+        }
         evaluated.insert(parameter.name.clone(), value.clone());
     }
     Ok(evaluated)
@@ -1757,13 +1804,20 @@ fn const_expr_references_identifier(expr: &sv::ir::ConstExpr) -> bool {
     match expr {
         sv::ir::ConstExpr::Ident(_) => true,
         sv::ir::ConstExpr::Literal(_) => false,
+        sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_expr_references_identifier(expr)
+                || const_expr_references_identifier(msb)
+                || const_expr_references_identifier(lsb)
+        }
         sv::ir::ConstExpr::Select { expr, bit } => {
             const_expr_references_identifier(expr) || const_expr_references_identifier(bit)
         }
         sv::ir::ConstExpr::Function { args, .. } => {
             args.iter().any(const_expr_references_identifier)
         }
-        sv::ir::ConstExpr::Unary { expr, .. } => const_expr_references_identifier(expr),
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_expr_references_identifier(expr)
+        }
         sv::ir::ConstExpr::Binary { left, right, .. } => {
             const_expr_references_identifier(left) || const_expr_references_identifier(right)
         }
@@ -2249,9 +2303,16 @@ fn lower_initial_processes(
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
     package_aliases: &[SourceVarId],
-) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
+) -> Result<
+    (
+        Vec<InitialStateValue<SourceVarId>>,
+        Vec<SymbolicProcess>,
+        Vec<celox_design::ProcessEventCounters<SourceVarId>>,
+    ),
+    sv::AnalyzerError,
+> {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -2294,7 +2355,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new()));
+        return Ok((values, Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -2355,12 +2416,38 @@ fn lower_initial_processes(
     pm.extern_functions = std::mem::take(extern_functions);
     let bodies: Vec<&[sv::ir::Stmt]> = runtime.iter().map(|process| process.body()).collect();
     ff::declare_event_counters(&mut pm, &bodies, package_aliases)?;
+    let process_event_counters = module
+        .ff_processes()
+        .iter()
+        .flat_map(|process| process.events())
+        .filter_map(|event| {
+            let expr = sv::ir::Expr::Ident(event.signal().to_string());
+            let watcher = pm
+                .event_watchers
+                .iter()
+                .find(|watcher| watcher.expr == expr)?;
+            Some(celox_design::ProcessEventCounters {
+                signal: pm.id(event.signal())?,
+                rises: pm.id(&watcher.state.rises)?,
+                falls: pm.id(&watcher.state.falls)?,
+            })
+        })
+        .collect();
+    let activations = bodies
+        .iter()
+        .map(|body| ff::Ff::new(&mut pm).plan_activation(body))
+        .collect::<Vec<_>>();
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|(process, slots)| {
+        .zip(activations)
+        .map(|((process, slots), activation)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots.clone())?,
+                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(
+                    process.body(),
+                    slots.clone(),
+                    activation,
+                )?,
                 slots,
             })
         })
@@ -2383,7 +2470,7 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?))
+    Ok((values, processes?, process_event_counters))
 }
 
 fn lower_comb_processes(
@@ -5288,11 +5375,31 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
     Some(match expr {
         sv::ir::ConstExpr::Literal(value) => sv::ir::Expr::Literal(value.clone()),
         sv::ir::ConstExpr::Ident(name) => sv::ir::Expr::Ident(name.clone()),
+        sv::ir::ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => sv::ir::Expr::Select {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            msb: (**msb).clone(),
+            lsb: (**lsb).clone(),
+            signed: *signed,
+        },
         sv::ir::ConstExpr::Select { expr, bit } => sv::ir::Expr::Select {
             expr: Box::new(expr_from_const_expr(expr)?),
             msb: (**bit).clone(),
             lsb: (**bit).clone(),
             signed: false,
+        },
+        sv::ir::ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => sv::ir::Expr::Resize {
+            expr: Box::new(expr_from_const_expr(expr)?),
+            width: *width,
+            signed: *signed,
         },
         sv::ir::ConstExpr::Function { .. } => return None,
         sv::ir::ConstExpr::Unary { op, expr } => sv::ir::Expr::Unary {

@@ -96,74 +96,81 @@ pub(super) struct CompiledLaneKernel {
 /// Every partitioned kernel of a program, compiled.
 pub(super) struct CompiledLaneKernels {
     lanes: u32,
-    comb: Option<CompiledLaneKernel>,
-    events: Vec<(AbsoluteAddr, CompiledLaneKernel)>,
-    fused: Vec<(AbsoluteAddr, CompiledLaneKernel)>,
+    /// Distinct compiled kernels. Kernels with the same units share one.
+    kernels: Vec<CompiledLaneKernel>,
+    /// The phase each kernel implements, with the index of its compiled form.
+    slots: Vec<(LaneKernelKind, usize)>,
 }
+
+/// Alignment of the first task function of each lane in the packed image, so
+/// a lane's code shares no cache line with another lane's.
+const LANE_CODE_ALIGN: usize = 64;
 
 impl CompiledLaneKernels {
     pub(super) fn functions(&self) -> impl Iterator<Item = &CompiledNativeFunction> {
-        self.comb
-            .iter()
-            .chain(
-                self.events
-                    .iter()
-                    .chain(&self.fused)
-                    .map(|(_, kernel)| kernel),
-            )
-            .flat_map(|kernel| &kernel.functions)
+        self.kernels.iter().flat_map(|kernel| &kernel.functions)
     }
 
     /// Append every task function to the packed image.
+    ///
+    /// The tasks of one lane are packed contiguously in the order the lane
+    /// runs them, so each lane streams through its own region of code
+    /// instead of skipping over the functions of the other lanes.
     pub(super) fn pack(
         self,
         image: &mut Vec<u8>,
         entries: &mut Vec<NativeCodeEntry>,
         symbols: &mut Vec<NativeCodeSymbol>,
     ) -> Result<NativeLaneImage, SimulatorError> {
-        let mut pack_kernel = |name: &str, kernel: CompiledLaneKernel| {
-            let offsets = kernel
-                .functions
+        let mut images = Vec::with_capacity(self.kernels.len());
+        for (index, kernel) in self.kernels.into_iter().enumerate() {
+            let name = self
+                .slots
                 .iter()
-                .enumerate()
-                .map(|(task, function)| {
-                    append_native_code(
+                .find(|(_, compiled)| *compiled == index)
+                .map(|(kind, _)| match kind {
+                    LaneKernelKind::Comb => "lane_eval_comb".to_string(),
+                    LaneKernelKind::Event(_) => format!("lane_eval_apply_ff[{index}]"),
+                    LaneKernelKind::Fused(_) => format!("lane_fused[{index}]"),
+                })
+                .unwrap_or_else(|| format!("lane_kernel[{index}]"));
+            let mut offsets = vec![0; kernel.functions.len()];
+            for lane in 0..self.lanes {
+                let mut first = true;
+                for (task, function) in kernel.functions.iter().enumerate() {
+                    if kernel.tasks[task].lane != lane {
+                        continue;
+                    }
+                    if first {
+                        let aligned = image.len().next_multiple_of(LANE_CODE_ALIGN);
+                        image.resize(aligned, 0);
+                        first = false;
+                    }
+                    offsets[task] = append_native_code(
                         image,
                         entries,
                         symbols,
-                        format!("{name}.task[{task}]"),
+                        format!("{name}.lane[{lane}].task[{task}]"),
                         function,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, SimulatorError>(NativeLaneKernelImage {
+                    )?;
+                }
+            }
+            images.push(NativeLaneKernelImage {
                 tasks: kernel.tasks,
                 offsets,
-            })
-        };
-        let comb = self
-            .comb
-            .map(|kernel| pack_kernel("lane_eval_comb", kernel))
-            .transpose()?;
-        let events = self
-            .events
-            .into_iter()
-            .enumerate()
-            .map(|(index, (event, kernel))| {
-                Ok((
-                    event,
-                    pack_kernel(&format!("lane_eval_apply_ff[{index}]"), kernel)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, SimulatorError>>()?;
-        let fused = self
-            .fused
-            .into_iter()
-            .enumerate()
-            .map(|(index, (event, kernel))| {
-                Ok((event, pack_kernel(&format!("lane_fused[{index}]"), kernel)?))
-            })
-            .collect::<Result<Vec<_>, SimulatorError>>()?;
+            });
+        }
+        let mut comb = None;
+        let mut events = Vec::new();
+        let mut fused = Vec::new();
+        for (kind, index) in self.slots {
+            let kernel = images[index].clone();
+            match kind {
+                LaneKernelKind::Comb => comb = Some(kernel),
+                LaneKernelKind::Event(event) => events.push((event, kernel)),
+                LaneKernelKind::Fused(event) => fused.push((event, kernel)),
+            }
+        }
         Ok(NativeLaneImage {
             lanes: self.lanes,
             comb,
@@ -192,6 +199,9 @@ pub(super) fn compile_lane_kernels(
     let mut functions = planned
         .iter()
         .map(|kernel| {
+            if kernel.same_as.is_some() {
+                return Vec::new();
+            }
             (0..kernel.tasks.len())
                 .map(|_| None)
                 .collect::<Vec<Option<(CompiledNativeFunction, Footprint)>>>()
@@ -204,6 +214,7 @@ pub(super) fn compile_lane_kernels(
         let jobs = planned
             .iter()
             .enumerate()
+            .filter(|(_, planned)| planned.same_as.is_none())
             .flat_map(|(kernel, planned)| {
                 planned
                     .tasks
@@ -250,10 +261,16 @@ pub(super) fn compile_lane_kernels(
         }
     }
 
-    let mut comb = None;
-    let mut events = Vec::new();
-    let mut fused = Vec::new();
+    let mut kernels = Vec::new();
+    let mut compiled_index = Vec::with_capacity(planned.len());
+    let mut slots = Vec::with_capacity(planned.len());
     for (mut planned, functions) in planned.into_iter().zip(functions) {
+        if let Some(original) = planned.same_as {
+            let index = compiled_index[original];
+            compiled_index.push(index);
+            slots.push((planned.kind, index));
+            continue;
+        }
         let (functions, footprints): (Vec<_>, Vec<_>) = functions
             .into_iter()
             .map(|compiled| compiled.expect("every lane task was compiled"))
@@ -270,21 +287,17 @@ pub(super) fn compile_lane_kernels(
         for (task, final_task) in planned.tasks.iter_mut().zip(final_tasks) {
             task.waits = final_task.waits;
         }
-        let kernel = CompiledLaneKernel {
+        compiled_index.push(kernels.len());
+        slots.push((planned.kind, kernels.len()));
+        kernels.push(CompiledLaneKernel {
             tasks: planned.task_specs(),
             functions,
-        };
-        match planned.kind {
-            LaneKernelKind::Comb => comb = Some(kernel),
-            LaneKernelKind::Event(event) => events.push((event, kernel)),
-            LaneKernelKind::Fused(event) => fused.push((event, kernel)),
-        }
+        });
     }
     Ok(Some(CompiledLaneKernels {
         lanes,
-        comb,
-        events,
-        fused,
+        kernels,
+        slots,
     }))
 }
 

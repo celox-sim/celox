@@ -497,6 +497,8 @@ pub(crate) fn project_module_with_ids(
                 .collect(),
             processes: Vec::new(),
             package_bindings: HashMap::default(),
+            shared_process_state: Default::default(),
+            process_event_counters: Vec::new(),
         },
         ids,
         process_storage,

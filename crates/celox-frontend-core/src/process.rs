@@ -181,6 +181,12 @@ impl<A: Clone> ProcessKernelBuilder<A> {
         self.suspend(ProcessStatus::Delay)
     }
 
+    /// Suspend in the inactive region for a SystemVerilog zero delay.
+    pub fn inactive_delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.store(self.delay.clone(), PROCESS_DELAY_WIDTH, amount);
+        self.suspend(ProcessStatus::InactiveDelay)
+    }
+
     /// Suspend until `count` rising edges of the process clock `clock` (an
     /// index into the slots' clock list) have passed, and continue at a new
     /// resume point one period after the last of them. `count` is an

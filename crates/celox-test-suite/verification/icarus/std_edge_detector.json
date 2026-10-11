@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_edge_detector::test_edge_detector_basic",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_edge_detector::test_edge_detector_clear",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "StandardLibrary",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "std_edge_detector::test_edge_detector_multibit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

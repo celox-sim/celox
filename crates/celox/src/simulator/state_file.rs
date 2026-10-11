@@ -448,6 +448,7 @@ impl<B: SimBackend> Simulator<B> {
             pending_releases: Vec::new(),
             done_processes: Vec::new(),
             ticks: 0,
+            inactive_processes: Vec::new(),
             finished: false,
         })
     }

@@ -1723,8 +1723,11 @@ run_one() {
 
 publish_result() {
     [[ -n "${HELIODOR_PUBLISH_ARCH:-}" ]] || return 0
-    node "$SCRIPT_DIR/publish-heliodor-bench.mjs" \
-        "$HELIODOR_RESULTS_DIR/results.tsv" "$HELIODOR_PUBLISH_ARCH"
+    local args=("$HELIODOR_RESULTS_DIR/results.tsv" "$HELIODOR_PUBLISH_ARCH")
+    if [[ -n "${HELIODOR_PUBLISH_HOST:-}" ]]; then
+        args+=(--host "$HELIODOR_PUBLISH_HOST")
+    fi
+    node "$SCRIPT_DIR/publish-heliodor-bench.mjs" "${args[@]}"
 }
 
 run_all() {

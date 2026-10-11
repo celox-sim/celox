@@ -868,6 +868,18 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
         if case.expectation == Expectation::CompilationError && !case.body.is_empty() {
             return error(pos, "a rejected case has no statements");
         }
+        if case.is_timed() {
+            let mut tick = false;
+            for stmt in &case.body {
+                stmt.walk(&mut |stmt| tick |= matches!(stmt.kind, StmtKind::Tick(..)));
+            }
+            if tick {
+                return error(
+                    pos,
+                    "tick cannot be combined with run_until or run_to_finish",
+                );
+            }
+        }
         validate_finish(&case.body)?;
         parsed.push(case);
     }
@@ -960,5 +972,23 @@ mod tests {
         assert_eq!(cases[0].tags, [TestTag::EvaluationOrder]);
         assert!(matches!(cases[0].body[0].kind, StmtKind::For(..)));
         assert_eq!(cases[1].expectation, Expectation::CompilationError);
+    }
+}
+
+#[cfg(test)]
+mod timing_mode_tests {
+    use super::*;
+    #[test]
+    fn mixed_tick_and_time_controls_are_rejected_even_in_nested_blocks() {
+        for body in [
+            "(tick clk) (run_until 1)",
+            "(if 0 (tick clk)) (run_to_finish)",
+        ] {
+            let text = format!(
+                "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) {body})"
+            );
+            let error = group(&text).unwrap_err();
+            assert!(error.message.contains("tick cannot be combined"), "{error}");
+        }
     }
 }

@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { appendResult, comparisonHistory, publishResult } from "./publish-heliodor-bench.mjs";
+import {
+  appendResult,
+  comparisonHistory,
+  cpuModelFromHost,
+  hostCpu,
+  publishResult,
+} from "./publish-heliodor-bench.mjs";
 
 const header =
   "runner\ttest\tstatus\telapsed_ns\tlog\tsemantic_status\texit_status\tprocess_elapsed_ns\treported_elapsed_ns\tcompile_elapsed_ns\texecute_elapsed_ns\tjit_execute_elapsed_ns\n";
@@ -167,10 +173,18 @@ test("concurrent publishers preserve results and compare by measurement time", (
     // Exercise the real CI entry point, including conversion and commit data.
     git("-C", seed, "remote", "add", "origin", remote);
     const input = join(directory, "results.tsv");
+    const host = join(directory, "heliodor-suite-host.txt");
+    writeFileSync(host, "runner_name=fixture\nlscpu\nModel name: AMD EPYC 7763 64-Core Processor\n");
     writeFileSync(input, header + row("celox", { success: false }) + row("veryl-cc-sync"));
     execFileSync(
       process.execPath,
-      [fileURLToPath(new URL("./publish-heliodor-bench.mjs", import.meta.url)), input, "aarch64"],
+      [
+        fileURLToPath(new URL("./publish-heliodor-bench.mjs", import.meta.url)),
+        input,
+        "aarch64",
+        "--host",
+        host,
+      ],
       {
         cwd: seed,
         stdio: "pipe",
@@ -191,6 +205,7 @@ test("concurrent publishers preserve results and compare by measurement time", (
     );
     const latest = published.entries["Heliodor Benchmarks"].at(-1);
     assert.equal(latest.benches.length, 2);
+    assert.equal(latest.cpu, "AMD EPYC 7763");
     assert.ok(latest.benches.every((bench) => bench.name.startsWith("heliodor-veryl-cc-aarch64/")));
     const files = ["rust", "verilator", "typescript"].map(name => {
       const file = join(directory, `${name}.json`);
@@ -198,7 +213,7 @@ test("concurrent publishers preserve results and compare by measurement time", (
       return file;
     });
     const publishBench = (env = {}) => execFileSync(process.execPath, [
-      fileURLToPath(new URL("./publish-bench.mjs", import.meta.url)), ...files,
+      fileURLToPath(new URL("./publish-bench.mjs", import.meta.url)), ...files, "--host", host,
     ], {
       cwd: seed,
       stdio: "pipe",
@@ -217,6 +232,7 @@ test("concurrent publishers preserve results and compare by measurement time", (
       assert.deepEqual(sample.benches, JSON.parse(readFileSync(files[index], "utf8")));
       assert.equal(sample.commit.id, git("-C", seed, "rev-parse", "HEAD").trim());
       assert.equal(sample.tool, "customSmallerIsBetter");
+      assert.equal(sample.cpu, "AMD EPYC 7763");
     }
     assert.deepEqual(regularPublished.entries["Heliodor Benchmarks"].at(-1), latest);
     const publishedTip = git("-C", seed, "rev-parse", "FETCH_HEAD");
@@ -243,7 +259,7 @@ test("publication refuses pull requests and non-master branches", () => {
   ]) {
     const result = spawnSync(
       process.execPath,
-      ["scripts/publish-heliodor-bench.mjs", "unused.tsv", "x86_64"],
+      ["scripts/publish-heliodor-bench.mjs", "unused.tsv", "x86_64", "--host", "unused-host.txt"],
       {
         encoding: "utf8",
         env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_REF: ref },
@@ -251,6 +267,35 @@ test("publication refuses pull requests and non-master branches", () => {
     );
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /requires a scheduled or manual master run/);
+  }
+});
+
+test("host metadata is reduced to the CPU model that produced the result", () => {
+  assert.equal(
+    cpuModelFromHost(
+      "runner_name=fixture\nheliodor-suite-host.txt\n[lscpu]\nModel name: AMD EPYC 7763 64-Core Processor\n",
+    ),
+    "AMD EPYC 7763",
+  );
+  assert.equal(
+    cpuModelFromHost("Model name: Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz"),
+    "Intel Xeon Platinum 8272CL",
+  );
+  assert.equal(cpuModelFromHost("Model name: Neoverse-N2"), "Neoverse-N2");
+  assert.equal(cpuModelFromHost("Hardware: Ampere(R) Altra(R) Processor"), "Ampere Altra");
+  assert.equal(cpuModelFromHost("uname -a\nLinux runner 6.8.0-generic\n"), null);
+  assert.equal(cpuModelFromHost("Model name:   \n"), null);
+
+  const directory = mkdtempSync(join(tmpdir(), "heliodor-host-cpu-"));
+  try {
+    const host = join(directory, "host.txt");
+    writeFileSync(host, "lscpu\nModel name: AMD EPYC 9V74 80-Core Processor\n");
+    assert.equal(hostCpu(host), "AMD EPYC 9V74");
+    writeFileSync(host, "uname -a\n");
+    assert.throws(() => hostCpu(host), /does not name a CPU model/);
+    assert.throws(() => hostCpu(join(directory, "missing.txt")));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

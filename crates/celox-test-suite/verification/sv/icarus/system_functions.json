@@ -1,0 +1,1160 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_runtime_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "execute",
+        "reason": "Icarus 13.0 aborts on a runtime array-query dimension (vpiBinaryConst::vpi_get: get 83 not supported). A standalone integer-dimension reproducer instead reports that $left expects an array and optionally an integer. IEEE 1800-2023 20.7 permits a runtime expression selecting a fixed-size dimension.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_handle_runtime_dimensions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_constant_array_queries",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects fixed-size array queries in localparams (a reference to mem is not allowed in a constant expression) and query operands naming typedefs (Type names are not valid expressions here). IEEE 1800-2023 20.7 permits both. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::array_queries_preserve_bounds_and_dimensions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_in_constant_expressions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::bit_vector_predicates_preserve_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_in_constant_expressions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_in_parameter_specializations_and_generate_scopes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_matches_four_states_and_variable_controls",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countbits_preserves_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_ignores_unknown_bits_in_comb_and_ff",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_in_constant_expressions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::countones_preserves_argument_and_return_types",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_packed_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_is_independent_of_unknown_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects data type arguments to $dimensions: chandle produces a syntax error; parameter and built-in type arguments produce \"Type names are not valid expressions here\", followed by an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_dimensions_type_queries",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects data type arguments to $dimensions: chandle produces a syntax error; parameter and built-in type arguments produce \"Type names are not valid expressions here\", followed by an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_of_nonarray_handle_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_one_bit_expression_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_preserves_one_bit_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: \"Array index expressions must be constant here\"). Verilator passes the two-state case; the four-state one is outside what it checks.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_runtime_packed_subselect",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: \"Array index expressions must be constant here\"). Verilator passes the two-state case; the four-state one is outside what it checks.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_preserves_selected_and_expression_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_function_return_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_imported_function_returns",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_package_array_constants",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_one_bit_expression_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_procedural_parameters_and_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_subroutine_unpacked_ports",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_procedural_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects data type arguments to $dimensions: chandle produces a syntax error; parameter and built-in type arguments produce \"Type names are not valid expressions here\", followed by an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_dimensions_type_queries",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects data type arguments to $dimensions: chandle produces a syntax error; parameter and built-in type arguments produce \"Type names are not valid expressions here\", followed by an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_resolves_types_and_constant_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_one_bit_expression_dimensions",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 reports 0 for one-bit vector operands of $dimensions, including sized literals, one-bit vector parameters and signing conversions. IEEE 1800-2023 6.20.2, 6.24.1 and 20.7 require vector rank 1; Slang 12.0.0 corroborates these type shapes.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_signing_conversions_are_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_subroutine_unpacked_ports",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects subroutine arguments with unpacked dimensions and passing an array to those arguments. IEEE 1800-2023 13.5 permits unpacked subroutine arguments. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "system_functions::dimensions_types_function_pattern_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_arguments_are_sized_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_display_field_width",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value.",
+        "upstream": []
+      },
+      "name": "system_functions::display_field_widths_expand_to_the_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_tasks_default_to_their_radix",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::display_unknown_bits_as_ieee_specifies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 discards immediate cover pass statements, including with -gassertions. IEEE 1800-2023 16.3 requires the pass statement to execute when the condition is true. Verilator passes when --coverage-user is enabled by the adapter.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/system_function_edge_cases.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_immediate_cover_actions",
+        "observed_version": "Icarus Verilog 13.0 (stable)",
+        "phase": "execute",
+        "reason": "Icarus 13.0 discards immediate cover pass statements, including with -gassertions. IEEE 1800-2023 16.3 requires the pass statement to execute when the condition is true. Verilator passes when --coverage-user is enabled by the adapter.",
+        "upstream": []
+      },
+      "name": "system_functions::immediate_cover_executes_pass_statement",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::immediate_cover_handles_unknown_conditions",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_handles_overrides_and_forwarding",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_preserves_parameter_values_and_result_type",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_unpacked_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_reports_bounded_array_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_reports_bounded_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_resolves_package_and_local_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_bindings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_packed_array_parameters",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 reports that packed array parameters are not supported, or fails a cast size that depends on a type alias dimension. Verilator passes or reports these four-state cases as unsupported.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_isunbounded",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects parameters initialized to the symbolic value $ and cannot evaluate $isunbounded on bounded parameters in constant expressions. IEEE 1800-2023 6.20.7 permits $ parameter values and 20.6.3 defines the one-bit query result. Slang accepts the cases; Verilator passes integer-parameter declarations, aliases and bounded queries, while scalar unbounded declarations have a separate recorded limitation.",
+        "upstream": []
+      },
+      "name": "system_functions::isunbounded_restores_shadowed_function_arguments",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "system_functions::signed_casts_in_parameters",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_accept_directives_before_unit_declarations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 checks the first digit of timeunit/timeprecision literals and rejects leading-zero integer or fixed-point spellings whose numeric magnitudes are 1, 10 or 100. IEEE 1800-2023 5.8 permits integer/fixed-point time literals, and 3.14.2.2 permits their use in time declarations. A standalone declaration without queries reproduces the failure; Verilator and Slang 12.0.0 accept these declarations.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_leading_zero_time_magnitudes",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 checks the first digit of timeunit/timeprecision literals and rejects leading-zero integer or fixed-point spellings whose numeric magnitudes are 1, 10 or 100. IEEE 1800-2023 5.8 permits integer/fixed-point time literals, and 3.14.2.2 permits their use in time declarations. A standalone declaration without queries reproduces the failure; Verilator and Slang 12.0.0 accept these declarations.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_accept_leading_zero_magnitudes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects repeated initial timeunit/timeprecision declarations before the other precision/unit is first declared, reporting a missing precision or missing initial declaration. IEEE 1800-2023 3.14.2.2 permits matching repeats and separate unit/precision declarations before non-time items. Slang 12.0.0 accepts the time declarations (it separately rejects the constant timescale queries).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_separate_time_declarations",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects repeated initial timeunit/timeprecision declarations before the other precision/unit is first declared, reporting a missing precision or missing initial declaration. IEEE 1800-2023 3.14.2.2 permits matching repeats and separate unit/precision declarations before non-time items. Slang 12.0.0 accepts the time declarations (it separately rejects the constant timescale queries).",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_accept_separate_initial_declarations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_are_constant_in_unqualified_calls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_distinguish_unit_and_global_precision",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_follow_partial_declarations_and_resetall",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_definition_package_namespaces",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_keep_module_and_package_names_independent",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interface_timescale_queries",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects standalone $unit arguments of the SV 2023 timescale queries, interface ports and modport function imports. IEEE 1800-2023 20.4.1 requires the interface declaration scope for unqualified calls and accepts $unit/$root arguments; this case also checks cross-file interface copies and unused-interface precision. Slang 12.0.0 in SV 2023 mode accepts the source.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_preserve_interface_scopes_when_flattened",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 compiles procedural and package calls of the SV 2023 timescale functions but vvp exits with errors that $timeunit/$timeprecision are not defined. IEEE 1800-2023 20.4.1 defines both functions; Slang accepts this source in SV 2023 mode.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_runtime",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 compiles procedural and package calls of the SV 2023 timescale functions but vvp exits with errors that $timeunit/$timeprecision are not defined. IEEE 1800-2023 20.4.1 defines both functions; Slang accepts this source in SV 2023 mode.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_preserve_procedural_and_package_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_declarations_and_return_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_directives_and_hierarchy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_hierarchical_interface_instances",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects the typed and generic interface port declarations in this timescale-query case with syntax errors in port declarations. IEEE 1800-2023 25.3 permits these interface ports; 20.4.1 selects the queried design element time scope. The case retains its assertions for direct instances, typed/modport ports, differently bound generic ports and local generate handles.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interface_timescale_handles",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects the typed and generic interface port declarations in this timescale-query case with syntax errors in port declarations. IEEE 1800-2023 25.3 permits these interface ports; 20.4.1 selects the queried design element time scope. The case retains its assertions for direct instances, typed/modport ports, differently bound generic ports and local generate handles.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_interface_instances_and_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_definition_package_namespaces",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Verilator 5.052 merges module and package identifiers, warns MODDUP and then cannot find P for a P:: reference. Icarus 13.0 rejects a module declaration that follows a same-named package. IEEE 1800-2023 3.13 gives definitions and packages separate global namespaces; Slang 12.0.0 accepts both declaration orders in this fixture.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_timescale_queries_compile",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not implement the SV 2023 $timeunit/$timeprecision functions: it rejects their syntax, cannot synthesize calls, or cannot evaluate parameter initializers. IEEE 1800-2023 20.4.1 defines the queries and 11.2.1 permits constant timescale calls with constant arguments.",
+        "upstream": []
+      },
+      "name": "system_functions::timescale_queries_survive_type_parameter_specialization",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_displays_unit_and_global_precision",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_printtimescale_operands",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+      "expectation": "Simulation",
+      "name": "system_functions::printtimescale_preserves_package_subroutine_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_printtimescale_operands",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    }
+  ]
+}

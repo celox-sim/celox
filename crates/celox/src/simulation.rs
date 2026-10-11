@@ -115,6 +115,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             return (0, Ok(()));
         }
         if !self.program.runtime_schema.comb_observers.is_empty() {
+            if let Err(error) = self.eval_comb_checked() {
+                return (0, Err(error));
+            }
             return (1, self.tick_deferred_comb(event));
         }
         // Every tick settles the combinational logic first, so a clean
@@ -129,7 +132,7 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     fn fused_ticks_allowed(&self) -> bool {
-        !self.components.has_scheduled_components()
+        self.vcd_writer.is_none() && !self.components.has_scheduled_components()
     }
 
     fn host_request(
@@ -358,6 +361,21 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         event_info,
         processes,
     )
+    .with_process_event_counters(
+        simulator
+            .program
+            .runtime_schema
+            .process_event_counters
+            .iter()
+            .map(|counters| {
+                (
+                    simulator.backend.resolve_signal(&counters.signal),
+                    simulator.backend.resolve_signal(&counters.rises),
+                    simulator.backend.resolve_signal(&counters.falls),
+                )
+            })
+            .collect(),
+    )
 }
 
 impl<B: SimBackend> Simulation<B> {
@@ -534,7 +552,8 @@ impl<B: SimBackend> Simulation<B> {
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
         self.simulator.eval_comb()?;
-        self.state.poll_waiting(&mut self.simulator)?;
+        let time = self.state.time();
+        self.state.settle_at(&mut self.simulator, time)?;
         Ok(())
     }
 
@@ -1232,5 +1251,176 @@ mod clock_wait_tests {
     #[test]
     fn four_state_clock_waits_run_on_every_backend() {
         check_all_backends(true);
+    }
+    fn edge_design(edge: Edge) -> FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Edges").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let clock_value = module.read(clk).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let value = if edge == Edge::Posedge {
+            clock_value
+        } else {
+            one
+        };
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, value, clk, edge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let three = module.constant(Constant::two_state(3u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: three,
+                },
+                Statement::Finish,
+            ])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check_edge<B: SimBackend>(mut sim: Simulation<B>, edge: Edge) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(1).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.time(), 12);
+        assert_eq!(sim.ticks(), 3);
+        assert!(sim.is_finished());
+    }
+
+    #[test]
+    fn clock_levels_and_falling_edges_agree_across_backends() {
+        for edge in [Edge::Posedge, Edge::Negedge] {
+            let builder = || Simulator::from_frontend(edge_design(edge)).emit_triggers();
+            check_edge(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                edge,
+            );
+            check_edge(Simulation::new(builder().build_cranelift().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_wasm().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_tiered().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_native().unwrap()), edge);
+        }
+    }
+
+    #[test]
+    fn settle_at_does_not_fuse_past_a_delay_boundary() {
+        // Use a dedicated SDK design so settle_at itself advances to the due delay.
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Boundary").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let target = module.whole(q).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        let five = module.constant(Constant::two_state(5u8, 8).unwrap());
+        let ten = module.constant(Constant::two_state(10u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::Delay { amount: five },
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: ten,
+                },
+            ])
+            .unwrap();
+        let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 5).unwrap(), Some(5));
+        assert_eq!(sim.time(), 5);
+        assert_eq!(sim.ticks(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod process_review_tests {
+    use super::*;
+
+    fn check_failed_batch<B: SimBackend>(mut sim: Simulator<B>) {
+        let event = sim.event("clk");
+        let (completed, result) = SimulationExecutor::tick_many(&mut sim, event, 10);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    }
+
+    #[test]
+    fn failed_pre_edge_comb_does_not_complete_a_clock_tick() {
+        let source = "module Top(input bit clk, input bit ok, output bit q); always_comb assert(ok) else $fatal(1, \"failed comb\"); always_ff @(posedge clk) q <= 1; endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("batch.sv"))], "Top");
+        check_failed_batch(builder().build_interpreter().unwrap());
+        check_failed_batch(builder().build_cranelift().unwrap());
+        check_failed_batch(builder().build_wasm().unwrap());
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+    }
+
+    #[test]
+    fn transient_edges_and_inactive_region_on_all_backends() {
+        let source = r#"module Top(output bit q, observed);
+            bit clk;
+            always_ff @(posedge clk) q <= 1;
+            initial begin @(posedge clk); #0; observed = q; end
+            initial begin #1; clk = 1; clk = 0; end
+        endmodule"#;
+        let reverse = source
+            .replace("bit clk;", "bit clk = 1;")
+            .replace("clk = 1; clk = 0;", "clk = 0; clk = 1;");
+        let unknown = source
+            .replace("bit clk;", "logic clk = 0;")
+            .replace("clk = 1; clk = 0;", "clk = 1'bx; clk = 0;");
+        for (source, four_state) in [
+            (source, false),
+            (reverse.as_str(), false),
+            (unknown.as_str(), true),
+        ] {
+            let builder = || {
+                Simulator::from_sv_sources(vec![(source, std::path::Path::new("review.sv"))], "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            check(Simulation::new(builder().build_interpreter().unwrap()));
+            check(Simulation::new(builder().build_cranelift().unwrap()));
+            check(Simulation::new(builder().build_wasm().unwrap()));
+            check(Simulation::new(builder().build_tiered().unwrap()));
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                target_arch = "aarch64"
+            ))]
+            {
+                check(Simulation::new(builder().build().unwrap()));
+                let image = builder().compile_native().unwrap().into_program_image();
+                let image = crate::NativeProgramImage::from_container_bytes(
+                    &image.to_container_bytes().unwrap(),
+                )
+                .unwrap();
+                check(Simulation::new(
+                    Simulator::from_sources(Vec::new(), "Top")
+                        .emit_triggers()
+                        .build_native_from_image(image)
+                        .unwrap(),
+                ));
+            }
+        }
     }
 }

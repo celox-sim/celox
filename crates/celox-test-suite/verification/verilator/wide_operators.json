@@ -1,0 +1,246 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_addition_128bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_addition_carry_propagation",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_bitwise_operations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_bitxnor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_div",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_logic_and_or",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_mul",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_reduction_nand",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_reduction_nor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_reduction_xnor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_rem",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_sar",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_signed_gt",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comb_signed_lt",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_comparison_eq",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_ff_accumulator",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_ff_mul",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_logic_or_with_narrow_operand",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_shift_left",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_signed_compare_non_chunk_aligned",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_subtraction_128bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_operators::test_wide_subtraction_borrow",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

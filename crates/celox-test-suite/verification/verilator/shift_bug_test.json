@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_dynamic_shift_in_if_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_right_shift_in_if_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_shift_ifreset_for",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_shift_in_for_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_shift_in_if_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_shift_to_array_by_loop_index",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "shift_bug_test::test_shift_with_wide_const_amount",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

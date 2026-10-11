@@ -29,8 +29,9 @@
 //!
 //! A case with `run_until` or `run_to_finish` is timed: the design's own
 //! `initial` and `always` processes run, and a write takes effect at the
-//! current time, so a process waiting for the signal resumes when time next
-//! advances. `tick` is not available in a timed case.
+//! current time. Reads, output collection and `eval` settle waiting and due
+//! processes at that timestamp. `tick` cannot be mixed with timed operations;
+//! timed shared sources use the injected scale and omit explicit time scales.
 //!
 //! A signal is `name` at the top or `inst.name`, `inst[2].name` below it.
 //!
@@ -60,3 +61,6 @@ pub mod sexpr;
 pub mod sv;
 
 pub use ast::{ScriptCase, ScriptError};
+
+pub(crate) mod timed;
+pub use timed::validate_timed_design;

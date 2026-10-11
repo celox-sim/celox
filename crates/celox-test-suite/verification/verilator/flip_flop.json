@@ -1,0 +1,1830 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_async_reset",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_array_literal_default_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_array_literal_expression_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_array_literal_nested_default_multidim_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_assert_message_output_argument_is_eager",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "eager_assertion_messages": "Requires message argument effects even on a successful assertion; SV executes the fail action only on failure (IEEE 1800-2023 16.3)."
+      },
+      "tags": [
+        "eager_assertion_messages"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_bits_and_size_array_dependencies_do_not_alias_later_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects negative bounds in elaborated for loops (InvalidForRange::NegativeBound). This is a frontend restriction, not an external simulator mismatch.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_restriction",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-negative-for-bounds"
+        ],
+        "id": "veryl_negative_for_bounds",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects negative bounds in elaborated for loops (InvalidForRange::NegativeBound). This is a frontend restriction, not an external simulator mismatch.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_dynamic_nonlocal_store_follows_pending_whole_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_effectful_array_item_output_is_not_a_read_alias",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_array_element_assignment_preserves_signedness",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_branch_view_is_reused_after_merge",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_array_literal_default_fill_matches_formal_shape",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_array_literal_element_uses_element_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_array_literal_element_uses_formal_context_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_callee_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_later_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7).",
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order",
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#sv-mixed-assignment-patterns"
+        ],
+        "id": "sv_mixed_assignment_patterns",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "The emitted assignment pattern mixes positional/replicated entries with keyed default entries, or leaves an unkeyed entry after default. Both parsers reject this emitted syntax; the fixture expectations have not been validated.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_supports_dynamic_multidim_indexing",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_array_literal_view_dominates_conditional_access",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_view_preserves_expression_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_array_literal_view_preserves_source_order",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "assignment_pattern_evaluation": "Requires source-order evaluation or a particular evaluation count for effectful assignment-pattern items; SV does not guarantee these choices (IEEE 1800-2023 10.9.1, 11.4.2)."
+      },
+      "tags": [
+        "assignment_pattern_evaluation"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_bits_and_size_evaluate_effectful_array_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_carries_branch_local_static_array_item_cache",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_chained_range_access_on_argument",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-array-argument-conversion"
+        ],
+        "id": "sv_array_argument_conversion",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_converts_array_literal_view_for_wider_nested_formal",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-array-argument-conversion"
+        ],
+        "id": "sv_array_argument_conversion",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_converts_forwarded_static_array_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "sv_emission_issue",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "LIMITATIONS.md#sv-array-argument-conversion"
+        ],
+        "id": "sv_array_argument_conversion",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Veryl forwards unpacked arrays with different element widths to function formals without elementwise conversion. Verilator rejects EXTEND/EXTENDS on these unpacked-array arguments.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_effectful_array_items_are_eager_before_conditional_access",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_expression_with_if",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_expression_with_output_argument_and_return_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+      },
+      "tags": [
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_forwards_array_literal_view_to_nested_call",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_indexed_argument_access",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_indexed_nonvariable_argument_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_keeps_array_view_active_for_output_index",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_merges_directly_forwarded_array_cache",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_merges_nested_array_state_at_cache_completion",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_merges_nested_array_state_at_static_cache_completion",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_merges_outer_array_view_across_nested_short_circuit",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_multidim_array_literal_indexing_preserves_element_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_multistatement_body",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_nested_bits_evaluates_effectful_array_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_nested_output_statement_in_function_body",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_part_select_of_signed_formal_is_unsigned",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_restores_array_literal_view_after_reentrant_call",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_restores_initialized_forwarded_alias_view",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_sign_extends_narrow_signed_actual_before_slice",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_snapshots_pure_array_items_before_later_effect",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "assignment_pattern_evaluation": "Requires source-order evaluation or a particular evaluation count for effectful assignment-pattern items; SV does not guarantee these choices (IEEE 1800-2023 10.9.1, 11.4.2).",
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+      },
+      "tags": [
+        "assignment_pattern_evaluation",
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_statement_with_output_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+      },
+      "tags": [
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_statement_with_output_argument_and_return_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+      },
+      "tags": [
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_function_call_step_access_on_nonvariable_argument",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_tracks_array_reads_in_output_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_tracks_array_view_hidden_in_bound_literal",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_tracks_nested_array_reads_in_output_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_call_tracks_nested_static_array_read_through_branch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_function_output_index_uses_final_nonlocal_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_if_reset_basic",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_if_reset_multi_cycle",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_if_reset_with_nested_if",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_nested_function_call_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_nonblocking",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_nonlocal_source_ternary_preserves_unknown_merge",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_nonlocal_write_precedes_aliased_formal_output_copyout",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_pure_input_is_snapshotted_before_later_effectful_input",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7).",
+        "evaluation_order": "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+      },
+      "tags": [
+        "evaluation_order",
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_bitwise_steps",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_bounds",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_break",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_forward_overshoot_exits_without_wraparound",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_reverse_singleton_exits_cleanly",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_for_zero_iteration_mul_loop_is_allowed",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_reverse_exclusive_i32_upper_sentinel",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_reverse_min_i32_end_wraps_before_range_check",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_runtime_reverse_step_matches_emitted_sv_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_short_circuit_runtime_write_preserves_later_state_source",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "deferred_function_effects": "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+      },
+      "tags": [
+        "deferred_function_effects"
+      ]
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_signed_xor_step_uses_loop_counter_width",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_statement_after_if_reset_keeps_source_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "veryl_extension",
+        "evidence": [
+          "verification/limitations/verilator.json",
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#veryl-ff-effects"
+        ],
+        "id": "veryl_ff_effects",
+        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
+        "upstream": []
+      },
+      "name": "flip_flop::test_ff_statement_function_direct_nonlocal_assignment_is_observable",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_static_and_dynamic_writes_share_sparse_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_struct_constructor_expression",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_struct_constructor_expression_literal_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_struct_constructor_signed_member_extension",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_ff_swap_correctness",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_hierarchical_clocks",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_multiple_async_resets",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "flip_flop::test_multiple_clocks",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

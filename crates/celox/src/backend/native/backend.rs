@@ -394,6 +394,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     #[serde(default)]
     pub(crate) testbench_kernels: Option<usize>,
+    pub(crate) process_event_counters: Vec<celox_design::ProcessEventCounters<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -503,6 +504,7 @@ impl NativeProgramImage {
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
                 testbench_kernels: self.runtime_schema.testbench_kernels,
+                process_event_counters: self.runtime_schema.process_event_counters.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -558,6 +560,23 @@ impl NativeProgramImage {
         }
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
+        }
+        for counters in &self.runtime_schema.process_event_counters {
+            if !self.event_map.contains_key(&counters.signal) {
+                return Err("a process edge counter names an unknown event domain".into());
+            }
+            for address in [&counters.rises, &counters.falls] {
+                if !self
+                    .design
+                    .state_objects
+                    .get(address)
+                    .is_some_and(|metadata| {
+                        metadata.width == celox_design::PROCESS_EVENT_COUNTER_WIDTH
+                    })
+                {
+                    return Err("a process edge counter has an invalid state object".into());
+                }
+            }
         }
         if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
             return Err("native image contains unknown feature requirements".into());
@@ -2262,6 +2281,7 @@ fn compile_program(
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
                 testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
+                process_event_counters: sir.runtime().runtime_schema.process_event_counters.clone(),
             },
             layout: layout.clone(),
             native_memory_size,

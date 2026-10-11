@@ -339,3 +339,62 @@
   (assert_eq y 2)
   (run_to_finish)
   (assert_eq y 3))
+
+(case host_inputs_are_staged_before_time_zero_initial_blocks
+  (source "setup.sv" #"module Top(input bit a, output bit y); initial y = a; endmodule"#)
+  (top Top)
+  (set a 1)
+  (run_until 0)
+  (assert_eq y 1))
+
+(case eval_starts_due_time_zero_processes
+  (source "eval.sv" #"module Top(output bit [7:0] y); initial y = 7; endmodule"#)
+  (top Top)
+  (eval)
+  (assert_eq y 7)
+  (run_until 0))
+
+(case direct_reads_settle_waiting_processes
+  (source "read.sv" #"module Top(input bit go, output bit [7:0] seen);
+    initial begin wait (go); seen = 1; #0; seen = 2; end
+  endmodule"#)
+  (top Top)
+  (run_until 0)
+  (set go 1)
+  (assert_eq seen 2))
+
+(case output_reads_settle_waiting_processes
+  (source "output.sv" #"module Top(input bit go);
+    initial begin wait (go); $display("woke"); end
+  endmodule"#)
+  (top Top)
+  (run_until 0)
+  (set go 1)
+  (expect_output "woke\n"))
+
+(case run_until_drains_target_time_before_later_writes
+  (source "boundary.sv" #"module Top(input bit [7:0] a, output bit [7:0] y);
+    initial #10 y = a;
+  endmodule"#)
+  (top Top)
+  (set a 1)
+  (run_until 10)
+  (set a 2)
+  (assert_eq y 1))
+
+(case repeated_settles_do_not_advance_design_time
+  (source "settles.sv" #"module Top(output bit seen); initial #1 seen = 1; endmodule"#)
+  (top Top)
+  (run_until 0)
+  (for i (range 0 1001) (eval))
+  (assert_eq seen 0)
+  (run_until 1)
+  (assert_eq seen 1))
+
+(case run_to_finish_has_no_simulated_time_deadline
+  (source "late.sv" #"module Top(output bit done);
+    initial begin #1000001; done = 1; $finish; end
+  endmodule"#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq done 1))

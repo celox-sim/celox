@@ -77,4 +77,4 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [veryl_negative_for_bounds](../LIMITATIONS.md#veryl-negative-for-bounds) | emission | 2 | 2 |
 | [veryl_runtime_system_calls](../LIMITATIONS.md#veryl-runtime-system-calls) | emission | 4 | 4 |
 
-The [CSV matrix](matrix.csv) contains every case. Full diagnostics and first failing comparisons are retained in [verilator.json](verilator.json) and [icarus.json](icarus.json).
+The [CSV matrix](matrix.csv) contains every case. Full diagnostics and first failing comparisons are retained by test group under [verilator/](verilator/) and [icarus/](icarus/), indexed by [verilator.json](verilator.json) and [icarus.json](icarus.json).

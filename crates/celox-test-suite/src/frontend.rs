@@ -3,6 +3,8 @@
 use crate::process::write_if_changed;
 use crate::script::ScriptCase;
 use crate::script::sv::{DesignInfo, TESTBENCH_TOP, testbench as generate_testbench};
+use crate::script::timed::{after_trivia, sv_words};
+use crate::validate_timed_design;
 use crate::verification::{EmissionError, panic_message};
 use crate::{Design, Expectation, Result};
 use std::collections::BTreeMap;
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 const PARAMETERS_TOP: &str = "celox_suite_parameters";
 
 /// The time scale every compiled source gets: a script time unit is 1 ns,
-/// and the generated testbench settles in 1 ps steps between them. The
+/// and the generated timed testbench settles without advancing time. The
 /// directive persists across the files that follow it in one compilation.
 const TIMESCALE: &str = "`timescale 1ns/1ps\n";
 
@@ -57,6 +59,7 @@ pub(crate) fn stage(
     directory: &Path,
     script: Option<&ScriptCase>,
 ) -> Result<Staged> {
+    validate_timed_design(design)?;
     fs::create_dir_all(directory)?;
     let directory = fs::canonicalize(directory)?;
     for (index, source) in design.sources.iter().enumerate() {
@@ -71,8 +74,18 @@ pub(crate) fn stage(
     let timescale = directory.join("timescale.sv");
     write_if_changed(&timescale, TIMESCALE.as_bytes())?;
     let mut paths = vec![timescale];
+    if design.timed {
+        let control = directory.join("timed_control.sv");
+        write_if_changed(&control, TIMED_CONTROL.as_bytes())?;
+        paths.push(control);
+    }
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
+        let source = if design.timed {
+            timed_source(source)
+        } else {
+            source.clone()
+        };
         write_if_changed(&path, source.as_bytes())?;
         paths.push(path);
     }
@@ -118,4 +131,41 @@ pub(crate) fn stage(
         testbench,
         edges: prepared.edges,
     })
+}
+
+const TIMED_CONTROL: &str = r#"package celox_suite_timed_control;
+  bit started = 0;
+  bit finished = 0;
+  function automatic void celox_suite_start_design();
+    started = 1;
+  endfunction
+  function automatic void celox_suite_finish_design(input int code = 1);
+    finished = 1;
+    case (code)
+      0: $finish(0);
+      2: $finish(2);
+      default: $finish(1);
+    endcase
+  endfunction
+endpackage
+"#;
+
+fn timed_source(source: &str) -> String {
+    let mut output = String::from("import celox_suite_timed_control::*;\n");
+    let mut previous = 0;
+    for (start, end, word) in sv_words(source) {
+        let replacement = match word {
+            "initial" => "initial wait (celox_suite_timed_control::started)",
+            "$finish" if after_trivia(&source[end..]).starts_with('(') => {
+                "celox_suite_finish_design"
+            }
+            "$finish" => "celox_suite_finish_design()",
+            _ => continue,
+        };
+        output.push_str(&source[previous..start]);
+        output.push_str(replacement);
+        previous = end;
+    }
+    output.push_str(&source[previous..]);
+    output
 }

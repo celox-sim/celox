@@ -1,0 +1,276 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::clock_periods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::control_flow",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::gated_drive",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_initialization": "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+      },
+      "tags": [
+        "two_state_initialization"
+      ]
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::hierarchy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::mixed_edges",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_initialization": "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+      },
+      "tags": [
+        "two_state_initialization"
+      ]
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::reset",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::reset_between_edges",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::reset_only_clock",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::shared_clock",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "verification/repros/concurrent_initial_gated_drive_verilator.json",
+          "verification/repros/concurrent_initial_gated_drive_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::simultaneous_edges",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_initialization": "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+      },
+      "tags": [
+        "two_state_initialization"
+      ]
+    }
+  ]
+}
