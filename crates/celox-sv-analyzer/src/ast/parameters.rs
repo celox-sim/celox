@@ -35,6 +35,7 @@ pub(super) fn binding_keys(
         variable_size_marker(name),
         variable_signed_marker(name),
         variable_dimensions_marker(name),
+        variable_unpacked_dimensions_marker(name),
     ];
     for index in 0..count {
         keys.push(parameter_dimension_marker(name, index, "left"));

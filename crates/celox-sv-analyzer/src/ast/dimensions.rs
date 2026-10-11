@@ -120,6 +120,7 @@ fn query_operand_dimensions(
     context.expression_signedness.extend(signedness);
     // Query declared return types, including functions with side effects.
     context.functions = Arc::default();
+    context.type_query = true;
     if !context.scope_types_complete {
         let mut shapes = containing_subroutine_param_shapes(
             RefNode::Expression(argument),
@@ -824,6 +825,7 @@ fn size_function_expression_type(
         // (including their first return dimension for $size).
         let mut query_dimensions = dimensions.clone();
         query_dimensions.functions = Arc::default();
+        query_dimensions.type_query = true;
         if let Some(r#type) = size_function_expression_type_from_dimensions(
             argument,
             syntax_tree,
@@ -878,6 +880,7 @@ fn size_function_expression_type(
         );
     }
     packed_dimensions.subroutine_param_shapes = Arc::new(shapes);
+    packed_dimensions.type_query = true;
     size_function_expression_type_from_dimensions(
         argument,
         syntax_tree,
@@ -1234,10 +1237,7 @@ fn containing_function_return_types(
                                 Some((
                                     import.name().to_string(),
                                     FunctionReturnMetadata {
-                                        argument_count: Some((
-                                            import.arguments().len(),
-                                            import.arguments().len(),
-                                        )),
+                                        arguments: Some(dpi_argument_metadata(&import)),
                                         width: Some(ty.width()),
                                         first_packed_dimension_width: (ty.width() > 1)
                                             .then_some(ty.width()),
@@ -1386,7 +1386,7 @@ fn function_declaration_return_metadata(
     Some((
         name,
         FunctionReturnMetadata {
-            argument_count: Some(function_argument_count(&params)),
+            arguments: Some(function_argument_metadata(&params)),
             width: return_type.map(|r#type| r#type.width),
             dimensions: function_return_dimensions(
                 return_node,

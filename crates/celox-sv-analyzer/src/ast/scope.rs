@@ -414,7 +414,7 @@ impl ScopeSymbols {
             function_return_types: self
                 .function_return_types
                 .iter()
-                .map(|(name, value)| (key(name), *value))
+                .map(|(name, value)| (key(name), value.clone()))
                 .collect(),
             constant_functions: self
                 .constant_functions

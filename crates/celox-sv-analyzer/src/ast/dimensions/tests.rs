@@ -45,7 +45,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             (
                 name.clone(),
                 FunctionReturnMetadata {
-                    argument_count: Some(function_argument_count(&f.params)),
+                    arguments: Some(function_argument_metadata(&f.params)),
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
                     dimensions: f.return_dimensions,

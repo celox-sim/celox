@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 13,
     "emission_error": 0,
-    "compile_error": 72,
+    "compile_error": 73,
     "runtime_error": 2,
     "unsupported": 0,
     "ignored": 0
@@ -776,6 +776,17 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:7: error: Packed array assignment pattern expects 8 element(s) in this context.\n<case>/source_0.sv:7:      : Found 2 element(s).\n2 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "system_functions::unpacked_dimensions_types_function_pattern_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: error: Function celox_suite_tb.dut.f port x is not an input port.\n<case>/source_0.sv:4:      : Function arguments must be input ports.\n<case>/source_0.sv:4: error: Function celox_suite_tb.dut.f port y is not an input port.\n<case>/source_0.sv:4:      : Function arguments must be input ports.\n<case>/source_0.sv:10: warning: always_comb process has no sensitivities.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::unpacked_dimensions_validates_writable_function_arguments",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

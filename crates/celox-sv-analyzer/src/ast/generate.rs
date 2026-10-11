@@ -1800,7 +1800,7 @@ mod tests {
             .unwrap();
         let active = items(module, &tree, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
-            argument_count: None,
+            arguments: None,
             width: Some(8),
             first_packed_dimension_width: Some(2),
             dimensions: Some(2),
@@ -1808,7 +1808,7 @@ mod tests {
             is_2state: false,
         };
         let inner = FunctionReturnMetadata {
-            argument_count: None,
+            arguments: None,
             width: Some(4),
             first_packed_dimension_width: Some(4),
             dimensions: Some(1),
@@ -1816,9 +1816,12 @@ mod tests {
             is_2state: true,
         };
         let dimensions = PackedDimensions {
-            function_return_types: [("f".to_string(), outer), ("g.f".to_string(), inner)]
-                .into_iter()
-                .collect(),
+            function_return_types: [
+                ("f".to_string(), outer.clone()),
+                ("g.f".to_string(), inner.clone()),
+            ]
+            .into_iter()
+            .collect(),
             ..PackedDimensions::default()
         };
         let local = active[0].dimensions(&dimensions);

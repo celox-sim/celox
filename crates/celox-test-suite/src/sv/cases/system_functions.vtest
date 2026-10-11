@@ -1569,3 +1569,71 @@ a=0a  10
   (assert_eq supplied_rank 0)
   (assert_eq empty_rank 0)
   (expect_output ""))
+
+(case unpacked_dimensions_restores_shadowed_array_rank
+  (source "shadowed_array_rank.sv" #"
+    module Top(output int local_rank, nested_rank, restored_rank);
+      if (1) begin : g
+        logic [7:0] x [0:1];
+        always_comb begin
+          localparam int x = 1;
+          local_rank = $unpacked_dimensions(x);
+        end
+        always_comb begin
+          begin
+            localparam int x = 1;
+            nested_rank = $unpacked_dimensions(x);
+          end
+          restored_rank = $unpacked_dimensions(x);
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_rank 0)
+  (assert_eq nested_rank 0)
+  (assert_eq restored_rank 1))
+
+(case unpacked_dimensions_accepts_explicit_default_omissions
+  (source "omitted_query_arguments.sv" #"
+    module Top(output int constant_rank, runtime_rank, trailing_rank);
+      function automatic int f(input int a = 1, input int b, input int c = 3);
+        $display("must not execute");
+        return a + b + c;
+      endfunction
+      localparam N = $unpacked_dimensions(f(, 2));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f(, 2, ));
+      assign trailing_rank = $unpacked_dimensions(f(1, 2, ));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (assert_eq trailing_rank 0)
+  (expect_output ""))
+
+(case unpacked_dimensions_validates_writable_function_arguments
+  (source "writable_query_arguments.sv" #"
+    module Top(output int rank, untouched);
+      int a;
+      function automatic int f(output int x, inout int y);
+        $display("must not execute");
+        x = 9;
+        y = 10;
+        return 11;
+      endfunction
+      always_comb begin
+        a = 7;
+        rank = $unpacked_dimensions(f(a, a));
+        untouched = a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq rank 0)
+  (assert_eq untouched 7)
+  (expect_output ""))

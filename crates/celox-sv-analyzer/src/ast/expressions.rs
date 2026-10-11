@@ -737,70 +737,107 @@ pub(super) fn expr_from_tf_call(
     {
         return Ok(Expr::Ident(name));
     }
-    let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
+    let query_formals = packed_dimensions
+        .type_query
+        .then(|| {
+            packed_dimensions
+                .function_return_types
+                .get(&name)
+                .and_then(|metadata| metadata.arguments.as_deref())
+        })
+        .flatten();
+    let actuals = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
         None => Vec::new(),
         Some(sv_parser::ListOfArguments::Ordered(args)) => {
             let contents = args.nodes.0.contents();
             if contents.len() == 1 && contents[0].is_none() {
                 Vec::new()
             } else {
-                let mut lowered = Vec::new();
-                for (position, expr) in contents.into_iter().enumerate() {
-                    let Some(expr) = expr.as_ref() else {
-                        return Err(unsupported(format!(
-                            "omitted argument {} of `{name}`",
-                            position + 1
-                        )));
-                    };
-                    // An assignment pattern takes its shape from the formal.
-                    let shape = packed_dimensions
-                        .subroutine_param_shapes
-                        .get(&name)
-                        .and_then(|shapes| shapes.get(position));
-                    if let Some(shape) = shape {
-                        // Passing an argument is an assignment-like context
-                        // (IEEE 1800-2023 10.8).
-                        check_unpacked_array_assignment(
-                            expr,
-                            shape,
-                            || format!("argument {} of `{name}`", position + 1),
-                            syntax_tree,
-                            packed_dimensions,
-                        )?;
-                    }
-                    let lowered_arg = match (patterns::pattern_expression(expr), shape) {
-                        (Some(pattern), Some(shape)) if pattern.nodes.0.is_none() => {
-                            patterns::expr_from_pattern(
-                                &pattern.nodes.1,
-                                shape,
-                                syntax_tree,
-                                packed_dimensions,
-                            )?
-                        }
-                        _ => expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?,
-                    };
-                    lowered.push(lowered_arg);
-                }
-                lowered
+                contents
             }
         }
         Some(sv_parser::ListOfArguments::Named(_)) => {
             return Err(unsupported(format!("named arguments of `{name}`")));
         }
     };
-    if packed_dimensions.functions.is_empty()
-        && let Some((minimum, maximum)) = packed_dimensions
-            .function_return_types
+    if let Some(formals) = query_formals {
+        if actuals.len() > formals.len() {
+            return Err(unsupported(format!("extra arguments of `{name}`")));
+        }
+        for (position, formal) in formals.iter().enumerate() {
+            if actuals.get(position).is_none_or(|actual| actual.is_none()) && !formal.has_default {
+                return Err(unsupported(format!(
+                    "omitted argument {} of `{name}`",
+                    position + 1
+                )));
+            }
+        }
+    }
+    let mut args = Vec::new();
+    for (position, expression) in actuals.into_iter().enumerate() {
+        let Some(expression) = expression.as_ref() else {
+            if query_formals.is_some_and(|formals| formals[position].has_default) {
+                // The query never evaluates the call or its default expression.
+                // Keep the argument positions while querying the return type.
+                args.push(Expr::Literal("0".into()));
+                continue;
+            }
+            return Err(unsupported(format!(
+                "omitted argument {} of `{name}`",
+                position + 1
+            )));
+        };
+        let shape = packed_dimensions
+            .subroutine_param_shapes
             .get(&name)
-            .and_then(|metadata| metadata.argument_count)
-        && !(minimum..=maximum).contains(&args.len())
-    {
-        return Err(unsupported(format!(
-            "argument count of `{name}`: expected {minimum}..={maximum}, got {}",
-            args.len()
-        )));
+            .and_then(|shapes| shapes.get(position));
+        if let Some(shape) = shape {
+            check_unpacked_array_assignment(
+                expression,
+                shape,
+                || format!("argument {} of `{name}`", position + 1),
+                syntax_tree,
+                packed_dimensions,
+            )?;
+        }
+        let argument = match (patterns::pattern_expression(expression), shape) {
+            (Some(pattern), Some(shape)) if pattern.nodes.0.is_none() => {
+                patterns::expr_from_pattern(
+                    &pattern.nodes.1,
+                    shape,
+                    syntax_tree,
+                    packed_dimensions,
+                )?
+            }
+            _ => expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?,
+        };
+        if query_formals.is_some_and(|formals| formals[position].direction.is_written())
+            && !query_actual_is_writable(&argument, packed_dimensions)
+        {
+            return Err(unsupported(format!(
+                "non-writable argument {} of `{name}`",
+                position + 1
+            )));
+        }
+        args.push(argument);
     }
     Ok(Expr::Call { name, args })
+}
+
+fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expression {
+        Expr::Ident(name) => {
+            dimensions.get(name).is_some() && !dimensions.const_env.contains_key(name)
+        }
+        Expr::Select { expr, .. } => query_actual_is_writable(expr, dimensions),
+        Expr::Concat(parts) => {
+            !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|part| query_actual_is_writable(part, dimensions))
+        }
+        _ => false,
+    }
 }
 
 fn selected_concatenation(

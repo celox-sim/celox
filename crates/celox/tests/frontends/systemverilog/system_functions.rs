@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_dimensions_restores_shadowed_array_rank(sim) { @case "system_functions::unpacked_dimensions_restores_shadowed_array_rank"; }
+    fn unpacked_dimensions_accepts_explicit_default_omissions(sim) { @case "system_functions::unpacked_dimensions_accepts_explicit_default_omissions"; }
+    fn unpacked_dimensions_validates_writable_function_arguments(sim) { @case "system_functions::unpacked_dimensions_validates_writable_function_arguments"; }
+
     fn unpacked_dimensions_accepts_defaulted_function_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_defaulted_function_arguments"; }
 
     fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
@@ -859,4 +863,34 @@ fn unpacked_dimensions_rejects_function_argument_count() {
     build_error(
         "module Top(output int y); function int f(input int a); return a; endfunction assign y = $unpacked_dimensions(f(1, 2)); endmodule",
     );
+}
+
+#[test]
+fn unpacked_dimensions_rejects_nonwritable_function_arguments() {
+    for direction in ["output", "inout"] {
+        for operand in ["1 + 2", "1", "int'(a)", "{a, 1'b0}", "P", "P[0]"] {
+            for use_site in [
+                format!("assign y = $unpacked_dimensions(f({operand}));"),
+                format!("localparam N = $unpacked_dimensions(f({operand})); assign y = 0;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); int a; localparam int P = 1; function int f({direction} int x); x = 4; return x; endfunction {use_site} endmodule"
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_omitted_required_arguments() {
+    for arguments in [",", "1,", ", 2, ,", ", , 3"] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions(f({arguments}));"),
+            format!("localparam N = $unpacked_dimensions(f({arguments})); assign y = 0;"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); function int f(input int a = 1, input int b, input int c = 3); return a + b + c; endfunction {use_site} endmodule"
+            ));
+        }
+    }
 }

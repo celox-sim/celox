@@ -209,7 +209,8 @@
         "procedural::select_index_call_skipped_by_logical_and",
         "procedural::select_index_calls_run_as_written",
         "procedural::select_indices_call_functions",
-        "synthesizable::function_output_and_inout_arguments_are_written_back"
+        "synthesizable::function_output_and_inout_arguments_are_written_back",
+        "system_functions::unpacked_dimensions_validates_writable_function_arguments"
       ]
     }
   },
