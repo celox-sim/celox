@@ -44,8 +44,10 @@ struct Cli {
     /// Serialization of coincident CPU/memory edges in the `board` model.
     #[arg(long, value_enum, default_value = "mem-then-cpu")]
     coincident_order: CoincidentOrder,
-    /// Host-side signal access style: pre-resolved handles with fixed-width
-    /// reads, or Rica's current name lookup with `BigUint` reads.
+    /// Host-side signal access style of the native-simulator models:
+    /// pre-resolved handles with fixed-width reads, or Rica's current name
+    /// lookup with `BigUint` reads. The timed model always reads
+    /// pre-resolved handles through `Simulation::get`.
     #[arg(long, value_enum, default_value = "resolved")]
     harness: Harness,
     #[arg(long, default_value_t = 2_000_000)]
@@ -813,6 +815,14 @@ fn run(cli: Cli) -> Result<(), RicaError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     if cli.model == Model::Timed {
+        if cli.harness != Harness::Resolved {
+            return Err(message("--model timed supports only --harness resolved"));
+        }
+        if cli.dump_ir_dir.is_some() || !cli.native_profile_blocks.is_empty() {
+            return Err(message(
+                "--dump-ir-dir and --native-profile-block need a native-simulator model",
+            ));
+        }
         if cli.compile_only {
             // The timed model compiles a fresh simulation per run.
             let compile_start = Instant::now();

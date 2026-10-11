@@ -29,7 +29,13 @@ CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 RICA_CELOX_CARGO_PROFILE="${RICA_CELOX_CARGO_PROFILE:-release}"
 RICA_BUILD_CELOX_RUNNER="${RICA_BUILD_CELOX_RUNNER:-1}"
-CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_CARGO_PROFILE/celox-rica}"
+RICA_ALLOW_UNPINNED="${RICA_ALLOW_UNPINNED:-0}"
+# Cargo builds the built-in `dev` and `test` profiles into `target/debug`.
+case "$RICA_CELOX_CARGO_PROFILE" in
+    dev|test) RICA_CELOX_PROFILE_DIR=debug ;;
+    *) RICA_CELOX_PROFILE_DIR="$RICA_CELOX_CARGO_PROFILE" ;;
+esac
+CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$RICA_CELOX_PROFILE_DIR/celox-rica}"
 
 usage() {
     cat <<'USAGE'
@@ -53,6 +59,7 @@ Environment:
   RICA_CELOX_CARGO_PROFILE
                         cargo profile for the runner (default: release)
   CELOX_RUNNER_BIN      prebuilt runner; set RICA_BUILD_CELOX_RUNNER=0 to skip cargo
+  RICA_ALLOW_UNPINNED   1 to run a checkout whose HEAD is not RICA_REF
 USAGE
 }
 
@@ -78,6 +85,13 @@ kernel_elf() {
 run() {
     if [[ ! -d "$RICA_DIR/riscv/src" ]]; then
         echo "error: $RICA_DIR is not a Rica checkout; run 'prepare' first" >&2
+        exit 1
+    fi
+    local head expected
+    head="$(git -C "$RICA_DIR" rev-parse HEAD)"
+    expected="$(git -C "$RICA_DIR" rev-parse --verify --quiet "$RICA_REF^{commit}" || true)"
+    if [[ "$head" != "$expected" && "$RICA_ALLOW_UNPINNED" != 1 ]]; then
+        echo "error: $RICA_DIR is at $head, not $RICA_REF; run 'prepare' or set RICA_ALLOW_UNPINNED=1" >&2
         exit 1
     fi
     if [[ "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
