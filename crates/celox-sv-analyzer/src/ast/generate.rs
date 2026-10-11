@@ -696,6 +696,15 @@ impl<'a> Elaborator<'a, '_> {
                         value = i128::from(value as i32);
                         let mut iteration = scope.clone();
                         iteration.env.insert(name.clone(), value);
+                        // Inherited parameter markers would keep this loop index
+                        // symbolic during constant substitution (for example in selects).
+                        for marker in [
+                            parameter_marker(&name),
+                            local_parameter_marker(&name),
+                            parameters::unbounded_parameter_marker(&name),
+                        ] {
+                            iteration.env.remove(&marker);
+                        }
                         insert_parameter_type_markers(
                             &mut iteration.env,
                             &name,
@@ -1185,8 +1194,14 @@ impl<'a> Elaborator<'a, '_> {
         }
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
-        if let Some((genvar, _)) = index {
+        if let Some((genvar, value)) = index {
             declared.insert(genvar.to_string());
+            // The implicit localparam in each loop body (IEEE 1800-2023 27.4)
+            // must override inherited literals during expression substitution.
+            scope.literals.insert(
+                genvar.to_string(),
+                Expr::Literal(format_typed_parameter_literal(value, 32, true)),
+            );
         }
         self.constants_and_signal_types(&children, &mut scope, &mut declared)?;
         for item in &children {
@@ -1899,6 +1914,24 @@ mod tests {
                 .contains("cyclic generate-local parameter dependency"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn folds_shadowing_genvars_in_nested_selects() {
+        let source = analyze(
+            "module Top #(parameter logic [7:0] i=9)(output logic [2:0] y); for (genvar i=-1; i<2; i++) begin : g if (1) assign y[i+1]=i; end endmodule",
+        ).unwrap();
+        assert_eq!(source.modules()[0].assignments().len(), 3);
+        for (index, assignment) in source.modules()[0].assignments().iter().enumerate() {
+            let LValue::Select { lsb, .. } = &assignment.lhs else {
+                panic!("{assignment:?}")
+            };
+            assert_eq!(
+                eval_ast_const_expr(lsb, &HashMap::default()),
+                Some(index as i128),
+                "{assignment:?}"
+            );
+        }
     }
 
     #[test]

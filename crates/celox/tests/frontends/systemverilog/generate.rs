@@ -1,6 +1,14 @@
 use super::*;
 
 sv_backends! {
+    fn genvar_shadows_module_localparam(sim) {
+        @case "generate::genvar_shadows_module_localparam";
+    }
+
+    fn genvar_shadows_inherited_parameter_values_and_types(sim) {
+        @case "generate::genvar_shadows_inherited_parameter_values_and_types";
+    }
+
     fn size_queries_use_generate_local_parameter_types(sim) {
         @case "generate::size_queries_use_generate_local_parameter_types";
     }

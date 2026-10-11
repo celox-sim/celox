@@ -1,5 +1,72 @@
 (group generate (category control_flow))
 
+(case genvar_shadows_module_localparam
+  (source "genvar_localparam_shadowing.sv" #"
+                module Top(output logic [7:0] y, outer_value);
+                    localparam int i = 9;
+                    for (genvar i = 0; i < 1; i++) begin : g
+                        assign y = i;
+                    end
+                    assign outer_value = i;
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0)
+  (assert_eq outer_value 9))
+
+(case genvar_shadows_inherited_parameter_values_and_types
+  (source "genvar_parameter_shadowing.sv" #"
+                module Child #(parameter VALUE=0)(output logic [7:0] y);
+                    assign y = VALUE;
+                endmodule
+                module Top #(parameter logic [7:0] i=9)
+                           (input logic clk, output logic [23:0] direct_value, copied_value,
+                            child_value, comb_value, q, output logic [2:0] checks,
+                            output logic [7:0] outer_value, nested_value,
+                            output logic [1:0] unknown_shadow);
+                    function automatic int outer(); return i; endfunction
+                    for (genvar i=-1; i<2; i++) begin : lanes
+                        localparam COPY = i;
+                        logic [i+1:0] tmp;
+                        assign tmp = '1;
+                        assign direct_value[8*(i+1)+:8] = i;
+                        assign copied_value[8*(i+1)+:8] = COPY;
+                        Child #(.VALUE(i)) child(.y(child_value[8*(i+1)+:8]));
+                        always_comb comb_value[8*(i+1)+:8] = i;
+                        always_ff @(posedge clk) q[8*(i+1)+:8] <= i;
+                        if ($bits(i)==32 && $size(i)==32 && $bits(tmp)==i+2
+                            && ((i<0) == (i==-1))) assign checks[i+1] = 1;
+                        else assign checks[i+1] = 0;
+                        if (i==0) begin : nested
+                            localparam i=5;
+                            assign nested_value = i;
+                            assign outer_value = outer();
+                        end
+                    end
+                    if (1) begin : scope
+                        localparam logic [3:0] j=4'bxxxx;
+                        for (genvar j=0; j<2; j++) begin : inner
+                            localparam COPY=j;
+                            if (j==COPY) assign unknown_shadow[j] = 1;
+                            else assign unknown_shadow[j] = 0;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (tick clk)
+  (assert_eq direct_value 0x0100ff)
+  (assert_eq copied_value 0x0100ff)
+  (assert_eq child_value 0x0100ff)
+  (assert_eq comb_value 0x0100ff)
+  (assert_eq q 0x0100ff)
+  (assert_eq checks 7)
+  (assert_eq outer_value 9)
+  (assert_eq nested_value 5)
+  (assert_eq unknown_shadow 3))
+
 (case size_queries_use_generate_local_parameter_types
   (source "generate_size_query_shadowing.sv" #"
                 module Top(input logic [7:0] x,
