@@ -78,7 +78,7 @@ pub fn external_signatures(
         let mut port_ids = module.ports.values().copied().collect::<Vec<_>>();
         port_ids.sort();
         let port_order = port_ids.iter().map(|id| ids[id]).collect();
-        let (sim_module, _) =
+        let (sim_module, _, _) =
             project_module_with_ids(&empty, module, config, ids, &HashMap::default())?;
         let id = celox_design::ModuleId(external.modules.len());
         external.roots.insert(sim_module.name.clone(), id);

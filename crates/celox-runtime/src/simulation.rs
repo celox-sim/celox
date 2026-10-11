@@ -1350,7 +1350,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // FF evaluations and before the pending NBA publications.
                 // Drain active evaluations before promoting another inactive
                 // batch, including evaluations a combinational settle woke.
-                let inactive_counter_values=self.process_counter_values(executor.backend());
+                let inactive_counter_values = self.process_counter_values(executor.backend());
                 let active_ran = self.run_processes(executor, current_time, Vec::new())?;
                 let progressed = if active_ran {
                     true
@@ -1364,7 +1364,8 @@ impl<B: SimBackend> SimulationState<B> {
                     self.run_processes(executor, current_time, ready)?
                 };
                 if progressed {
-                    let driven=self.process_counter_edges(executor.backend(),&inactive_counter_values);
+                    let driven =
+                        self.process_counter_edges(executor.backend(), &inactive_counter_values);
                     executor.eval_comb()?;
                     if track_stable_edges {
                         self.replace_triggers_with_stable_edges(executor.backend_mut());

@@ -19,6 +19,7 @@
 //!   event count u32, then per event: scheduled event
 //!   periodic count u32, then per marker: scheduled event | count u64
 //!   high count u32, then per event: event str
+//!   unknown count u32, then per event: event str (version 2 and later)
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! ```
