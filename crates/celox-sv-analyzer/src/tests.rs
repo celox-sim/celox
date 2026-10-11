@@ -783,6 +783,85 @@ fn resolves_constant_parameter_part_selects() {
 }
 
 #[test]
+fn resolves_imported_constant_parameter_part_selects() {
+    for (declaration, selection, expected) in [
+        ("logic [11:4] D = 8'hab", "[7:4]", 11),
+        ("logic [4:11] D = 8'hab", "[8:11]", 11),
+        ("logic [11:4] D = 8'hxa", "[7:4]", 10),
+    ] {
+        for import in ["import cfg::*;", "import cfg::D;", ""] {
+            let reference = if import.is_empty() { "cfg::D" } else { "D" };
+            let source = format!(
+                "package cfg; parameter {declaration}; endpackage \
+             module Top; {import} localparam N = {reference}{selection}; \
+             localparam BITS = $bits(N); endmodule"
+            );
+            let ir = analyze_source(&source, Path::new("imported_parameter_select.sv")).unwrap();
+            let parameters = ir.modules()[0].parameters();
+            assert_eq!(
+                parameters[0].resolved_value(),
+                Some(expected),
+                "{import}: {declaration}"
+            );
+            assert_eq!(parameters[0].resolved_width(), Some(4), "{import}");
+            assert_eq!(parameters[1].resolved_value(), Some(4), "{import}");
+        }
+    }
+    let source = "package cfg; parameter logic [11:4] D = 8'hab; endpackage \
+                  module Top #(parameter N = cfg::D[7:4])(output int value); \
+                  assign value = N; endmodule";
+    let ir = analyze_source(source, Path::new("imported_header_parameter_select.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
+    let parsed =
+        ParsedSource::parse(source, Path::new("imported_header_parameter_select.sv")).unwrap();
+    let packages = ParsedSource::analyze_packages_with_roots(&[&parsed], &["Top"]).unwrap();
+    let ir = parsed
+        .analyze_module(
+            "Top",
+            &HashMap::default(),
+            &[],
+            &ModuleInterfaces::default(),
+            &packages,
+        )
+        .unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
+}
+
+#[test]
+fn preserves_unknown_out_of_range_constant_parameter_elements() {
+    for (declaration, selection, width, is_x) in [
+        ("logic [1:0][7:4] W = 8'hab", "W[2][5]", 1, true),
+        ("logic [1:0][7:4] W = 8'hab", "W[0][8]", 1, true),
+        ("logic [1:0][7:4] W = 8'hab", "W[2]", 4, true),
+        ("logic [1:0][63:0] W = 128'h1", "W[2][5]", 1, true),
+        ("bit [1:0][7:4] W = 8'hab", "W[2][5]", 1, false),
+        ("bit [1:0][7:4] W = 8'hab", "W[0][8]", 1, false),
+    ] {
+        let source = format!(
+            "module Top; parameter {declaration}; \
+             localparam N = {selection}; localparam BITS = $bits(N); \
+             localparam IS_X = N === 'x; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("out_of_range_parameter_select.sv"))
+            .unwrap_or_else(|error| panic!("{selection}: {error}"));
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(
+            parameters[1].resolved_value(),
+            if is_x { None } else { Some(0) },
+            "{selection}"
+        );
+        assert_eq!(parameters[1].resolved_width(), Some(width), "{selection}");
+        assert_eq!(parameters[1].resolved_signed(), Some(false), "{selection}");
+        assert_eq!(parameters[2].resolved_value(), Some(width as i128));
+        assert_eq!(
+            parameters[3].resolved_value(),
+            Some(i128::from(is_x)),
+            "{selection}"
+        );
+    }
+}
+
+#[test]
 fn rejects_unrepresentable_constant_parameter_selections() {
     for selection in ["W[MISSING:0]", "W[0][3:0]", "W[0][1]"] {
         let source = format!(

@@ -240,6 +240,56 @@
   (assert_eq implicit_sum 0)
   (assert_eq known_low 10))
 
+(case constant_parameter_initializers_preserve_imported_shapes
+  (source "imported_parameter_selections.sv" #"
+    package cfg;
+      parameter logic [11:4] D = 8'hab;
+      parameter logic [4:11] U = 8'hab;
+      parameter logic [11:4] X = 8'hxa;
+    endpackage
+    package other;
+      parameter logic [7:0] D = 8'hcd;
+    endpackage
+    module Child #(parameter N = cfg::D[7:4])(output logic [3:0] value);
+      assign value = N;
+    endmodule
+    module Shadow(output logic [3:0] value);
+      import cfg::*;
+      localparam D = 8'hab;
+      localparam N = D[3:0];
+      assign value = N;
+    endmodule
+    module Top(output int down, up, qualified, header, shadow, known_low, width, generated);
+      import cfg::*;
+      localparam DOWN = D[7:4];
+      localparam UP = U[8:11];
+      localparam QUALIFIED = cfg::D[7:4];
+      localparam KNOWN_LOW = X[7:4];
+      localparam WIDTH = $bits(DOWN);
+      assign down = DOWN;
+      assign up = UP;
+      assign qualified = QUALIFIED;
+      assign known_low = KNOWN_LOW;
+      assign width = WIDTH;
+      Child child(.value(header));
+      Shadow local_shadow(.value(shadow));
+      if (1) begin : local_import
+        import other::D;
+        localparam N = D[7:4];
+        assign generated = N;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq down 11)
+  (assert_eq up 11)
+  (assert_eq qualified 11)
+  (assert_eq header 11)
+  (assert_eq shadow 11)
+  (assert_eq known_low 10)
+  (assert_eq generated 12)
+  (assert_eq width 4))
+
 (case constant_parameter_initializers_shape_ports_and_generate
   (source "constant_parameter_widths.sv" #"
     module Child #(parameter logic [31:0] W = 18,
@@ -452,7 +502,8 @@
                     output logic [3:0] size_base, bits_base, offset_base, up_base, outer_base, whole_base,
                     output logic [7:0] size_width, bits_width,
                     output int packed_down, packed_up, outer_down, outer_up,
-                        selected_bit, selected_width);
+                        selected_bit, selected_width, invalid_width,
+                    output logic [2:0] invalid_is_x);
                     assign size_base = data[$size(P[0]) +: 4];
                     assign bits_base = data[$bits(P[0]) +: 4];
                     assign offset_base = data[$size(OFFSET[1]) +: 4];
@@ -470,12 +521,19 @@
                     localparam OUTER_UP = UP[1:1];
                     localparam SELECTED_BIT = OFFSET[1][5];
                     localparam SELECTED_WIDTH = $bits(PACKED_DOWN);
+                    localparam INVALID_OUTER = OFFSET[3][5];
+                    localparam INVALID_INNER = OFFSET[1][8];
+                    localparam INVALID_ELEMENT = OFFSET[3];
+                    localparam INVALID_WIDTH = $bits(INVALID_OUTER);
                     assign packed_down = PACKED_DOWN;
                     assign packed_up = PACKED_UP;
                     assign outer_down = OUTER_DOWN;
                     assign outer_up = OUTER_UP;
                     assign selected_bit = SELECTED_BIT;
                     assign selected_width = SELECTED_WIDTH;
+                    assign invalid_is_x = {INVALID_OUTER === 1'bx,
+                        INVALID_INNER === 1'bx, INVALID_ELEMENT === 4'bxxxx};
+                    assign invalid_width = INVALID_WIDTH;
                 endmodule
             "#)
   (top Top)
@@ -491,7 +549,9 @@
   (assert_eq outer_down 10)
   (assert_eq outer_up 10)
   (assert_eq selected_bit 1)
-  (assert_eq selected_width 4))
+  (assert_eq selected_width 4)
+  (assert_eq invalid_is_x 7)
+  (assert_eq invalid_width 1))
 
 (case indexed_widths_accept_replication_concatenations
   (source "indexed_replication_widths.sv" #"

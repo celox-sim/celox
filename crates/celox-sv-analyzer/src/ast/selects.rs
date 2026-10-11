@@ -1802,6 +1802,56 @@ fn indexed_constant_expression(
                     syntax_tree,
                 )
                 .ok_or_else(|| unsupported("parameter name"))?;
+                // A valid-rank packed element selection outside its declared
+                // range yields X (zero for two-state values), with the width
+                // of the remaining dimensions (IEEE 1800-2023 11.5.1).
+                // Handle it before lvalue flattening can fall back to the base.
+                let bit_selects = &parameter.nodes.1.nodes.1.nodes.0;
+                if parameter.nodes.1.nodes.2.is_none()
+                    && !bit_selects.is_empty()
+                    && let Some(variable) = dimensions.get(&name)
+                    && variable.unpacked.is_empty()
+                    && bit_selects.len() <= variable.packed.len()
+                {
+                    let indices = bit_selects
+                        .iter()
+                        .map(|bit_select| {
+                            indexed_select_base(
+                                RefNode::ConstantExpression(&bit_select.nodes.1),
+                                syntax_tree,
+                                dimensions,
+                            )
+                        })
+                        .collect::<Converted<Vec<_>>>()?;
+                    if indices.iter().zip(&variable.packed).any(|(index, range)| {
+                        const_expr_is_out_of_range(
+                            index,
+                            &range.left,
+                            &range.right,
+                            &dimensions.const_env,
+                        )
+                    }) {
+                        let width = product_expr(
+                            &variable.packed[indices.len()..]
+                                .iter()
+                                .map(|range| range.width.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        let width = eval_ast_const_expr(&width, &dimensions.const_env)
+                            .and_then(|width| usize::try_from(width).ok())
+                            .ok_or_else(|| unsupported("constant parameter element width"))?;
+                        let signing = if selects_signed_element(&name, indices.len(), dimensions) {
+                            "s"
+                        } else {
+                            ""
+                        };
+                        let digit = if variable.is_2state { "0" } else { "x" };
+                        return Ok(Expr::Literal(format!(
+                            "{width}'{signing}b{}",
+                            digit.repeat(width)
+                        )));
+                    }
+                }
                 let selected = lvalue_from_constant_select(
                     name.clone(),
                     &parameter.nodes.1,

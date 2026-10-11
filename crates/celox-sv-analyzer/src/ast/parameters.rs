@@ -450,12 +450,14 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
                 if selects::parameter_initializer_needs_typed_selection(expr) {
+                    let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
-                        parameter_packed_dimensions(parameters),
+                        parameter_packed_dimensions_with_imported(parameters, &imported),
                         const_env,
                         type_aliases,
                     );
-                    dimensions.parameter_values = parameter_value_env(parameters, const_env).into();
+                    dimensions.parameter_values =
+                        parameter_value_env_with_imported(parameters, const_env, &imported).into();
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.

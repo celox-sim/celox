@@ -1405,6 +1405,18 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
     scope
         .parameters
         .retain(|parameter| parameter.name() != name);
+    // Keep the imported binding's shape and four-state literal as well as its
+    // numeric markers. Later localparam selections must use this block's
+    // import, which can shadow a module import with different declared bounds.
+    if let Some(parameter) = scope::imported()
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name() == target)
+    {
+        let mut parameter = parameter.clone();
+        parameter.name = name.to_string();
+        scope.parameters.push(parameter);
+    }
 }
 
 // Bootstrap only module-scope functions; collecting the full function map would
