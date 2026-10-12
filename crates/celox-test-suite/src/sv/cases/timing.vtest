@@ -656,3 +656,25 @@
  endmodule"#)
  (top Top) (set clk 1) (run_until 0) (assert_eq q 0)
  (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))
+
+(case else_prefixed_instance_is_not_an_else_action
+ (source "elsewhere.sv" #"module elsewhere; endmodule
+ module Top(input bit clk,en,output bit q);
+   always_ff @(posedge clk) if(en) q<=1;
+   elsewhere u();
+ endmodule"#)
+ (top Top) (set en 1) (set clk 1) (run_until 0) (assert_eq q 1))
+
+(case nested_imports_do_not_leak_into_module_edge_processes
+ (source "imports.sv" #"package A;
+   task automatic tick(output bit value); value=1; endtask
+ endpackage
+ package B;
+   task automatic tick(output bit value); #1 value=1; endtask
+ endpackage
+ module Top(input bit clk,output bit q);
+   import A::tick;
+   if(1) begin : nested import B::tick; end
+   always @(posedge clk) tick(q);
+ endmodule"#)
+ (top Top) (set clk 1) (run_until 0) (assert_eq q 1))

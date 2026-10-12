@@ -19,7 +19,6 @@ use crate::{
 /// decoration and waveform capture outside the backend-independent scheduler.
 pub trait SimulationExecutor {
     type Backend: SimBackend;
-
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
@@ -1496,6 +1495,10 @@ impl<B: SimBackend> SimulationState<B> {
 
         executor.eval_comb()?;
         self.round_evaluated = true;
+        if executor.finish_requested(current_time) {
+            self.finished = true;
+            return Ok(true);
+        }
         if track_stable_edges {
             // Combinational settling before an active scheduled source domain
             // commits may expose transient derived-clock edges. In that case,
@@ -1528,7 +1531,8 @@ impl<B: SimBackend> SimulationState<B> {
                 if can_use_eval_apply {
                     let single_id = marked_bits.iter().next().expect("one marked trigger");
                     let info = self.event_info[single_id];
-                    can_use_eval_apply = !info.is_cascaded;
+                    can_use_eval_apply =
+                        !info.is_cascaded && !self.active_ff_domains.contains(info.canonical_id);
                     if can_use_eval_apply {
                         if let Some(event) = info.eval_ff_event {
                             discovered_in_this_step.insert(single_id);
@@ -1540,6 +1544,10 @@ impl<B: SimBackend> SimulationState<B> {
                             self.record_domain_publication(executor.backend(), info.canonical_id);
                             executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
+                            if executor.finish_requested(current_time) {
+                                self.finished = true;
+                                return Ok(true);
+                            }
                             if track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
                             }
@@ -1580,6 +1588,10 @@ impl<B: SimBackend> SimulationState<B> {
                             "FF trigger discovered without a corresponding execution unit"
                         );
                     }
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
                     ff_body_edges
                         .union_with(&self.process_counter_edges(executor.backend(), &before));
                 }
@@ -1606,6 +1618,10 @@ impl<B: SimBackend> SimulationState<B> {
                         || !triggered_domains.is_disjoint(&self.active_ff_domains)
                     {
                         executor.eval_comb()?;
+                        if executor.finish_requested(current_time) {
+                            self.finished = true;
+                            return Ok(true);
+                        }
                         self.replace_triggers_with_stable_edges(executor.backend_mut());
                         for id in ff_body_edges.iter() {
                             executor.backend_mut().mark_triggered_bit(id);
@@ -1664,6 +1680,10 @@ impl<B: SimBackend> SimulationState<B> {
                         self.process_counter_edges(executor.backend(), &inactive_counter_values);
                     driven.union_with(&ff_body_edges);
                     executor.eval_comb()?;
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
                     if let Some(before) = inactive_samples {
                         executor.backend_mut().clear_triggered_bits();
                         for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
@@ -1721,6 +1741,10 @@ impl<B: SimBackend> SimulationState<B> {
                 comb_already_done = false;
             } else {
                 executor.eval_comb()?;
+                if executor.finish_requested(current_time) {
+                    self.finished = true;
+                    return Ok(true);
+                }
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
                 }
@@ -1741,6 +1765,10 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                     }
                     executor.eval_comb()?;
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
                     if track_stable_edges {
                         if driven.is_empty() {
                             self.replace_triggers_with_stable_edges(executor.backend_mut());

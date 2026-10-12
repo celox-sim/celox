@@ -1862,3 +1862,35 @@ fn single_iteration_comb_loops_do_not_hide_event_edges() {
         assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{body}");
     }
 }
+
+#[test]
+fn nba_pulses_across_ff_bodies_require_an_ordered_queue() {
+    let code = "module Top(input bit clk);bit a,b;always @(posedge clk) a<=1;always @(posedge clk) b<=1;initial @(a^b); endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("ff_batches.sv"))], "Top")
+        .build()
+        .expect_err("cross-process NBA pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
+#[test]
+fn comb_pulses_across_processes_are_rejected() {
+    let code = "module Top(input bit a);wire[1:0]q;assign q[0]=a;assign q[1]=a;initial @(posedge(q[0]^q[1])); endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("comb_batches.sv"))], "Top")
+        .build()
+        .expect_err("cross-process comb pulse")
+        .to_string();
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+#[test]
+fn rtl_finish_stops_following_stores_and_nbas() {
+    for body in [
+        "always_comb begin q=0; if(go) begin $finish; q=1; end end",
+        "always @(posedge go) begin q<=1; $finish; q=1; end",
+    ] {
+        let code = format!("module Top(output bit q);bit go;initial #1 go=1;{body} endmodule");
+        let mut sim = simulation(&code);
+        sim.run_until(2).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into(), "{body}");
+    }
+}

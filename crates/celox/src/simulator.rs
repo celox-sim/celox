@@ -976,6 +976,21 @@ mod host {
             }
         }
 
+        pub(crate) fn has_pending_runtime_finish(&self) -> bool {
+            if !self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| matches!(site.kind, RuntimeEventKind::Finish))
+            {
+                return false;
+            }
+            self.peek_backend_runtime_events_from(self.runtime_event_read_seq.load(Ordering::Acquire)).iter().any(|event| {
+                matches!(event,RawRuntimeEvent::Event{site_id,..} if self.program.runtime_schema.runtime_event_sites.get(*site_id).is_some_and(|site|matches!(site.kind,RuntimeEventKind::Finish)))
+            })
+        }
+
         fn peek_backend_runtime_events_from(&self, read_seq: u64) -> Vec<RawRuntimeEvent> {
             let mut read_seq = read_seq;
             let layout = self.backend.layout();
