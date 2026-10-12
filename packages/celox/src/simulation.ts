@@ -437,6 +437,10 @@ export class Simulation<P = Record<string, unknown>> {
 		if (this._handle.time() > endTime) return;
 		const needsHostPoll = this.needsHostPoll();
 		this.settleSharedWrites();
+		if (this.isFinished()) {
+			this._state.pendingHostWrites = false;
+			return;
+		}
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
 			this._state.pendingHostWrites = false;
@@ -552,6 +556,11 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {
+			this.settleSharedWrites();
+			if (this.isFinished()) {
+				this._state.pendingHostWrites = false;
+				break;
+			}
 			// An exhausted queue is a normal completion, even when the budget is
 			// already spent. Preserve that behavior instead of reporting a timeout.
 			if (

@@ -39,6 +39,8 @@ pub(super) struct Ff<'p, 'a> {
     b: SIRBuilder<Addr>,
     /// Variables assigned with blocking stores.
     working: HashSet<SourceVarId>,
+    /// Persistent static locals use stable state, including in FF bodies.
+    persistent: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
     nonblocking_targets: Vec<(SourceVarId, BitAccess)>,
@@ -110,6 +112,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             m,
             b: SIRBuilder::new(),
             working: HashSet::default(),
+            persistent: HashSet::default(),
             targets: Vec::new(),
             nonblocking_targets: Vec::new(),
             nonblocking_store: false,
@@ -135,6 +138,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let variable = self.aliases.get(&id).copied().unwrap_or(id);
         if self.kernel.is_some()
             || self.event_counter_state.contains(&variable)
+            || self.persistent.contains(&variable)
             || (self.working.contains(&variable) && !self.m.is_hidden(variable))
         {
             stable(*self.private.get(&id).unwrap_or(&id))
@@ -161,7 +165,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if blocking {
             self.working.insert(id);
         }
-        if self.m.is_hidden(id) {
+        if self.m.is_hidden(id) && !self.persistent.contains(&id) {
             return;
         }
         let variable = self.m.var(id);
@@ -218,6 +222,20 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Collect the variables a body writes, following calls into subroutines.
     fn scan(&mut self, stmts: &[sv::ir::Stmt], visited: &mut HashSet<String>) {
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local {
+                    name,
+                    r#static: true,
+                    ..
+                } = stmt
+                {
+                    if let Some(id) = self.m.id(name) {
+                        self.persistent.insert(id);
+                    }
+                }
+            });
+        }
         let mut writes: Vec<(sv::ir::LValue, bool)> = Vec::new();
         for stmt in stmts {
             stmt.walk(&mut |stmt| match stmt {
@@ -281,12 +299,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let working_set = &self.working;
         let variables = &*self.m.variables;
         let counters = &self.event_counter_state;
+        let persistent = &self.persistent;
         let direct = self.kernel.is_some();
         let map = |id: &SourceVarId| -> Addr {
             if direct {
                 let id = aliases.get(id).unwrap_or(id);
                 stable(*private.get(id).unwrap_or(id))
-            } else if counters.contains(id) {
+            } else if counters.contains(id) || persistent.contains(id) {
                 stable(*id)
             } else if let Some(var) = aliases.get(id) {
                 if !self.nonblocking_store

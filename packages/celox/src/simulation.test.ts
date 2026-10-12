@@ -873,3 +873,21 @@ test("past targets preserve pending host writes for a valid later run", () => {
 	);
 	sim.dispose();
 });
+
+for (const method of ["runUntil", "waitUntil"] as const) {
+	test(`${method} observes host-write finish before a zero step budget`, () => {
+		const { create, handle } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		handle.isFinished = vi.fn().mockReturnValue(false);
+		vi.mocked(handle.evalComb).mockImplementation(() => {
+			vi.mocked(handle.isFinished!).mockReturnValue(true);
+		});
+		sim.dut.d = 1n;
+		if (method === "runUntil") sim.runUntil(10, { maxSteps: 0 });
+		else expect(sim.waitUntil(() => false, { maxSteps: 0 })).toBe(0);
+		expect(sim.isFinished()).toBe(true);
+		expect(handle.stepUntil).not.toHaveBeenCalled();
+		expect(handle.step).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}
