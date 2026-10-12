@@ -72,6 +72,41 @@ function graph() {
 	};
 }
 
+test.each(["/", "C:/"])(
+	"catalogue events recognize the filesystem root %s",
+	async (root) => {
+		platform.windows = root === "C:/";
+		const plugin = celox({ projectRoot: root });
+		await (plugin.configResolved as Function)({ root });
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const changes = vi.fn();
+		watcher.on("change", changes);
+		(plugin.configureServer as Function)({
+			watcher,
+			httpServer: new EventEmitter(),
+			config: { server: { hmr: true } },
+		});
+		for (const event of ["add", "unlink"])
+			watcher.emit(event, `${root}rtl/New.veryl`);
+		expect(changes).toHaveBeenCalledTimes(2);
+		expect(changes).toHaveBeenCalledWith(`${root}Veryl.toml`);
+	},
+);
+
+test("the watcher includes a custom project directory outside the Vite root", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-external-"));
+	roots.push(root);
+	const plugin = celox({ projectRoot: root });
+	await (plugin.configResolved as Function)({ root: join(root, "tests") });
+	const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+	(plugin.configureServer as Function)({
+		watcher,
+		config: { server: { hmr: true } },
+		environments: {},
+	});
+	expect(watcher.add).toHaveBeenCalledWith(expect.arrayContaining([root]));
+});
+
 test("Windows project imports resolve to a loadable dependency module", async () => {
 	platform.windows = true;
 	const { plugin, context } = await initialize("C:/project");
