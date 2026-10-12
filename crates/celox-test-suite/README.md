@@ -93,8 +93,9 @@ behavioral model and verifies that incorrect results are rejected.
 - A design with `Design::timed` is driven by `run_until` and `run_to_finish`
   instead of `tick`: the simulator runs the design's own processes, delays
   and clocks. `run_until` advances to the given time in the design's time
-  units and fails when the design has finished by then; `run_to_finish` runs
-  until a process calls `$finish` and fails when the events run out first. A
+  units and fails when the design has finished by then; `run_to_finish` rejects
+  an already-finished design, runs until a process calls `$finish`, and fails
+  when the events run out first. A
   `write` in a timed case takes effect at the current time, and `eval_comb`
   also resumes the processes it woke, as a simulator's settle step does. A
   time later than `RUN_UNTIL_LIMIT` (`i64::MAX / 1000`) is out of range in
@@ -257,8 +258,9 @@ external adapters. `tick` cannot be mixed with timed operations.
 Reads, output collection and `eval` settle processes due at the current
 timestamp without advancing time. External scripted adapters use an Icarus
 read/write synchronization callback or a Verilator clocking event sampled in
-the observed region. Initial blocks and plain time-zero `always` processes start after pre-run input
-writes settle. Internal control names are chosen to avoid source identifiers.
+the observed region. Initial blocks and all `always` processes start after
+pre-run input writes settle. Internal control names are chosen to avoid source
+identifiers.
 `run_until` drains its target timestamp before subsequent writes. Only checks
 may follow `run_to_finish`; they run in a `final` block that sees the script's
 top-level bindings. There is no simulated-time deadline: final checks require

@@ -415,3 +415,14 @@
   (top Top)
   (run_to_finish)
   (assert_eq done 1))
+
+(case event_always_processes_start_after_host_inputs
+  (source "event_start.sv" #"module Top(input bit a, output bit y);
+    bit seen=0;
+    always @(a) seen=1;
+    initial y=seen;
+  endmodule"#)
+  (top Top)
+  (set a 1)
+  (run_until 0)
+  (assert_eq y 0))

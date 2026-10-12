@@ -91,3 +91,9 @@ sv_backends! {
         @case "timing::timed_control_names_do_not_collide_with_design_names";
     }
 }
+
+sv_backends! {
+    fn event_always_processes_start_after_host_inputs(sim) {
+        @case "timing::event_always_processes_start_after_host_inputs";
+    }
+}

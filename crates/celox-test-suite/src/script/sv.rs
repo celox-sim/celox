@@ -981,6 +981,10 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     let (before_finish, after_finish) = case.split_at_finish();
     generator.block_at(before_finish, true)?;
     if after_finish.is_some() {
+        generator.line("if (celox_suite_timed_control::finished) begin");
+        generator.line("  $display(\"@suite assert the design finished before run_to_finish\");");
+        generator.line("  $fatal(1, \"run_to_finish started after design finish\");");
+        generator.line("end");
         generator.line("suite_reached_finish = 1;");
         generator.line("settle_now();");
         generator.line("wait (1'b0);");
