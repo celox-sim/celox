@@ -1090,6 +1090,7 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().clear_triggered_bits();
 
                 let mut can_use_eval_apply = self.processes.is_empty()
+                    && self.process_event_counters.is_empty()
                     && triggered_domains.is_empty()
                     && marked_bits.count() == 1;
                 if can_use_eval_apply {
@@ -1114,6 +1115,7 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                 }
 
+                let mut ff_body_edges = BitSet::with_capacity(num_events);
                 for id in marked_bits.iter() {
                     if discovered_in_this_step.contains(id) {
                         continue;
@@ -1127,6 +1129,7 @@ impl<B: SimBackend> SimulationState<B> {
                     triggered_domains.insert(info.canonical_id);
                     newly_triggered.push(info.canonical_id);
 
+                    let before = self.event_counter_values(executor.backend());
                     if let Some(event) = info.eval_only_event {
                         executor.stage_external_event(
                             info.eval_ff_event.unwrap_or(event),
@@ -1141,11 +1144,15 @@ impl<B: SimBackend> SimulationState<B> {
                             "FF trigger discovered without a corresponding execution unit"
                         );
                     }
+                    ff_body_edges.union_with(&self.counter_edges(executor.backend(), &before));
                 }
 
                 // Working-region writes become visible only when this NBA
                 // batch is published; discover their cascade edges then.
                 executor.backend_mut().clear_triggered_bits();
+                for id in ff_body_edges.iter() {
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
                 // Inactive-region (#0) continuations run after the active
                 // FF evaluations and before the pending NBA publications.
                 // Drain active evaluations before promoting another inactive
@@ -1157,7 +1164,13 @@ impl<B: SimBackend> SimulationState<B> {
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
-                    if ready.is_empty() || self.finished {
+                    if self.finished {
+                        break;
+                    }
+                    if ready.is_empty() {
+                        if !ff_body_edges.is_empty() {
+                            continue;
+                        }
                         break;
                     }
                     // A new inactive batch may create a fresh occurrence of
@@ -1271,6 +1284,31 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         Ok(true)
+    }
+
+    fn event_counter_values(&self, backend: &B) -> Vec<(u32, u32)> {
+        self.process_event_counters
+            .iter()
+            .map(|(_, rises, falls)| (backend.get_as(*rises), backend.get_as(*falls)))
+            .collect()
+    }
+
+    fn counter_edges(&self, backend: &B, before: &[(u32, u32)]) -> BitSet {
+        let mut edges = BitSet::with_capacity(backend.num_events());
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let changed = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    backend.get_as::<u32>(*falls) != *old_falls
+                }
+                _ => backend.get_as::<u32>(*rises) != *old_rises,
+            };
+            if changed {
+                edges.insert(*id);
+            }
+        }
+        edges
     }
 
     /// Whether a change of event signal `id` from `was_nonzero` to

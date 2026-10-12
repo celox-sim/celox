@@ -1298,6 +1298,9 @@ pub fn schedule_symbolic_rtl(
                 })
         })
         .collect::<Vec<_>>();
+    for counters in &mut process_event_counters {
+        counters.signal = events.canonical(counters.signal);
+    }
     process_event_counters
         .sort_unstable_by_key(|counters| (counters.signal, counters.rises, counters.falls));
     let process_read_roots = process_event_counters
