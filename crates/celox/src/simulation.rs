@@ -531,8 +531,12 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Advance time and run until `end_time` (inclusive). As for
-    /// [`Self::step`], processes that a host write woke resume first.
+    /// [`Self::step`], processes that a host write woke resume first. A time
+    /// before the current time leaves the simulation unchanged.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        if end_time < self.state.time() {
+            return Ok(());
+        }
         self.settle_host_writes()?;
         self.state
             .poll_waiting_until(&mut self.simulator, end_time)?;
@@ -1496,5 +1500,111 @@ mod bounded_clock_phase_tests {
             Some(5)
         );
         assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    fn check_past_limit<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(100).unwrap();
+        let gate = sim.signal("gate");
+        let seen = sim.signal("seen");
+        sim.set_wide(gate, 1u8.into());
+        sim.run_until(60).unwrap();
+        assert_eq!(sim.time(), 100);
+        assert_eq!(sim.get(seen), 0u8.into());
+        assert!(sim.has_waiting_processes());
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(seen), 1u8.into());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn past_run_limit_does_not_poll_waiters_or_rewind_time() {
+        let source = "module Top(input bit gate, output bit seen); initial begin wait(gate); seen=1; end endmodule";
+        let builder =
+            || Simulation::from_sv_sources(vec![(source, std::path::Path::new("past.sv"))], "Top");
+        check_past_limit(builder().build_interpreter().unwrap());
+        check_past_limit(builder().build_cranelift().unwrap());
+        check_past_limit(builder().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_past_limit(builder().build_native().unwrap());
+    }
+
+    fn coincident_design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let byte = ValueType::bits(8).unwrap();
+        let mut module = ModuleBuilder::new("Coincident").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let other = module.internal("other", bit).unwrap();
+        let count = module.output("count", byte).unwrap();
+        let sampled = module.output("sampled", byte).unwrap();
+        let seen = module.output("seen", bit).unwrap();
+        let count_expr = module.read(count).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        let two = module.constant(Constant::two_state(2u8, 8).unwrap());
+        let next = module.binary(BinaryOp::Add, count_expr, one, byte).unwrap();
+        let target = module.whole(count).unwrap();
+        module
+            .register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        let target = module.whole(sampled).unwrap();
+        module
+            .register(target, count_expr, other, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let target = module.whole(seen).unwrap();
+        let value = module.read(clk).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: one,
+                },
+                Statement::Assign { target, value },
+            ])
+            .unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            }])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check_coincident<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("other", 4, 1).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 1u8.into());
+        assert_eq!(sim.ticks(), 2);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.time(), 4);
+        assert_eq!(sim.ticks(), 2);
+    }
+
+    #[test]
+    fn clock_wait_resumes_before_coincident_generated_edge() {
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_native()
+                .unwrap(),
+        );
     }
 }

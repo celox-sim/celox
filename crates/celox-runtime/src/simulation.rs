@@ -467,9 +467,10 @@ impl<B: SimBackend> SimulationState<B> {
             })
             .map(|(id, _)| *id)
             .collect();
+        let mut generated_events = Vec::new();
         for id in &rising {
             let clock = &self.tick_clocks[id];
-            events_to_process.push(SimEvent {
+            generated_events.push(SimEvent {
                 time: current_time,
                 event_ref: clock.event,
                 signal: clock.signal,
@@ -477,7 +478,14 @@ impl<B: SimBackend> SimulationState<B> {
             });
         }
         let ready = self.take_ready_processes(current_time);
-        self.step_round(executor, current_time, events_to_process, ready, true)?;
+        self.step_round(
+            executor,
+            current_time,
+            events_to_process,
+            generated_events,
+            ready,
+            true,
+        )?;
         self.credit_rising_edges(current_time, rising)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
@@ -529,7 +537,9 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 break;
             }
-            if !self.step_round(executor, current_time, Vec::new(), ready, false)? && !fired {
+            if !self.step_round(executor, current_time, Vec::new(), Vec::new(), ready, false)?
+                && !fired
+            {
                 break;
             }
         }
@@ -570,7 +580,7 @@ impl<B: SimBackend> SimulationState<B> {
                 rising.push(*id);
             }
         }
-        self.step_round(executor, time, events, Vec::new(), true)?;
+        self.step_round(executor, time, events, Vec::new(), Vec::new(), true)?;
         self.credit_rising_edges(time, rising)
     }
 
@@ -628,7 +638,8 @@ impl<B: SimBackend> SimulationState<B> {
         // The fused kernel runs the waited-on clock's domain alone: a design
         // whose registers drive another clock or reset needs the scheduler's
         // rounds, and a clock that is high now needs its normalizing fall.
-        if !executor.fused_ticks_allowed()
+        if time > limit
+            || !executor.fused_ticks_allowed()
             || self.domain_kinds[clock] != Some(DomainKind::ClockPosedge)
             || !self.inactive.is_empty()
             || !self.waiting.is_empty()
@@ -744,11 +755,11 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        if self.finished || self.waiting.is_empty() {
+        if self.finished || self.waiting.is_empty() || self.scheduler.time > limit {
             return Ok(false);
         }
         let time = self.scheduler.time;
-        if !self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
+        if !self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false)? {
             return Ok(false);
         }
         self.run_remaining_rounds(executor, time, limit)?;
@@ -933,7 +944,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(None);
         }
         let ready = self.take_ready_processes(time);
-        self.step_round(executor, time, Vec::new(), ready, true)?;
+        self.step_round(executor, time, Vec::new(), Vec::new(), ready, true)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
         self.run_remaining_rounds(executor, time, time)?;
@@ -949,7 +960,8 @@ impl<B: SimBackend> SimulationState<B> {
         &mut self,
         executor: &mut E,
         current_time: u64,
-        events_to_process: Vec<SimEvent<B>>,
+        mut events_to_process: Vec<SimEvent<B>>,
+        generated_events: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
         settle_idle: bool,
     ) -> Result<bool, SimulatorErrorCode>
@@ -1016,6 +1028,14 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
         }
+
+        // A completed clock wait resumes before the following generated
+        // rising edge. Apply that edge after the ready processes, then join
+        // it to scheduled triggers so coincident FF domains share one batch.
+        for event in &generated_events {
+            executor.backend_mut().set(event.signal, event.next_val);
+        }
+        events_to_process.extend(generated_events);
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
