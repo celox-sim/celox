@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 
 const aliases = vi.hoisted(() => new Map<string, string>());
+const unlinkFailures = vi.hoisted(() => new Map<string, string>());
+const vanishedDirectories = vi.hoisted(() => new Set<string>());
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
 	// Emulate filesystem aliases left by a case-only rename. readdirSync keeps
@@ -26,6 +28,19 @@ vi.mock("node:fs", async (importOriginal) => {
 		writeFileSync: (path: any, data: any, options: any) =>
 			fs.writeFileSync(alias(path), data, options),
 		statSync: (path: any, options: any) => fs.statSync(alias(path), options),
+		unlinkSync: (path: any) => {
+			const code = unlinkFailures.get(String(path));
+			if (code) {
+				if (code === "ENOENT") fs.unlinkSync(path);
+				throw Object.assign(new Error(`cleanup ${code}`), { code });
+			}
+			return fs.unlinkSync(path);
+		},
+		readdirSync: (path: any, options: any) => {
+			if (vanishedDirectories.delete(String(path)))
+				fs.rmSync(path, { recursive: true });
+			return fs.readdirSync(path, options);
+		},
 	};
 });
 
@@ -38,6 +53,8 @@ import type { GenTsJsonOutput } from "../../vite-plugin/src/types.js";
 const roots: string[] = [];
 afterEach(() => {
 	aliases.clear();
+	unlinkFailures.clear();
+	vanishedDirectories.clear();
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
 });
@@ -183,4 +200,80 @@ test("actual filesystem preserves a declaration after a case-only source rename"
 	expect(readFileSync(written, "utf8")).toBe(
 		"export declare const Main: {};\n",
 	);
+});
+
+test.each([
+	{ previous: "Caf\u00e9", next: "Cafe\u0301" },
+	{ previous: "\u03a3", next: "\u03c2" },
+	{ previous: "\u1e9e", next: "\u00df" },
+])(
+	"startup and watch cleanup preserve Unicode aliases ($previous to $next)",
+	({ previous, next }) => {
+		const root = project();
+		const oldPath = join(root, ".celox/src", `${previous}.d.veryl.ts`);
+		const nextPath = join(root, ".celox/src", `${next}.d.veryl.ts`);
+		writeFileSync(oldPath, "old declaration");
+		aliases.set(nextPath, oldPath);
+		aliases.set(
+			join(root, "src", `${next}.veryl`),
+			join(root, "src/Main.veryl"),
+		);
+		const output = {
+			...data(root),
+			fileModules: { [`src/${next}.veryl`]: ["Main"] },
+		};
+		expect(generateSidecars(output, root)).toEqual([nextPath]);
+		cleanSidecars([oldPath], [nextPath]);
+		expect(existsSync(oldPath)).toBe(true);
+		expect(readFileSync(oldPath, "utf8")).toBe(
+			"export declare const Main: {};\n",
+		);
+	},
+);
+
+test("startup removes distinct normalization-sensitive obsolete declarations", (context) => {
+	const root = project();
+	const oldPath = join(root, ".celox/src/Caf\u00e9.d.veryl.ts");
+	const nextPath = join(root, ".celox/src/Cafe\u0301.d.veryl.ts");
+	writeFileSync(oldPath, "orphan declaration");
+	if (existsSync(nextPath))
+		context.skip("filesystem aliases normalized spellings");
+	writeFileSync(join(root, "src/Cafe\u0301.veryl"), "module Main {}\n");
+	const output = {
+		...data(root),
+		fileModules: { "src/Cafe\u0301.veryl": ["Main"] },
+	};
+	generateSidecars(output, root);
+	expect(existsSync(oldPath)).toBe(false);
+	expect(existsSync(nextPath)).toBe(true);
+});
+
+test("startup tolerates another process deleting an observed orphan", () => {
+	const root = project();
+	const ghost = join(root, ".celox/src/Removed.d.veryl.ts");
+	writeFileSync(ghost, "orphan declaration");
+	unlinkFailures.set(ghost, "ENOENT");
+	expect(() => generateSidecars(data(root), root)).not.toThrow();
+	expect(existsSync(ghost)).toBe(false);
+	expect(existsSync(join(root, ".celox/src/Main.d.veryl.ts"))).toBe(true);
+});
+
+test("startup tolerates an orphan directory disappearing before traversal", () => {
+	const root = project();
+	const dir = join(root, ".celox/removed");
+	mkdirSync(dir);
+	writeFileSync(join(dir, "Removed.d.veryl.ts"), "orphan declaration");
+	vanishedDirectories.add(dir);
+	expect(() => generateSidecars(data(root), root)).not.toThrow();
+	expect(existsSync(dir)).toBe(false);
+	expect(existsSync(join(root, ".celox/src/Main.d.veryl.ts"))).toBe(true);
+});
+
+test("startup cleanup reports genuine I/O failures", () => {
+	const root = project();
+	const ghost = join(root, ".celox/src/Removed.d.veryl.ts");
+	writeFileSync(ghost, "orphan declaration");
+	unlinkFailures.set(ghost, "EACCES");
+	expect(() => generateSidecars(data(root), root)).toThrow("cleanup EACCES");
+	expect(existsSync(ghost)).toBe(true);
 });

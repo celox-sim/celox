@@ -1,4 +1,5 @@
 import {
+	type Dirent,
 	existsSync,
 	mkdirSync,
 	readdirSync,
@@ -66,17 +67,21 @@ export function generateSidecars(
 function retainedSidecars(paths: string[]): Map<string, string[]> {
 	const retained = new Map<string, string[]>();
 	for (const path of paths) {
-		const key = path.toLowerCase();
+		const key = sidecarKey(path);
 		retained.set(key, [...(retained.get(key) ?? []), path]);
 	}
 	return retained;
+}
+
+function sidecarKey(path: string): string {
+	return path.normalize("NFC").toLowerCase().toUpperCase().normalize("NFC");
 }
 
 function isRetainedSidecar(
 	path: string,
 	retained: Map<string, string[]>,
 ): boolean {
-	const candidates = retained.get(path.toLowerCase());
+	const candidates = retained.get(sidecarKey(path));
 	if (!candidates) return false;
 	if (candidates.includes(path)) return true;
 	// A case-only rename may leave the old directory-entry spelling. Confirm
@@ -92,16 +97,28 @@ function removeOrphanSidecars(
 	dir: string,
 	retained: Map<string, string[]>,
 ): void {
-	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+	let entries: Dirent<string>[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		return;
+	}
+	for (const entry of entries) {
 		const path = join(dir, entry.name);
-		if (entry.isDirectory()) {
-			removeOrphanSidecars(path, retained);
-		} else if (
-			entry.isFile() &&
-			entry.name.endsWith(".d.veryl.ts") &&
-			!isRetainedSidecar(path, retained)
-		) {
-			unlinkSync(path);
+		try {
+			if (entry.isDirectory()) {
+				removeOrphanSidecars(path, retained);
+			} else if (
+				entry.isFile() &&
+				entry.name.endsWith(".d.veryl.ts") &&
+				!isRetainedSidecar(path, retained)
+			) {
+				unlinkSync(path);
+			}
+		} catch (error) {
+			// Another server may have cleaned this entry after readdir/stat.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
 	}
 }
