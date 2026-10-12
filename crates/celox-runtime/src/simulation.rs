@@ -455,8 +455,10 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
-        self.scheduled_clock_drives.make_empty();
-        self.scheduled_clock_time = current_time;
+        if self.scheduled_clock_time != current_time {
+            self.scheduled_clock_drives.make_empty();
+            self.scheduled_clock_time = current_time;
+        }
         for event in &events_to_process {
             self.scheduled_clock_drives.insert(event.event_ref.id());
             if let Some(id) = self.signal_to_id.get(&event.signal) {
@@ -1524,6 +1526,8 @@ impl<B: SimBackend> SimulationState<B> {
             done: self.done.clone(),
             ticks: self.ticks,
             inactive: self.inactive.clone(),
+            scheduled_clock_drives: self.scheduled_clock_drives.clone(),
+            scheduled_clock_time: self.scheduled_clock_time,
             finished: self.finished,
         }
     }
@@ -1577,6 +1581,9 @@ impl<B: SimBackend> SimulationState<B> {
         self.done.clone_from(&snapshot.done);
         self.ticks = snapshot.ticks;
         self.inactive.clone_from(&snapshot.inactive);
+        self.scheduled_clock_drives
+            .clone_from(&snapshot.scheduled_clock_drives);
+        self.scheduled_clock_time = snapshot.scheduled_clock_time;
         self.finished = snapshot.finished;
         Ok(())
     }
@@ -1754,6 +1761,8 @@ pub struct SimulationSnapshot<B: SimBackend> {
     done: BTreeSet<usize>,
     ticks: u64,
     inactive: BTreeSet<usize>,
+    scheduled_clock_drives: BitSet,
+    scheduled_clock_time: u64,
     finished: bool,
 }
 
@@ -1772,6 +1781,8 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             done: self.done.clone(),
             ticks: self.ticks,
             inactive: self.inactive.clone(),
+            scheduled_clock_drives: self.scheduled_clock_drives.clone(),
+            scheduled_clock_time: self.scheduled_clock_time,
             finished: self.finished,
         }
     }

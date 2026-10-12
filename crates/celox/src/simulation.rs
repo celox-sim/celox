@@ -1854,3 +1854,59 @@ mod clock_failure_progress_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod clock_provenance_checkpoint_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", ValueType::bits(1).unwrap()).unwrap();
+        let q = m.output("q", ValueType::bits(1).unwrap()).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let value = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(q).unwrap();
+        m.register(target, value, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        m.process(vec![
+            Statement::Delay { amount: one },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("clk", 0, 1).unwrap();
+        assert_eq!(sim.step().unwrap(), Some(0));
+        let checkpoint = sim.checkpoint().unwrap();
+        sim.run_until(2).unwrap();
+        sim.restore(&checkpoint).unwrap();
+        // Model a host waking the suspended process at the restored timestamp.
+        let mut parts = sim.state.export_schedule(&sim.simulator.backend);
+        parts.process_wakeups = vec![(0, 0)];
+        sim.state.import_schedule(parts);
+        let error = sim.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(sim.ticks(), 0);
+    }
+    #[test]
+    fn restored_clock_drive_provenance_rejects_a_same_time_generator() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
