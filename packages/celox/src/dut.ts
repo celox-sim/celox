@@ -29,6 +29,8 @@ import { isFourStateValue } from "./types.js";
  */
 export interface DirtyState {
 	dirty: boolean;
+	/** Input writes still need scheduler polling, even after a lazy comb read. */
+	pendingHostWrites?: boolean;
 	disposed?: boolean;
 }
 
@@ -451,6 +453,7 @@ function defineSignalProperty(
 			}
 
 			state.dirty = true;
+			state.pendingHostWrites = true;
 		},
 
 		enumerable: true,
@@ -826,6 +829,7 @@ function createArrayDut(
 				if (is4state) storage.write(index, true, 0n);
 			}
 			state.dirty = true;
+			state.pendingHostWrites = true;
 		},
 	};
 }
