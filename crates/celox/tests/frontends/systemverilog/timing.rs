@@ -147,3 +147,8 @@ sv_backends! {
  fn else_prefixed_instance_is_not_an_else_action(sim) { @case "timing::else_prefixed_instance_is_not_an_else_action"; }
  fn nested_imports_do_not_leak_into_module_edge_processes(sim) { @case "timing::nested_imports_do_not_leak_into_module_edge_processes"; }
 }
+
+sv_backends! {
+ fn single_item_case_generate_ff_is_staged_together(sim){@case "timing::single_item_case_generate_ff_is_staged_together";}
+ fn timed_expansion_preserves_adapter_macros(sim){@case "timing::timed_expansion_preserves_adapter_macros";}
+}

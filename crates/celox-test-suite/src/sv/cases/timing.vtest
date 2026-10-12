@@ -678,3 +678,21 @@
    always @(posedge clk) tick(q);
  endmodule"#)
  (top Top) (set clk 1) (run_until 0) (assert_eq q 1))
+
+(case single_item_case_generate_ff_is_staged_together
+ (source "case.sv" #"module Top(input bit clk,output bit q,seen);
+ localparam MODE=0;
+ case(MODE) 0:always_ff @(posedge clk)q<=1;default:always_ff @(posedge clk)q<=0;endcase
+ initial seen=q;
+ endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq seen 0)(assert_eq q 1))
+
+(case timed_expansion_preserves_adapter_macros
+ (source "macros.sv" #"module Top(output bit q);
+ `ifdef CELOX_SUITE_ICARUS
+ initial begin q=1;#1;$finish;end
+ `else
+ initial begin q=1;#1;$finish;end
+ `endif
+ endmodule"#)
+ (top Top)(run_to_finish)(assert_eq q 1))

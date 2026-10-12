@@ -177,7 +177,9 @@ fn single_generate_body(source: &str, start: usize) -> bool {
             last_word = &source[begin..at];
             control_end = (last_word == "else").then_some(at);
         } else {
-            if !source.as_bytes()[at].is_ascii_whitespace() {
+            if source.as_bytes()[at] == b':' {
+                control_end = Some(at + 1);
+            } else if !source.as_bytes()[at].is_ascii_whitespace() {
                 control_end = None;
                 last_word = "";
             }
@@ -232,7 +234,7 @@ pub(super) fn gated(
     } else {
         staged
     };
-    Ok((body_end, staged))
+    Ok((body_end, format!("{staged}\n")))
 }
 
 /// The frontend classifies an ordinary always as FF only when every leaf
@@ -515,6 +517,7 @@ impl TaskTiming {
             .into_values()
             .rev()
             .find_map(|(explicit, wildcard)| explicit.or(wildcard))
+            .or_else(|| self.tasks.get(&format!("::{name}")).copied())
     }
 
     fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {
