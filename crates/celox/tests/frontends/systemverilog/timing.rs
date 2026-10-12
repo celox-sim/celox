@@ -142,3 +142,8 @@ sv_backends! {
  fn local_function_shadows_unrelated_timed_task(sim) { @case "timing::local_function_shadows_unrelated_timed_task"; }
  fn explicit_timed_import_overrides_earlier_wildcard(sim) { @case "timing::explicit_timed_import_overrides_earlier_wildcard"; }
 }
+
+sv_backends! {
+ fn else_prefixed_instance_is_not_an_else_action(sim) { @case "timing::else_prefixed_instance_is_not_an_else_action"; }
+ fn nested_imports_do_not_leak_into_module_edge_processes(sim) { @case "timing::nested_imports_do_not_leak_into_module_edge_processes"; }
+}

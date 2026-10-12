@@ -110,7 +110,9 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
             let body = statement_end(source, end)?;
             let next = trivia(source, body);
             if matches!(keyword, Some("if" | "assert" | "assume"))
-                && source[next..].starts_with("else")
+                && sv_words(&source[next..])
+                    .first()
+                    .is_some_and(|word| word.0 == 0 && word.2 == "else")
             {
                 statement_end(source, next + 4)
             } else {
@@ -149,6 +151,42 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
     }
 }
 
+fn single_generate_body(source: &str, start: usize) -> bool {
+    let mut at = 0;
+    let mut last_word = "";
+    let mut control_end = None;
+    while at < start {
+        if skip_token(source, &mut at) {
+            continue;
+        }
+        if source.as_bytes()[at] == b'(' {
+            if let Some(end) = parens(source, at) {
+                control_end = matches!(last_word, "if" | "for").then_some(end);
+                at = end;
+                continue;
+            }
+        }
+        if source.as_bytes()[at].is_ascii_alphabetic() || source.as_bytes()[at] == b'_' {
+            let begin = at;
+            at += 1;
+            while at < start
+                && (source.as_bytes()[at].is_ascii_alphanumeric() || source.as_bytes()[at] == b'_')
+            {
+                at += 1;
+            }
+            last_word = &source[begin..at];
+            control_end = (last_word == "else").then_some(at);
+        } else {
+            if !source.as_bytes()[at].is_ascii_whitespace() {
+                control_end = None;
+                last_word = "";
+            }
+            at += 1;
+        }
+    }
+    control_end.is_some_and(|end| trivia(source, end) == start)
+}
+
 pub(super) fn gated(
     source: &str,
     start: usize,
@@ -181,15 +219,20 @@ pub(super) fn gated(
     };
     let armed = fresh("armed");
     let pending = fresh("pending");
-    let scope = fresh("scope");
     let package = &names.package;
     let event = &source[begin + 1..event_end - 1];
-    Ok((
-        body_end,
-        format!(
-            "if (1) begin : {scope}\nbit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend\nend else begin end"
-        ),
-    ))
+    let staged = format!(
+        "bit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
+    );
+    // A single generate item needs a block for the additional declarations.
+    // Reuse that construct's unnamed body rather than inserting another if,
+    // which would change the user's implicit genblkN numbering.
+    let staged = if single_generate_body(source, start) {
+        format!("begin\n{staged}\nend")
+    } else {
+        staged
+    };
+    Ok((body_end, staged))
 }
 
 /// The frontend classifies an ordinary always as FF only when every leaf
@@ -333,6 +376,25 @@ fn container_at(source: &str, at: usize) -> String {
     scope
 }
 
+// Scope identities include their source offsets so closed sibling blocks
+// cannot make their imports visible at a later module item.
+fn lexical_scope_at(source: &str, at: usize) -> Vec<usize> {
+    let mut scopes = Vec::new();
+    for (start, _, word) in sv_words(&source[..at]) {
+        match word {
+            "module" | "interface" | "package" | "begin" | "fork" | "task" | "function" => {
+                scopes.push(start)
+            }
+            "endmodule" | "endinterface" | "endpackage" | "end" | "join" | "join_any"
+            | "join_none" | "endtask" | "endfunction" => {
+                scopes.pop();
+            }
+            _ => {}
+        }
+    }
+    scopes
+}
+
 impl TaskTiming {
     pub(super) fn new(sources: &[String]) -> Self {
         let mut result = Self::default();
@@ -417,8 +479,8 @@ impl TaskTiming {
         if let Some(value) = self.tasks.get(&format!("{scope}::{name}")) {
             return Some(*value);
         }
-        let mut explicit = None;
-        let mut wildcard = None;
+        let call_scope = lexical_scope_at(source, at);
+        let mut imports: BTreeMap<usize, (Option<bool>, Option<bool>)> = BTreeMap::new();
         for (start, end, word) in sv_words(&source[..at]) {
             if word != "import" {
                 continue;
@@ -427,6 +489,11 @@ impl TaskTiming {
             if !import_scope.is_empty() && import_scope != scope {
                 continue;
             }
+            let lexical = lexical_scope_at(source, start);
+            if !call_scope.starts_with(&lexical) {
+                continue;
+            }
+            let (explicit, wildcard) = imports.entry(lexical.len()).or_default();
             let tail = &source[end..];
             let clause = &tail[..tail.find(';')?];
             let words = sv_words(clause);
@@ -437,14 +504,17 @@ impl TaskTiming {
             if selected == Some(name) || (selected.is_none() && clause.contains('*')) {
                 if let Some(value) = self.tasks.get(&format!("{package}::{name}")) {
                     if selected == Some(name) {
-                        explicit = Some(*value);
+                        *explicit = Some(*value);
                     } else {
-                        wildcard = Some(wildcard.unwrap_or(false) || *value);
+                        *wildcard = Some(wildcard.unwrap_or(false) || *value);
                     }
                 }
             }
         }
-        explicit.or(wildcard)
+        imports
+            .into_values()
+            .rev()
+            .find_map(|(explicit, wildcard)| explicit.or(wildcard))
     }
 
     fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {
