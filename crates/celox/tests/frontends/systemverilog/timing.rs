@@ -137,3 +137,8 @@ sv_backends! {
  fn printed_finish_notice_is_design_output(sim) { @case "timing::printed_finish_notice_is_design_output"; }
  fn combinational_finish_ends_timed_execution(sim) { @case "timing::combinational_finish_ends_timed_execution"; }
 }
+
+sv_backends! {
+ fn local_function_shadows_unrelated_timed_task(sim) { @case "timing::local_function_shadows_unrelated_timed_task"; }
+ fn explicit_timed_import_overrides_earlier_wildcard(sim) { @case "timing::explicit_timed_import_overrides_earlier_wildcard"; }
+}

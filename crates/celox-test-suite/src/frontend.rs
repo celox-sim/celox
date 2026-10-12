@@ -333,4 +333,27 @@ mod timed_staging_tests {
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    #[ignore = "requires Verilator and a C++ compiler; Icarus rejects deferred assertions"]
+    fn deferred_assertions_retain_staged_edges() {
+        let text = r##"(group deferred (category sequential))
+          (case assertion (source "assert.sv" #"module Top(input bit clk,output bit q,seen);
+            task accept; q<=1; endtask
+            task reject; q<=0; endtask
+            always @(posedge clk) assert #0 (1) accept(); else reject();
+            initial seen=q;
+          endmodule"#) (top Top) (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 1))"##;
+        let case = load_group("deferred.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/deferred-assertion-protocol")
+            .join(std::process::id().to_string());
+        let mut backend = celox_test_suite::verilator::Verilator::build_script(
+            &celox_test_suite::sv::verification::SvFrontend,
+            case,
+            &root,
+        )
+        .unwrap();
+        backend.run_testbench().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

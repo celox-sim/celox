@@ -2708,15 +2708,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // This FF representation has one pending value per destination.
-        // Ordered NBA pulses require an update queue; reject watched targets
-        // whose intermediate values would otherwise be silently lost.
-        let mut watched_nbas = HashSet::default();
-        for (id, _) in &self.nonblocking_targets {
-            if self.m.watchers_by_var.contains_key(id) && !watched_nbas.insert(*id) {
-                return Err(unsupported(format!(
-                    "multiple nonblocking assignments to event-watched variable `{}` require ordered NBA updates",
-                    self.m.var(*id).path[0]
-                )));
+        // Ordered pulses are unsupported only when a feasible path updates
+        // a watched expression more than once.
+        for watcher in &self.m.event_watchers {
+            if watched_nba_count(body, self.m, &watcher.expr, &mut HashSet::default()) > 1 {
+                return Err(unsupported(
+                    "multiple nonblocking assignments affecting an event expression require ordered NBA updates",
+                ));
             }
         }
         // Merge the written ranges of each variable.
@@ -2981,6 +2979,120 @@ impl Ff<'_, '_> {
     }
 }
 
+/// Count NBA updates along one feasible path that affect this expression.
+fn watched_nba_count(
+    stmts: &[sv::ir::Stmt],
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    visiting: &mut HashSet<String>,
+) -> usize {
+    let mut names = HashSet::default();
+    expr_idents(expr, &mut names);
+    subroutine_reads(pm, expr, &mut names);
+    let affects = |target: &sv::ir::LValue| {
+        if !names.contains(target.name()) {
+            return false;
+        }
+        // A fixed select depends only on the selected bits, so updates of
+        // disjoint bits do not need an ordered queue for this watcher.
+        if let sv::ir::Expr::Select {
+            expr: base,
+            msb,
+            lsb,
+            ..
+        } = expr
+            && matches!(&**base,sv::ir::Expr::Ident(name) if name==target.name())
+            && let sv::ir::LValue::Select {
+                msb: written_msb,
+                lsb: written_lsb,
+                ..
+            } = target
+        {
+            let eval = |value| {
+                sv::typecheck::eval_const_expr_with_types(value, pm.constants, pm.parameter_types)
+            };
+            if let (Some(a), Some(b), Some(c), Some(d)) =
+                (eval(msb), eval(lsb), eval(written_msb), eval(written_lsb))
+            {
+                return a.min(b) <= c.max(d) && c.min(d) <= a.max(b);
+            }
+        }
+        true
+    };
+    let mut total = 0usize;
+    for stmt in stmts {
+        let mut count = match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: true,
+                ..
+            } => usize::from(affects(lhs)),
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                nonblocking: true,
+                ..
+            } => usize::from(parts.iter().any(affects)),
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => watched_nba_count(then_body, pm, expr, visiting)
+                .max(watched_nba_count(else_body, pm, expr, visiting)),
+            sv::ir::Stmt::Case { items, default, .. } => items
+                .iter()
+                .map(|item| item.body.as_slice())
+                .chain(default.iter().map(Vec::as_slice))
+                .map(|body| watched_nba_count(body, pm, expr, visiting))
+                .max()
+                .unwrap_or(0),
+            sv::ir::Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                let trips = loop_trip_cap(kind, init, condition.as_ref(), step, &|expr| {
+                    known_loop_value(
+                        expr,
+                        pm.variables,
+                        pm.name_to_id,
+                        pm.constants,
+                        pm.parameter_types,
+                    )
+                });
+                watched_nba_count(init, pm, expr, visiting)
+                    + trips
+                        * (watched_nba_count(body, pm, expr, visiting)
+                            + watched_nba_count(step, pm, expr, visiting))
+            }
+            _ => 0,
+        };
+        let mut calls = Vec::new();
+        stmt_calls(stmt, &mut calls);
+        for (name, args) in calls {
+            if visiting.insert(name.clone()) {
+                if let Some(subroutine) = pm.subroutine(&name) {
+                    count += watched_nba_count(&subroutine.body, pm, expr, visiting);
+                    let mut defaults = Vec::new();
+                    default_calls(subroutine, &args, &mut defaults);
+                    for (name, _) in defaults {
+                        if visiting.insert(name.clone()) {
+                            if let Some(subroutine) = pm.subroutine(&name) {
+                                count += watched_nba_count(&subroutine.body, pm, expr, visiting);
+                            }
+                            visiting.remove(&name);
+                        }
+                    }
+                }
+                visiting.remove(&name);
+            }
+        }
+        total = (total + count).min(2);
+    }
+    total
+}
+
 /// Declare the watchers of the event expressions the processes `bodies`, or
 /// the subroutines they call, wait on. A kernel's store to a variable such
 /// an expression reads then records the events it makes, so an event a
@@ -3055,15 +3167,20 @@ pub fn declare_event_counters(
         let mut names = HashSet::default();
         expr_idents(&expr, &mut names);
         subroutine_reads(pm, &expr, &mut names);
-        if names
-            .iter()
-            .filter(|name| pm.combinational.contains(*name))
-            .count()
-            > 1
+        if names.iter().any(|name| pm.combinational.contains(name))
+            && names.iter().filter(|name| pm.id(name).is_some()).count() > 1
         {
-            return Err(unsupported(
-                "event expression reading multiple combinationally driven variables",
-            ));
+            let construct = if names
+                .iter()
+                .filter(|name| pm.combinational.contains(*name))
+                .count()
+                > 1
+            {
+                "event expression reading multiple combinationally driven variables"
+            } else {
+                "event expression reading a combinationally driven variable together with other variables"
+            };
+            return Err(unsupported(construct));
         }
         if position < explicit_expressions
             && names

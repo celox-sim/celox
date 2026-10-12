@@ -18,6 +18,15 @@ impl<B: SimBackend> TimedBackend<B> {
             .any(|event| matches!(event, RuntimeEvent::Finish));
         self.1.extend(events);
     }
+    fn settle_checked(&mut self) -> Result<()> {
+        let already_finished = self.finished();
+        self.0.settle()?;
+        self.capture_events();
+        if !already_finished && self.finished() {
+            return Err("the design finished outside run_to_finish during settling".into());
+        }
+        Ok(())
+    }
     fn finished(&self) -> bool {
         self.0.is_finished() || self.2
     }
@@ -63,8 +72,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
-        self.0.settle()?;
-        self.capture_events();
+        self.settle_checked()?;
         let signal = signal_of(&self.0, path);
         Ok(self.0.get_four_state(signal))
     }
@@ -72,8 +80,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     /// Settling also resumes the processes the writes woke, as the external
     /// simulators' settle step does.
     fn eval_comb(&mut self) -> Result<()> {
-        self.0.settle()?;
-        self.capture_events();
+        self.settle_checked()?;
         Ok(())
     }
 
@@ -82,8 +89,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn take_output(&mut self) -> Result<String> {
-        self.0.settle()?;
-        self.capture_events();
+        self.settle_checked()?;
         collect_output(std::mem::take(&mut self.1))
     }
 
@@ -282,17 +288,29 @@ fn run_to_finish_rejects_a_finish_during_an_earlier_settle() {
         let go = backend.0.signal("go");
         backend.0.set_wide(go, 1u8.into());
         match operation {
-            0 => backend.eval_comb().unwrap(),
+            0 => assert!(
+                backend
+                    .eval_comb()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finished outside")
+            ),
             1 => {
                 backend
                     .read(&SignalPath {
                         instances: Vec::new(),
                         name: "done".into(),
                     })
-                    .unwrap();
+                    .unwrap_err();
             }
             _ => {
-                backend.take_output().unwrap();
+                assert!(
+                    backend
+                        .take_output()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("finished outside")
+                );
             }
         }
         assert!(
