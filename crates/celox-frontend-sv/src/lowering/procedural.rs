@@ -171,7 +171,11 @@ impl<'a> ProcModule<'a> {
         let comb_writes = module
             .comb_processes()
             .iter()
-            .map(|process| combinational_write_counts(process.body(), &subroutines))
+            .map(|process| {
+                combinational_write_counts(process.body(), &subroutines, &|expr| {
+                    known_loop_value(expr, variables, name_to_id, constants, parameter_types)
+                })
+            })
             .collect::<Vec<_>>();
         let hidden_comb_pulses = comb_writes
             .iter()
@@ -2282,15 +2286,84 @@ pub(super) type EventWatchPlan = (
     Vec<SourceVarId>,
 );
 
+pub(super) fn known_loop_value(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    ids: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Option<usize> {
+    let mut arena = SLTNodeArena::new();
+    let (node, _) = lower_expr_with_context(
+        expr, variables, ids, constants, types, &mut arena, None, None,
+    )?;
+    let (value, _) = slt_const(&arena, &mut ConstCache::default(), node)?;
+    value.to_usize()
+}
+
+/// Maximum relevant iterations, capped at two for hidden-pulse analysis.
+pub(super) fn loop_trip_cap(
+    kind: &sv::ir::LoopKind<sv::ir::Expr>,
+    init: &[sv::ir::Stmt],
+    condition: Option<&sv::ir::Expr>,
+    step: &[sv::ir::Stmt],
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
+) -> usize {
+    use sv::ir::LoopKind;
+    match kind {
+        LoopKind::Repeat(count) => eval(count).unwrap_or(2).min(2),
+        LoopKind::While if condition.and_then(eval) == Some(0) => 0,
+        LoopKind::DoWhile if condition.and_then(eval) == Some(0) => 1,
+        LoopKind::For => {
+            let Some(loop_) = canonical_for_loop(init, condition, step) else {
+                return 2;
+            };
+            let Some(start) = eval(&loop_.start) else {
+                return 2;
+            };
+            let Some(end) = eval(&loop_.end) else {
+                return 2;
+            };
+            let holds = |value| match loop_.compare {
+                sv::ir::BinaryOp::Lt => value < end,
+                sv::ir::BinaryOp::Le => value <= end,
+                sv::ir::BinaryOp::Gt => value > end,
+                sv::ir::BinaryOp::Ge => value >= end,
+                sv::ir::BinaryOp::Ne => value != end,
+                _ => true,
+            };
+            if !holds(start) {
+                return 0;
+            }
+            if loop_.step_op != celox_slt::SLTStepOp::Add {
+                return 2;
+            }
+            let next = if loop_.decreasing {
+                start.checked_sub(loop_.step)
+            } else {
+                start.checked_add(loop_.step)
+            };
+            if next.is_some_and(|value| !holds(value)) {
+                1
+            } else {
+                2
+            }
+        }
+        _ => 2,
+    }
+}
+
 /// Variables whose combinational process can write them repeatedly in one run.
 fn combinational_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
 ) -> HashMap<String, usize> {
     fn counts(
         stmts: &[sv::ir::Stmt],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
     ) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
@@ -2309,8 +2382,8 @@ fn combinational_write_counts(
                     else_body,
                     ..
                 } => {
-                    next = counts(then_body, subroutines, visiting);
-                    for (name, count) in counts(else_body, subroutines, visiting) {
+                    next = counts(then_body, subroutines, visiting, eval);
+                    for (name, count) in counts(else_body, subroutines, visiting, eval) {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry).max(count);
                     }
@@ -2321,21 +2394,27 @@ fn combinational_write_counts(
                         .map(|item| item.body.as_slice())
                         .chain(default.iter().map(Vec::as_slice))
                     {
-                        for (name, count) in counts(body, subroutines, visiting) {
+                        for (name, count) in counts(body, subroutines, visiting, eval) {
                             let entry = next.entry(name).or_default();
                             *entry = (*entry).max(count);
                         }
                     }
                 }
                 sv::ir::Stmt::Loop {
-                    init, body, step, ..
+                    kind,
+                    init,
+                    condition,
+                    body,
+                    step,
                 } => {
-                    next = counts(init, subroutines, visiting);
-                    for (name, _) in counts(body, subroutines, visiting)
+                    next = counts(init, subroutines, visiting, eval);
+                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, eval);
+                    for (name, count) in counts(body, subroutines, visiting, eval)
                         .into_iter()
-                        .chain(counts(step, subroutines, visiting))
+                        .chain(counts(step, subroutines, visiting, eval))
                     {
-                        next.insert(name, 2);
+                        let entry = next.entry(name).or_default();
+                        *entry = (*entry + count * trips).min(2);
                     }
                 }
                 _ => {}
@@ -2343,7 +2422,7 @@ fn combinational_write_counts(
             let mut calls = Vec::new();
             stmt_calls(stmt, &mut calls);
             for (name, args) in calls {
-                for (name, count) in call_counts(&name, &args, subroutines, visiting) {
+                for (name, count) in call_counts(&name, &args, subroutines, visiting, eval) {
                     let entry = next.entry(name).or_default();
                     *entry = (*entry + count).min(2);
                 }
@@ -2360,13 +2439,14 @@ fn combinational_write_counts(
         args: &[Option<sv::ir::Expr>],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
     ) -> HashMap<String, usize> {
         if !visiting.insert(name.to_string()) {
             return HashMap::default();
         }
         let mut result = HashMap::default();
         if let Some(subroutine) = subroutines.get(name) {
-            result = counts(&subroutine.body, subroutines, visiting);
+            result = counts(&subroutine.body, subroutines, visiting, eval);
             for param in &subroutine.params {
                 result.remove(&param.name);
             }
@@ -2386,7 +2466,7 @@ fn combinational_write_counts(
             let mut defaults = Vec::new();
             default_calls(subroutine, args, &mut defaults);
             for (name, args) in defaults {
-                for (name, count) in call_counts(&name, &args, subroutines, visiting) {
+                for (name, count) in call_counts(&name, &args, subroutines, visiting, eval) {
                     let entry = result.entry(name).or_default();
                     *entry = (*entry + count).min(2);
                 }
@@ -2395,5 +2475,5 @@ fn combinational_write_counts(
         visiting.remove(name);
         result
     }
-    counts(stmts, subroutines, &mut HashSet::default())
+    counts(stmts, subroutines, &mut HashSet::default(), eval)
 }
