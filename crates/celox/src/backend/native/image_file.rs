@@ -6,7 +6,7 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-const CONTAINER_VERSION: u16 = 12;
+const CONTAINER_VERSION: u16 = 13;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -260,4 +260,26 @@ fn checksum(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })
+}
+
+#[cfg(test)]
+mod runtime_schema_version_tests {
+    use super::*;
+
+    #[test]
+    fn previous_native_schema_is_rejected_before_postcard_decoding() {
+        let payload = b"not a NativeProgramImage";
+        let previous = CONTAINER_VERSION - 1;
+        let mut bytes = payload.to_vec();
+        bytes.extend_from_slice(TRAILER_MAGIC);
+        bytes.extend_from_slice(&previous.to_le_bytes());
+        bytes.push(NativeImageArchitecture::current() as u8);
+        bytes.push(0);
+        bytes.extend_from_slice(&(TRAILER_SIZE as u32).to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&checksum(payload).to_le_bytes());
+        assert!(
+            matches!(NativeProgramImage::from_container_bytes(&bytes),Err(NativeImageContainerError::UnsupportedVersion(version)) if version==previous)
+        );
+    }
 }
