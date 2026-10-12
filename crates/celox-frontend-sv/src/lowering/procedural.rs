@@ -115,7 +115,7 @@ impl<'a> ProcModule<'a> {
                 .max()
                 .unwrap_or_default(),
         );
-        let subroutines = module
+        let subroutines: HashMap<String, sv::ir::Subroutine> = module
             .subroutines()
             .iter()
             .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
@@ -168,6 +168,11 @@ impl<'a> ProcModule<'a> {
                 unpacked_bounds.insert(id, bounds);
             }
         }
+        let hidden_comb_pulses = module
+            .comb_processes()
+            .iter()
+            .flat_map(|process| repeated_comb_writes(process.body(), &subroutines))
+            .collect();
         Self {
             variables,
             name_to_id,
@@ -210,11 +215,7 @@ impl<'a> ProcModule<'a> {
                     names
                 }))
                 .collect(),
-            hidden_comb_pulses: module
-                .comb_processes()
-                .iter()
-                .flat_map(|process| repeated_comb_writes(process.body()))
-                .collect(),
+            hidden_comb_pulses,
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
             static_initial_values: Vec::new(),
@@ -2277,8 +2278,15 @@ pub(super) type EventWatchPlan = (
 );
 
 /// Variables whose combinational process can write them repeatedly in one run.
-fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
-    fn counts(stmts: &[sv::ir::Stmt]) -> HashMap<String, usize> {
+fn repeated_comb_writes(
+    stmts: &[sv::ir::Stmt],
+    subroutines: &HashMap<String, sv::ir::Subroutine>,
+) -> HashSet<String> {
+    fn counts(
+        stmts: &[sv::ir::Stmt],
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        visiting: &mut HashSet<String>,
+    ) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
             let mut next: HashMap<String, usize> = HashMap::default();
@@ -2296,8 +2304,8 @@ fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
                     else_body,
                     ..
                 } => {
-                    next = counts(then_body);
-                    for (name, count) in counts(else_body) {
+                    next = counts(then_body, subroutines, visiting);
+                    for (name, count) in counts(else_body, subroutines, visiting) {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry).max(count);
                     }
@@ -2308,7 +2316,7 @@ fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
                         .map(|item| item.body.as_slice())
                         .chain(default.iter().map(Vec::as_slice))
                     {
-                        for (name, count) in counts(body) {
+                        for (name, count) in counts(body, subroutines, visiting) {
                             let entry = next.entry(name).or_default();
                             *entry = (*entry).max(count);
                         }
@@ -2317,10 +2325,19 @@ fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
                 sv::ir::Stmt::Loop {
                     init, body, step, ..
                 } => {
-                    next = counts(init);
-                    for (name, _) in counts(body).into_iter().chain(counts(step)) {
+                    next = counts(init, subroutines, visiting);
+                    for (name, _) in counts(body, subroutines, visiting)
+                        .into_iter()
+                        .chain(counts(step, subroutines, visiting))
+                    {
                         next.insert(name, 2);
                     }
+                }
+                sv::ir::Stmt::Call { name, .. } if visiting.insert(name.clone()) => {
+                    if let Some(subroutine) = subroutines.get(name) {
+                        next = counts(&subroutine.body, subroutines, visiting);
+                    }
+                    visiting.remove(name);
                 }
                 _ => {}
             }
@@ -2331,7 +2348,7 @@ fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
         }
         result
     }
-    counts(stmts)
+    counts(stmts, subroutines, &mut HashSet::default())
         .into_iter()
         .filter_map(|(name, count)| (count > 1).then_some(name))
         .collect()

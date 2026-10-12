@@ -544,7 +544,11 @@ export class Simulation<P = Record<string, unknown>> {
 		while (!condition()) {
 			// An exhausted queue is a normal completion, even when the budget is
 			// already spent. Preserve that behavior instead of reporting a timeout.
-			if (steps >= max && this._handle.nextEventTime() != null) {
+			if (
+				steps >= max &&
+				(this._handle.nextEventTime() != null ||
+					(this._state.pendingHostWrites ?? this._state.dirty))
+			) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
 					this._handle.time(),
@@ -755,7 +759,6 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const bytes = this._handle.saveState();
 		this._state.dirty = false;
-		this._state.pendingHostWrites = false;
 		return bytes;
 	}
 
@@ -775,7 +778,8 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.loadState(bytes);
 		this.syncClocks();
 		this._state.dirty = false;
-		this._state.pendingHostWrites = false;
+		// Loaded inputs may differ from the scheduler's last sampled state.
+		this._state.pendingHostWrites = true;
 	}
 
 	/** Release native resources. */

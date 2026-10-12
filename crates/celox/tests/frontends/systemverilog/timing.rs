@@ -117,4 +117,9 @@ sv_backends! {
     fn qualified_ff_startup_actions(sim) { @case "timing::qualified_ff_startup_actions"; }
     fn ordinary_edge_always_retains_staged_startup_edges(sim) { @case "timing::ordinary_edge_always_retains_staged_startup_edges"; }
     fn macro_ff_startup_actions(sim) { @case "timing::macro_ff_startup_actions"; }
+    fn macro_argument_process_keywords_are_expanded_before_staging(sim) { @case "timing::macro_argument_process_keywords_are_expanded_before_staging"; }
+    fn do_while_ff_bodies_are_staged_in_full(sim) { @case "timing::do_while_ff_bodies_are_staged_in_full"; }
+    fn wildcard_always_blocks_settle_staged_inputs(sim) { @case "timing::wildcard_always_blocks_settle_staged_inputs"; }
+    fn timed_edge_always_bodies_do_not_replay_setup_edges(sim) { @case "timing::timed_edge_always_bodies_do_not_replay_setup_edges"; }
+    fn timed_edge_always_task_calls_do_not_replay_setup_edges(sim) { @case "timing::timed_edge_always_task_calls_do_not_replay_setup_edges"; }
 }

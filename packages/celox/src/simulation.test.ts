@@ -758,3 +758,50 @@ test("a consumed host write does not keep charging a quiescent waiter", () => {
 	expect(handle.stepUntil).not.toHaveBeenCalled();
 	sim.dispose();
 });
+
+test("saving settled inputs preserves the pending host poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	handle.saveState = vi.fn(() => new Uint8Array([1]));
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	sim.saveState();
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+test("loaded state requires a budgeted host poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	handle.loadState = vi.fn();
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.loadState(new Uint8Array([1]));
+	expect(() => sim.runUntil(10, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.runUntil).not.toHaveBeenCalled();
+	sim.runUntil(10, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+test("waitUntil charges a host wake even with an empty event queue", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	let awake = false;
+	vi.mocked(handle.step).mockImplementation(() => {
+		awake = true;
+		return 0;
+	});
+	expect(() => sim.waitUntil(() => awake, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(awake).toBe(false);
+	sim.waitUntil(() => awake, { maxSteps: 1 });
+	expect(awake).toBe(true);
+	sim.dispose();
+});

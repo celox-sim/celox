@@ -497,3 +497,49 @@
     endmodule"#)
   (top Top) (set clk 1) (run_until 0)
   (assert_eq y 0) (assert_eq q 1))
+
+(case macro_argument_process_keywords_are_expanded_before_staging
+  (source "macro_arg.sv" #"`define FF(kind) kind @(posedge clk) q <= d;
+    module Top(input bit clk, d, output bit q, seen);
+      `FF(always_ff)
+      initial seen=q;
+    endmodule"#)
+  (top Top)
+  (set d 1) (set clk 1) (run_until 0)
+  (assert_eq seen 0) (assert_eq q 1))
+
+(case do_while_ff_bodies_are_staged_in_full
+  (source "do_while.sv" #"module Top(input bit clk, d, output bit q, seen);
+      always_ff @(posedge clk) do q <= d; while (0);
+      initial seen=q;
+    endmodule"#)
+  (top Top)
+  (set d 1) (set clk 1) (run_until 0)
+  (assert_eq seen 0) (assert_eq q 1))
+
+(case wildcard_always_blocks_settle_staged_inputs
+  (source "wildcard.sv" #"module Top(input bit a, output bit y, z);
+      always @(*) y=a;
+      always @* z=a;
+      initial #1;
+    endmodule"#)
+  (top Top)
+  (set a 1) (run_until 0) (assert_eq y 1) (assert_eq z 1))
+
+(case timed_edge_always_bodies_do_not_replay_setup_edges
+  (source "delayed.sv" #"module Top(input bit clk, output bit q);
+      always @(posedge clk) #1 q=1;
+    endmodule"#)
+  (top Top)
+  (set clk 1) (run_until 1) (assert_eq q 0)
+  (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))
+
+(case timed_edge_always_task_calls_do_not_replay_setup_edges
+  (source "task.sv" #"module Top(input bit clk, output bit q);
+      task tick; #1 q=1; endtask
+      task relay; tick(); endtask
+      always @(posedge clk) relay();
+    endmodule"#)
+  (top Top)
+  (set clk 1) (run_until 1) (assert_eq q 0)
+  (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))
