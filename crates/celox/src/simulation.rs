@@ -1984,6 +1984,58 @@ mod finish_clock_batch_tests {
     use super::*;
     use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
     #[test]
+    fn coincident_finish_suppresses_an_overflowing_next_edge() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(u64::MAX - 1).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let bit = ValueType::bits(1).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let dst = m.whole(q).unwrap();
+        m.register(dst, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 2).unwrap();
+        let start = m.constant(Constant::two_state(u64::MAX - 3, 64).unwrap());
+        let end = m.constant(Constant::two_state(u64::MAX - 1, 64).unwrap());
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![
+            Statement::Delay { amount: start },
+            Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            },
+        ])
+        .unwrap();
+        m.process(vec![Statement::Delay { amount: end }, Statement::Finish])
+            .unwrap();
+        let design = m.finish();
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_interpreter()
+                .unwrap(),
+        ));
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_cranelift()
+                .unwrap(),
+        ));
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_wasm()
+                .unwrap(),
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(
+            Simulator::from_frontend(design).build_native().unwrap(),
+        ));
+    }
+
+    #[test]
     fn finish_suppresses_coincident_generated_edges() {
         fn check<B: SimBackend>(mut sim: Simulation<B>, scheduled: bool) {
             if scheduled {

@@ -456,13 +456,6 @@ impl<B: SimBackend> SimulationState<B> {
         if current_time > limit {
             return Ok(None);
         }
-        for (id, clock) in &self.tick_clocks {
-            if clock.next_edge == current_time && self.clock_has_waiters(*id) {
-                current_time
-                    .checked_add(clock.period)
-                    .ok_or_else(|| clock_overflow(*id))?;
-            }
-        }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -1133,13 +1126,13 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             // Suppress generated edges queued before a ready process finished.
             self.round_new_rising.make_empty();
-            return Ok(false);
+            generated_events.clear();
         }
 
         // Ready processes may activate a clock at this timestamp. Join it
         // to existing source events before any coincident FF domain commits.
         // With no other event, retain the later fused-tick path.
-        if !events_to_process.is_empty() || !process_driven.is_empty() {
+        if !self.finished && (!events_to_process.is_empty() || !process_driven.is_empty()) {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
                     && self.clock_has_waiters(*id)
@@ -1168,6 +1161,12 @@ impl<B: SimBackend> SimulationState<B> {
         // A completed clock wait resumes before the following generated
         // rising edge. Apply that edge after the ready processes, then join
         // it to scheduled triggers so coincident FF domains share one batch.
+        for event in &generated_events {
+            let id = event.event_ref.id();
+            current_time
+                .checked_add(self.tick_clocks[&id].period)
+                .ok_or_else(|| clock_overflow(id))?;
+        }
         for event in &generated_events {
             executor.backend_mut().set(event.signal, event.next_val);
         }
