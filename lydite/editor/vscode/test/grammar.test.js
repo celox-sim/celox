@@ -223,8 +223,90 @@ input rst: bool;`;
 // An unbraced document may keep its first entry on the header line.
 samples.inline = `specification "Inline" component Counter { init true; invariant true; steps { tick = true; } }`;
 
+samples.review = `specification "Review" {
+  component Calls {
+    input use: bool;
+    input pre: bool;
+    input goal: bool;
+    input lhs: bool;
+    input rhs: bool;
+    init pre && goal && lhs && rhs;
+    invariant i.use == use;
+    use child: Child(flag: use);
+    example calls {
+      trace {
+        component() => true;
+        state(flag: true) => true;
+        use(flag: true) => true;
+        add(amount: if flag { add(bv, read(m, index)) } else { bv(4, 0) }) => true;
+        add(amount: (read(m, index))) => true;
+        add(amount:
+          add(read(m, index), 1u4)
+        ) => true;
+        component(
+          flag: true
+        ) => true;
+      }
+    }
+    invariant read
+      (s.mem, s.address) == word;
+    invariant custom
+      (s.value) == word;
+    outputs { read = s.value; }
+  }
+}`;
+
+// Nested expression braces must not end the surrounding proof context.
+samples.proofReview = `lemmas "Proof review" {
+  target check {
+    rhs spec.x';
+    lemma step {
+      context true;
+      guard pre && goal && lhs == rhs;
+      claim if pre { lhs } else { rhs };
+    }
+    use done: step(context: pre);
+    result done;
+  }
+}`;
+
+samples.proofExit = `design "Proof exit" {
+  proof { target check { rhs spec.x'; lemma step { context true; guard pre; claim goal; } } }
+  spec { state pre: bool; state goal: bool; init pre == goal; }
+}`;
+
 // [sample, line, token, occurrence, expected innermost scope]
 const expectations = [
+  ['review', '    input use: bool;', 'use', 1, 'variable.other.lydite'],
+  ['review', '    invariant i.use == use;', 'use', 1, 'variable.other.lydite'],
+  ['review', '    invariant i.use == use;', 'use', 2, 'variable.other.lydite'],
+  ['review', '    use child: Child(flag: use);', 'use', 1, 'keyword.control.lydite'],
+  ['review', '    use child: Child(flag: use);', 'use', 2, 'variable.other.lydite'],
+  ['review', '        component() => true;', 'component', 1, 'entity.name.function.lydite'],
+  ['review', '        state(flag: true) => true;', 'state', 1, 'entity.name.function.lydite'],
+  ['review', '        use(flag: true) => true;', 'use', 1, 'entity.name.function.lydite'],
+  ['review', '        add(amount: if flag { add(bv, read(m, index)) } else { bv(4, 0) }) => true;', 'add', 1, 'entity.name.function.lydite'],
+  ['review', '        add(amount: if flag { add(bv, read(m, index)) } else { bv(4, 0) }) => true;', 'add', 2, 'support.function.builtin.lydite'],
+  ['review', '        add(amount: if flag { add(bv, read(m, index)) } else { bv(4, 0) }) => true;', 'read', 1, 'support.function.builtin.lydite'],
+  ['review', '        add(amount: (read(m, index))) => true;', 'add', 1, 'entity.name.function.lydite'],
+  ['review', '        add(amount:', 'add', 1, 'entity.name.function.lydite'],
+  ['review', '          add(read(m, index), 1u4)', 'add', 1, 'support.function.builtin.lydite'],
+  ['review', '        component(', 'component', 1, 'entity.name.function.lydite'],
+  // A name with its opening parenthesis on a later line falls back locally.
+  ['review', '    invariant read', 'read', 1, 'variable.other.lydite'],
+  ['review', '    invariant custom', 'custom', 1, 'variable.other.lydite'],
+  ['review', '      (s.mem, s.address) == word;', 's', 1, 'variable.language.namespace.lydite'],
+  ['review', '    outputs { read = s.value; }', 'read', 1, 'variable.other.lydite'],
+  ...['pre', 'goal', 'lhs', 'rhs'].flatMap(word => [
+    ['review', `    input ${word}: bool;`, word, 1, 'variable.other.lydite'],
+    ['review', '    init pre && goal && lhs && rhs;', word, 1, 'variable.other.lydite'],
+    ['proofReview', '      guard pre && goal && lhs == rhs;', word, 1, 'variable.language.lydite']
+  ]),
+  ...['pre', 'lhs', 'rhs'].map(word => ['proofReview', '      claim if pre { lhs } else { rhs };', word, 1, 'variable.language.lydite']),
+  ['proofReview', '    use done: step(context: pre);', 'pre', 1, 'variable.language.lydite'],
+  ['proofExit', "  proof { target check { rhs spec.x'; lemma step { context true; guard pre; claim goal; } } }", 'pre', 1, 'variable.language.lydite'],
+  ['proofExit', '  spec { state pre: bool; state goal: bool; init pre == goal; }', 'pre', 2, 'variable.other.lydite'],
+  ['proofExit', '  spec { state pre: bool; state goal: bool; init pre == goal; }', 'goal', 2, 'variable.other.lydite'],
   ['design', 'design "Counter" {', 'design', 1, 'keyword.other.document.lydite'],
   ['design', 'design "Counter" {', 'Counter', 1, 'string.quoted.double.lydite'],
   ['design', 'design "Counter" {', '{', 1, 'punctuation.section.block.begin.lydite'],
