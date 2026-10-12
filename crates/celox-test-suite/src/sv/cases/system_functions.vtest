@@ -2336,3 +2336,21 @@ Time scale of (P) is 100ns / 10ps
   (assert_eq bits_c 48)
   (assert_eq size_e 2)
   (assert_eq body_bits 16))
+
+; Self-determined display arguments still propagate their own operation width
+; and signedness into context-determined operands (IEEE 1800-2023 11.8.2).
+(case display_expressions_propagate_operand_widths
+  (source "display_width.sv" #"
+module Top(input logic clk, input logic signed [7:0] sa,
+           input logic [7:0] a, b);
+    always_ff @(posedge clk)
+        $display("%0h %0d %0h %0h %0h %0h", sa + 1, sa + 1,
+            b | (~4'd9), 16'h80 + (-b), ((-a) >> 8'd1) + 16'h80,
+            (~1'b1) ^ 8'sd5);
+endmodule
+"#)
+  (top Top)
+  (modify (set sa 0xfe) (set a 0x9e) (set b 0x13))
+  (expect_output "")
+  (tick clk)
+  (expect_output "ffffffff -1 f7 6d 8031 fb\n"))

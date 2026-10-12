@@ -1,4 +1,6 @@
 sv_backends! {
+    fn nested_operands_extend_before_context_operations(sim) { @case "operators::nested_operands_extend_before_context_operations"; }
+
     fn wide_arithmetic_shift_preserves_unknown_sign(sim) { @case "operators::wide_arithmetic_shift_preserves_unknown_sign"; }
 
     fn partial_word_shift_sign_z_65(sim) { @case "operators::partial_word_shift_sign_z_65"; }

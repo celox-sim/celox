@@ -1291,3 +1291,35 @@ endmodule
   (top Top)
   (modify (set a (fourstate 0x10000000000000005 0x10000000000000000)) (set n 1))
   (assert_eq y (fourstate 0x18000000000000002 0x18000000000000000)))
+
+; IEEE 1800-2023 11.8.2: widen each context-determined operand before
+; evaluating its parent operation, including comparison and concat results.
+(case nested_operands_extend_before_context_operations
+  (source "nested_width.sv" #"
+module Top(input logic clk, input logic [7:0] a, b,
+           output logic [7:0] shifted, sum, ff_shifted,
+           output logic [15:0] concatenated, low_concat, from_function, fill_left, fill_right);
+    assign fill_left = '1 | (b >= 4'd5);
+    assign fill_right = (b >= 4'd5) | '1;
+    assign shifted = (b >= 4'd5) << 3'd3;
+    assign sum = (b >= 4'd5) + (a >= 4'd5);
+    assign concatenated = {a[7], b} << 8'd1;
+    assign low_concat = {a[3:0], b[3:0]} << 4'd1;
+    always_ff @(posedge clk) ff_shifted <= (b >= 4'd5) << 3'd3;
+    function automatic logic [15:0] add_comparisons(input logic [7:0] x, y);
+        return (x >= 4'd5) + (y >= 4'd5);
+    endfunction
+    assign from_function = add_comparisons(a, b);
+endmodule
+"#)
+  (top Top)
+  (modify (set a 0x9e) (set b 0x13))
+  (assert_eq fill_left 0xffff)
+  (assert_eq fill_right 0xffff)
+  (assert_eq shifted 8)
+  (assert_eq sum 2)
+  (assert_eq concatenated 0x226)
+  (assert_eq low_concat 0x1c6)
+  (assert_eq from_function 2)
+  (tick clk)
+  (assert_eq ff_shifted 8))

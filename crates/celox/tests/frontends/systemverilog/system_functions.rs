@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
+
     fn unpacked_dimensions_publishes_dependent_array_parameters(sim) { @case "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"; }
     fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
     fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
