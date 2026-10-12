@@ -122,4 +122,7 @@ sv_backends! {
     fn wildcard_always_blocks_settle_staged_inputs(sim) { @case "timing::wildcard_always_blocks_settle_staged_inputs"; }
     fn timed_edge_always_bodies_do_not_replay_setup_edges(sim) { @case "timing::timed_edge_always_bodies_do_not_replay_setup_edges"; }
     fn timed_edge_always_task_calls_do_not_replay_setup_edges(sim) { @case "timing::timed_edge_always_task_calls_do_not_replay_setup_edges"; }
+    fn imported_timed_tasks_do_not_replay_setup_edges(sim) { @case "timing::imported_timed_tasks_do_not_replay_setup_edges"; }
+    fn untimed_local_tasks_shadow_timed_tasks_in_other_scopes(sim) { @case "timing::untimed_local_tasks_shadow_timed_tasks_in_other_scopes"; }
+    fn automatic_module_ff_staging_keeps_its_state(sim) { @case "timing::automatic_module_ff_staging_keeps_its_state"; }
 }

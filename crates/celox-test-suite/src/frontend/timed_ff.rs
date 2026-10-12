@@ -141,6 +141,7 @@ pub(super) fn gated(
     start: usize,
     end: usize,
     names: &TimedNames,
+    tasks: &TaskTiming,
 ) -> Result<(usize, String)> {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
@@ -151,7 +152,7 @@ pub(super) fn gated(
     let body_start = trivia(source, event_end);
     let body_end =
         statement_end(source, body_start).ok_or("unsupported timed always_ff statement")?;
-    let body = timed_content(&source[body_start..body_end], names)?;
+    let body = timed_content(&source[body_start..body_end], names, tasks)?;
     let identifiers = sv_words(source)
         .into_iter()
         .map(|word| word.2)
@@ -172,18 +173,14 @@ pub(super) fn gated(
     Ok((
         body_end,
         format!(
-            "always @({event} or posedge {package}::started) begin\n  bit {armed}=0;\n  bit {pending}=0;\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
+            "bit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
         ),
     ))
 }
 
 /// The frontend classifies an ordinary always as FF only when every leaf
 /// of its event list is explicitly edge-qualified.
-pub(super) fn edge_control(
-    source: &str,
-    end: usize,
-    timed_tasks: &std::collections::BTreeSet<String>,
-) -> bool {
+pub(super) fn edge_control(source: &str, end: usize, tasks: &TaskTiming) -> bool {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
         return false;
@@ -196,11 +193,7 @@ pub(super) fn edge_control(
         return false;
     };
     let body = &source[end..body_end];
-    if has_timing(body)
-        || sv_words(body)
-            .iter()
-            .any(|word| timed_tasks.contains(word.2))
-    {
+    if has_timing(body) || tasks.has_timed_call(source, end, body_end) {
         return false;
     }
     let event = &source[begin + 1..end - 1];
@@ -291,35 +284,125 @@ fn has_timing(source: &str) -> bool {
     false
 }
 
-pub(super) fn timed_tasks(source: &str) -> std::collections::BTreeSet<String> {
-    let words = sv_words(source);
-    let mut tasks = Vec::new();
-    for (index, (_, end, word)) in words.iter().enumerate() {
-        if *word != "task" {
-            continue;
+#[derive(Default)]
+pub(super) struct TaskTiming {
+    tasks: BTreeMap<String, bool>,
+}
+
+fn container_at(source: &str, at: usize) -> String {
+    let words = sv_words(&source[..at]);
+    let mut scope = String::new();
+    for (index, (_, _, word)) in words.iter().enumerate() {
+        match *word {
+            "module" | "interface" | "package" => {
+                if let Some((_, _, name)) = words[index + 1..]
+                    .iter()
+                    .find(|word| !matches!(word.2, "static" | "automatic"))
+                {
+                    scope = name.to_string();
+                }
+            }
+            "endmodule" | "endinterface" | "endpackage" => scope.clear(),
+            _ => {}
         }
-        let Some((_, body_end, _)) = words[index + 1..].iter().find(|word| word.2 == "endtask")
-        else {
-            continue;
-        };
-        let Some((_, _, name)) = words[index + 1..]
-            .iter()
-            .find(|word| !matches!(word.2, "automatic" | "static"))
-        else {
-            continue;
-        };
-        tasks.push((name.to_string(), &source[*end..*body_end]));
     }
-    let mut timed = std::collections::BTreeSet::new();
-    loop {
-        let before = timed.len();
-        for (name, body) in &tasks {
-            if has_timing(body) || sv_words(body).iter().any(|word| timed.contains(word.2)) {
-                timed.insert(name.clone());
+    scope
+}
+
+impl TaskTiming {
+    pub(super) fn new(sources: &[String]) -> Self {
+        let mut result = Self::default();
+        let mut records = Vec::new();
+        for source in sources {
+            let words = sv_words(source);
+            for (index, (start, end, word)) in words.iter().enumerate() {
+                if *word != "task" {
+                    continue;
+                }
+                let Some((_, body_end, _)) =
+                    words[index + 1..].iter().find(|word| word.2 == "endtask")
+                else {
+                    continue;
+                };
+                let Some((_, _, name)) = words[index + 1..]
+                    .iter()
+                    .find(|word| !matches!(word.2, "automatic" | "static"))
+                else {
+                    continue;
+                };
+                let scope = container_at(source, *start);
+                let key = format!("{scope}::{name}");
+                let header_end = source[*end..*body_end]
+                    .find(';')
+                    .map_or(*end, |offset| end + offset + 1);
+                result
+                    .tasks
+                    .insert(key.clone(), has_timing(&source[header_end..*body_end]));
+                records.push((key, source.as_str(), header_end, *body_end));
             }
         }
-        if timed.len() == before {
-            return timed;
+        loop {
+            let mut changed = false;
+            for (key, source, start, end) in &records {
+                if !result.tasks[key] && result.has_timed_call(source, *start, *end) {
+                    result.tasks.insert(key.clone(), true);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return result;
+            }
         }
+    }
+
+    fn resolve(&self, source: &str, at: usize, name: &str) -> Option<bool> {
+        let prefix = source[..at].trim_end();
+        if let Some(prefix) = prefix.strip_suffix("::") {
+            let package = sv_words(prefix).last()?.2;
+            return self.tasks.get(&format!("{package}::{name}")).copied();
+        }
+        let scope = container_at(source, at);
+        if let Some(value) = self.tasks.get(&format!("{scope}::{name}")) {
+            return Some(*value);
+        }
+        for (start, end, word) in sv_words(&source[..at]) {
+            if word != "import" {
+                continue;
+            }
+            let import_scope = container_at(source, start);
+            if !import_scope.is_empty() && import_scope != scope {
+                continue;
+            }
+            let tail = &source[end..];
+            let clause = &tail[..tail.find(';')?];
+            let words = sv_words(clause);
+            let Some((_, _, package)) = words.first() else {
+                continue;
+            };
+            let selected = words.get(1).map(|word| word.2);
+            if selected == Some(name) || (selected.is_none() && clause.contains('*')) {
+                if let Some(value) = self.tasks.get(&format!("{package}::{name}")) {
+                    return Some(*value);
+                }
+            }
+        }
+        None
+    }
+
+    fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {
+        sv_words(&source[start..end])
+            .iter()
+            .any(|(at, word_end, name)| {
+                if !self
+                    .tasks
+                    .keys()
+                    .any(|key| key.ends_with(&format!("::{name}")))
+                {
+                    return false;
+                }
+                let tail = after_trivia(&source[start + word_end..end]);
+                (tail.starts_with('(') || tail.starts_with(';'))
+                    && self.resolve(source, start + at, name).unwrap_or(true)
+            })
     }
 }
