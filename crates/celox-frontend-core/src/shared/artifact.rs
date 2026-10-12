@@ -35,14 +35,13 @@ impl ScheduledRtl {
     /// disposable state publications.
     pub fn inject_triggers(&mut self) {
         let mut trigger_map = HashMap::default();
+        let kinds = self.design.event_kinds();
         for (id, address) in self.design.events.ordered_events.iter().enumerate() {
-            if let Some(metadata) = self.design.state_objects.get(address) {
-                trigger_map.entry(*address).or_insert_with(Vec::new).push(
-                    celox_design::TriggerIdWithKind {
-                        kind: metadata.kind,
-                        id,
-                    },
-                );
+            if let Some(kind) = kinds.get(address) {
+                trigger_map
+                    .entry(*address)
+                    .or_insert_with(Vec::new)
+                    .push(celox_design::TriggerIdWithKind { kind: *kind, id });
             }
         }
 

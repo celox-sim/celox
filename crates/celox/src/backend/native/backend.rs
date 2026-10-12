@@ -2100,13 +2100,12 @@ fn compile_program(
     // Bind semantic event identities to image-relative function offsets. The
     // precompiled runtime turns these into process-local pointers after it has
     // copied the image into executable memory.
-    let mut next_id = 0usize;
-    let mut id_to_addr = Vec::new();
+    let (mut addr_to_id, mut id_to_addr) = crate::backend::event_ids(sir);
+    let mut next_id = id_to_addr.len();
     let mut id_to_event = Vec::new();
     let mut event_map = HashMap::default();
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
-    let mut addr_to_id = HashMap::default();
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
@@ -2196,6 +2195,17 @@ fn compile_program(
         &mut id_to_addr,
         &mut id_to_event,
     )?;
+    id_to_event = id_to_addr
+        .iter()
+        .map(|address| {
+            event_map
+                .get(address)
+                .or_else(|| eval_only_event_map.get(address))
+                .or_else(|| apply_event_map.get(address))
+                .copied()
+                .expect("every scheduled event address resolves to an event")
+        })
+        .collect();
     // Pre-compute 4-state initialization regions
     let mut four_state_inits = Vec::new();
     if options.four_state {

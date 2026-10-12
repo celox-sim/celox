@@ -193,9 +193,8 @@ impl WasmBackend {
         let mut event_map = HashMap::default();
         let mut eval_only_event_map = HashMap::default();
         let mut apply_event_map = HashMap::default();
-        let mut id_to_addr = Vec::new();
-        let mut addr_to_id = HashMap::default();
-        let mut next_id = 0usize;
+        let (mut addr_to_id, mut id_to_addr) = super::event_ids(sir);
+        let mut next_id = id_to_addr.len();
 
         let compile_ffs = |ff_map: &HashMap<
             AbsoluteAddr,

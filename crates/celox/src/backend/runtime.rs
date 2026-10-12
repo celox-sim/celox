@@ -419,9 +419,8 @@ impl JitBackend {
 
         let comb_code_ptr = res.map_err(SimulatorError::from)?;
 
-        let mut next_id = 0;
-        let mut addr_to_id = HashMap::default();
-        let mut id_to_addr = Vec::new();
+        let (mut addr_to_id, mut id_to_addr) = super::event_ids(sir);
+        let mut next_id = id_to_addr.len();
         let mut ff_funcs = Vec::new();
 
         let mut compile_ffs = |ff_map: &HashMap<
@@ -437,10 +436,11 @@ impl JitBackend {
         > {
             let mut event_map = HashMap::default();
             for (clock, units) in ff_map {
-                let id = *addr_to_id.entry(*clock).or_insert_with(|| {
+                let canonical = sir.design.events.canonical(*clock);
+                let id = *addr_to_id.entry(canonical).or_insert_with(|| {
                     let id = *next_id;
                     *next_id += 1;
-                    id_to_addr.push(*clock);
+                    id_to_addr.push(canonical);
                     id
                 });
 
