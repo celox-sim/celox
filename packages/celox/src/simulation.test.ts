@@ -841,3 +841,35 @@ test("restored checkpoints retain a budgeted host wake", () => {
 	expect(handle.stepUntil).toHaveBeenCalledOnce();
 	sim.dispose();
 });
+
+test("bounded runs include queued events at the current target time", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.nextEventTime).mockReturnValue(0);
+	vi.mocked(handle.stepUntil!).mockImplementation(() => {
+		vi.mocked(handle.nextEventTime).mockReturnValue(null);
+		return 0;
+	});
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledWith(0);
+	sim.dispose();
+});
+
+test("past targets preserve pending host writes for a valid later run", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.runUntil(100);
+	vi.mocked(handle.runUntil).mockClear();
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.dut.d = 1n;
+	sim.runUntil(60);
+	expect(handle.runUntil).not.toHaveBeenCalled();
+	expect(sim.time()).toBe(100);
+	expect(() => sim.runUntil(100, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.dispose();
+});

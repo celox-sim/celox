@@ -434,6 +434,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		if (this._handle.time() > endTime) return;
 		const needsHostPoll = this.needsHostPoll();
 		this.settleSharedWrites();
 		if (opts?.maxSteps == null) {
@@ -444,9 +445,11 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
+		const queued = this._handle.nextEventTime();
 		if (
-			this._handle.time() > endTime ||
-			(this._handle.time() === endTime && !needsHostPoll)
+			this._handle.time() === endTime &&
+			!needsHostPoll &&
+			(queued == null || queued > endTime)
 		) {
 			this._state.dirty = false;
 			return;
