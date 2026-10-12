@@ -39,6 +39,8 @@ pub(super) struct Ff<'p, 'a> {
     b: SIRBuilder<Addr>,
     /// Variables assigned with blocking stores.
     working: HashSet<SourceVarId>,
+    /// Persistent static locals use stable state, including in FF bodies.
+    persistent: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
     nonblocking_targets: Vec<(SourceVarId, BitAccess)>,
@@ -110,6 +112,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             m,
             b: SIRBuilder::new(),
             working: HashSet::default(),
+            persistent: HashSet::default(),
             targets: Vec::new(),
             nonblocking_targets: Vec::new(),
             nonblocking_store: false,
@@ -135,6 +138,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let variable = self.aliases.get(&id).copied().unwrap_or(id);
         if self.kernel.is_some()
             || self.event_counter_state.contains(&variable)
+            || self.persistent.contains(&variable)
             || (self.working.contains(&variable) && !self.m.is_hidden(variable))
         {
             stable(*self.private.get(&id).unwrap_or(&id))
@@ -161,7 +165,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if blocking {
             self.working.insert(id);
         }
-        if self.m.is_hidden(id) {
+        if self.m.is_hidden(id) && !self.persistent.contains(&id) {
             return;
         }
         let variable = self.m.var(id);
@@ -262,6 +266,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
             if visited.insert(name) {
+                if subroutine.is_task {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| {
+                            if let sv::ir::Stmt::Local {
+                                name,
+                                r#static: true,
+                                ..
+                            } = stmt
+                            {
+                                if let Some(id) = self.m.id(name) {
+                                    self.persistent.insert(id);
+                                }
+                            }
+                        });
+                    }
+                }
                 self.scan(&subroutine.body, visited);
             }
         }
@@ -281,17 +301,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         let working_set = &self.working;
         let variables = &*self.m.variables;
         let counters = &self.event_counter_state;
+        let persistent = &self.persistent;
         let direct = self.kernel.is_some();
         let map = |id: &SourceVarId| -> Addr {
             if direct {
                 let id = aliases.get(id).unwrap_or(id);
                 stable(*private.get(id).unwrap_or(id))
-            } else if counters.contains(id) {
+            } else if counters.contains(id) || persistent.contains(id) {
                 stable(*id)
             } else if let Some(var) = aliases.get(id) {
                 if !self.nonblocking_store
                     && working_set.contains(var)
-                    && variables.get(var).is_some_and(|var| !var.hidden)
+                    && (persistent.contains(var)
+                        || variables.get(var).is_some_and(|var| !var.hidden))
                 {
                     stable(*var)
                 } else {
@@ -2133,6 +2155,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
+        let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
+            let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
+                return Err(unsupported(format!("condition of `{name}`")));
+            };
+            Some(self.eval_truth(condition)?)
+        } else {
+            None
+        };
         let (template, values) = system_task_template(&kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -2166,11 +2196,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
+        // Argument effects happen before branching, and the condition register
+        // retains the value it had before those effects.
+        let resume = match assertion {
+            Some((_, Some(true))) => return Ok(true),
+            Some((truth, None)) => {
+                let resume = self.b.new_block();
+                let fail = self.b.new_block();
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: truth,
+                    true_block: (resume, Vec::new()),
+                    false_block: (fail, Vec::new()),
+                });
+                self.b.switch_to_block(fail);
+                Some(resume)
+            }
+            _ => None,
+        };
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
+            SystemTaskKind::Assertion(kind) => *kind,
         };
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
@@ -2193,12 +2241,19 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             return Ok(false);
         }
-        if matches!(kind, SystemTaskKind::Fatal) {
+        if kind.is_fatal() {
             let code = self
                 .m
                 .runtime_error(template.unwrap_or_else(|| "$fatal".to_string()));
             self.b.seal_block(SIRTerminator::Error(code));
-            return Ok(false);
+            if resume.is_none() {
+                return Ok(false);
+            }
+        } else if let Some(resume) = resume {
+            self.jump(resume);
+        }
+        if let Some(resume) = resume {
+            self.b.switch_to_block(resume);
         }
         Ok(true)
     }
