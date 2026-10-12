@@ -576,3 +576,38 @@
   (top Top)
   (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 1)
   (set clk 0) (eval) (set clk 1) (run_until 1) (assert_eq q 1))
+
+(case control_members_do_not_pollute_user_package_imports
+  (source "user.sv" #"package user_values; localparam bit started=1; localparam bit finished=1; endpackage"#)
+  (source "top.sv" #"module Top(output bit q); import user_values::*;
+      initial begin q=started & finished; #1; $finish; end
+    endmodule"#)
+  (top Top)
+  (run_until 0) (assert_eq q 1) (run_to_finish))
+
+(case blocking_ff_stores_are_visible_before_inactive_work
+  (source "blocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
+      bit clk; wire [7:0] derived=q+1;
+      always @(posedge clk) q=1;
+      initial #1 clk=1;
+      initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
+    endmodule"#)
+  (top Top) (run_until 1) (assert_eq observed 1) (assert_eq derived_seen 2) (assert_eq q 9))
+
+(case nonblocking_ff_stores_remain_pending_during_inactive_work
+  (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
+      bit clk; wire [7:0] derived=q+1;
+      always @(posedge clk) q<=1;
+      initial #1 clk=1;
+      initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
+    endmodule"#)
+  (top Top) (run_until 1) (assert_eq observed 0) (assert_eq derived_seen 1) (assert_eq q 1))
+
+(case mixed_ff_stores_keep_their_active_and_nba_values
+  (source "mixed.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
+      bit clk; wire [7:0] derived=q+1;
+      always @(posedge clk) begin q<=7; q=2; end
+      initial #1 clk=1;
+      initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
+    endmodule"#)
+  (top Top) (run_until 1) (assert_eq observed 2) (assert_eq derived_seen 3) (assert_eq q 7))

@@ -234,8 +234,9 @@ fn expanded_timed_source(source: &str) -> Result<String> {
 
 fn timed_source(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {
     Ok(format!(
-        "import {}::*;\n{}",
+        "import {}::{};\n{}",
         names.package,
+        names.finish,
         timed_content(source, names, tasks)?
     ))
 }
