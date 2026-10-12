@@ -593,7 +593,14 @@ impl<B: SimBackend> SimulationState<B> {
                 next_val: 1,
             });
         }
-        self.step_round(executor, current_time, events_to_process, generated_events, ready, true)?;
+        self.step_round(
+            executor,
+            current_time,
+            events_to_process,
+            generated_events,
+            ready,
+            true,
+        )?;
         self.credit_rising_edges(current_time, rising)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
@@ -656,7 +663,8 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 break;
             }
-            if !self.step_round(executor, current_time, events, Vec::new(), ready, false)? && !fired {
+            if !self.step_round(executor, current_time, events, Vec::new(), ready, false)? && !fired
+            {
                 break;
             }
         }
@@ -1424,7 +1432,8 @@ impl<B: SimBackend> SimulationState<B> {
                             "FF trigger discovered without a corresponding execution unit"
                         );
                     }
-                    ff_body_edges.union_with(&self.process_counter_edges(executor.backend(), &before));
+                    ff_body_edges
+                        .union_with(&self.process_counter_edges(executor.backend(), &before));
                 }
 
                 // Working-region writes become visible only when this NBA
