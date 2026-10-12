@@ -99,6 +99,9 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
+- Multiple nonblocking assignments in one FF body to a variable watched by an
+  event control. Ordered NBA updates need an update queue; collapsing them could
+  hide intermediate edges.
 - Classes, and timing controls in `always_ff`, `always_comb` and the
   subroutines they call.
 - Interfaces: ports of an interface, `inout`, `ref` and expression modport

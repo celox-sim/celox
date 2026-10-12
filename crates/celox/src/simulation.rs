@@ -258,6 +258,15 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         event_info,
         processes,
     )
+    .with_active_ff_events(
+        simulator
+            .program
+            .runtime_schema
+            .active_ff_events
+            .iter()
+            .filter_map(|event| simulator.backend.resolve_event_opt(event))
+            .collect(),
+    )
     .with_process_event_counters(
         simulator
             .program
