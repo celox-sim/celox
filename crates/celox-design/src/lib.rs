@@ -627,7 +627,7 @@ pub struct RuntimeSchema<A> {
     /// it and the kernels after it are the testbench's, not the design's.
     pub testbench_kernels: Option<usize>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
-    /// FF evaluation domains that publish blocking stores into active state.
+    /// FF domains with blocking stores or finish effects in the active region.
     pub active_ff_events: HashSet<A>,
 }
 

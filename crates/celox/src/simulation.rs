@@ -152,6 +152,13 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             && self.program.runtime_schema.comb_observers.is_empty()
             // Design events must return to the scheduler to drain the ring.
             && self.program.runtime_schema.runtime_event_sites.iter().all(|site|site.location.is_some())
+            && !self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| matches!(site.kind, celox_design::RuntimeEventKind::Finish))
+
             && !self.program.runtime_schema.clock_phase_sensitive_comb
     }
 
@@ -2081,5 +2088,82 @@ mod tick_budget_snapshot_tests {
         sim.run_until(0).unwrap();
         assert_eq!(sim.ticks(), 1);
         assert!(sim.state.tick_budget_spent());
+    }
+}
+
+#[cfg(test)]
+mod finish_clock_batch_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    #[test]
+    fn finish_suppresses_coincident_generated_edges() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, scheduled: bool) {
+            if scheduled {
+                sim.schedule("other", 4, 1).unwrap();
+            }
+            sim.run_until(4).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(sim.ticks(), 2);
+        }
+        for scheduled in [false, true] {
+            let bit = ValueType::bits(1).unwrap();
+            let word = ValueType::bits(8).unwrap();
+            let mut m = ModuleBuilder::new("Top").unwrap();
+            let clk = m.internal("clk", bit).unwrap();
+            let other = m.internal("other", bit).unwrap();
+            let q = m.output("count", word).unwrap();
+            let r = m.output("other_q", bit).unwrap();
+            let v = m.read(q).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+            let next = m.binary(BinaryOp::Add, v, one, word).unwrap();
+            let dst = m.whole(q).unwrap();
+            m.register(dst, next, clk, Edge::Posedge, None, None)
+                .unwrap();
+            let dst = m.whole(r).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+            m.register(dst, one, other, Edge::Posedge, None, None)
+                .unwrap();
+            m.clock_period(clk, 2).unwrap();
+            let ten = m.constant(Constant::two_state(10u8, 64).unwrap());
+            let four = m.constant(Constant::two_state(4u8, 64).unwrap());
+            m.process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            }])
+            .unwrap();
+            m.process(vec![Statement::Delay { amount: four }, Statement::Finish])
+                .unwrap();
+            let design = m.finish();
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_interpreter()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_cranelift()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_wasm()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(Simulator::from_frontend(design).build_native().unwrap()),
+                scheduled,
+            );
+        }
     }
 }

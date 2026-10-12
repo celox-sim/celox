@@ -775,7 +775,7 @@ impl<B: SimBackend> SimulationState<B> {
         let committed = rising
             .into_iter()
             .filter(|id| {
-                result.is_ok()
+                (result.is_ok() && !self.finished)
                     || self
                         .round_published_domains
                         .contains(self.event_info[*id].canonical_id)
@@ -1420,6 +1420,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        if self.finished {
+            // Suppress generated edges queued before a ready process finished.
+            self.round_new_rising.make_empty();
+            generated_events.clear();
+        }
+
         // Ready processes can activate a clock at this timestamp. Join
         // its first rise with existing events and reset assertions before
         // any coincident domain publishes its FF updates. An isolated
@@ -1427,7 +1433,8 @@ impl<B: SimBackend> SimulationState<B> {
         let reset_edge_due = self.clock_waits.values().any(|wait| {
             wait.release.is_some() && self.tick_clocks[&wait.clock].next_edge == current_time
         });
-        if !self.tick_budget_spent()
+        if !self.finished
+            && !self.tick_budget_spent()
             && (reset_edge_due || !events_to_process.is_empty() || !process_driven.is_empty())
         {
             for (id, clock) in &self.tick_clocks {

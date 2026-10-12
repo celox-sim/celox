@@ -620,6 +620,14 @@ impl NativeProgramImage {
                 {
                     return Err("a process clock has an invalid event domain or period".into());
                 }
+                if self
+                    .runtime_schema
+                    .rtl_writes
+                    .iter()
+                    .any(|write| write.id == clock.signal)
+                {
+                    return Err("a process clock is driven by design logic".into());
+                }
                 let event = self.event_map[&clock.signal].id;
                 if let Some(previous) = process_clock_periods.insert(event, clock.period)
                     && previous != clock.period
@@ -2370,7 +2378,17 @@ fn compile_program(
             native_memory_size,
             options: NativeRuntimeOptions {
                 four_state: options.four_state,
-                native_tick_loop: options.x86_options.native_tick_loop,
+                // A generated loop cannot distinguish a failed pre-edge
+                // phase from a published tick. Run fallible comb separately.
+                native_tick_loop: options.x86_options.native_tick_loop
+                    && !sir
+                        .sir
+                        .eval_comb
+                        .iter()
+                        .flat_map(|unit| unit.blocks.values())
+                        .any(|block| {
+                            matches!(block.terminator, celox_sir::SIRTerminator::Error(_))
+                        }),
                 native_force_support: options.native_force_support,
                 perf_map: options.x86_options.diagnostics.perf_map,
                 kernel_selection: crate::backend::lanes::kernel_selection(options),
@@ -3417,13 +3435,23 @@ mod process_metadata_tests {
     fn process_clock_metadata_is_checked_before_image_attachment() {
         let original = image();
         original.to_container_bytes().unwrap();
-        for corruption in 0..4 {
+        for corruption in 0..5 {
             let mut broken = original.clone();
             let slots = &mut broken.runtime_schema.processes[0];
             match corruption {
                 0 => slots.clocks[0].signal = slots.delay,
                 1 => slots.clocks[0].period = 1,
                 2 => slots.clock = slots.status,
+                4 => {
+                    let signal = slots.clocks[0].signal;
+                    broken
+                        .runtime_schema
+                        .rtl_writes
+                        .insert(celox_design::VarAtomBase {
+                            id: signal,
+                            access: celox_design::BitAccess::new(0, 0),
+                        });
+                }
                 _ => {
                     let signal = *broken
                         .design
@@ -3457,6 +3485,30 @@ mod process_metadata_tests {
         assert!(
             matches!(broken.to_container_bytes(), Err(NativeImageContainerError::InvalidImage(message)) if message.contains("conflicting periods"))
         );
+    }
+
+    #[test]
+    fn default_native_loops_do_not_credit_a_failed_pre_edge_iteration() {
+        use crate::backend::SimBackend;
+        let source = r#"module Top(clk:input clock,enable:output logic,v:output logic){
+           assign v=if enable ? ~v : 1'd0;
+           always_ff(clk){enable=1;}
+        }"#;
+        let mut sim = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .build_native()
+            .unwrap();
+        let event = sim.event("clk");
+        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 10);
+        assert_eq!(completed, 1);
+        assert!(result.is_ok());
+        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 9);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
     }
 
     #[test]
