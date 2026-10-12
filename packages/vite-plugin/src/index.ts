@@ -3,6 +3,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars } from "./sidecar.js";
+import { withSidecarLock } from "./sidecar-lock.js";
 import {
 	loadTestbenchComponentModule,
 	normalizeTestbenchComponentPath,
@@ -87,18 +88,20 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Watch events can detect edits that preserve both mtime and size.
 			// Keep fingerprint checks for generator-owned lockfile notifications.
 			if (file !== projectFile("Veryl.lock")) cache.invalidate();
-			const data = cache.get();
-			if (file === projectFile("Veryl.lock") && data === generatedData)
-				return false;
-			if (data !== generatedData) {
-				const nextPaths = generateSidecars(data, projectRoot, {
-					removeOrphans: false,
-				});
-				cleanSidecars(sidecarPaths, nextPaths);
-				sidecarPaths = nextPaths;
-				generatedData = data;
-			}
-			return true;
+			return withSidecarLock(projectRoot, () => {
+				const data = cache.get();
+				if (file === projectFile("Veryl.lock") && data === generatedData)
+					return false;
+				if (data !== generatedData) {
+					const nextPaths = generateSidecars(data, projectRoot, {
+						removeOrphans: false,
+					});
+					cleanSidecars(sidecarPaths, nextPaths);
+					sidecarPaths = nextPaths;
+					generatedData = data;
+				}
+				return true;
+			});
 		})();
 		if (timestamp !== undefined) lastUpdate = { file, timestamp, result };
 		return result;
@@ -173,11 +176,13 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 			cache = new GenTsCache(projectRoot, componentManifests);
 			// Run generator and create type sidecars
-			const data = cache.get();
-			const nextPaths = generateSidecars(data, projectRoot);
-			cleanSidecars(sidecarPaths, nextPaths);
-			sidecarPaths = nextPaths;
-			generatedData = data;
+			await withSidecarLock(projectRoot, () => {
+				const data = cache.get();
+				const nextPaths = generateSidecars(data, projectRoot);
+				cleanSidecars(sidecarPaths, nextPaths);
+				sidecarPaths = nextPaths;
+				generatedData = data;
+			});
 		},
 
 		configureServer(server) {

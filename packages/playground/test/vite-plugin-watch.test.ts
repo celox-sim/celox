@@ -25,6 +25,9 @@ vi.mock("../../vite-plugin/src/generator.js", () => ({
 		fileModules: {},
 	})),
 }));
+vi.mock("../../vite-plugin/src/sidecar-lock.js", () => ({
+	withSidecarLock: async (_root: string, run: Function) => run(),
+}));
 vi.mock(
 	"../../vite-plugin/src/testbench-components.js",
 	async (importOriginal) => ({
@@ -190,13 +193,13 @@ test("HMR-disabled lockfile changes notify once and unchanged writes remain sile
 	});
 	writeFileSync(file, "edited");
 	watcher.emit("change", file);
-	await Promise.resolve();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes).toHaveBeenCalledWith(join(root, "Veryl.toml"));
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 	changes.mockClear();
 	moduleGraph.invalidateModule.mockClear();
 	watcher.emit("change", file);
-	await Promise.resolve();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes).toHaveBeenCalledTimes(1); // Only the original raw event.
 	expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
 	expect(runGenTs).toHaveBeenCalledTimes(2);
@@ -270,7 +273,7 @@ test("HMR-disabled watch edits refresh data and stop updating after server close
 	writeFileSync(file, "edited");
 	utimesSync(file, 1_700_000_000, 1_700_000_000);
 	watcher.emit("change", file);
-	await Promise.resolve();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 	expect(moduleGraph.invalidateModule).toHaveBeenCalled();
 	httpServer.emit("close");
@@ -296,7 +299,7 @@ test("raw watch events in the same millisecond each refresh generated data", asy
 	for (const value of ["first edit", "second edit"]) {
 		writeFileSync(file, value);
 		watcher.emit("change", file);
-		await Promise.resolve();
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	expect(runGenTs).toHaveBeenCalledTimes(3);
 	httpServer.emit("close");
