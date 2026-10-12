@@ -3,6 +3,55 @@ use std::{fmt::Write, path::Path};
 use super::*;
 
 #[test]
+fn unresolved_local_parameter_masks_imported_bindings() {
+    let tree = crate::syntax::parse_source(
+        "module C #(parameter logic [7:0] W, parameter N = W[3:0]); endmodule",
+        Path::new("required_local_parameter.sv"),
+    )
+    .unwrap();
+    let imported = scope::ScopeSymbols {
+        const_env: [("W".into(), 18)].into_iter().collect(),
+        parameter_values: [("W".into(), Expr::Literal("8'd18".into()))]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let _scope = scope::install(Arc::new(imported.clone()));
+    let parameters = parameters_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &imported.const_env,
+        &HashMap::default(),
+    )
+    .unwrap();
+    assert!(parameters[0].value().is_none());
+    assert!(
+        parameters[1].value().is_none(),
+        "required W must not use an imported default"
+    );
+    let values = parameter_value_env_with_imported(&parameters, &imported.const_env, &imported);
+    assert!(!values.contains_key("W"));
+    let mut numeric = imported.const_env.clone();
+    extend_const_env_with_parameters(&mut numeric, &parameters);
+    assert!(!numeric.contains_key("W"));
+    let overrides = [("W".into(), ConstExpr::Literal("21".into()))]
+        .into_iter()
+        .collect();
+    let specialized = parameters_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &imported.const_env,
+        &overrides,
+    )
+    .unwrap();
+    let values = const_env_from_parameters(&specialized);
+    assert_eq!(values["W"], 21);
+    assert_eq!(values["N"], 5);
+}
+
+#[test]
 fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() {
     use std::cell::Cell;
 

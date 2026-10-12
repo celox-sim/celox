@@ -2288,8 +2288,11 @@ fn parameter_value_env_with_imported(
     imported: &scope::ScopeSymbols,
 ) -> HashMap<String, Expr> {
     let mut values = parameter_value_env(parameters, const_env);
+    let local_names: HashSet<_> = parameters.iter().map(Parameter::name).collect();
     for (name, value) in &imported.parameter_values {
-        values.entry(name.clone()).or_insert_with(|| value.clone());
+        if !local_names.contains(name.as_str()) {
+            values.entry(name.clone()).or_insert_with(|| value.clone());
+        }
     }
     values
 }

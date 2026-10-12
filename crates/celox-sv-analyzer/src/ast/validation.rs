@@ -269,6 +269,13 @@ fn reject_silently_ignored_constructs_with_dimensions(
         if let RefNode::ParamAssignment(parameter) = &child
             && let Some((_, expression)) = parameter.nodes.2.as_ref()
             && selects::parameter_initializer_needs_typed_lowering(expression)
+            && parameters::validate_parameter_initializer_literal_widths(
+                expression,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?
+            .is_none()
         {
             selects::selected_parameter_initializer(
                 expression,

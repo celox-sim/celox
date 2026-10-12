@@ -3,6 +3,12 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn constant_parameter_initializers_preserve_inferred_dimensions(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_inferred_dimensions";
+    }
+    fn constant_parameter_initializers_short_circuit_wide_operands(sim) {
+        @case "indexed_select::constant_parameter_initializers_short_circuit_wide_operands";
+    }
     fn nested_array_indices_preserve_cast_widths(sim) {
         @case "indexed_select::nested_array_indices_preserve_cast_widths";
     }

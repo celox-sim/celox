@@ -744,6 +744,73 @@ fn resolves_function_scope_size_casts() {
 }
 
 #[test]
+fn selects_inferred_constant_parameter_dimensions() {
+    for (initializer, selection, expected) in [
+        ("18", "W[3:0]", 2),
+        ("18", "W[0 +: 4]", 2),
+        ("64'habcdef", "W[11:8]", 13),
+        ("-1", "W[31:28]", 15),
+    ] {
+        let source = format!(
+            "module Top; parameter W = {initializer}; \
+            localparam N = {selection}; localparam BITS = $bits(N); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("inferred_parameter_select.sv")).unwrap();
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), Some(expected));
+        assert_eq!(parameters[1].resolved_width(), Some(4));
+        assert_eq!(parameters[2].resolved_value(), Some(4));
+    }
+}
+
+#[test]
+fn permits_short_circuited_constant_parameter_operands() {
+    for (expression, expected) in [
+        ("0 && 65537'd0", 0),
+        ("1 || 65537'bx", 1),
+        ("0 && 1000000000'd0", 0),
+        ("1 || 1000000000'bx", 1),
+        ("0 && 1000000000'd0 || 1", 1),
+        ("1 || 1000000000'd0 && 0", 1),
+        ("(0 && 1000000000'd0) || 1", 1),
+        ("0 && 8'(1000000000'd0)", 0),
+        ("1'bx && 0 && 1000000000'd0", 0),
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("short_circuit_parameter.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(expected)
+        );
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_width(), Some(1));
+    }
+    for expression in [
+        "1 && 1000000000'd0",
+        "0 || 1000000000'd0",
+        "0 && 1000000000'd0 || 1000000000'd0",
+        "1'bx && 1000000000'd0",
+        "1000000000'd0 === 1000000000'd0",
+        "0 && $bits(data[0 +: 1000000000'd1])",
+    ] {
+        let source =
+            format!("module Top(input logic [7:0] data); localparam N = {expression}; endmodule");
+        let error =
+            analyze_source(&source, Path::new("evaluated_parameter_operand.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("constant materialization limit"),
+            "{expression}: {error}"
+        );
+    }
+    assert!(
+        analyze_source(
+            "module Top; localparam N = 0 && missing_type'(65537'd0); endmodule",
+            Path::new("skipped_invalid_cast.sv"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn resolves_constant_parameter_part_selects() {
     for (declaration, selection, expected, width, signed) in [
         ("logic [31:0] W = 18", "W[3:0] + 1", 3, 32, false),
