@@ -6,6 +6,7 @@ import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
 export class GenTsCache {
 	private _data: GenTsJsonOutput | undefined;
 	private _sourceKey = "";
+	private _configKey = "";
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -17,14 +18,22 @@ export class GenTsCache {
 		this.invalidate();
 	}
 
-	/** Get cached data, refreshing if any .veryl file has changed. */
+	/** Refresh when a source or generator configuration file changes. */
 	get(): GenTsJsonOutput {
 		const key = this.computeSourceKey();
-		if (this._data && this._sourceKey === key) {
+		const configKey = this.computeConfigKey();
+		if (
+			this._data &&
+			this._sourceKey === key &&
+			this._configKey === configKey
+		) {
 			return this._data;
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
 		this._sourceKey = key;
+		// Generation may create or update Veryl.lock. Record its new state
+		// without scanning source files a second time.
+		this._configKey = this.computeConfigKey();
 		return this._data;
 	}
 
@@ -32,6 +41,20 @@ export class GenTsCache {
 	invalidate(): void {
 		this._sourceKey = "";
 		this._data = undefined;
+	}
+
+	private computeConfigKey(): string {
+		return JSON.stringify(
+			["Veryl.toml", "celox.toml", "Veryl.lock"].map((name) => {
+				try {
+					const stat = statSync(join(this._projectRoot, name));
+					return [name, stat.mtimeMs, stat.size];
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					return [name, null];
+				}
+			}),
+		);
 	}
 
 	/**
