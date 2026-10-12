@@ -23,6 +23,11 @@ pub trait SimulationExecutor {
         false
     }
 
+    /// Whether a process finish stops already queued domains in this round.
+    fn finish_stops_round(&self, _process: usize) -> bool {
+        true
+    }
+
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
@@ -147,6 +152,7 @@ pub struct SimulationState<B: SimBackend> {
     inactive: BTreeSet<usize>,
     /// A process requested the end of the simulation.
     finished: bool,
+    finish_round: bool,
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -226,6 +232,7 @@ impl<B: SimBackend> SimulationState<B> {
             waiting: BTreeSet::new(),
             inactive: BTreeSet::new(),
             finished: false,
+            finish_round: true,
         }
     }
 
@@ -456,6 +463,7 @@ impl<B: SimBackend> SimulationState<B> {
                         any_ran = true;
                     }
                     Some(ProcessStatus::Finish) => {
+                        self.finish_round = executor.finish_stops_round(process);
                         self.waiting.remove(&process);
                         self.finished = true;
                         return Ok(true);
@@ -479,6 +487,7 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Record a finish emitted by the host while settling current-time writes.
     pub fn finish(&mut self) {
+        self.finish_round = true;
         self.finished = true;
     }
 
@@ -576,6 +585,9 @@ impl<B: SimBackend> SimulationState<B> {
                 .map(|(signal, _, _)| executor.backend().get_as(*signal))
                 .collect();
             let progressed = self.run_processes(executor, current_time, ready_processes)?;
+            if self.finished && self.finish_round {
+                return Ok(true);
+            }
             if !progressed && !settle_idle && events_to_process.is_empty() {
                 return Ok(false);
             }
