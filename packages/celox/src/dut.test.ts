@@ -400,6 +400,61 @@ describe("createDut — scalar ports", () => {
 		dut.a = 0xab_cdefn;
 		expect(dut.a).toBe(0xab_cdefn);
 	});
+	test.each([1, 8, 17, 24, 25, 31, 32, 40, 49, 53, 54, 63, 65, 128])(
+		"%i-bit scalar writes truncate BigInt before converting to number",
+		(width) => {
+			const byteSize = Math.ceil(width / 8);
+			const buffer = makeBuffer(byteSize * 2);
+			const sig: SignalLayout = {
+				offset: 0,
+				width,
+				byteSize,
+				is4state: true,
+				direction: "input",
+			};
+			const dut = createDut<WritableFourStatePort>(
+				buffer,
+				{ a: sig },
+				{ a: { direction: "input", type: "logic", width, is4state: true } },
+				mockHandle(),
+				{ dirty: false },
+			);
+			const widthMask = (1n << BigInt(width)) - 1n;
+			for (const value of [(1n << 200n) | 1n, -1n, -(1n << 200n) - 3n]) {
+				dut.a = value;
+				expect(dut.a).toBe(value & widthMask);
+				expect(readFourState(buffer, sig)).toEqual([value & widthMask, 0n]);
+				dut.a = FourState(value, (1n << 201n) | 1n);
+				expect(readFourState(buffer, sig)).toEqual([value & widthMask, 1n]);
+			}
+		},
+	);
+
+	test.each([54, 63, 65, 127])(
+		"%i-bit wide reads mask unused padding",
+		(width) => {
+			const byteSize = Math.ceil(width / 8);
+			const buffer = makeBuffer(byteSize * 2);
+			new Uint8Array(buffer).fill(0xff);
+			const sig: SignalLayout = {
+				offset: 0,
+				width,
+				byteSize,
+				is4state: true,
+				direction: "input",
+			};
+			const dut = createDut<WritableFourStatePort>(
+				buffer,
+				{ a: sig },
+				{ a: { direction: "input", type: "logic", width, is4state: true } },
+				mockHandle(),
+				{ dirty: false },
+			);
+			const expected = (1n << BigInt(width)) - 1n;
+			expect(dut.a).toBe(expected);
+			expect(readFourState(buffer, sig)).toEqual([expected, expected]);
+		},
+	);
 });
 
 // ---------------------------------------------------------------------------

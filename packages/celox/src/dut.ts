@@ -36,32 +36,8 @@ export interface DirtyState {
 // DataView helpers
 // ---------------------------------------------------------------------------
 
-/** Fast scalar load; the caller ensures widened reads fit in the view. */
-function readNumber(view: DataView, offset: number, width: number): number {
-	if (width <= 8) {
-		const raw = view.getUint8(offset);
-		return width === 8 ? raw : raw & ((1 << width) - 1);
-	}
-	if (width <= 16) {
-		const raw = view.getUint16(offset, true);
-		return width === 16 ? raw : raw & ((1 << width) - 1);
-	}
-	if (width <= 32) {
-		const raw = view.getUint32(offset, true);
-		return width === 32 ? raw : (raw & ((1 << width) - 1)) >>> 0;
-	}
-	// 33..53 bits — fits safely in a JS number
-	const lo = view.getUint32(offset, true);
-	const hi = view.getUint32(offset + 4, true) & ((1 << (width - 32)) - 1);
-	return lo + hi * 0x1_0000_0000;
-}
-
 /** Read only the allocated scalar bytes, masked to width. */
-function readNumberExact(
-	view: DataView,
-	offset: number,
-	width: number,
-): number {
+function readNumber(view: DataView, offset: number, width: number): number {
 	if (width <= 8) {
 		const raw = view.getUint8(offset);
 		return width === 8 ? raw : raw & ((1 << width) - 1);
@@ -172,24 +148,7 @@ function readSignal(view: DataView, sig: SignalLayout): bigint {
 	if (sig.width <= 53) {
 		return BigInt(readNumber(view, sig.offset, sig.width));
 	}
-	return readBigInt(view, sig.offset, sig.byteSize);
-}
-
-/** Exact-size fallback for scalar loads at the end of memory. */
-function readSignalExact(view: DataView, sig: SignalLayout): bigint {
-	return BigInt(readNumberExact(view, sig.offset, sig.width));
-}
-
-/** Select a safe load once when constructing the scalar accessor. */
-function signalReader(view: DataView, sig: SignalLayout): typeof readSignal {
-	if (sig.width > 53) return readSignal;
-	const size =
-		sig.width <= 8 ? 1 : sig.width <= 16 ? 2 : sig.width <= 32 ? 4 : 8;
-	const canShrink =
-		"resizable" in view.buffer && view.buffer.resizable === true;
-	return sig.offset + size <= view.byteLength && !canShrink
-		? readSignal
-		: readSignalExact;
+	return BigInt.asUintN(sig.width, readBigInt(view, sig.offset, sig.byteSize));
 }
 
 /** Write a signal value to the DataView. Accepts bigint (number accepted for compat). */
@@ -198,7 +157,10 @@ function writeSignal(
 	sig: SignalLayout,
 	value: bigint | number,
 ): void {
-	const bigVal = typeof value === "bigint" ? value : BigInt(value);
+	const bigVal = BigInt.asUintN(
+		sig.width,
+		typeof value === "bigint" ? value : BigInt(value),
+	);
 	if (sig.width <= 53) {
 		writeNumber(view, sig.offset, sig.width, Number(bigVal));
 	} else {
@@ -462,7 +424,6 @@ function defineSignalProperty(
 	handle: NativeHandle,
 	state: DirtyState,
 ): void {
-	const read = signalReader(view, sig);
 	const isOutput = port?.direction === "output";
 	const isInput = port?.direction === "input";
 
@@ -474,7 +435,7 @@ function defineSignalProperty(
 				handle.evalComb();
 				state.dirty = false;
 			}
-			return read(view, sig);
+			return readSignal(view, sig);
 		},
 
 		set(value: bigint | number | symbol | FourStateValue) {
@@ -913,7 +874,7 @@ export function readFourState(
 		throw new Error("Signal is not 4-state");
 	}
 	const view = new DataView(buffer);
-	const value = signalReader(view, sig)(view, sig);
+	const value = readSignal(view, sig);
 	const maskSig: SignalLayout = {
 		offset: sig.offset + sig.byteSize,
 		width: sig.width,
@@ -921,6 +882,6 @@ export function readFourState(
 		is4state: false,
 		direction: sig.direction,
 	};
-	const mask = signalReader(view, maskSig)(view, maskSig);
+	const mask = readSignal(view, maskSig);
 	return [value, mask];
 }
