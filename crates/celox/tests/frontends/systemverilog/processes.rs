@@ -1665,3 +1665,87 @@ fn called_tasks_with_hidden_comb_pulses_are_rejected() {
         assert!(error.contains("multiple blocking writes"), "{error}");
     }
 }
+
+#[test]
+fn expression_calls_with_hidden_comb_pulses_are_rejected() {
+    let error = build_error(
+        r#"module Top(input bit go, output bit seen); bit q,dummy;
+        function bit pulse(); q=1; q=0; return 0; endfunction
+        always_comb dummy=go ? pulse() : 0;
+        initial begin @(posedge q); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn subroutine_and_output_actuals_are_combinational_drivers() {
+    for task in [
+        "task drive; q=a; endtask",
+        "task drive(output bit out); out=a; endtask",
+    ] {
+        let call = if task.contains("output") {
+            "drive(q);"
+        } else {
+            "drive();"
+        };
+        let source = format!(
+            r#"module Top(input bit a, output bit seen); bit q,r;
+            {task} always_comb {call} assign r=q;
+            initial begin @(q^r); seen=1; end
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("multiple combinationally driven variables"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn past_targets_leave_host_waiters_suspended() {
+    let mut sim = simulation(
+        r#"module Top(input bit go, output bit seen); initial begin wait(go); seen=1; end endmodule"#,
+    );
+    sim.run_until(100).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(60).unwrap();
+    assert_eq!(sim.time(), 100);
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+    assert!(sim.has_waiting_processes());
+    sim.run_until(100).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn blocking_ff_publication_precedes_inactive_continuations() {
+    for (assign, expected) in [("q=1;", 1u8), ("q<=1;", 0), ("q<=7; q=2;", 2)] {
+        let source = format!(
+            r#"module Top(input bit clk, output bit [7:0] q, observed, derived_seen);
+            bit [7:0] derived; assign derived=q+1;
+            always @(posedge clk) begin {assign} end
+            initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
+        endmodule"#
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("observed")), expected.into(), "{assign}");
+        assert_eq!(
+            sim.get(sim.signal("derived_seen")),
+            (expected + 1).into(),
+            "{assign}"
+        );
+        let final_q = if assign == "q=1;" {
+            9u8
+        } else if assign == "q<=1;" {
+            1
+        } else {
+            7
+        };
+        assert_eq!(sim.get(sim.signal("q")), final_q.into(), "{assign}");
+    }
+}

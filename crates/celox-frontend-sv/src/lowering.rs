@@ -6318,9 +6318,9 @@ fn lower_ff_processes(
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
         insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set, apply);
     }
-    // Every process of a trigger evaluates against the pre-edge state before
-    // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
-    // all evaluations first and all commits afterwards.
+    // Nonblocking stores remain queued while evaluation units execute;
+    // blocking stores publish during evaluation (IEEE 1800-2023 10.4).
+    // The combined unit publishes queued NBAs after all evaluations.
     for (trigger_set, eval_only) in &eval_only_ff_blocks {
         let apply = &apply_ff_blocks[trigger_set];
         let mut eval_apply = merge_sir_eus(&[eval_only.clone(), apply.clone()]).0;
