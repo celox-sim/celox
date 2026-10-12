@@ -1,3 +1,4 @@
+import { withOwnedHandle } from "./handle-ownership.js";
 /**
  * NAPI helper utilities for the @celox-sim/celox TypeScript runtime.
  *
@@ -946,25 +947,27 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 		const raw = options.tier
 			? handleCtor.newTiered!(napiSources, moduleName, napiOpts)
 			: new handleCtor(napiSources, moduleName, napiOpts);
-		const layout = parseLegacyLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		return withOwnedHandle(raw, () => {
+			const layout = parseLegacyLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
-		// Detect WASM-compiled addon and use the bridge
-		let buf: ArrayBuffer | SharedArrayBuffer;
-		let handle: NativeSimulatorHandle;
-		if (isWasmHandle(raw)) {
-			const bridge = createWasmSimulatorBridge(raw);
-			buf = bridge.sharedMemory.buffer;
-			handle = bridge.handle;
-		} else {
-			buf = raw.sharedMemory().buffer;
-			handle = wrapDirectSimulatorHandle(raw);
-		}
+			// Detect WASM-compiled addon and use the bridge
+			let buf: ArrayBuffer | SharedArrayBuffer;
+			let handle: NativeSimulatorHandle;
+			if (isWasmHandle(raw)) {
+				const bridge = createWasmSimulatorBridge(raw);
+				buf = bridge.sharedMemory.buffer;
+				handle = bridge.handle;
+			} else {
+				buf = raw.sharedMemory().buffer;
+				handle = wrapDirectSimulatorHandle(raw);
+			}
 
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return { buffer: buf, layout, events, handle, hierarchy, warnings };
+			return { buffer: buf, layout, events, handle, hierarchy, warnings };
+		});
 	};
 }
 
@@ -999,15 +1002,17 @@ export function createSimulationBridge(
 			napiOpts,
 		);
 
-		const layout = parseLegacyLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+		return withOwnedHandle(raw, () => {
+			const layout = parseLegacyLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
 
-		const buf = raw.sharedMemory().buffer;
-		const handle = wrapDirectSimulationHandle(raw);
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+			const buf = raw.sharedMemory().buffer;
+			const handle = wrapDirectSimulationHandle(raw);
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return { buffer: buf, layout, events, handle, hierarchy, warnings };
+			return { buffer: buf, layout, events, handle, hierarchy, warnings };
+		});
 	};
 }
 

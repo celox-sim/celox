@@ -1,9 +1,245 @@
 use super::*;
 
+#[test]
+fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
+    for process in ["always_comb", "always_ff @(posedge clk)"] {
+        let source = format!(
+            r#"
+            module Top(input logic clk, enabled, input logic [1:0] condition);
+              function automatic int message_value();
+                $display("inside");
+                return 7;
+              endfunction
+              {process} if (enabled)
+                $assert_continue(condition, "value=%0d", message_value());
+            endmodule
+        "#
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("veryl_assert_unknown.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+        sim.drain_runtime_events();
+        let enabled = sim.signal("enabled");
+        let condition = sim.signal("condition");
+        sim.modify(|io| {
+            io.set(enabled, 1u8);
+            io.set_four_state(condition, BigUint::from(2u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        if process.starts_with("always_ff") {
+            sim.tick(sim.event("clk")).unwrap();
+        }
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: b"inside".to_vec()
+            },]
+        );
+        sim.modify(|io| {
+            io.set_four_state(condition, BigUint::from(0u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        if process.starts_with("always_ff") {
+            sim.tick(sim.event("clk")).unwrap();
+        }
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![
+                celox::RuntimeEvent::Display {
+                    message: b"inside".to_vec()
+                },
+                celox::RuntimeEvent::AssertContinue {
+                    message: b"value=7".to_vec()
+                },
+            ]
+        );
+    }
+}
+
 sv_backends! {
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
     fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
     fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
+    // Veryl extension calls emitted unchanged into SV, not SV assert statements.
+    fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, enabled, ok, output logic effect, output logic reached);
+              function automatic int message_value(input logic value, output logic written);
+                $display("inside=%0d", value);
+                written = !value;
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                reached = 0;
+                effect = ok;
+                if (enabled) begin
+                  $assert_continue(effect, "before=%0d value=%0d after=%0d",
+                                   effect, message_value(effect, effect), effect);
+                  reached = 1;
+                end
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert.sv"))], "Top")
+            .four_state(true);
+        let enabled = sim.signal("enabled");
+        let ok = sim.signal("ok");
+        let clk = sim.event("clk");
+        sim.set(enabled, 0u8);
+        sim.set(ok, 0u8);
+        sim.tick(clk).unwrap();
+        assert!(sim.drain_runtime_events().is_empty());
+        assert_eq!(sim.get(sim.signal("reached")), 0u8.into());
+        sim.set(enabled, 1u8);
+        sim.set(ok, 1u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
+        ]);
+        sim.set(ok, 0u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"before=0 value=-2 after=1".to_vec() },
+        ]);
+    }
+
+    fn veryl_assert_comb_evaluates_success_message_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic enabled, ok, output logic effect);
+              function automatic int message_value(input logic value, output logic written);
+                $display("inside=%0d", value);
+                written = !value;
+                return -2;
+              endfunction
+              always_comb begin
+                effect = ok;
+                if (enabled)
+                  $assert_continue(effect, "before=%0d value=%0d after=%0d",
+                                   effect, message_value(effect, effect), effect);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_comb.sv"))], "Top")
+            .four_state(true);
+        sim.drain_runtime_events();
+        let enabled = sim.signal("enabled");
+        let ok = sim.signal("ok");
+        sim.modify(|io| { io.set(enabled, 1u8); io.set(ok, 1u8); }).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
+        ]);
+        sim.modify(|io| io.set(ok, 0u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"before=0 value=-2 after=1".to_vec() },
+        ]);
+        sim.modify(|io| io.set(enabled, 0u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn veryl_assert_fatal_ff_evaluates_messages_and_stops_only_on_failure(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, ok, output logic reached);
+              function automatic int message_value();
+                $display("inside");
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                reached = 0;
+                $assert(ok, "value=%0d", message_value());
+                reached = 1;
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_fatal.sv"))], "Top");
+        let ok = sim.signal("ok");
+        let clk = sim.event("clk");
+        sim.set(ok, 1u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+        ]);
+        sim.set(ok, 0u8);
+        assert!(sim.tick(clk).is_err());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::AssertFatal { message: b"value=-2".to_vec() },
+        ]);
+    }
+
+    fn veryl_assert_comb_runtime_loop_keeps_eager_argument_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic ok, input logic [2:0] count, output int q);
+              function automatic int message_value(input int index);
+                $display("inside=%0d", index);
+                return index + 1;
+              endfunction
+              always_comb begin
+                q = 0;
+                for (int i = 0; i < count; ++i) begin
+                  $assert_continue(ok, "value=%0d", message_value(i));
+                  q += 1;
+                end
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_loop.sv"))], "Top");
+        sim.drain_runtime_events();
+        let ok = sim.signal("ok");
+        let count = sim.signal("count");
+        sim.modify(|io| { io.set(ok, 1u8); io.set(count, 2u8); }).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 2u32.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
+        ]);
+        sim.modify(|io| io.set(ok, 0u8)).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"value=1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"value=2".to_vec() },
+        ]);
+    }
+
+    fn veryl_assert_constant_conditions_preserve_message_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk);
+              function automatic int message_value();
+                $display("inside");
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                $assert(1'b1, "value=%0d", message_value());
+                $assert_continue(1'b0, message_value());
+                $assert_continue(1'b0);
+                assert (1'b1) else $error("value=%0d", message_value());
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_constant.sv"))], "Top");
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"assertion failed".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"assertion failed".to_vec() },
+        ]);
+    }
+
     fn unpacked_dimensions_publishes_dependent_array_parameters(sim) { @case "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"; }
     fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
     fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }

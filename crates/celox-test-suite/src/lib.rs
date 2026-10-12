@@ -112,7 +112,7 @@ impl TestTag {
                 "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
             }
             Self::EagerAssertionMessages => {
-                "Requires message argument effects even on a successful assertion; SV executes the fail action only on failure (IEEE 1800-2023 16.3)."
+                "Requires eager message argument effects for Veryl's `$assert`/`$assert_continue` extension, including successful checks; standard SystemVerilog does not define these calls."
             }
             Self::TwoStateZeroDivision => {
                 "Requires the suite's totalized two-state division/remainder result of zero, including logic destinations; SV arithmetic produces X before any two-state destination conversion (IEEE 1800-2023 11.3.4, 11.4.3)."

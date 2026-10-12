@@ -1279,16 +1279,13 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     )
                     .map(ConstExpr::Ident)
                 );
-                Ok(Some(
-                    const_select_expr(
-                        base.clone(),
-                        &parameter.nodes.1,
-                        syntax_tree,
-                        const_env,
-                        type_aliases,
-                    )?
-                    .unwrap_or(base),
-                ))
+                const_select_expr(
+                    base,
+                    &parameter.nodes.1,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
                 if let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0
@@ -1538,6 +1535,9 @@ fn const_select_expr(
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     if select.nodes.2.is_some() {
         return Ok(None);
+    }
+    if bit_selects.is_empty() {
+        return Ok(Some(base));
     }
     // An element of a packed parameter takes its width and signedness from
     // the parameter's dimensions.

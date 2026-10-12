@@ -70,9 +70,6 @@ fn test_ff_assert_message_output_argument_is_eager(sim) {
 
 fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     @omit_veryl;
-    // SV frontend evaluates `$assert_continue` message arguments only when the check fails, so
-    // the `$display` in `message_value` is missing; Veryl evaluates them eagerly.
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
             function message_value (x: input logic<8>) -> logic<8> {
@@ -329,9 +326,6 @@ fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
 
 fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
     @omit_veryl;
-    // SV frontend evaluates `$assert_continue` message arguments only when the check fails, so
-    // the `$display` in the case pattern is missing; Veryl evaluates them eagerly.
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
             function observed_value (x: input logic<8>) -> logic<8> {

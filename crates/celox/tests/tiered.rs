@@ -352,3 +352,45 @@ fn tiered_promotion_with_lane_partitioned_kernels() {
         assert_eq!(lanes_out!(sim), lanes_out!(reference));
     }
 }
+
+/// Wildcard comparison results must remain X when the native tier takes over.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn tiered_wildcard_unknown_stays_x_across_promotion() {
+    let code = r#"
+module Top(input logic [3:0] x, y, output logic neq);
+    assign neq = (x !=? y);
+endmodule
+"#;
+    let mut sim =
+        celox::Simulator::from_sv_sources(vec![(code, std::path::Path::new("wildcard.sv"))], "Top")
+            .four_state(true)
+            .tier_promotion(celox::TierPromotion::AfterSteps(32))
+            .build_tiered()
+            .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    let neq = sim.signal("neq");
+    sim.modify(|io| {
+        io.set_four_state(x, 4u8.into(), 3u8.into());
+        io.set(y, 4u8);
+    })
+    .unwrap();
+    let expected = (1u8.into(), 1u8.into());
+    assert!(!sim.is_compiled());
+    assert_eq!(sim.get_four_state(neq), expected);
+
+    // The step threshold holds the initial tier; this deadline only bounds
+    // waiting for the background compiler and does not select the tier.
+    for _ in 0..32 {
+        sim.eval_comb().unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !sim.is_compiled() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        sim.eval_comb().unwrap();
+    }
+    assert!(sim.is_compiled(), "background compilation did not finish");
+    assert!(sim.promotion_error().is_none());
+    assert_eq!(sim.get_four_state(neq), expected);
+}
