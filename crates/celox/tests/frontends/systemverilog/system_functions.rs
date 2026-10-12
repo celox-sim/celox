@@ -907,9 +907,12 @@ fn finish_in_an_initial_block_ends_the_simulation() {
     assert!(sim.is_finished());
     assert_eq!(
         sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::Display {
-            message: "before".to_string(),
-        }],
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before".to_string(),
+            },
+            celox::RuntimeEvent::Finish
+        ],
     );
 }
 
