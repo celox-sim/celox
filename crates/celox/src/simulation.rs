@@ -1290,7 +1290,7 @@ mod static_task_ff_tests {
             sim.load_state(&file).unwrap();
             next(&mut sim, expected + 1);
         }
-        for (assignment, expected) in [("n=n+1", 11), ("n<=n+1", 10)] {
+        for (assignment, expected) in [("n=n+1", 11), ("n[3:0]=n[3:0]+1", 11), ("n<=n+1", 10)] {
             let source = format!(
                 "module Top(input bit clk,output bit[7:0]out);task tick(output bit[7:0]value);static bit[7:0]n=10;{assignment};value=n;endtask always_ff @(posedge clk)tick(out);endmodule"
             );

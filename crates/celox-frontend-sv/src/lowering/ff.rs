@@ -222,20 +222,6 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Collect the variables a body writes, following calls into subroutines.
     fn scan(&mut self, stmts: &[sv::ir::Stmt], visited: &mut HashSet<String>) {
-        for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Local {
-                    name,
-                    r#static: true,
-                    ..
-                } = stmt
-                {
-                    if let Some(id) = self.m.id(name) {
-                        self.persistent.insert(id);
-                    }
-                }
-            });
-        }
         let mut writes: Vec<(sv::ir::LValue, bool)> = Vec::new();
         for stmt in stmts {
             stmt.walk(&mut |stmt| match stmt {
@@ -280,6 +266,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
             if visited.insert(name) {
+                if subroutine.is_task {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| {
+                            if let sv::ir::Stmt::Local {
+                                name,
+                                r#static: true,
+                                ..
+                            } = stmt
+                            {
+                                if let Some(id) = self.m.id(name) {
+                                    self.persistent.insert(id);
+                                }
+                            }
+                        });
+                    }
+                }
                 self.scan(&subroutine.body, visited);
             }
         }
@@ -310,7 +312,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             } else if let Some(var) = aliases.get(id) {
                 if !self.nonblocking_store
                     && working_set.contains(var)
-                    && variables.get(var).is_some_and(|var| !var.hidden)
+                    && (persistent.contains(var)
+                        || variables.get(var).is_some_and(|var| !var.hidden))
                 {
                     stable(*var)
                 } else {
