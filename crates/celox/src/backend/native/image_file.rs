@@ -261,3 +261,43 @@ fn checksum(bytes: &[u8]) -> u64 {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })
 }
+
+#[cfg(test)]
+mod process_metadata_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+
+    fn image() -> NativeProgramImage {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
+        crate::Simulator::from_frontend(module.finish())
+            .compile_native()
+            .unwrap()
+            .into_program_image()
+    }
+
+    #[test]
+    fn the_previous_process_schema_is_rejected_before_decoding() {
+        let mut bytes = image().to_container_bytes().unwrap();
+        let version = bytes.len() - TRAILER_SIZE + 8;
+        bytes[version..version + 2].copy_from_slice(&(CONTAINER_VERSION - 1).to_le_bytes());
+        assert!(matches!(
+            NativeProgramImage::from_container_bytes(&bytes),
+            Err(NativeImageContainerError::UnsupportedVersion(version)) if version == CONTAINER_VERSION - 1
+        ));
+    }
+}
