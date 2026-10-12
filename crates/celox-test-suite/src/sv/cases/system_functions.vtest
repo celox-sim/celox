@@ -1012,6 +1012,141 @@ a=0a  10
   (assert_eq for_index 1)
   (assert_eq foreach_index 1))
 
+(case timescale_queries_resolve_declarations_and_return_types
+  (source "timescales.sv" #"
+    module Top(input logic a, output logic ok, output logic [63:0] wide,
+               output logic [3:0] narrow, output int scaled);
+      timeunit 100ps / 10fs;
+      timeprecision 10fs;
+      timeunit 100ps;
+      function automatic int unit_value(); return $timeunit(); endfunction
+      assign wide = $timeunit;
+      assign narrow = $timeprecision;
+      assign scaled = a ? $timeprecision() : unit_value();
+      assign ok = ($timeunit == -10) && ($timeprecision() == -14)
+        && ($bits($timeunit()) == 32) && ($timeunit() < 0)
+        && (($timeunit() >> 1) == 32'h7fff_fffb)
+        && (($timeunit() >>> 1) == -5);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq ok 1)
+  (assert_eq wide 18446744073709551606)
+  (assert_eq narrow 2)
+  (assert_eq scaled 4294967286)
+  (modify (set a 1))
+  (assert_eq scaled 4294967282))
+
+(case timescale_queries_resolve_directives_and_hierarchy
+  (source "timescales.sv" #"
+    `timescale 10ns / 100ps
+    module Leaf(output int u, p);
+      assign u = $timeunit;
+      assign p = $timeprecision();
+    endmodule
+    `timescale 1us / 1ns
+    module Child(output int u, p);
+      Leaf leaf();
+      assign u = $timeunit();
+      assign p = $timeprecision;
+    endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign ok = ($timeunit == -3) && ($timeprecision == -6)
+        && ($timeunit(child) == -6) && ($timeprecision(child) == -9)
+        && ($timeunit(child.leaf) == -8) && ($timeprecision(child.leaf) == -10)
+;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_distinguish_unit_and_global_precision
+  (source "timescales.sv" #"
+    timeunit 100ps / 10fs;
+    `timescale 10ns / 100ps
+    module Child(); endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign ok = ($timeunit($unit) == -10) && ($timeprecision($unit) == -14)
+        && ($timeunit($root) == -15) && ($timeprecision($root) == -15)
+        && ($timeunit() == -3) && ($timeprecision(child) == -10);
+    endmodule
+    `timescale 1ns / 1fs
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_follow_partial_declarations_and_resetall
+  (source "timescales.sv" #"
+    timeunit 1ns / 1ps;
+    `timescale 100ns / 10ps
+    module A(); timeunit 10ns; endmodule
+    module B(); timeprecision 1ps; endmodule
+    module Top(output wire ok);
+      A a(); B b(); C c();
+      assign ok = ($timeunit(a) == -8) && ($timeprecision(a) == -11)
+        && ($timeunit(b) == -7) && ($timeprecision(b) == -12)
+        && ($timeunit(c) == -9) && ($timeprecision(c) == -12)
+        && ($timeunit == -7) && ($timeprecision == -11);
+    endmodule
+    `resetall
+    module C(); endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_preserve_procedural_and_package_scopes
+  (source "timescales.sv" #"
+    timeunit 1ns / 1ps;
+    package P;
+      timeunit 10us / 100ns;
+      function automatic int precision_value(); return $timeprecision(); endfunction
+    endpackage
+    module Top(input logic clk, output logic ok, output int initialized, registered, package_precision);
+      timeunit 1ms / 1us;
+      function automatic int own_unit(); return $timeunit; endfunction
+      initial begin
+        initialized = $timeunit();
+        $timeprecision;
+      end
+      always_comb begin : block_scope
+        $timeunit();
+        ok = (own_unit() == -3) && (P::precision_value() == -7);
+      end
+      assign package_precision = P::precision_value();
+      always_ff @(posedge clk) registered <= $timeprecision;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1)
+  (assert_eq package_precision 4294967289)
+  (assert_eq initialized 4294967293)
+  (tick clk)
+  (assert_eq registered 4294967290))
+
+(case timescale_queries_are_constant_in_unqualified_calls
+  (source "timescales.sv" #"
+    module Top(output logic ok);
+      timeunit 1ns / 100ps;
+      localparam int U = $timeunit();
+      localparam int P = $timeprecision;
+      logic [-U-1:0] v;
+      assign v = '1;
+      assign ok = (U == -9) && (P == -10) && ($bits(v) == 9) && (v == 9'h1ff);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
 (case isunbounded_preserves_parameter_values_and_result_type
   (source "isunbounded.sv" #"
     module Top(output logic [7:0] flags, output logic [63:0] wide,
@@ -1138,21 +1273,33 @@ a=0a  10
     module Child #(parameter int P = -1) (output logic y);
       assign y = $isunbounded(P);
     endmodule
-    module Top(output logic [1:0] result, output logic [7:0] constant_value,
-               output int nested_bits);
+    module Top(output logic [4:0] result, output logic [7:0] constant_value,
+               output int nested_bits, output logic [15:0] genvar_values);
       parameter int P = -1;
       localparam Q = $isunbounded(P);
+      localparam int i = 9;
       Child #(.P(Q)) c(.y(result[1]));
       assign result[0] = $isunbounded(Q);
       assign constant_value = Q;
       assign nested_bits = $bits($isunbounded(P));
+      for (genvar i=-1; i<1; i++) begin : g
+        localparam BOUNDED = !$isunbounded(i);
+        if (BOUNDED) begin : nested
+          assign result[i+3] = $isunbounded(i);
+        end else assign result[i+3] = 1;
+        assign genvar_values[8*(i+1)+:8] = i;
+      end
+      for (genvar j=0; j<1; j++) begin : fresh
+        assign result[4] = $isunbounded(j);
+      end
     endmodule
   "#)
   (top Top)
   (eval)
   (assert_eq result 0)
   (assert_eq constant_value 0)
-  (assert_eq nested_bits 1))
+  (assert_eq nested_bits 1)
+  (assert_eq genvar_values 0x00ff))
 
 (case isunbounded_reports_bounded_array_parameters
   (source "isunbounded_array.sv" #"
@@ -1288,3 +1435,904 @@ a=0a  10
   (eval)
   (assert_eq and_bits 1)
   (assert_eq or_bits 2))
+
+(case timescale_queries_accept_separate_initial_declarations
+  (source "separate_times.sv" #"
+    timeunit 1ns;
+    timeunit 1ns;
+    timeprecision 1ps;
+    package P;
+      timeprecision 10ns;
+      timeprecision 10ns;
+      timeunit 10us;
+      function automatic int unit_value(); return $timeunit; endfunction
+      function automatic int precision_value(); return $timeprecision; endfunction
+    endpackage
+    module Top(output logic ok);
+      timeunit 10ns;
+      timeunit 10ns;
+      timeprecision 100ps;
+      localparam int U = $timeunit();
+      localparam int T = $timeprecision();
+      timeunit 10ns;
+      timeprecision 100ps;
+      assign ok = (U == -8) && (T == -10)
+        && ($timeunit($unit) == -9) && ($timeprecision($unit) == -12)
+        && (P::unit_value() == -5) && (P::precision_value() == -8);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_keep_module_and_package_names_independent
+  (source "namespaces.sv" #"
+    module P(); timeunit 1us / 1ns; endmodule
+    package P;
+      timeunit 100ns / 10ps;
+      function automatic int unit_value(); return $timeunit; endfunction
+      function automatic int precision_value(); return $timeprecision; endfunction
+    endpackage
+    package Q;
+      timeunit 10us / 100ps;
+      function automatic int unit_value(); return $timeunit; endfunction
+      function automatic int precision_value(); return $timeprecision; endfunction
+    endpackage
+    module Q(); timeunit 10ns / 1ps; endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      P p_inst(); Q q_inst();
+      assign ok = ($timeunit(p_inst) == -6) && ($timeprecision(p_inst) == -9)
+        && ($timeunit(q_inst) == -8) && ($timeprecision(q_inst) == -12)
+        && (P::unit_value() == -7) && (P::precision_value() == -11)
+        && (Q::unit_value() == -5) && (Q::precision_value() == -10);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_accept_directives_before_unit_declarations
+  (source "directive_before_unit.sv" #"
+    `timescale 10ns / 1ns
+    timeunit 1ns;
+    `timescale 10ns / 1ns
+    timeprecision 1ps;
+    module Top(output logic ok);
+      timeunit 100ps / 10fs;
+      assign ok = ($timeunit() == -10) && ($timeprecision() == -14);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_packages_with_instantiated_namesakes
+  (source "package_queries.sv" #"
+    module P(); timeunit 1us / 1ns; endmodule
+    package P; timeunit 100ns / 10ps; endpackage
+    package Q; timeunit 10us / 100ps; endpackage
+    module Q(); timeunit 10ns / 1ps; endmodule
+    module Top(output logic ok);
+      timeunit 1ms / 1us;
+      P p_inst(); Q q_inst();
+      assign ok = ($timeunit(P) == -7) && ($timeprecision(P) == -11)
+        && ($timeunit(Q) == -5) && ($timeprecision(Q) == -10)
+        && ($timeunit(p_inst) == -6) && ($timeprecision(p_inst) == -9)
+        && ($timeunit(q_inst) == -8) && ($timeprecision(q_inst) == -12);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_preserve_interface_scopes_when_flattened
+  (source "interface_times.sv" #"
+    timeunit 100ps / 100fs;
+    interface ClockInfo;
+      timeunit 100ns / 10ps;
+      function automatic int unit_value();
+        $timeunit();
+        void'($timeprecision());
+        return $timeunit();
+      endfunction
+      function automatic int precision_value(); return $timeprecision(); endfunction
+      function automatic int unit_scope(); return $timeunit($unit); endfunction
+      function automatic int precision_scope(); return $timeprecision($unit); endfunction
+      modport reader(import unit_value, import precision_value);
+    endinterface
+    interface Unused; timeunit 1ns / 1fs; endinterface
+  "#)
+  (source "interface_users.sv" #"
+    timeunit 10ns / 1ps;
+    module Reader(ClockInfo.reader info, output int u, p);
+      timeunit 1us / 1ns;
+      assign u = info.unit_value();
+      assign p = info.precision_value();
+    endmodule
+    module Top(output int direct_unit, direct_precision, port_unit, port_precision,
+               output logic ok);
+      timeunit 1ms / 1us;
+      ClockInfo info();
+      Reader reader(.info(info), .u(port_unit), .p(port_precision));
+      assign direct_unit = info.unit_value();
+      assign direct_precision = info.precision_value();
+      assign ok = ($timeunit() == -3) && ($timeprecision() == -6)
+        && ($timeunit($unit) == -8) && ($timeprecision($unit) == -12)
+        && ($timeunit($root) == -15) && ($timeprecision($root) == -15)
+        && (info.unit_scope() == -10) && (info.precision_scope() == -13)
+        && ($bits($timeunit()) == 32) && ($timeunit() < 0);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_unit (trunc 32 -7))
+  (assert_eq direct_precision (trunc 32 -11))
+  (assert_eq port_unit (trunc 32 -7))
+  (assert_eq port_precision (trunc 32 -11))
+  (assert_eq ok 1))
+
+
+(case timescale_queries_accept_leading_zero_magnitudes
+  (source "leading_zero_times.sv" #"
+    timeunit 001.0ns / 001ps;
+    package P;
+      timeunit 010.00ns / 0010.0ps;
+      function automatic int unit_value(); return $timeunit(); endfunction
+      function automatic int precision_value(); return $timeprecision(); endfunction
+    endpackage
+    module Child(output logic ok);
+      timeunit 00100ns / 00100.00ps;
+      assign ok = ($timeunit() == -7) && ($timeprecision() == -10);
+    endmodule
+    module Top(output logic ok);
+      timeunit 01ns / 001ps;
+      logic child_ok;
+      Child child(.ok(child_ok));
+      assign ok = child_ok && ($timeunit() == -9) && ($timeprecision() == -12)
+        && (P::unit_value() == -8) && (P::precision_value() == -11);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case timescale_queries_survive_type_parameter_specialization
+  (source "typed_times.sv" #"
+    timeunit 10ns / 1ps;
+    module Child #(parameter type T = logic)(output T value, output logic ok);
+      timeunit 1us / 1ns;
+      localparam int U = $timeunit();
+      localparam int P = $timeprecision();
+      assign value = T'(1);
+      assign ok = (U == -6) && (P == -9) && ($timeunit() == -6)
+        && ($timeprecision() == -9) && ($timeprecision($root) == -15);
+    endmodule
+    module Unused(); timeunit 1ns / 1fs; endmodule
+    module Top(output logic ok, output logic [7:0] wide, output logic [3:0] narrow);
+      timeunit 1ms / 1us;
+      logic a, b;
+      Child #(.T(logic [7:0])) first(.value(wide), .ok(a));
+      Child #(.T(logic [3:0])) second(.value(narrow), .ok(b));
+      assign ok = a && b && ($timeunit() == -3) && ($timeprecision() == -6);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq wide 1)
+  (assert_eq narrow 1)
+  (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_interface_instances_and_ports
+  (source "interface_handle_times.sv" #"
+    timeunit 1ns / 1ps;
+    interface I;
+      timeunit 100ns / 10ps;
+      logic v;
+      modport reader(input v);
+    endinterface
+    interface J; timeunit 1us / 100ps; logic v; endinterface
+    module Reader(I.reader info, output int u, p);
+      timeunit 10us / 1ns;
+      assign u = $timeunit(info);
+      assign p = $timeprecision(info);
+    endmodule
+    module GenericReader(interface info, output int u, p);
+      timeunit 10ns / 1ps;
+      assign u = $timeunit(info);
+      assign p = $timeprecision(info);
+    endmodule
+    module Top(output int direct_u, direct_p, fixed_u, fixed_p,
+               output int generic_i_u, generic_i_p, generic_j_u, generic_j_p,
+               output int generated_u, generated_p, output logic ok);
+      timeunit 1ms / 1us;
+      I i(); J j();
+      assign i.v = 0;
+      assign j.v = 0;
+      Reader reader(.info(i), .u(fixed_u), .p(fixed_p));
+      GenericReader a(.info(i), .u(generic_i_u), .p(generic_i_p));
+      GenericReader b(.info(j), .u(generic_j_u), .p(generic_j_p));
+      assign direct_u = $timeunit(i);
+      assign direct_p = $timeprecision(i);
+      if (1) begin : g
+        J local_info();
+        assign local_info.v = 0;
+        assign generated_u = $timeunit(local_info);
+        assign generated_p = $timeprecision(local_info);
+      end
+      always_comb begin
+        $timeunit(i);
+        void'($timeprecision(j));
+        ok = ($timeunit() == -3) && ($timeprecision() == -6)
+          && ($bits($timeunit(i)) == 32) && ($timeunit(i) < 0);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq direct_u (trunc 32 -7))
+  (assert_eq direct_p (trunc 32 -11))
+  (assert_eq fixed_u (trunc 32 -7))
+  (assert_eq fixed_p (trunc 32 -11))
+  (assert_eq generic_i_u (trunc 32 -7))
+  (assert_eq generic_i_p (trunc 32 -11))
+  (assert_eq generic_j_u (trunc 32 -6))
+  (assert_eq generic_j_p (trunc 32 -10))
+  (assert_eq generated_u (trunc 32 -6))
+  (assert_eq generated_p (trunc 32 -10))
+  (assert_eq ok 1))
+
+
+(case timescale_queries_resolve_hierarchical_interface_instances
+  (source "hierarchical_interface_times.sv" #"
+    timeunit 1ns / 1ps;
+    interface I;
+      timeunit 100ns / 10ps;
+      logic value;
+      function automatic int own_unit(); return $timeunit(); endfunction
+    endinterface
+    interface J; timeunit 1us / 100ps; logic value; endinterface
+    module Leaf;
+      timeunit 10ns / 1ps;
+      J nested();
+      assign nested.value = 0;
+    endmodule
+    module Child;
+      timeunit 1us / 1ns;
+      I info();
+      Leaf leaf();
+      assign info.value = 0;
+    endmodule
+    module Top(output int u, p, deep_u, deep_p, output logic ok);
+      timeunit 1ms / 1us;
+      Child child();
+      assign u = $timeunit(child.info);
+      assign p = $timeprecision(child.info);
+      assign deep_u = $timeunit(child.leaf.nested);
+      assign deep_p = $timeprecision(child.leaf.nested);
+      always_comb begin
+        $timeunit(child.info);
+        void'($timeprecision(child.leaf.nested));
+        ok = ($timeunit(child) == -6) && ($timeprecision(child) == -9)
+          && ($bits($timeunit(child.info)) == 32) && ($timeunit(child.info) < 0);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq u (trunc 32 -7))
+  (assert_eq p (trunc 32 -11))
+  (assert_eq deep_u (trunc 32 -6))
+  (assert_eq deep_p (trunc 32 -10))
+  (assert_eq ok 1))
+
+(case unpacked_dimensions_counts_declared_arrays
+  (source "unpacked_dimensions_arrays.sv" #"
+    module Top(output int scalar, packed_vector, packed_matrix, memory,
+               output int matrix, mixed, atom, singleton, nonarray_type);
+        logic s;
+        logic [7:0] v;
+        logic [1:0][3:0] p;
+        logic [7:0] a [3:5];
+        logic [7:0] b [0:1][0:2];
+        logic [1:0][3:0] c [0:1][0:2][0:3];
+        int i;
+        bit one [0:0];
+        assign scalar = $unpacked_dimensions(s);
+        assign packed_vector = $unpacked_dimensions(v);
+        assign packed_matrix = $unpacked_dimensions(p);
+        assign memory = $unpacked_dimensions(a);
+        assign matrix = $unpacked_dimensions(b);
+        assign mixed = $unpacked_dimensions(c);
+        assign atom = $unpacked_dimensions(i);
+        assign singleton = $unpacked_dimensions(one);
+        assign nonarray_type = $unpacked_dimensions(42);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (expand name (scalar packed_vector packed_matrix atom nonarray_type)
+    (assert_eq {name} 0))
+  (assert_eq memory 1)
+  (assert_eq matrix 2)
+  (assert_eq mixed 3)
+  (assert_eq singleton 1))
+
+(case unpacked_dimensions_preserves_selection_and_return_types
+  (source "unpacked_dimensions_expressions.sv" #"
+    module Top(input logic index, clk, input logic [7:0] value,
+               output int whole, element, leaf, packed_element, slice,
+               output int arithmetic, literal_value, returned, member, registered,
+               output logic [63:0] inverted, output logic negative);
+        logic [1:0][3:0] a [0:1][0:2];
+        typedef struct packed { logic [1:0][3:0] pair; logic flag; } record_t;
+        record_t record_value;
+        function automatic logic [1:0][3:0] identity(input logic [7:0] v);
+            $display("operand must not execute");
+            return v;
+        endfunction
+        assign whole = $unpacked_dimensions((a));
+        assign element = $unpacked_dimensions(a[index]);
+        assign leaf = $unpacked_dimensions(a[index][0]);
+        assign packed_element = $unpacked_dimensions(a[index][0][1]);
+        assign slice = $unpacked_dimensions(a[index][0:1]);
+        assign arithmetic = $unpacked_dimensions(value + value);
+        assign literal_value = $unpacked_dimensions(32'd7);
+        assign returned = $unpacked_dimensions(identity(value));
+        assign member = $unpacked_dimensions(record_value.pair);
+        assign inverted = ~$unpacked_dimensions(a);
+        assign negative = ($unpacked_dimensions(a) - 3) < 0;
+        always_ff @(posedge clk) registered <= $unpacked_dimensions(a);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x5a 0xff)
+    (modify (set value value) (set index (& value 1)))
+    (tick clk)
+    (assert_eq whole 2)
+    (assert_eq element 1)
+    (assert_eq leaf 0)
+    (assert_eq packed_element 0)
+    (assert_eq slice 1)
+    (expand name (arithmetic literal_value returned member)
+      (assert_eq {name} 0))
+    (assert_eq inverted (trunc 64 (~ 2)))
+    (assert_eq negative 1)
+    (assert_eq registered 2)
+    (expect_output "")))
+
+(case unpacked_dimensions_resolves_types_and_constant_scopes
+  (source "unpacked_dimensions_types.sv" #"
+    module Child #(parameter type T = logic [7:0])
+                  (output int result, output logic [$unpacked_dimensions(T):0] mask);
+        localparam N = $unpacked_dimensions(T);
+        assign result = N;
+        assign mask = '1;
+    endmodule
+    module Top(output int alias_type, original, overridden, generated,
+               output int formal, local_array, table_count, result_bits,
+               output int string_type, real_type, string_value, real_value,
+               output logic [0:0] original_mask, overridden_mask);
+        typedef logic [7:0] element_t;
+        typedef element_t row_t [0:2];
+        typedef row_t matrix_t [0:1];
+        localparam logic [7:0] TABLE [0:1] = '{8'h12, 8'h34};
+        localparam TABLE_N = $unpacked_dimensions(TABLE);
+        localparam N = $unpacked_dimensions(matrix_t);
+        logic [7:0] x [0:1][0:2];
+        assign alias_type = N;
+        assign table_count = TABLE_N;
+        assign result_bits = $bits($unpacked_dimensions(matrix_t));
+        assign string_type = $unpacked_dimensions(string);
+        assign real_type = $unpacked_dimensions(real);
+        assign string_value = $unpacked_dimensions("hello");
+        assign real_value = $unpacked_dimensions(3.14);
+        Child a(.result(original), .mask(original_mask));
+        Child #(.T(logic [1:0][3:0])) b(.result(overridden), .mask(overridden_mask));
+        if (N == 2) begin : g
+            logic [7:0] x [0:1][0:2][0:3];
+            localparam C = $unpacked_dimensions(x);
+            assign generated = C;
+        end else assign generated = -1;
+        function automatic int query(input logic [7:0] x [0:1]);
+            return $unpacked_dimensions(x);
+        endfunction
+        function automatic int local_query();
+            logic [7:0] x [0:1][0:2][0:3];
+            return $unpacked_dimensions(x);
+        endfunction
+        logic [7:0] arguments [0:1];
+        assign formal = query(arguments);
+        assign local_array = local_query();
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq alias_type 2)
+  (assert_eq original 0)
+  (assert_eq overridden 0)
+  (assert_eq generated 3)
+  (assert_eq formal 1)
+  (assert_eq local_array 3)
+  (assert_eq table_count 1)
+  (assert_eq result_bits 32)
+  (expand name (string_type real_type string_value real_value)
+    (assert_eq {name} 0))
+  (assert_eq original_mask 1)
+  (assert_eq overridden_mask 1))
+
+(case unpacked_dimensions_is_independent_of_unknown_values
+  (four_state)
+  (source "unpacked_dimensions_four_state.sv" #"
+    module Top(input logic [7:0] value, output int whole, element, parameter_value);
+        logic [7:0] a [0:1];
+        assign a[0] = value;
+        assign a[1] = value;
+        localparam logic [7:0] UNKNOWN = 8'b10xz_11xz;
+        localparam N = $unpacked_dimensions(UNKNOWN);
+        assign whole = $unpacked_dimensions(a);
+        assign element = $unpacked_dimensions(a[0]);
+        assign parameter_value = N;
+    endmodule
+  "#)
+  (top Top)
+  (for (value mask) (list (0 255) (255 255) (0xa5 0x5a))
+    (modify (set value (fourstate value mask)))
+    (assert_eq whole (fourstate 1 0))
+    (assert_eq element (fourstate 0 0))
+    (assert_eq parameter_value (fourstate 0 0))))
+
+; IEEE 1800-2023 20.7: queries use the operand's lexical declaration.
+(case unpacked_dimensions_resolves_procedural_scopes
+  (source "unpacked_scopes.sv" #"
+    module Top(output int task_value, legacy_value, block_value, nested_value, initial_value);
+      logic [7:0] x [0:1][0:2];
+      task automatic query(input logic [7:0] x [0:1], output int result);
+        logic [7:0] local_array [0:1][0:2][0:3];
+        result = $unpacked_dimensions(x) * 10 + $unpacked_dimensions(local_array);
+      endtask
+      task automatic legacy;
+        input logic [7:0] x [0:1];
+        output int result;
+        result = $unpacked_dimensions(x);
+      endtask
+      function automatic int nested();
+        logic [7:0] x [0:1];
+        begin : inner
+          logic [7:0] x [0:1][0:2][0:3];
+          return $unpacked_dimensions(x);
+        end
+      endfunction
+      logic [7:0] argument [0:1];
+      always_comb begin
+        logic [7:0] block_array [0:1][0:2][0:3][0:4];
+        query(argument, task_value);
+        legacy(argument, legacy_value);
+        block_value = $unpacked_dimensions(block_array);
+        nested_value = nested();
+      end
+      initial begin
+        logic [7:0] x [0:1][0:2][0:3][0:4][0:5];
+        initial_value = $unpacked_dimensions(x);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq task_value 13)
+  (assert_eq legacy_value 1)
+  (assert_eq block_value 4)
+  (assert_eq nested_value 3)
+  (assert_eq initial_value 5))
+
+(case unpacked_dimensions_resolves_package_array_constants
+  (source "unpacked_package.sv" #"
+    package data_pkg;
+      localparam logic [7:0] A [0:1] = '{8'h12, 8'h34};
+      localparam int N = $unpacked_dimensions(A);
+      localparam int ELEMENT = $unpacked_dimensions(A[0]);
+    endpackage
+    module Top(output int whole, element);
+      import data_pkg::*;
+      assign whole = N;
+      assign element = ELEMENT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq whole 1)
+  (assert_eq element 0))
+
+(case unpacked_dimensions_resolves_preceding_block_declarations
+  (source "preceding_dimensions.sv" #"
+    module Top(output int first_rank, second_rank, width_value);
+      always_comb begin
+        logic [7:0] a [0:1];
+        logic [$unpacked_dimensions(a):0] b;
+        logic [7:0] c [0:$unpacked_dimensions(a)];
+        first_rank = $unpacked_dimensions(a);
+        second_rank = $unpacked_dimensions(c);
+        width_value = $bits(b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq first_rank 1)
+  (assert_eq second_rank 1)
+  (assert_eq width_value 2))
+
+
+(case unpacked_dimensions_types_function_pattern_arguments
+  (source "dimension_patterns.sv" #"
+    module Top(output int constant_rank, runtime_rank);
+      function automatic logic [7:0] f(input logic [7:0] a [0:1]);
+        $display("must not execute");
+        return a[0];
+      endfunction
+      localparam N = $unpacked_dimensions(f('{8'h1, 8'h2}));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f('{8'h3, 8'h4}));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (expect_output ""))
+
+(case unpacked_dimensions_accepts_defaulted_function_arguments
+  (source "query_default_arguments.sv" #"
+    module Top(output int constant_rank, runtime_rank, supplied_rank, empty_rank);
+      function automatic int f(input int a, input int b = 2);
+        $display("must not execute");
+        return a + b;
+      endfunction
+      function automatic int g(input int a = 1, input int b = 2);
+        $display("must not execute");
+        return a + b;
+      endfunction
+      localparam N = $unpacked_dimensions(f(1));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f(1));
+      assign supplied_rank = $unpacked_dimensions(f(1, 3));
+      assign empty_rank = $unpacked_dimensions(g());
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (assert_eq supplied_rank 0)
+  (assert_eq empty_rank 0)
+  (expect_output ""))
+
+(case unpacked_dimensions_restores_shadowed_array_rank
+  (source "shadowed_array_rank.sv" #"
+    module Top(output int local_rank, nested_rank, restored_rank);
+      if (1) begin : g
+        logic [7:0] x [0:1];
+        always_comb begin
+          localparam int x = 1;
+          local_rank = $unpacked_dimensions(x);
+        end
+        always_comb begin
+          begin
+            localparam int x = 1;
+            nested_rank = $unpacked_dimensions(x);
+          end
+          restored_rank = $unpacked_dimensions(x);
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq local_rank 0)
+  (assert_eq nested_rank 0)
+  (assert_eq restored_rank 1))
+
+(case unpacked_dimensions_accepts_explicit_default_omissions
+  (source "omitted_query_arguments.sv" #"
+    module Top(output int constant_rank, runtime_rank, trailing_rank);
+      function automatic int f(input int a = 1, input int b, input int c = 3);
+        $display("must not execute");
+        return a + b + c;
+      endfunction
+      localparam N = $unpacked_dimensions(f(, 2));
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(f(, 2, ));
+      assign trailing_rank = $unpacked_dimensions(f(1, 2, ));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (assert_eq trailing_rank 0)
+  (expect_output ""))
+
+(case unpacked_dimensions_validates_writable_function_arguments
+  (source "writable_query_arguments.sv" #"
+    module Top(output int rank, untouched);
+      int a;
+      function automatic int f(output int x, inout int y);
+        $display("must not execute");
+        x = 9;
+        y = 10;
+        return 11;
+      endfunction
+      always_comb begin
+        a = 7;
+        rank = $unpacked_dimensions(f(a, a));
+        untouched = a;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq rank 0)
+  (assert_eq untouched 7)
+  (expect_output ""))
+
+; IEEE 1800-2023 13.4.1: the function name denotes its result variable.
+(case unpacked_dimensions_accepts_function_result_arguments
+  (source "function_result_query_arguments.sv" #"
+    module Child(input int value, output int copied);
+      assign copied = value;
+    endmodule
+    module Top(output int ansi_result, legacy_result, implicit_result, inline_result);
+      localparam logic [31:0] P = 32'bx;
+      function automatic int g(output int x);
+        $display("must not execute");
+        x = 99;
+        g = 0;
+      endfunction
+      function automatic int update(inout int x);
+        $display("must not execute");
+        x = 99;
+        update = 0;
+      endfunction
+      function automatic int f(input int P);
+        f = P;
+        f = f + $unpacked_dimensions(g(f))
+              + $unpacked_dimensions(update(f[31:0]))
+              + $unpacked_dimensions(g(P));
+      endfunction
+      function automatic int legacy;
+        int P;
+        begin
+          P = 11;
+          legacy = P;
+          legacy = legacy + $unpacked_dimensions(update({legacy[31:16], legacy[15:0]}))
+                          + $unpacked_dimensions(g(P));
+        end
+      endfunction
+      function automatic implicit_f;
+        implicit_f = 1;
+        implicit_f = implicit_f + $unpacked_dimensions(g(implicit_f));
+      endfunction
+      assign ansi_result = f(9);
+      assign legacy_result = legacy();
+      assign implicit_result = implicit_f();
+      Child child(.value(f(9)), .copied(inline_result));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ansi_result 9)
+  (assert_eq legacy_result 11)
+  (assert_eq implicit_result 1)
+  (assert_eq inline_result 9)
+  (expect_output ""))
+
+(case unpacked_dimensions_resolves_preceding_module_declarations
+  (source "preceding_module_shapes.sv" #"
+    module Top(input logic [7:0] port_array [0:1],
+               input logic [$unpacked_dimensions(port_array):0] sized_port,
+               output int signal_width, port_width, chained_width, header_width);
+      logic [7:0] a [0:1];
+      logic [$unpacked_dimensions(a):0] b;
+      logic [$unpacked_dimensions(port_array):0] c;
+      logic [$dimensions(b):0] d;
+      localparam W = $bits(b);
+      assign signal_width = W;
+      assign port_width = $bits(c);
+      assign chained_width = $bits(d);
+      assign header_width = $bits(sized_port);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signal_width 2)
+  (assert_eq port_width 2)
+  (assert_eq chained_width 2)
+  (assert_eq header_width 2))
+
+(case unpacked_dimensions_prefers_values_over_imported_types
+  (source "value_shadows_imported_type.sv" #"
+    package P;
+      typedef logic [7:0] row_t [0:1];
+      typedef logic [7:0] port_t [0:1];
+    endpackage
+    module Top(input logic port_t, output int signal_rank, port_rank, type_rank);
+      import P::*;
+      logic row_t;
+      localparam N = $unpacked_dimensions(row_t);
+      localparam M = $unpacked_dimensions(port_t);
+      assign signal_rank = N;
+      assign port_rank = M;
+      assign type_rank = $unpacked_dimensions(P::row_t);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq signal_rank 0)
+  (assert_eq port_rank 0)
+  (assert_eq type_rank 1))
+
+(case unpacked_dimensions_checks_unevaluated_indices
+  (source "unevaluated_query_indices.sv" #"
+    module Top(input int index, output int constant_rank, runtime_rank, total_rank);
+      logic [7:0] a [0:1][0:2];
+      function automatic int f(input int x);
+        $display("must not execute");
+        return x;
+      endfunction
+      localparam N = $unpacked_dimensions(a[f(index)]);
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(a[index][f(index)]);
+      assign total_rank = $dimensions(a[f(index)]);
+    endmodule
+  "#)
+  (top Top)
+  (set index 1)
+  (eval)
+  (assert_eq constant_rank 1)
+  (assert_eq runtime_rank 0)
+  (assert_eq total_rank 2)
+  (expect_output ""))
+
+(case unpacked_dimensions_resolves_sibling_declarators
+  (source "sibling_declarators.sv" #"
+    module Top(output int data_bits, net_bits, alias_bits);
+      logic [7:0] a [0:1], b [0:$unpacked_dimensions(a)];
+      wire [7:0] x [0:1], z [0:$unpacked_dimensions(x)];
+      assign x[0] = 8'h00;
+      assign x[1] = 8'h00;
+      assign z[0] = 8'h00;
+      assign z[1] = 8'h00;
+      typedef logic [7:0] byte_t;
+      byte_t p [0:1], q [0:$unpacked_dimensions(p)];
+      localparam B = $bits(b), Z = $bits(z), Q = $bits(q);
+      assign data_bits = B;
+      assign net_bits = Z;
+      assign alias_bits = Q;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq data_bits 16)
+  (assert_eq net_bits 16)
+  (assert_eq alias_bits 16))
+
+(case unpacked_dimensions_selects_integral_atoms
+  (source "integral_atom_selects.sv" #"
+    module Top(input int index, output int constant_rank, runtime_rank, slice_rank, array_rank);
+      int i;
+      int a [0:1];
+      localparam N = $unpacked_dimensions(i[0]);
+      assign constant_rank = N;
+      assign runtime_rank = $unpacked_dimensions(i[index]);
+      assign slice_rank = $unpacked_dimensions(i[index +: 3]);
+      assign array_rank = $unpacked_dimensions(a[0][3]);
+    endmodule
+  "#)
+  (top Top)
+  (set index 1)
+  (eval)
+  (assert_eq constant_rank 0)
+  (assert_eq runtime_rank 0)
+  (assert_eq slice_rank 0)
+  (assert_eq array_rank 0))
+
+(case unpacked_dimensions_publishes_array_parameters_before_declarations
+  (source "array_parameter_declarations.sv" #"
+    module Top #(parameter logic [7:0] A [0:1] = '{default:0})
+        (output logic [$unpacked_dimensions(A):0] y,
+         output int port_bits, signal_bits, local_bits);
+      logic [$unpacked_dimensions(A):0] b;
+      localparam logic [7:0] C [0:1] = '{default:0};
+      logic [$unpacked_dimensions(C):0] d;
+      localparam Y = $bits(y), B = $bits(b), D = $bits(d);
+      assign y = 2'b11;
+      assign port_bits = Y;
+      assign signal_bits = B;
+      assign local_bits = D;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 3)
+  (assert_eq port_bits 2)
+  (assert_eq signal_bits 2)
+  (assert_eq local_bits 2))
+
+
+; 20.4.2: special scope names and canonical magnitudes do not depend on the
+; external adapter's enclosing testbench instance name.
+(case printtimescale_displays_unit_and_global_precision
+  (source "print_scales.sv" #"
+    timeunit 100ps / 10fs;
+    module Top(input logic clk, input logic enabled, output logic q);
+      timeunit 1ns / 1ps;
+      always_ff @(posedge clk) begin
+        if (enabled) begin
+          $printtimescale($unit);
+          $printtimescale($root);
+        end
+        q <= enabled;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 0))
+  (tick clk)
+  (expect_output "")
+  (modify (set enabled 1))
+  (tick clk)
+  (assert_eq q 1)
+  (expect_output #"Time scale of ($unit) is 100ps / 10fs
+Time scale of ($root) is 10fs / 10fs
+"#))
+
+(case printtimescale_preserves_package_subroutine_scope
+  (source "print_package.sv" #"
+    package P;
+      timeunit 100ns / 10ps;
+      function automatic int show(input int value);
+        $printtimescale;
+        return value;
+      endfunction
+    endpackage
+    module Top(input logic clk, input int data, output int q);
+      timeunit 1ns / 1ps;
+      always_ff @(posedge clk) begin
+        $printtimescale(P);
+        q <= P::show(data);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set data 7))
+  (tick clk)
+  (assert_eq q 7)
+  (expect_output #"Time scale of (P) is 100ns / 10ps
+Time scale of (P) is 100ns / 10ps
+"#))
+
+(case unpacked_dimensions_publishes_dependent_array_parameters
+  (source "dependent_header_arrays.sv" #"
+    module Top #(
+      parameter logic [7:0] A [0:1] = '{default:0},
+      parameter logic [7:0] B [0:$unpacked_dimensions(A)] = '{default:0},
+      parameter logic [$bits(B)-1:0] C [0:$size(B)] = '{default:16'h1234},
+      parameter logic [7:0] D [0:1] = '{default:0}, E [0:$unpacked_dimensions(D)] = '{default:0}
+    )(output logic [$bits(C)-1:0] y, output int bits_b, bits_c, size_e, body_bits);
+      localparam logic [7:0] BODY_A [0:1] = '{default:0}, BODY_B [0:$unpacked_dimensions(BODY_A)] = '{default:0};
+      assign y = {C[0], C[1], C[2]};
+      assign bits_b = $bits(B);
+      assign bits_c = $bits(C);
+      assign size_e = $size(E);
+      assign body_bits = $bits(BODY_B);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x123412341234)
+  (assert_eq bits_b 16)
+  (assert_eq bits_c 48)
+  (assert_eq size_e 2)
+  (assert_eq body_bits 16))

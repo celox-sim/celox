@@ -505,8 +505,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                     );
                 }
                 let call = sv::ir::Expr::Call {
+                    arg_order: Vec::new(),
                     name: name.clone(),
-                    args: lowered,
+                    args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -522,6 +523,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|arg| self.hoist_const(arg, calls))
                     .collect::<Result<_, _>>()?,
                 site: *site,
+            },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.hoist_const(expr, calls)?),
+                msb: Box::new(self.hoist_const(msb, calls)?),
+                lsb: Box::new(self.hoist_const(lsb, calls)?),
+                signed: *signed,
             },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(expr, calls)?),
@@ -653,6 +665,30 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                signed,
+            } if matches!(&**base, ConstExpr::Ident(name) if self.m.id(name).is_some()) => {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let msb = self.freeze_const(msb, copies)?;
+                let lsb = self.freeze_const(lsb, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                };
+                let value = self.eval(&read, None)?;
+                let width = self.b.register(&value).width();
+                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                self.store(temp, SIROffset::Static(0), width, value);
+                ConstExpr::Ident(temp_name)
+            }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
             {
                 let ConstExpr::Ident(name) = &**base else {
@@ -672,6 +708,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.freeze_const(expr, copies)?),
+                msb: Box::new(self.freeze_const(msb, copies)?),
+                lsb: Box::new(self.freeze_const(lsb, copies)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.freeze_const(expr, copies)?),
                 bit: Box::new(self.freeze_const(bit, copies)?),
@@ -724,16 +771,20 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, args } if self.m.dpi_imports.contains_key(name) => {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.dpi_imports.contains_key(name) => {
                 let import = self.m.dpi_imports[name].clone();
                 let Some(r#type) = import.return_type() else {
                     return Err(unsupported(format!(
                         "void DPI-C function `{name}` used as a value"
                     )));
                 };
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+                let args = args.clone();
                 let result = self
-                    .dpi_call(&import, &args)?
+                    .dpi_call(&import, &args, arg_order)?
                     .expect("a non-void DPI-C import defines a result");
                 let (temp, temp_name) = self.m.temp(
                     "dpi",
@@ -744,8 +795,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store(temp, SIROffset::Static(0), r#type.width(), result);
                 Expr::Ident(temp_name)
             }
-            Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.subroutines.contains_key(name) => {
+                let args = args.clone();
                 let subroutine = self
                     .m
                     .subroutine(name)
@@ -757,7 +812,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     )));
                 };
                 let (width, signed, is_4state) = self.m.type_shape(&r#type)?;
-                let result = self.call(name, &args)?;
+                let result = self.call(name, &args, arg_order)?;
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
                 let Some(result) = result else {
                     return Err(unsupported(format!(
@@ -797,11 +852,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                     else_expr: Box::new(else_expr),
                 }
             }
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| self.hoist(arg))
+                    .map(|arg| arg.as_ref().map(|arg| self.hoist(arg)).transpose())
                     .collect::<Result<_, _>>()?,
             },
             Expr::Select {
@@ -891,6 +951,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         import: &sv::ir::DpiImport,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
         let name = import.name();
         if args.len() != import.arguments().len() {
@@ -900,8 +961,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 import.arguments().len()
             )));
         }
-        let mut registers = Vec::with_capacity(args.len());
-        for (arg, argument) in args.iter().zip(import.arguments()) {
+        let mut registers = vec![None; args.len()];
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..args.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        // Evaluate actuals in source order, then pass registers in C formal order.
+        for position in positions {
+            let argument = import.arguments().get(position).ok_or_else(|| {
+                unsupported(format!("argument position of DPI-C function `{name}`"))
+            })?;
+            let arg = &args[position];
             let Some(arg) = arg else {
                 return Err(unsupported(format!(
                     "omitted argument of DPI-C function `{name}`"
@@ -910,8 +981,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
-            registers.push(self.dpi_register(value, r#type));
+            registers[position] = Some(self.dpi_register(value, r#type));
         }
+        let registers = registers
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| unsupported(format!("missing argument of DPI-C function `{name}`")))?;
         let func = self.m.extern_function(import);
         let dst = import
             .return_type()
@@ -1544,15 +1619,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.jump(return_block);
                 Ok(false)
             }
-            sv::ir::Stmt::Call { name, args } => {
+            sv::ir::Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => {
                 if let Some(import) = self.m.dpi_imports.get(name).cloned() {
-                    self.dpi_call(&import, args)?;
+                    self.dpi_call(&import, args, arg_order)?;
                     return Ok(true);
                 }
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
-                self.call(name, args)?;
+                self.call(name, args, arg_order)?;
                 Ok(true)
             }
             sv::ir::Stmt::Eval(expr) => {
@@ -1617,6 +1696,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.with_kernel(ProcessKernelBuilder::finish);
             return Ok(false);
         }
+        let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
+            let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
+                return Err(unsupported(format!("condition of `{name}`")));
+            };
+            Some(self.eval_truth(condition)?)
+        } else {
+            None
+        };
         let (template, values) = system_task_template(&kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -1650,11 +1737,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
+        // Argument effects happen before branching, and the condition register
+        // retains the value it had before those effects.
+        let resume = match assertion {
+            Some((_, Some(true))) => return Ok(true),
+            Some((truth, None)) => {
+                let resume = self.b.new_block();
+                let fail = self.b.new_block();
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: truth,
+                    true_block: (resume, Vec::new()),
+                    false_block: (fail, Vec::new()),
+                });
+                self.b.switch_to_block(fail);
+                Some(resume)
+            }
+            _ => None,
+        };
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
+            SystemTaskKind::Assertion(kind) => *kind,
         };
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
@@ -1669,12 +1774,19 @@ impl<'p, 'a> Ff<'p, 'a> {
             site_id,
             args: regs,
         });
-        if matches!(kind, SystemTaskKind::Fatal) {
+        if kind.is_fatal() {
             let code = self
                 .m
                 .runtime_error(template.unwrap_or_else(|| "$fatal".to_string()));
             self.b.seal_block(SIRTerminator::Error(code));
-            return Ok(false);
+            if resume.is_none() {
+                return Ok(false);
+            }
+        } else if let Some(resume) = resume {
+            self.jump(resume);
+        }
+        if let Some(resume) = resume {
+            self.b.switch_to_block(resume);
         }
         Ok(true)
     }
@@ -2055,6 +2167,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         name: &str,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<String>, sv::AnalyzerError> {
         let subroutine = self
             .m
@@ -2076,7 +2189,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
-        for (position, param) in subroutine.params.iter().enumerate() {
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        for position in positions {
+            let param = subroutine
+                .params
+                .get(position)
+                .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             let id = self
                 .m
                 .id(&param.name)
@@ -2304,6 +2426,26 @@ fn substitute_overlay_const(
             None => expr.clone(),
         },
         ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(
+                if matches!(&**expr, ConstExpr::Ident(_))
+                    && (const_expr_references_identifier(msb)
+                        || const_expr_references_identifier(lsb))
+                {
+                    (**expr).clone()
+                } else {
+                    go(expr)
+                },
+            ),
+            msb: Box::new(go(msb)),
+            lsb: Box::new(go(lsb)),
+            signed: *signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),
@@ -2398,9 +2540,14 @@ fn substitute_overlay(
             then_expr: Box::new(go(then_expr)),
             else_expr: Box::new(go(else_expr)),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
-            args: args.iter().map(go).collect(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(go(expr)),

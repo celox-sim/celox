@@ -863,8 +863,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                     );
                 }
                 let call = sv::ir::Expr::Call {
+                    arg_order: Vec::new(),
                     name: name.clone(),
-                    args: lowered,
+                    args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -880,6 +881,17 @@ impl<'p, 'a> Comb<'p, 'a> {
                     .map(|arg| self.hoist_const(store, frames, arg, calls))
                     .collect::<Result<_, _>>()?,
                 site: *site,
+            },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
+                msb: Box::new(self.hoist_const(store, frames, msb, calls)?),
+                lsb: Box::new(self.hoist_const(store, frames, lsb, calls)?),
+                signed: *signed,
             },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.hoist_const(store, frames, expr, calls)?),
@@ -1020,6 +1032,30 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.write(store, temp, full(width), value)?;
                 ConstExpr::Ident(temp_name)
             }
+            ConstExpr::SelectRange {
+                expr: base,
+                msb,
+                lsb,
+                signed,
+            } if matches!(&**base, ConstExpr::Ident(name) if self.m.id(name).is_some()) => {
+                let ConstExpr::Ident(name) = &**base else {
+                    unreachable!()
+                };
+                let msb = self.freeze_const(store, frames, msb, copies)?;
+                let lsb = self.freeze_const(store, frames, lsb, copies)?;
+                let is_4state = self.m.var(self.m.id(name).expect("a variable")).is_4state;
+                let read = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                    msb,
+                    lsb,
+                    signed: *signed,
+                };
+                let (node, sources) = self.eval(store, frames, &read, None)?;
+                let width = celox_slt::get_width(node, self.arena);
+                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                self.write(store, temp, full(width), (node, sources))?;
+                ConstExpr::Ident(temp_name)
+            }
             ConstExpr::Select { expr: base, bit } if matches!(&**base, ConstExpr::Ident(name) if array(self, name) == Some(true)) =>
             {
                 let ConstExpr::Ident(name) = &**base else {
@@ -1041,6 +1077,17 @@ impl<'p, 'a> Comb<'p, 'a> {
                 ConstExpr::Ident(temp_name)
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => return Ok(expr.clone()),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
+                msb: Box::new(self.freeze_const(store, frames, msb, copies)?),
+                lsb: Box::new(self.freeze_const(store, frames, lsb, copies)?),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
                 bit: Box::new(self.freeze_const(store, frames, bit, copies)?),
@@ -1105,9 +1152,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     "DPI-C function `{name}` called in combinational logic"
                 )));
             }
-            Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
-                let result = self.call(store, frames, name, &args)?;
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.subroutines.contains_key(name) => {
+                let args = args.clone();
+                let result = self.call(store, frames, name, &args, arg_order)?;
                 let Some((node, sources)) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -1128,11 +1179,20 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.write(store, temp, full(width), (node, sources))?;
                 Expr::Ident(temp_name)
             }
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| self.hoist(store, frames, arg))
+                    .map(|arg| {
+                        arg.as_ref()
+                            .map(|arg| self.hoist(store, frames, arg))
+                            .transpose()
+                    })
                     .collect::<Result<_, _>>()?,
             },
             Expr::Binary { left, op, right }
@@ -1815,7 +1875,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.set_flag(&mut store, return_flag, true)?;
                 Ok(store)
             }
-            sv::ir::Stmt::Call { name, args } => {
+            sv::ir::Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => {
                 if self.m.dpi_imports.contains_key(name) {
                     return Err(unsupported(format!(
                         "DPI-C function `{name}` called in combinational logic"
@@ -1824,7 +1888,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
-                self.call(&mut store, frames, name, args)?;
+                self.call(&mut store, frames, name, args, arg_order)?;
                 Ok(store)
             }
             sv::ir::Stmt::Eval(expr) => {
@@ -2807,6 +2871,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         name: &str,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
         let subroutine = self
             .m
@@ -2827,7 +2892,16 @@ impl<'p, 'a> Comb<'p, 'a> {
         // Copy the inputs in, left to right, in the caller's scope.
         let mut outputs = Vec::new();
         let mut copied = Vec::new();
-        for (position, param) in subroutine.params.iter().enumerate() {
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        for position in positions {
+            let param = subroutine
+                .params
+                .get(position)
+                .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             let id = self
                 .m
                 .id(&param.name)
@@ -3005,9 +3079,20 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
-        let (template, values) = system_task_template(&kind, args);
         let observer_store = store.fork();
         let mut observed = Sources::default();
+        let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
+            let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
+                return Err(unsupported(format!("condition of `{name}`")));
+            };
+            let (node, sources) = self.eval(store, frames, condition, None)?;
+            observed.extend(sources);
+            let truth = slt_truth(self.arena, node)?;
+            Some(self.capture(truth)?)
+        } else {
+            None
+        };
+        let (template, values) = system_task_template(&kind, args);
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
@@ -3044,19 +3129,34 @@ impl<'p, 'a> Comb<'p, 'a> {
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
+            SystemTaskKind::Assertion(kind) => *kind,
         };
         let condition = self.path_condition()?;
-        let guard = match (&kind, condition) {
-            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
-            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+        let guard = if let Some(passed) = assertion {
+            // An assertion fires only on failure and only on the active path.
+            Some(if let Some((node, sources)) = condition {
                 observed.extend(sources);
-                Some(node)
-            }
-            // Assertion sites fire when their guard is false.
-            (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => Some(self.constant(0, 1)?),
-            (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
-                observed.extend(sources);
-                Some(slt_not(self.arena, &mut self.consts, node)?)
+                let inactive = slt_not(self.arena, &mut self.consts, node)?;
+                slt_or(self.arena, &mut self.consts, inactive, passed)?
+            } else {
+                passed
+            })
+        } else {
+            match (&kind, condition) {
+                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
+                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+                    observed.extend(sources);
+                    Some(node)
+                }
+                // Assertion sites fire when their guard is false.
+                (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => {
+                    Some(self.constant(0, 1)?)
+                }
+                (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
+                    observed.extend(sources);
+                    Some(slt_not(self.arena, &mut self.consts, node)?)
+                }
+                (SystemTaskKind::Assertion(_), _) => unreachable!("assertion guard handled above"),
             }
         };
         let guard = guard.map(|guard| self.capture(guard)).transpose()?;
@@ -3075,8 +3175,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 guard,
                 emit_on_true: matches!(kind, SystemTaskKind::Print(..) | SystemTaskKind::Finish),
                 args: captured.clone(),
-                fatal_error_code: matches!(kind, SystemTaskKind::Fatal)
-                    .then_some(i64::from(site_id)),
+                fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
             });
             true
         } else {
@@ -3459,7 +3558,7 @@ impl Comb<'_, '_> {
                         record(self, part, writes);
                     }
                 }
-                sv::ir::Stmt::Call { name, args } => calls.push((name.clone(), args.clone())),
+                sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
                 _ => {}
             });
         }
@@ -3540,6 +3639,23 @@ fn substitute_literals(
                 None => expr.clone(),
             },
             ConstExpr::Literal(_) => expr.clone(),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                // Keep the declaration available: bounds may be in declared
+                // packed coordinates, or select an unpacked element at run time.
+                expr: Box::new(if matches!(&**expr, ConstExpr::Ident(_)) {
+                    (**expr).clone()
+                } else {
+                    constant(expr, literals)
+                }),
+                msb: Box::new(constant(msb, literals)),
+                lsb: Box::new(constant(lsb, literals)),
+                signed: *signed,
+            },
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
                 expr: Box::new(constant(expr, literals)),
                 bit: Box::new(constant(bit, literals)),
@@ -3597,6 +3713,9 @@ fn substitute_literals(
                 match expr {
                     ConstExpr::Ident(_) => true,
                     ConstExpr::Literal(_) => false,
+                    ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                        has_ident(expr) || has_ident(msb) || has_ident(lsb)
+                    }
                     ConstExpr::Select { expr, bit } => has_ident(expr) || has_ident(bit),
                     ConstExpr::Function { args, .. } => args.iter().any(has_ident),
                     ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
@@ -3659,9 +3778,14 @@ fn substitute_literals(
             then_expr: Box::new(go(then_expr)),
             else_expr: Box::new(go(else_expr)),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
-            args: args.iter().map(go).collect(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(go(expr)),

@@ -32,22 +32,84 @@ impl ParsedSource {
         })
     }
 
+    /// Bind assignment-pattern parameters with values frozen in the caller.
+    pub fn with_pattern_parameter_overrides(
+        &self,
+        module_name: &str,
+        overrides: &[(String, String)],
+    ) -> Result<Option<Self>, AnalyzerError> {
+        ast::type_parameters::apply_pattern_parameter_overrides(
+            &self.code,
+            &self.tree,
+            module_name,
+            overrides,
+        )?
+        .as_deref()
+        .map(|code| Self::parse(code, &self.path))
+        .transpose()
+    }
+
     pub fn module_names(&self) -> &[String] {
         self.index.names()
+    }
+
+    /// Module and interface declarations share the SV design-element namespace.
+    pub fn component_names(&self) -> fxhash::FxHashSet<String> {
+        let mut names = self
+            .module_names()
+            .iter()
+            .cloned()
+            .collect::<fxhash::FxHashSet<_>>();
+        for node in &self.tree {
+            let identifier = match node {
+                sv_parser::RefNode::InterfaceDeclarationAnsi(interface) => {
+                    &interface.nodes.0.nodes.3
+                }
+                sv_parser::RefNode::InterfaceDeclarationNonansi(interface) => {
+                    &interface.nodes.0.nodes.3
+                }
+                _ => continue,
+            };
+            if let Some(name) = ast::component_identifier(identifier, &self.tree) {
+                names.insert(name);
+            }
+        }
+        names
     }
 
     pub fn module_interfaces(&self) -> &ModuleInterfaces {
         &self.index.interfaces
     }
 
+    /// Module and interface names referenced by instantiations and ports.
+    pub fn component_references(&self) -> fxhash::FxHashSet<String> {
+        ast::interfaces::component_references(&self.tree)
+    }
+
     /// Analyze the packages declared in `sources`, each once, after the
     /// packages it depends on.
     pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {
+        Self::analyze_packages_impl(sources, None)
+    }
+
+    /// Analyze packages and time queries using the roots selected by the
+    /// hierarchy elaborator, rather than inferring roots from all sources.
+    pub fn analyze_packages_with_roots(
+        sources: &[&ParsedSource],
+        roots: &[&str],
+    ) -> Result<Packages, AnalyzerError> {
+        Self::analyze_packages_impl(sources, Some(roots))
+    }
+
+    fn analyze_packages_impl(
+        sources: &[&ParsedSource],
+        roots: Option<&[&str]>,
+    ) -> Result<Packages, AnalyzerError> {
         let trees: Vec<_> = sources
             .iter()
             .map(|source| (&source.tree, source.path.as_path()))
             .collect();
-        ast::with_call_sites(|| Packages::analyze(&trees))
+        ast::with_call_sites(|| Packages::analyze_with_roots(&trees, roots))
     }
 
     /// Analyze a module that may use `packages`, rewriting its type
@@ -308,5 +370,84 @@ mod tests {
                 .modules()
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod pattern_override_tests {
+    use super::*;
+
+    #[test]
+    fn pattern_specialization_preserves_shadowed_local_parameter_declarations() {
+        let source = ParsedSource::parse(
+            r#"
+                module Top #(parameter byte Q [2] = '{1, 2})(output int y);
+                    always_comb begin
+                        localparam int Q = 9;
+                        y = Q;
+                    end
+                endmodule
+            "#,
+            Path::new("pattern_scope.sv"),
+        )
+        .unwrap();
+        let rebound = source
+            .with_pattern_parameter_overrides("Top", &[("Q".into(), "'{-3, -5}".into())])
+            .unwrap()
+            .unwrap();
+        assert!(rebound.code.contains("localparam int Q = 9;"));
+        let ir = rebound
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        assert_eq!(ir.modules()[0].initial_processes().len(), 1);
+        assert_eq!(
+            ir.modules()[0].signals()[0].r#type().resolved_width(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn pattern_override_leaves_counts_and_keys_use_the_callers_scope() {
+        let ir = crate::analyze_source(
+            r#"
+                module Child #(parameter int N = 1, parameter byte Q [2] = '{1, 2});
+                endmodule
+                module Top #(parameter int N = 2);
+                    Child #(.Q('{N{-N}})) repeated_values();
+                    Child #(.Q('{N-2: -N, default: N+1})) keyed_values();
+                endmodule
+            "#,
+            Path::new("pattern_caller.sv"),
+        )
+        .unwrap();
+        let top = ir
+            .modules()
+            .iter()
+            .find(|module| module.name() == "Top")
+            .unwrap();
+        for instance in top.instances() {
+            let pattern = instance.parameter_overrides()[0].pattern_text().unwrap();
+            assert!(!pattern.contains('N'), "{pattern}");
+            let child = ParsedSource::parse(
+                "module Child #(parameter int N = 1, parameter byte Q [2] = '{1, 2}); endmodule",
+                Path::new("child.sv"),
+            )
+            .unwrap();
+            let rebound = child
+                .with_pattern_parameter_overrides("Child", &[("Q".into(), pattern.into())])
+                .unwrap()
+                .unwrap();
+            rebound
+                .analyze_module_with_parameter_expr_overrides(
+                    "Child",
+                    &HashMap::default(),
+                    &ModuleInterfaces::default(),
+                )
+                .unwrap();
+        }
     }
 }

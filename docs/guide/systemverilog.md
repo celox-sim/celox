@@ -3,8 +3,8 @@
 Celox simulates [Veryl](https://veryl-lang.org/) and a **synthesizable subset of
 SystemVerilog**. Both frontends lower into the same intermediate representation,
 so they share scheduling, optimization, backends, and the runtime. A design can
-also mix the two languages: a Veryl top level may instantiate SystemVerilog
-modules.
+also mix the two languages: either language may be the top level, and module
+hierarchies may cross the language boundary in both directions.
 
 The SystemVerilog frontend is a Rust API behind the `systemverilog` Cargo
 feature of the `celox` crate. The TypeScript package and the Vite plugin
@@ -31,8 +31,36 @@ let mut sim = Simulator::from_sv_sources(
 .build()?;
 ```
 
-`Simulator::from_mixed_sources` combines Veryl sources with SystemVerilog
-children.
+`Simulator::from_mixed_sources` combines both source lists in one simulation.
+Veryl instantiates an SV module with `$sv::Module`; SV instantiates a Veryl
+module by its name. A Veryl module and an SV module may share a name;
+`$sv::Module` selects the SV definition. Numeric module parameters are resolved by the owning
+frontend, including parameters of Veryl children instantiated from SV.
+
+Interfaces and `input` / `output` modports may cross the boundary in either
+direction. In Veryl, use `inst bus: $sv::Bus;` and
+`bus: modport $sv::Bus::slave` for an SV interface. SV can instantiate an
+interface declared in Veryl and connect it to either language's modules.
+Interface parameters, instance arrays and generic SV interface ports are
+bound to the actual interface. Logic inside an SV interface instantiated
+from Veryl runs in the SV frontend.
+
+Declared parameter widths retain dependencies on earlier interface parameters,
+including when SV supplies named overrides in a different order.
+Constant functions used by interface defaults are expanded into declaration
+expressions when the native analyzer can represent their bodies that way.
+Header-dependent functions with statement bodies that cannot be expressed in
+the contract, such as loops, produce an unsupported diagnostic. Functions with
+header-dependent formal or return widths also produce an unsupported diagnostic;
+the contract cannot represent those symbolic type conversions yet. Declaration
+casts whose target size depends on interface parameters and constant functions
+that cannot be lowered symbolically are also rejected instead of retaining a
+value computed from default parameters.
+
+The bridge exchanges declaration contracts and links native symbolic modules;
+it does not require the Veryl-to-SV emitter. Cross-language interface function
+calls and function `import` / `export` modports are not supported yet. They
+remain available within their owning language's supported subset.
 
 ## What is supported
 
@@ -43,7 +71,7 @@ synthesis and is tested at the design level.
 | --- | --- |
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
-| Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
 | Continuous logic | `assign`, `wire w = expr;` |
@@ -55,9 +83,9 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
-| Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables) |
-| System functions | `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
-| System tasks | `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
+| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -103,10 +131,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
-  array, ANSI port default values, packed unions
-  ([#440](https://github.com/celox-sim/celox/issues/440)), multidimensional packed ranges that are not zero-based and
-  descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)), block-local
-  variables that share a name with a variable of another process ([#445](https://github.com/celox-sim/celox/issues/445)),
+  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, multidimensional packed ranges that are not zero-based and
+  descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs, strings and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
   plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists, and both edges of one clock ([#443](https://github.com/celox-sim/celox/issues/443)) or one
@@ -125,8 +151,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `$time` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
-  function, a call with the wrong number of arguments or an omitted argument
-  of a function, and a task used as a value are errors.
+  function, a call with the wrong number of arguments, an omitted argument
+  without a declared default, and a task used as a value are errors.
 - DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
   exports, tri-state buses and multiple drivers, hierarchical references.
 
@@ -206,6 +232,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   `import p::*;`, a name the scope declares itself hides the package's, and
   a name that two wildcard-imported packages declare is an error only when a
   reference uses it. Names in a package function resolve in the package.
+  An import in a generate block makes names visible in that block (and the
+  blocks inside it), ahead of the module's own declarations and imports.
   A package variable is one object shared by every module that uses it,
   including SystemVerilog modules instantiated from Veryl, and keeps its
   initializer. `sim.signal("p::v")` names it. Several drivers of one package
@@ -235,8 +263,22 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   writes it. A top module with an interface port therefore has ports such as
   `bus$data`. A module with a generic `interface` port is copied once per
   interface it is connected to, as `M$I`.
-- **Block-local variables** of an `always_comb` become signals of the module; a
-  name that clashes with another signal is rejected.
+- **Block-local variables** have lexical scope in `always_comb` and `always_ff`.
+  Locals may shadow module signals and reuse names in separate blocks or processes.
+- **Hard packed untagged unions** share one bit vector between all members;
+  every member must have the same width (IEEE 1800-2023 7.3.1).
+- **Named subroutine arguments** bind by formal name. Input evaluation and output
+  copy-out retain source order. Expressions and call statements support omitted
+  arguments with ANSI-declared defaults. Defaults are evaluated only when used,
+  in the enclosing declaration scope (IEEE 1800-2023 13.5.3). Constant calls use
+  the same formal names in parameter initializers, ranges and generate conditions;
+  generate-local declarations retain their own signatures. Named calls with
+  procedural effects in selection indices are rejected.
+- **Typed parameter patterns** are converted in the caller's type, preserving
+  width, signing and four-state values (IEEE 1800-2023 10.9, 6.20.2). Packed
+  values transfer by bits, so struct member names and field divisions may differ
+  in the child. Typed scalar patterns can override a parameter whose default is
+  an ordinary value. Unpacked patterns retain their positional array shape.
 - **Variable lifetimes** follow IEEE 1800-2023 6.21. A variable declared in a
   procedural block, function or task is static unless it, its subroutine or
   its module (`module automatic`) is declared `automatic`. A static local of a
@@ -295,3 +337,36 @@ The cases that remain excluded fall into these groups:
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
   hierarchical assignments) are not emitted as simulatable SystemVerilog
   modules.
+
+`$timeunit` and `$timeprecision` return a signed 32-bit exponent in seconds
+(IEEE 1800-2023 20.4.1). They resolve the current time scope, `$unit`, `$root`,
+and scalar module instance paths across source files. `timeunit`,
+`timeprecision`, preceding `timescale` directives, and `resetall` follow the
+precedence in 3.14.2.3. The implementation defaults are 1 ns / 1 ps. The global
+precision includes all declared precisions and directive precisions, even in
+uninstantiated definitions (3.14.3). Selected instance arrays and generate paths
+require elaborated hierarchy lookup and are currently rejected.
+
+`$printtimescale` displays the selected time scope in the IEEE 1800-2023
+20.4.2 form, for example `Time scale of (Top.child) is 100ns / 10ps`.
+It accepts the current scope, a design-element argument, `$unit`, or `$root`,
+and runs in `initial`, `always` processes and subroutines. Current and relative
+module names use the elaborated instance path. Package and interface copies
+retain their declaration's time unit and precision.
+
+Separate time unit and precision declarations may precede other scope items;
+matching repeats may appear later. Designs mixing explicitly specified or
+inherited scales with implementation defaults are rejected (3.14.2.3).
+Module definitions and packages retain independent scales even when their names
+coincide (3.13). A bare package query remains available when a same-named
+module is instantiated; visible hierarchy instances, including roots, take
+precedence over a namesake package. Simulator root lookup uses the selected
+top and reachable hierarchy; instantiations in unused supplied modules do not
+hide the selected root. Leading zeros in integer or fixed-point
+time magnitudes do not change their numeric value. Interface functions retain
+their declaration's time scope and compilation unit when copied into modules
+during elaboration. Queries of scalar interface instances and ports are
+resolved using their bound interface type before flattening, including generic
+interface ports and handles declared within a generate block. Scalar paths to
+interface instances inside child modules, such as `child.info`, are resolved
+before those instances are flattened away.

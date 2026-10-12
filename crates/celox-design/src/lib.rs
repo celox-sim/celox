@@ -274,6 +274,25 @@ pub const PROCESS_STATUS_WIDTH: usize = 8;
 /// Width of [`ProcessSlots::delay`].
 pub const PROCESS_DELAY_WIDTH: usize = 64;
 
+/// Controls which combinational stores dead store elimination preserves.
+///
+/// The policy is part of the runtime contract: host-side handles resolve
+/// only to state the policy guarantees to keep, so a design that happens to
+/// read a signal today cannot make a testbench depend on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum DeadStorePolicy {
+    /// Keep all stores (no dead store elimination). Default for user-facing builds.
+    #[default]
+    Off,
+    /// Eliminate stores except those explicitly marked live via `live_signal()`
+    /// and those loaded by execution units.
+    PreserveListedSignals,
+    /// Eliminate stores except those to top-module ports and those loaded by EUs.
+    PreserveTopPorts,
+    /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
+    PreserveAllPorts,
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -292,6 +311,12 @@ pub struct RuntimeSchema<A> {
     /// derived from the other state, so state files recompute rather than
     /// compare them.
     pub comb_writes: HashSet<A>,
+    /// Dead store elimination policy the program was compiled with. Together
+    /// with `live_signals` and the design it decides which combinationally
+    /// written state the host may observe.
+    pub dead_store_policy: DeadStorePolicy,
+    /// State explicitly declared observable for dead store elimination.
+    pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
 }
@@ -306,6 +331,8 @@ impl<A> Default for RuntimeSchema<A> {
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
+            dead_store_policy: DeadStorePolicy::Off,
+            live_signals: HashSet::default(),
             processes: Vec::new(),
         }
     }
@@ -379,6 +406,51 @@ impl<A> Default for ElaboratedDesign<A> {
             events: EventTopology::default(),
             initial_state: Vec::new(),
         }
+    }
+}
+
+impl<A: Copy + Eq + std::hash::Hash> ElaboratedDesign<A> {
+    /// Effective kinds of canonical event domains. Infer only unambiguous
+    /// one-bit alias edges; declaration metadata and signal types stay intact.
+    /// Opposite edges on one net require separate dispatch domains and retain
+    /// their existing canonical kind here.
+    pub fn event_kinds(&self) -> HashMap<A, DomainKind> {
+        let mut inferred: HashMap<A, Option<DomainKind>> = HashMap::default();
+        for (address, metadata) in &self.state_objects {
+            if metadata.width != 1
+                || !matches!(
+                    metadata.kind,
+                    DomainKind::ClockPosedge
+                        | DomainKind::ClockNegedge
+                        | DomainKind::ResetAsyncHigh
+                        | DomainKind::ResetAsyncLow
+                )
+            {
+                continue;
+            }
+            let canonical = self.events.canonical(*address);
+            let kind = inferred.entry(canonical).or_insert(Some(metadata.kind));
+            if kind.is_some_and(|kind| kind != metadata.kind) {
+                *kind = None;
+            }
+        }
+        self.events
+            .ordered_events
+            .iter()
+            .filter_map(|address| {
+                let metadata = self.state_objects.get(address)?;
+                let kind = if metadata.kind == DomainKind::Other && metadata.width == 1 {
+                    inferred
+                        .get(address)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(metadata.kind)
+                } else {
+                    metadata.kind
+                };
+                Some((*address, kind))
+            })
+            .collect()
     }
 }
 
@@ -834,5 +906,43 @@ mod tests {
         assert_eq!(design.events.len(), 1);
         assert!(!design.events.is_empty());
         assert_eq!(design.state_objects[&10].width, 1);
+    }
+    #[test]
+    fn alias_event_kinds_are_separate_from_declaration_metadata() {
+        let mut design = ElaboratedDesign::<u32>::default();
+        for (address, kind) in [
+            (10, DomainKind::Other),
+            (11, DomainKind::ClockPosedge),
+            (20, DomainKind::Other),
+            (21, DomainKind::ClockNegedge),
+            (30, DomainKind::Other),
+            (31, DomainKind::ClockPosedge),
+            (32, DomainKind::ClockNegedge),
+        ] {
+            design.state_objects.insert(
+                address,
+                VariableMetadata {
+                    width: 1,
+                    is_4state: false,
+                    kind,
+                    type_kind: PortTypeKind::Logic,
+                    array_dims: Vec::new(),
+                },
+            );
+        }
+        design.events.ordered_events = vec![10, 20, 30];
+        for (alias, canonical) in [(11, 10), (21, 20), (31, 30), (32, 30)] {
+            design.events.aliases.insert(alias, canonical);
+        }
+        let kinds = design.event_kinds();
+        assert_eq!(kinds[&10], DomainKind::ClockPosedge);
+        assert_eq!(kinds[&20], DomainKind::ClockNegedge);
+        assert_eq!(
+            kinds[&30],
+            DomainKind::Other,
+            "conflicting aliases do not select one edge"
+        );
+        assert_eq!(design.state_objects[&10].kind, DomainKind::Other);
+        assert_eq!(design.state_objects[&20].type_kind, PortTypeKind::Logic);
     }
 }

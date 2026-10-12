@@ -66,6 +66,10 @@ extern "C" fn dpi_add(x: i32, y: i32) -> i32 {
     x.wrapping_add(y)
 }
 
+extern "C" fn dpi_digits(first: i32, second: i32) -> i32 {
+    first * 10 + second
+}
+
 extern "C" fn dpi_negate_byte(x: i8) -> i8 {
     x.wrapping_neg()
 }
@@ -142,6 +146,38 @@ recorder!(record_wasm, "wasm");
 recorder!(record_cranelift_parallel, "cranelift_parallel");
 
 dpi_backends! {
+    fn named_imports_bind_formals_and_evaluate_actuals_in_source_order(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int a, b,
+                  output int named_result, mixed_result, effects_result, tmp);
+                    import "DPI-C" function int digits(input int first, input int second);
+                    function automatic int write_tmp(input int v, output int dst);
+                        dst = v;
+                        return v;
+                    endfunction
+                    always_ff @(posedge clk) begin
+                        named_result <= digits(.second(a), .first(b));
+                        mixed_result <= digits(a, .second(b));
+                        tmp = 0;
+                        effects_result <= digits(.second(write_tmp(a, tmp)), .first(tmp));
+                        digits(.second(write_tmp(b, tmp)), .first(tmp));
+                    end
+                endmodule
+            "#).dpi_function("digits", dpi_digits as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, b) = (sim.signal("a"), sim.signal("b"));
+        for (x, y) in [(3u32, 4u32), (7, 2)] {
+            sim.modify(|io| { io.set(a, x); io.set(b, y); }).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(sim.signal("named_result")), BigUint::from(10 * y + x));
+            assert_eq!(sim.get(sim.signal("mixed_result")), BigUint::from(10 * x + y));
+            assert_eq!(sim.get(sim.signal("effects_result")), BigUint::from(11 * x));
+            assert_eq!(sim.get(sim.signal("tmp")), BigUint::from(y));
+        }
+    }
+
     fn int_function_in_nonblocking_assignment(sim) {
         @build unsafe {
             builder(r#"
@@ -654,5 +690,33 @@ fn rejects_unsupported_imports_and_calls() {
             message.contains(expected),
             "expected `{expected}` in:\n{message}"
         );
+    }
+}
+
+static QUERY_DPI_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn dpi_query_value() -> i32 {
+    QUERY_DPI_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    42
+}
+
+dpi_backends! {
+    fn unpacked_dimensions_queries_local_import_without_calling_it(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(output int constant_rank, runtime_rank);
+                    import "DPI-C" function int value();
+                    localparam N = $unpacked_dimensions(value());
+                    assign constant_rank = N;
+                    assign runtime_rank = $unpacked_dimensions(value());
+                endmodule
+            "#)
+            .dpi_function("value", dpi_query_value as *const ())
+        };
+        sim.eval_comb().unwrap();
+        for name in ["constant_rank", "runtime_rank"] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(0u32));
+        }
+        assert_eq!(QUERY_DPI_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

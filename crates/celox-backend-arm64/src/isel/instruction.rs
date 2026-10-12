@@ -2689,6 +2689,16 @@ pub(super) fn lower_instruction(
                             false_val: has_x,
                         });
                         ctx.set_mask(*dst, res_m);
+                        // Wildcards compute their mask inline, but still need
+                        // value normalization: an unknown result is X, not Z.
+                        let old_v = ctx.reg_map.get(*dst);
+                        let normalized = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: normalized,
+                            lhs: old_v,
+                            rhs: res_m,
+                        });
+                        ctx.reg_map.set(*dst, normalized);
                         // Skip the general 4-state mask computation below
                     } else {
                         // 2-state: wildcards are same as Eq/Ne

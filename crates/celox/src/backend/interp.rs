@@ -1252,14 +1252,14 @@ impl InterpBackend {
 
         // Share one id space across the three schedule groups, mirroring the
         // compiled backend so scheduler ordering and trigger ids agree.
-        let mut next_id = 0usize;
-        let mut addr_to_id: HashMap<AbsoluteAddr, usize> = HashMap::default();
-        let mut id_to_addr: Vec<AbsoluteAddr> = Vec::new();
+        let (mut addr_to_id, mut id_to_addr) = super::event_ids(laid_out);
+        let mut next_id = id_to_addr.len();
         let mut intern_event = |addr: &AbsoluteAddr| -> usize {
-            *addr_to_id.entry(*addr).or_insert_with(|| {
+            let canonical = laid_out.design.events.canonical(*addr);
+            *addr_to_id.entry(canonical).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
-                id_to_addr.push(*addr);
+                id_to_addr.push(canonical);
                 id
             })
         };
@@ -1663,15 +1663,15 @@ impl SimBackend for InterpBackend {
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.four_state && signal.is_4state;
 
-        assert!(provided_size <= allocated_size);
+        let copy_size = provided_size.min(allocated_size);
 
         if signal.array_layout.is_some() {
-            let mut bytes = vec![0u8; provided_size];
+            let mut bytes = vec![0u8; copy_size];
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &value as *const T as *const u8,
                     bytes.as_mut_ptr(),
-                    provided_size,
+                    copy_size,
                 );
             }
             let wide = BigUint::from_bytes_le(&bytes);
@@ -1682,7 +1682,11 @@ impl SimBackend for InterpBackend {
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
-                let raw = *(&value as *const T as *const u8);
+                let raw = if copy_size == 0 {
+                    0
+                } else {
+                    *(&value as *const T as *const u8)
+                };
                 let byte = if signal.width < 8 {
                     raw & ((1u8 << signal.width) - 1)
                 } else {
@@ -1693,8 +1697,11 @@ impl SimBackend for InterpBackend {
             }
 
             std::ptr::write_bytes(base_ptr, 0, allocated_size);
-            let ptr = base_ptr as *mut T;
-            std::ptr::write_unaligned(ptr, value);
+            std::ptr::copy_nonoverlapping(&value as *const T as *const u8, base_ptr, copy_size);
+
+            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
+            }
 
             if clear_mask {
                 let mask_ptr = base_ptr.add(allocated_size);

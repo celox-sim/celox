@@ -26,6 +26,7 @@ pub(crate) mod symbolic {
 }
 
 use crate::symbolic::artifact::ExternalModule;
+pub use artifact::external_signatures;
 pub use artifact::{VerylSimModule as SimModule, VerylSymbolicRtl};
 pub(crate) use celox_frontend_core::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, InstancePath,
@@ -36,9 +37,11 @@ pub use constant_loops::lower_constant_loops;
 pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_for_bounds};
 pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
 pub use file_dependencies::{FileDependency, capture_file_dependencies};
+pub use hierarchy::parse_ir_with_external_hierarchy_and_native_modules;
 pub use hierarchy::{parse_ir, parse_ir_with_external_hierarchy, parse_ir_with_loop_provenance};
 pub use interface_captures::lower_interface_captures;
 pub use lowering::types::{resolve_dims, resolve_total_width};
+pub use module::external_port_formal_names;
 pub use portability_check::{check_array_literal_side_effects, check_function_output_aliases};
 pub use schedule::schedule_symbolic_rtl;
 pub use source::{

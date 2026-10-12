@@ -1,6 +1,459 @@
 use super::*;
 
+#[test]
+fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
+    for process in ["always_comb", "always_ff @(posedge clk)"] {
+        let source = format!(
+            r#"
+            module Top(input logic clk, enabled, input logic [1:0] condition);
+              function automatic int message_value();
+                $display("inside");
+                return 7;
+              endfunction
+              {process} if (enabled)
+                $assert_continue(condition, "value=%0d", message_value());
+            endmodule
+        "#
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("veryl_assert_unknown.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+        sim.drain_runtime_events();
+        let enabled = sim.signal("enabled");
+        let condition = sim.signal("condition");
+        sim.modify(|io| {
+            io.set(enabled, 1u8);
+            io.set_four_state(condition, BigUint::from(2u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        if process.starts_with("always_ff") {
+            sim.tick(sim.event("clk")).unwrap();
+        }
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: "inside".into()
+            },]
+        );
+        sim.modify(|io| {
+            io.set_four_state(condition, BigUint::from(0u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        if process.starts_with("always_ff") {
+            sim.tick(sim.event("clk")).unwrap();
+        }
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![
+                celox::RuntimeEvent::Display {
+                    message: "inside".into()
+                },
+                celox::RuntimeEvent::AssertContinue {
+                    message: "value=7".into()
+                },
+            ]
+        );
+    }
+}
+
 sv_backends! {
+    // Veryl extension calls emitted unchanged into SV, not SV assert statements.
+    fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, enabled, ok, output logic effect, output logic reached);
+              function automatic int message_value(input logic value, output logic written);
+                $display("inside=%0d", value);
+                written = !value;
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                reached = 0;
+                effect = ok;
+                if (enabled) begin
+                  $assert_continue(effect, "before=%0d value=%0d after=%0d",
+                                   effect, message_value(effect, effect), effect);
+                  reached = 1;
+                end
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert.sv"))], "Top")
+            .four_state(true);
+        let enabled = sim.signal("enabled");
+        let ok = sim.signal("ok");
+        let clk = sim.event("clk");
+        sim.set(enabled, 0u8);
+        sim.set(ok, 0u8);
+        sim.tick(clk).unwrap();
+        assert!(sim.drain_runtime_events().is_empty());
+        assert_eq!(sim.get(sim.signal("reached")), 0u8.into());
+        sim.set(enabled, 1u8);
+        sim.set(ok, 1u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=1".into() },
+        ]);
+        sim.set(ok, 0u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=0".into() },
+            celox::RuntimeEvent::AssertContinue { message: "before=0 value=-2 after=1".into() },
+        ]);
+    }
+
+    fn veryl_assert_comb_evaluates_success_message_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic enabled, ok, output logic effect);
+              function automatic int message_value(input logic value, output logic written);
+                $display("inside=%0d", value);
+                written = !value;
+                return -2;
+              endfunction
+              always_comb begin
+                effect = ok;
+                if (enabled)
+                  $assert_continue(effect, "before=%0d value=%0d after=%0d",
+                                   effect, message_value(effect, effect), effect);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_comb.sv"))], "Top")
+            .four_state(true);
+        sim.drain_runtime_events();
+        let enabled = sim.signal("enabled");
+        let ok = sim.signal("ok");
+        sim.modify(|io| { io.set(enabled, 1u8); io.set(ok, 1u8); }).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=1".into() },
+        ]);
+        sim.modify(|io| io.set(ok, 0u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=0".into() },
+            celox::RuntimeEvent::AssertContinue { message: "before=0 value=-2 after=1".into() },
+        ]);
+        sim.modify(|io| io.set(enabled, 0u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn veryl_assert_fatal_ff_evaluates_messages_and_stops_only_on_failure(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, ok, output logic reached);
+              function automatic int message_value();
+                $display("inside");
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                reached = 0;
+                $assert(ok, "value=%0d", message_value());
+                reached = 1;
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_fatal.sv"))], "Top");
+        let ok = sim.signal("ok");
+        let clk = sim.event("clk");
+        sim.set(ok, 1u8);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside".into() },
+        ]);
+        sim.set(ok, 0u8);
+        assert!(sim.tick(clk).is_err());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside".into() },
+            celox::RuntimeEvent::AssertFatal { message: "value=-2".into() },
+        ]);
+    }
+
+    fn veryl_assert_comb_runtime_loop_keeps_eager_argument_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic ok, input logic [2:0] count, output int q);
+              function automatic int message_value(input int index);
+                $display("inside=%0d", index);
+                return index + 1;
+              endfunction
+              always_comb begin
+                q = 0;
+                for (int i = 0; i < count; ++i) begin
+                  $assert_continue(ok, "value=%0d", message_value(i));
+                  q += 1;
+                end
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_loop.sv"))], "Top");
+        sim.drain_runtime_events();
+        let ok = sim.signal("ok");
+        let count = sim.signal("count");
+        sim.modify(|io| { io.set(ok, 1u8); io.set(count, 2u8); }).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 2u32.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=0".into() },
+            celox::RuntimeEvent::Display { message: "inside=1".into() },
+        ]);
+        sim.modify(|io| io.set(ok, 0u8)).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside=0".into() },
+            celox::RuntimeEvent::AssertContinue { message: "value=1".into() },
+            celox::RuntimeEvent::Display { message: "inside=1".into() },
+            celox::RuntimeEvent::AssertContinue { message: "value=2".into() },
+        ]);
+    }
+
+    fn veryl_assert_constant_conditions_preserve_message_effects(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk);
+              function automatic int message_value();
+                $display("inside");
+                return -2;
+              endfunction
+              always_ff @(posedge clk) begin
+                $assert(1'b1, "value=%0d", message_value());
+                $assert_continue(1'b0, message_value());
+                $assert_continue(1'b0);
+                assert (1'b1) else $error("value=%0d", message_value());
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_constant.sv"))], "Top");
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "inside".into() },
+            celox::RuntimeEvent::Display { message: "inside".into() },
+            celox::RuntimeEvent::AssertContinue { message: "assertion failed".into() },
+            celox::RuntimeEvent::AssertContinue { message: "assertion failed".into() },
+        ]);
+    }
+
+    fn unpacked_dimensions_publishes_dependent_array_parameters(sim) { @case "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"; }
+    fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
+    fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
+    fn unpacked_dimensions_selects_integral_atoms(sim) { @case "system_functions::unpacked_dimensions_selects_integral_atoms"; }
+    fn unpacked_dimensions_publishes_array_parameters_before_declarations(sim) { @case "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations"; }
+    fn unpacked_dimensions_resolves_preceding_module_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_module_declarations"; }
+    fn unpacked_dimensions_prefers_values_over_imported_types(sim) { @case "system_functions::unpacked_dimensions_prefers_values_over_imported_types"; }
+    fn unpacked_dimensions_checks_unevaluated_indices(sim) { @case "system_functions::unpacked_dimensions_checks_unevaluated_indices"; }
+
+    fn unpacked_dimensions_restores_shadowed_array_rank(sim) { @case "system_functions::unpacked_dimensions_restores_shadowed_array_rank"; }
+    fn unpacked_dimensions_accepts_explicit_default_omissions(sim) { @case "system_functions::unpacked_dimensions_accepts_explicit_default_omissions"; }
+    fn unpacked_dimensions_validates_writable_function_arguments(sim) { @case "system_functions::unpacked_dimensions_validates_writable_function_arguments"; }
+
+    fn unpacked_dimensions_accepts_defaulted_function_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_defaulted_function_arguments"; }
+
+    fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
+    fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
+
+    fn unpacked_dimensions_resolves_procedural_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
+    }
+    fn unpacked_dimensions_resolves_package_array_constants(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_package_array_constants";
+    }
+
+    fn unpacked_dimensions_counts_declared_arrays(sim) {
+        @case "system_functions::unpacked_dimensions_counts_declared_arrays";
+    }
+
+    fn unpacked_dimensions_preserves_selection_and_return_types(sim) {
+        @case "system_functions::unpacked_dimensions_preserves_selection_and_return_types";
+    }
+
+    fn unpacked_dimensions_resolves_types_and_constant_scopes(sim) {
+        @case "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes";
+    }
+
+    fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
+        @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
+    }
+
+    fn printtimescale_displays_unit_and_global_precision(sim) { @case "system_functions::printtimescale_displays_unit_and_global_precision"; }
+    fn printtimescale_preserves_package_subroutine_scope(sim) { @case "system_functions::printtimescale_preserves_package_subroutine_scope"; }
+
+    fn printtimescale_qualifies_current_and_relative_module_instances(sim) {
+        @setup { let source = r#"
+            module Child(input logic clk, input logic enabled);
+              timeunit 100ns / 10ps;
+              always_ff @(posedge clk) if (enabled) $printtimescale;
+            endmodule
+            module Top(input logic clk, input logic enabled);
+              timeunit 1ns / 1ps;
+              Child first(clk, enabled);
+              Child second(clk, enabled);
+              always_ff @(posedge clk) if (enabled) begin
+                $printtimescale();
+                $printtimescale(first);
+                $printtimescale($root.Top.second);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("printtimescale.sv"))], "Top");
+        sim.set(sim.signal("enabled"), 1u8);
+        sim.tick(sim.event("clk")).unwrap();
+        let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect::<Vec<_>>();
+        messages.sort();
+        assert_eq!(messages, [
+            "Time scale of (Top) is 1ns / 1ps",
+            "Time scale of (Top.first) is 100ns / 10ps",
+            "Time scale of (Top.first) is 100ns / 10ps",
+            "Time scale of (Top.second) is 100ns / 10ps",
+            "Time scale of (Top.second) is 100ns / 10ps",
+        ]);
+    }
+
+    fn printtimescale_resolves_interfaces_before_flattening(sim) {
+        @setup { let source = r#"
+            interface I;
+              timeunit 100ns / 10ps;
+              function automatic int show(input int data); $printtimescale; return data; endfunction
+            endinterface
+            module Child; timeunit 1us / 1ns; I nested(); endmodule
+            module Top(input logic clk, input int data, output int q);
+              timeunit 1ns / 1ps;
+              I info(); Child child();
+              always_ff @(posedge clk) begin
+                $printtimescale(info);
+                $printtimescale(child.nested);
+                q <= info.show(data);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("printtimescale.sv"))], "Top");
+        sim.set(sim.signal("data"), 7u32);
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 7u32.into());
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.child.nested) is 100ns / 10ps".into() },
+            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
+        ]);
+    }
+
+    fn printtimescale_keeps_generic_interface_bindings_separate(sim) {
+        @setup { let source = r#"
+            interface I;
+              timeunit 1ns / 1ps;
+              function automatic int show(input int v); $printtimescale; return v; endfunction
+            endinterface
+            interface J;
+              timeunit 100ns / 10ps;
+              function automatic int show(input int v); $printtimescale; return v; endfunction
+            endinterface
+            module Reader(interface info, input logic clk, input int data, output int q);
+              timeunit 1us / 1ns;
+              always_ff @(posedge clk) begin $printtimescale(info); q <= info.show(data); end
+            endmodule
+            module Top(input logic clk, input int data, output int i_q, j_q);
+              timeunit 1us / 1ns;
+              I i(); J j(); Reader r_i(i, clk, data, i_q); Reader r_j(j, clk, data, j_q);
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("interface_prints.sv"))], "Top");
+        sim.set(sim.signal("data"), 7u32);
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.get(sim.signal("i_q")), 7u32.into());
+        assert_eq!(sim.get(sim.signal("j_q")), 7u32.into());
+        let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect::<Vec<_>>();
+        messages.sort();
+        assert_eq!(messages, [
+            "Time scale of (Top.r_i.info) is 1ns / 1ps",
+            "Time scale of (Top.r_i.info) is 1ns / 1ps",
+            "Time scale of (Top.r_j.info) is 100ns / 10ps",
+            "Time scale of (Top.r_j.info) is 100ns / 10ps",
+        ]);
+    }
+    fn timescale_queries_resolve_hierarchical_interface_instances(sim) { @case "system_functions::timescale_queries_resolve_hierarchical_interface_instances"; }
+    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
+    fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
+    fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
+    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
+    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
+    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
+
+    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
+    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
+
+    fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
+        @setup {
+            let source = r#"
+                package P;
+                    timeunit 100ps / 10fs;
+                    function automatic int root_precision(); return $timeprecision($root.Top); endfunction
+                endpackage
+                interface I;
+                    timeunit 100ns / 10ps;
+                    function automatic int root_unit(); return $timeunit($root.Top); endfunction
+                endinterface
+                module Child(output logic ok);
+                    timeunit 1us / 1ns;
+                    assign ok = ($timeunit($root.Top) == -9) && ($timeprecision($root.Top) == -12)
+                        && ($timeunit(Top) == -9) && ($timeprecision(Top) == -12)
+                        && (P::root_precision() == -12);
+                endmodule
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    logic child_ok;
+                    I info();
+                    Child child(.ok(child_ok));
+                    assign ok = child_ok && (info.root_unit() == -9);
+                endmodule
+                module Harness(); timeunit 1ms / 1us; Top unused_top(); endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("selected_root.sv"))], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_cross_file_and_root_instance_paths(sim) {
+        @setup {
+            let source = r#"
+                timeunit 10ns / 1ps;
+                module Top(output logic ok);
+                    timeunit 1ns / 1ps;
+                    Child child();
+                    assign ok = ($timeunit() == -9) && ($timeprecision() == -12)
+                        && ($timeunit(child) == -6) && ($timeprecision(child) == -7)
+                        && ($timeunit(Top.child) == -6) && ($timeprecision($root.Top.child) == -7)
+                        && ($timeunit($unit) == -8) && ($timeprecision($root) == -15);
+                endmodule
+            "#;
+            let child = "module Child(); timeunit 1us / 100ns; endmodule";
+            let unused = "module Unused(); timeunit 1fs / 1fs; endmodule";
+        }
+        @build Simulator::from_sv_sources(vec![
+            (source, Path::new("top.sv")),
+            (child, Path::new("child.sv")),
+            (unused, Path::new("unused.sv")),
+        ], "Top");
+        let ok = sim.signal("ok");
+        assert_eq!(sim.get(ok), 1u32.into());
+    }
+
+    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
+    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
+    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
+    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
+    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
+    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
+
     fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
     fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
     fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
@@ -227,6 +680,7 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
         "$onehot0",
         "$isunknown",
         "$dimensions",
+        "$unpacked_dimensions",
     ] {
         for args in ["", "a, a", ", a", "a,"] {
             let call = format!("{name}({args})");
@@ -254,6 +708,127 @@ fn build_error(source: &str) -> String {
             .filter(|word| *word != "│")
             .collect::<Vec<_>>()
             .join(" "),
+    }
+}
+
+#[test]
+fn printtimescale_rejects_invalid_operands_and_value_contexts() {
+    for item in [
+        "$printtimescale(missing);",
+        "$printtimescale($root.P);",
+        "$printtimescale(1);",
+        "$printtimescale(,);",
+        "$printtimescale(Top, Top);",
+        "void'($printtimescale());",
+        "y = $bits($printtimescale());",
+        "y = $printtimescale();",
+    ] {
+        let source = format!(
+            "package P; timeunit 1ns / 1ps; endpackage module Top(output int y); timeunit 1ns / 1ps; always_comb begin y = 0; {item} end endmodule"
+        );
+        build_error(&source);
+    }
+    build_error(
+        "module Top(output int y); localparam UNUSED=$bits($printtimescale()); assign y=0; endmodule",
+    );
+    let error = build_error(
+        "interface I; function automatic int show(); $printtimescale; return 0; endfunction initial $display(\"%0d\", show()); endinterface module Top(output logic y); I info[2](); assign y=0; endmodule",
+    );
+    assert!(
+        error.contains("uses its instance scope in `$printtimescale`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn printtimescale_runs_in_initial_blocks_with_all_time_magnitudes() {
+    for (declaration, expected) in [
+        ("timeunit 100s / 10s;", "100s / 10s"),
+        ("timeunit 1ms / 100us;", "1ms / 100us"),
+        ("timeunit 10ns / 1ps;", "10ns / 1ps"),
+        ("timeunit 100ps / 10fs;", "100ps / 10fs"),
+        ("", "1ns / 1ps"),
+    ] {
+        let source = format!(
+            "module Top(output logic y); {declaration} initial $printtimescale; assign y=0; endmodule"
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: format!("Time scale of (Top) is {expected}")
+            }]
+        );
+    }
+}
+
+#[test]
+fn printtimescale_initial_instances_and_interface_arrays_keep_their_names() {
+    let source = r#"
+        interface I;
+          timeunit 100ns / 10ps;
+          initial begin $printtimescale; $printtimescale($root); end
+        endinterface
+        module Child; timeunit 1us / 1ns; initial $printtimescale(); endmodule
+        module Top(output logic y);
+          timeunit 1ns / 1ps;
+          I info[2:1](); Child children[2:1]();
+          assign y=0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    let mut messages = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect::<Vec<_>>();
+    messages.sort();
+    assert_eq!(
+        messages,
+        [
+            "Time scale of ($root) is 1ps / 1ps",
+            "Time scale of ($root) is 1ps / 1ps",
+            "Time scale of (Top.children[1]) is 1us / 1ns",
+            "Time scale of (Top.children[2]) is 1us / 1ns",
+            "Time scale of (Top.info[1]) is 100ns / 10ps",
+            "Time scale of (Top.info[2]) is 100ns / 10ps",
+        ]
+    );
+}
+
+#[test]
+fn printtimescale_interface_arrays_preserve_integer_boundary_indices() {
+    for (range, indices) in [
+        ("-2147483647:-2147483648", vec![i32::MIN, i32::MIN + 1]),
+        ("2147483646:2147483647", vec![i32::MAX - 1, i32::MAX]),
+        ("-2147483648:-2147483648", vec![i32::MIN]),
+        ("2147483647:2147483647", vec![i32::MAX]),
+    ] {
+        let source = format!(
+            "interface I; timeunit 100ns / 10ps; initial $printtimescale; endinterface module Top(output logic y); timeunit 1ns / 1ps; I items[{range}](); assign y=0; endmodule"
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        let mut messages = sim
+            .drain_runtime_events()
+            .into_iter()
+            .map(|event| match event {
+                celox::RuntimeEvent::Display { message } => message,
+                event => panic!("unexpected event: {event:?}"),
+            })
+            .collect::<Vec<_>>();
+        messages.sort();
+        let mut expected = indices
+            .into_iter()
+            .map(|index| format!("Time scale of (Top.items[{index}]) is 100ns / 10ps"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(messages, expected, "range [{range}]");
     }
 }
 
@@ -399,6 +974,28 @@ fn reports_where_a_known_system_function_is_not_supported() {
     for (expected, source) in cases {
         let error = build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+#[test]
+fn timescale_queries_reject_packages_beneath_root() {
+    for function in ["$timeunit", "$timeprecision"] {
+        for item in [
+            format!("assign y = {function}($root.P);"),
+            format!("always_comb begin {function}($root.P); y = 0; end"),
+            format!("always_comb begin void'({function}($root.P)); y = 0; end"),
+            format!("assign y = $bits({function}($root.P));"),
+            format!("localparam UNUSED = {function}($root.P); assign y = 0;"),
+        ] {
+            let source = format!(
+                "package P; timeunit 100ns / 10ps; endpackage module Top(output int y); timeunit 1ns / 1ps; {item} endmodule"
+            );
+            let error = build_error(&source);
+            assert!(
+                error.contains("unknown timescale query design element `P`"),
+                "{item}: {error}"
+            );
+        }
     }
 }
 
@@ -734,5 +1331,177 @@ fn dimensions_rejects_malformed_pattern_arguments() {
         build_error(&format!(
             "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
         ));
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_undefined_operands() {
+    for source in [
+        "module Top(output int y); assign y = $unpacked_dimensions(missing); endmodule",
+        "module Top(output int y); localparam N = $unpacked_dimensions(missing); assign y = 0; endmodule",
+        "module Top(output int y); if ($unpacked_dimensions(missing) == 1) assign y = 1; else assign y = 0; endmodule",
+        "module Top(input logic a, output logic y); always_comb begin $unpacked_dimensions(missing); y = a; end endmodule",
+    ] {
+        build_error(source);
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_excess_indices() {
+    for operand in ["a[0][3][0]", "a[0][3][0:0]", "a[0][3][0 +: 1]"] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions({operand});"),
+            format!("localparam N = $unpacked_dimensions({operand}); assign y = 0;"),
+            format!("always_comb begin $unpacked_dimensions({operand}); y = 0; end"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); logic [7:0] a [0:1]; {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_zero_size_casts() {
+    for statement in [
+        "assign y = $unpacked_dimensions(logic)'(1'b1);",
+        "localparam P = $unpacked_dimensions(logic)'(1'b1); assign y = P;",
+        "localparam N = $unpacked_dimensions(logic); assign y = N'(1'b1);",
+    ] {
+        build_error(&format!("module Top(output int y); {statement} endmodule"));
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_malformed_pattern_arguments() {
+    for statement in [
+        "assign y = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3}));",
+        "localparam N = $unpacked_dimensions(f('{8'h1, 8'h2, 8'h3})); assign y = 0;",
+    ] {
+        build_error(&format!(
+            "module Top(output int y); function automatic logic [7:0] f(input logic [7:0] a [0:1]); return a[0]; endfunction {statement} endmodule"
+        ));
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_invalid_range_bounds() {
+    for operand in [
+        "a[0][MISSING:0]",
+        "a[0][0:MISSING]",
+        "a[0][MISSING +: 1]",
+        "a[0][(MISSING == 0) +: 1]",
+        "a[0][(0 << MISSING) +: 1]",
+        "a[0][0 +: MISSING]",
+        "a[0][0 +: 0]",
+    ] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions({operand});"),
+            format!("localparam N = $unpacked_dimensions({operand}); assign y = 0;"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); logic [7:0] a [0:1][0:2]; {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_function_argument_count() {
+    for declaration in [
+        "function int f(input int a); return a; endfunction",
+        "function int f; input int a; begin f = a; end endfunction",
+        "function int f(input int a, input int b = 2); return a + b; endfunction",
+    ] {
+        for arguments in ["", "1, 2, 3"] {
+            for use_site in [
+                format!("assign y = $unpacked_dimensions(f({arguments}));"),
+                format!("localparam N = $unpacked_dimensions(f({arguments})); assign y = 0;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); {declaration} {use_site} endmodule"
+                ));
+            }
+        }
+    }
+    build_error(
+        "module Top(output int y); function int f(input int a); return a; endfunction assign y = $unpacked_dimensions(f(1, 2)); endmodule",
+    );
+}
+
+#[test]
+fn unpacked_dimensions_rejects_nonwritable_function_arguments() {
+    for direction in ["output", "inout"] {
+        for operand in ["1 + 2", "1", "int'(a)", "{a, 1'b0}", "P", "P[0]"] {
+            for use_site in [
+                format!("assign y = $unpacked_dimensions(f({operand}));"),
+                format!("localparam N = $unpacked_dimensions(f({operand})); assign y = 0;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); int a; localparam int P = 1; function int f({direction} int x); x = 4; return x; endfunction {use_site} endmodule"
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn dimension_queries_reject_four_state_parameter_output_actuals() {
+    for query in ["$unpacked_dimensions", "$dimensions"] {
+        for direction in ["output", "inout"] {
+            for value in ["4'bxxxx", "4'bzzzz", "4'b10xz"] {
+                for operand in ["P", "P[0]", "{a, P}", "{P, a}"] {
+                    for use_site in [
+                        format!("assign y = {query}(f({operand}));"),
+                        format!("localparam N = {query}(f({operand})); assign y = N;"),
+                    ] {
+                        let diagnostic = build_error(&format!(
+                            "module Top(output int y); logic [3:0] a; localparam logic [3:0] P = {value}; function int f({direction} logic [7:0] x); x = 0; f = 1; endfunction {use_site} endmodule"
+                        ));
+                        assert!(
+                            diagnostic.contains("non-writable argument")
+                                || diagnostic.contains("operand of"),
+                            "{query}({operand}), {direction}, {value}, {use_site}: {diagnostic}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unpacked_dimensions_rejects_omitted_required_arguments() {
+    for arguments in [",", "1,", ", 2, ,", ", , 3"] {
+        for use_site in [
+            format!("assign y = $unpacked_dimensions(f({arguments}));"),
+            format!("localparam N = $unpacked_dimensions(f({arguments})); assign y = 0;"),
+        ] {
+            build_error(&format!(
+                "module Top(output int y); function int f(input int a = 1, input int b, input int c = 3); return a + b + c; endfunction {use_site} endmodule"
+            ));
+        }
+    }
+}
+
+#[test]
+fn dimension_queries_reject_invalid_indices() {
+    for query in ["$unpacked_dimensions", "$dimensions"] {
+        for index in [
+            "MISSING",
+            "(MISSING == 0)",
+            "(0 << MISSING)",
+            "f()",
+            "f(1, 2)",
+        ] {
+            for statement in [
+                format!("assign y = {query}(a[{index}]);"),
+                format!("localparam N = {query}(a[{index}]); assign y = N;"),
+            ] {
+                build_error(&format!(
+                    "module Top(output int y); logic [7:0] a [0:1][0:2]; function int f(input int x); return x; endfunction {statement} endmodule"
+                ));
+            }
+        }
     }
 }

@@ -15,6 +15,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
+        let mut parameter_signedness = HashMap::default();
         let mut parameter_literals = HashMap::default();
         let mut parameter_table = ParameterTable::default();
         let mut parameters = Vec::new();
@@ -58,6 +59,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             let resolved_type = parameter.resolved_type(&parameter_types);
             if let Some(r#type) = resolved_type {
                 parameter_types.insert(parameter.name().to_string(), r#type);
+                parameter_signedness.insert(parameter.name().to_string(), r#type.signed);
             }
             let parameter = ir::Parameter::new(
                 parameter.name().to_string(),
@@ -67,6 +69,25 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 resolved_type.map(|r#type| r#type.signed),
                 parameter.declared_width(),
                 parameter.declared_signed(),
+            )
+            .with_declaration(
+                parameter
+                    .value()
+                    .map(|value| module.declaration_expr(value, &parameter_signedness).into()),
+                parameter
+                    .packed_ranges()
+                    .iter()
+                    .map(|range| {
+                        ir::PackedRange::new(
+                            module
+                                .declaration_expr(range.left(), &parameter_signedness)
+                                .into(),
+                            module
+                                .declaration_expr(range.right(), &parameter_signedness)
+                                .into(),
+                        )
+                    })
+                    .collect(),
             );
             if imported {
                 imported_parameters.push(parameter);
@@ -114,6 +135,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                                 parameter.name().to_string(),
                                 parameter.value().cloned().map(Into::into),
                                 parameter.type_text().map(str::to_string),
+                                parameter.pattern_text().map(str::to_string),
                             )
                         })
                         .collect(),
@@ -178,7 +200,8 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .collect(),
             )
             .with_dpi_imports(module.dpi_imports().to_vec())
-            .with_imported_parameters(imported_parameters),
+            .with_imported_parameters(imported_parameters)
+            .with_declaration_subroutines(module.declaration_subroutines().to_vec()),
         );
     }
 

@@ -388,6 +388,9 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
+    /// Ordered so that the encoded image does not depend on hash order.
+    pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
 }
 
@@ -484,6 +487,8 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                dead_store_policy: self.runtime_schema.dead_store_policy,
+                live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
             },
             testbench: self.testbench.clone(),
@@ -2098,13 +2103,12 @@ fn compile_program(
     // Bind semantic event identities to image-relative function offsets. The
     // precompiled runtime turns these into process-local pointers after it has
     // copied the image into executable memory.
-    let mut next_id = 0usize;
-    let mut id_to_addr = Vec::new();
+    let (mut addr_to_id, mut id_to_addr) = crate::backend::event_ids(sir);
+    let mut next_id = id_to_addr.len();
     let mut id_to_event = Vec::new();
     let mut event_map = HashMap::default();
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
-    let mut addr_to_id = HashMap::default();
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
@@ -2194,6 +2198,17 @@ fn compile_program(
         &mut id_to_addr,
         &mut id_to_event,
     )?;
+    id_to_event = id_to_addr
+        .iter()
+        .map(|address| {
+            event_map
+                .get(address)
+                .or_else(|| eval_only_event_map.get(address))
+                .or_else(|| apply_event_map.get(address))
+                .copied()
+                .expect("every scheduled event address resolves to an event")
+        })
+        .collect();
     // Pre-compute 4-state initialization regions
     let mut four_state_inits = Vec::new();
     if options.four_state {
@@ -2242,6 +2257,14 @@ fn compile_program(
                     .runtime()
                     .runtime_schema
                     .comb_writes
+                    .iter()
+                    .copied()
+                    .collect(),
+                dead_store_policy: sir.runtime().runtime_schema.dead_store_policy,
+                live_signals: sir
+                    .runtime()
+                    .runtime_schema
+                    .live_signals
                     .iter()
                     .copied()
                     .collect(),
@@ -3065,11 +3088,11 @@ impl super::super::SimBackend for NativeBackend {
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
 
-        assert!(provided_size <= allocated_size);
+        let copy_size = provided_size.min(allocated_size);
 
         if signal.array_layout.is_some() {
             let value_bytes =
-                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, provided_size) };
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
             self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
             if clear_mask {
                 self.write_signal_plane(signal, true, &BigUint::from(0u8));
@@ -3080,7 +3103,11 @@ impl super::super::SimBackend for NativeBackend {
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
-                let raw = *(&val as *const T as *const u8);
+                let raw = if copy_size == 0 {
+                    0
+                } else {
+                    *(&val as *const T as *const u8)
+                };
                 let byte = if signal.width < 8 {
                     raw & ((1u8 << signal.width) - 1)
                 } else {
@@ -3090,10 +3117,14 @@ impl super::super::SimBackend for NativeBackend {
                 return;
             }
 
-            if provided_size < allocated_size {
+            if copy_size < allocated_size {
                 std::ptr::write_bytes(base_ptr, 0, allocated_size);
             }
-            std::ptr::write_unaligned(base_ptr as *mut T, val);
+            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
+
+            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
+            }
 
             if clear_mask {
                 let mask_ptr = base_ptr.add(allocated_size);

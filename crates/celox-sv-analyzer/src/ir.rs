@@ -42,6 +42,7 @@ pub struct Module {
     initial_processes: Vec<InitialProcess>,
     locals: Vec<LocalVariable>,
     subroutines: Vec<Subroutine>,
+    declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
 }
@@ -75,6 +76,7 @@ impl Module {
             initial_processes,
             locals,
             subroutines,
+            declaration_subroutines: Vec::new(),
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
         }
@@ -83,6 +85,17 @@ impl Module {
     pub(crate) fn with_imported_parameters(mut self, parameters: Vec<Parameter>) -> Self {
         self.imported_parameters = parameters;
         self
+    }
+
+    pub(crate) fn with_declaration_subroutines(mut self, subroutines: Vec<Subroutine>) -> Self {
+        self.declaration_subroutines = subroutines;
+        self
+    }
+
+    /// Constant-function bodies with symbolic module parameter references,
+    /// used to inspect declaration dependencies before default substitution.
+    pub fn declaration_subroutines(&self) -> &[Subroutine] {
+        &self.declaration_subroutines
     }
 
     /// The parameters of the packages the module uses (IEEE 1800-2023 26.3),
@@ -157,6 +170,8 @@ impl Module {
 pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
+    declaration_value: Option<ConstExpr>,
+    packed_ranges: Vec<PackedRange>,
     resolved_value: Option<i128>,
     resolved_width: Option<usize>,
     resolved_signed: Option<bool>,
@@ -177,12 +192,35 @@ impl Parameter {
         Self {
             name,
             value,
+            declaration_value: None,
+            packed_ranges: Vec::new(),
             resolved_value,
             resolved_width,
             resolved_signed,
             declared_width,
             declared_signed,
         }
+    }
+
+    pub(crate) fn with_declaration(
+        mut self,
+        value: Option<ConstExpr>,
+        packed_ranges: Vec<PackedRange>,
+    ) -> Self {
+        self.declaration_value = value;
+        self.packed_ranges = packed_ranges;
+        self
+    }
+
+    /// The default with native constant-function expression bodies expanded,
+    /// retaining references to parameters for later specialization.
+    pub fn declaration_value(&self) -> Option<&ConstExpr> {
+        self.declaration_value.as_ref().or(self.value.as_ref())
+    }
+
+    /// Symbolic declared packed ranges, before resolving parameter defaults.
+    pub fn packed_ranges(&self) -> &[PackedRange] {
+        &self.packed_ranges
     }
 
     pub fn name(&self) -> &str {
@@ -377,15 +415,27 @@ pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
     type_text: Option<String>,
+    pattern_text: Option<String>,
 }
 
 impl ParameterOverride {
-    pub(crate) fn new(name: String, value: Option<ConstExpr>, type_text: Option<String>) -> Self {
+    pub(crate) fn new(
+        name: String,
+        value: Option<ConstExpr>,
+        type_text: Option<String>,
+        pattern_text: Option<String>,
+    ) -> Self {
         Self {
             name,
             value,
             type_text,
+            pattern_text,
         }
+    }
+
+    /// A constant assignment pattern, evaluated in the caller scope.
+    pub fn pattern_text(&self) -> Option<&str> {
+        self.pattern_text.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -480,6 +530,17 @@ impl Type {
 
     pub fn resolved_width(&self) -> Option<usize> {
         self.resolved_width
+    }
+
+    pub(crate) fn has_symbolic_ranges(&self) -> bool {
+        let constants = fxhash::FxHashMap::default();
+        self.packed_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        }) || self.unpacked_ranges.iter().any(|range| {
+            typecheck::eval_const_expr(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+        })
     }
 }
 
@@ -589,6 +650,13 @@ pub enum ConstExpr {
     Select {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
+    },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
     },
     /// An integral cast whose width and signedness remain independent of
     /// the enclosing index arithmetic.
@@ -868,7 +936,10 @@ pub enum Expr {
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        /// Missing actuals retain their formal slots for declaration-scope defaults.
+        args: Vec<Option<Expr>>,
+        /// Formal positions in source evaluation/copy-out order; empty means positional.
+        arg_order: Vec<usize>,
     },
     /// `expr inside { items }`: true when `expr` matches any item.
     Inside {
@@ -928,6 +999,17 @@ impl From<ast::ConstExpr> for ConstExpr {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
             },
+            ast::ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: Box::new((*expr).into()),
+                msb: Box::new((*msb).into()),
+                lsb: Box::new((*lsb).into()),
+                signed,
+            },
             ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
                 name,
                 site,
@@ -972,6 +1054,17 @@ impl From<ConstExpr> for ast::ConstExpr {
             ConstExpr::Select { expr, bit } => ast::ConstExpr::Select {
                 expr: Box::new((*expr).into()),
                 bit: Box::new((*bit).into()),
+            },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ast::ConstExpr::SelectRange {
+                expr: Box::new((*expr).into()),
+                msb: Box::new((*msb).into()),
+                lsb: Box::new((*lsb).into()),
+                signed,
             },
             ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
                 name,
@@ -1162,9 +1255,14 @@ impl From<ast::Expr> for Expr {
                 then_expr: Box::new((*then_expr).into()),
                 else_expr: Box::new((*else_expr).into()),
             },
-            ast::Expr::Call { name, args } => Expr::Call {
+            ast::Expr::Call {
                 name,
-                args: args.into_iter().map(Into::into).collect(),
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
+                name,
+                args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
                 expr: Box::new((*expr).into()),

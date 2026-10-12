@@ -147,19 +147,42 @@
     },
     {
       "category": "ControlFlow",
-      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+      "detail": "Icarus 13.0 returns 0 for $dimensions of the implicit integer localparam in a loop-generate body. IEEE 1800-2023 27.4 and 20.7 require one packed dimension for this predefined integer type. A standalone reproducer returns 0 in Icarus and 1 in Verilator; Celox and Verilator pass the unchanged shared assertions.",
       "expectation": "Simulation",
       "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_genvar_dimensions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_genvar_dimensions",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns 0 for $dimensions of the implicit integer localparam in a loop-generate body. IEEE 1800-2023 27.4 and 20.7 require one packed dimension for this predefined integer type. A standalone reproducer returns 0 in Icarus and 1 in Verilator; Celox and Verilator pass the unchanged shared assertions.",
+        "upstream": []
+      },
+      "name": "generate::genvar_shadows_inherited_parameter_shapes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_syntax",
         "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
+        "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_syntax",
-        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
-        "upstream": []
+        ]
       },
       "name": "generate::ignores_type_aliases_in_inactive_generate_branches",
       "phase": "skip",

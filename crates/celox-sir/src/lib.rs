@@ -76,8 +76,8 @@ impl<A> LaneUnit<A> {
 /// equivalent to the event's sequential evaluate-and-apply kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParallelFfKernel<A> {
-    /// Next-state evaluations. They publish only staged (working or sparse)
-    /// state.
+    /// Next-state evaluations. They publish staged (working or sparse) state,
+    /// or STABLE state directly for targets that no later unit accesses.
     pub evaluations: Vec<LaneUnit<A>>,
     /// Publications of staged state.
     pub applications: Vec<LaneUnit<A>>,

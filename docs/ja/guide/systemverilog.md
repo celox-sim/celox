@@ -2,8 +2,8 @@
 
 Celox は [Veryl](https://veryl-lang.org/) と、**SystemVerilog の合成可能なサブセット**をシミュレートします。
 2 つのフロントエンドは同じ中間表現へ lowering するため、スケジューリング、最適化、バックエンド、
-ランタイムを共有します。2 つの言語を混在させることもでき、Veryl のトップから SystemVerilog の
-モジュールをインスタンス化できます。
+ランタイムを共有します。両言語を混在させ、どちらをトップにしても双方向にモジュールを
+インスタンス化できます。
 
 SystemVerilog フロントエンドは、`celox` crate の Cargo feature `systemverilog` の背後にある Rust API です。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl だけを読み込みます。
@@ -29,7 +29,26 @@ let mut sim = Simulator::from_sv_sources(
 .build()?;
 ```
 
-`Simulator::from_mixed_sources` は、Veryl のソースと SystemVerilog の子モジュールを組み合わせます。
+`Simulator::from_mixed_sources` は両言語のソースを組み合わせます。トップはどちらの言語でもよく、
+階層は Veryl → SV → Veryl のように言語境界を複数回跨げます。Veryl では `$sv::Module`、
+SV では Veryl のモジュール名でインスタンス化します。数値パラメータは、それぞれの frontend が解決します。
+
+interface と `input` / `output` modport のメンバー接続も双方向に対応します。SV の interface は
+Veryl で `inst bus: $sv::Bus;`、ポートで `bus: modport $sv::Bus::slave` と指定できます。
+SV から Veryl の interface をインスタンス化し、両言語のモジュールに接続することもできます。
+interface のパラメータ、インスタンス配列、SV の generic interface ポートは接続先の型で解決します。
+Veryl からインスタンス化した SV interface の内部ロジックは、SV frontend で実行します。
+
+パラメータの宣言幅が先行する interface パラメータに依存する場合も、SV側の名前付き上書きの順序にかかわらず、宣言順で上書きを反映します。
+VerylとSVに同名のモジュールがある場合、`$sv::Module` はSV側の定義を選択します。
+interface の既定値で呼び出す定数関数は、native analyzer が本体を式として表せる場合に宣言式へ展開します。
+ループなど、本体を宣言式で表せないヘッダ依存の定数関数は、未対応として診断します。
+引数型や戻り値型の幅がヘッダパラメータに依存する関数も、宣言式でその型変換を表せないため未対応として診断します。
+宣言内のキャスト先のサイズがinterfaceパラメータに依存する場合や、定数関数をシンボリックに解析できない場合も、既定値で計算した結果を固定せず未対応として診断します。
+
+両 frontend の宣言情報と解析結果を直接接続するため、Veryl の SV emitter は不要です。
+言語境界を跨ぐ interface 関数の呼び出しと、関数の `import` / `export` modport は、まだ未対応です。
+各言語内での対応範囲は従来どおりです。
 
 ## サポートしているもの
 
@@ -39,7 +58,7 @@ let mut sim = Simulator::from_sv_sources(
 | --- | --- |
 | モジュール | ANSI ポート、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ・配列・構造体、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ・配列・構造体、hard packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
@@ -50,13 +69,20 @@ let mut sim = Simulator::from_sv_sources(
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
-| パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル） |
-| システム関数 | `$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| システムタスク | `always` 系のプロセスとサブルーチンの `$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
+| システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
 SystemVerilog に対しても、共有の Veryl 適合性スイートを実行しています。
+
+`$printtimescale` は IEEE 1800-2023 20.4.2 の形式で時刻スコープを表示します。
+例: `Time scale of (Top.child) is 100ns / 10ps`。
+引数なしの現在スコープ、design element、`$unit`、`$root` を指定でき、
+`initial`、`always` 系のプロセスとサブルーチンで実行できます。
+現在のモジュールと相対参照には実際のインスタンス階層名を使い、
+package・interface の手続きは宣言元の時間単位と精度を保持します。
 
 ## サポートしていないもの
 
@@ -72,9 +98,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、packed union（[#440](https://github.com/celox-sim/celox/issues/440)）、0 起点の降順でない
-  多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、別の
-  プロセスの変数と同名のブロックローカル変数（[#445](https://github.com/celox-sim/celox/issues/445)）、unpacked 構造体、文字列、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、0 起点の降順でない
+  多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
   オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、プロセスをまたいだ同一クロック（[#443](https://github.com/celox-sim/celox/issues/443)）・同一リセット
   （[#471](https://github.com/celox-sim/celox/issues/471)）の両エッジの使用。
@@ -90,7 +115,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
-  引数の数が誤っている呼び出しや関数の引数の省略、値として使ったタスクはエラーです。
+  引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
 - DPI、トライステートバスと複数ドライバ、階層参照。
 
 ## 知っておくべき挙動
@@ -107,7 +132,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   の規則で解決します。`p::x` は package `p` の項目を指すため、複数の package、または package と
   モジュールに同名の項目があっても衝突しません。`import p::x;` で見えるのは `x` だけです。
   `import p::*;` では、スコープ自身の宣言が package の同名の項目を隠し、2 つの wildcard import
-  の package が宣言する名前は、参照したときだけエラーになります。package の関数の中の名前は
+  の package が宣言する名前は、参照したときだけエラーになります。generate ブロック内の import は、そのブロック
+  （と内側のブロック）でだけ名前を見えるようにし、モジュール自身の宣言や import より優先されます。package の関数の中の名前は
   package の中で解決します。package の変数は、それを使うすべてのモジュール（Veryl からインスタンス化した
   SystemVerilog モジュールを含む）で共有される 1 つのオブジェクトで、初期化子も反映します。
   `sim.signal("p::v")` で参照できます。1 つの package 変数を複数のドライバが書く設計は、書き込む
@@ -123,8 +149,19 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   コンパイル単位の項目 `x` を指します。コンパイル単位の変数は、そのファイルのモジュールが共有する 1 つの
   オブジェクトで、package 変数と同じく `$unit::v` という名前になります。これを宣言できるソースファイルは
   1 つだけです。コンパイル単位での DPI import は未対応です。
-- **ブロックローカル変数**（`always_comb` 内）は、モジュールの信号になります。ほかの信号と
-  名前が衝突するものは拒否します。
+- **ブロックローカル変数**は、`always_comb` と `always_ff` で字句スコープを持ちます。
+  モジュールの信号と同名の変数や、別のブロック・プロセスでの同名変数を扱えます。
+- **hard packed untagged union** のメンバーは、同じビットベクタを共有します。
+  全メンバーの幅が一致する必要があります（IEEE 1800-2023 7.3.1）。
+- **名前付きサブルーチン引数**は仮引数の名前で束縛し、入力の評価と出力のコピーアウトは
+  ソースに書かれた順序で行います。式と文のどちらでも、ANSI宣言で既定値を持つ引数を省略できます。
+  既定値は使うときだけ、サブルーチンを宣言した外側のスコープで評価します（IEEE 1800-2023 13.5.3）。
+  パラメータ初期値・範囲・generate条件の定数呼び出しも仮引数名で束縛し、generate内の宣言は自身のシグネチャを使います。
+  選択の添字での副作用を伴う名前付き呼び出しは拒否します。
+- **型付きパラメータパターン**は呼び出し元の型で変換し、幅・符号・4-state の値を保持します
+  （IEEE 1800-2023 10.9、6.20.2）。packed 値はビット列として渡すため、子の構造体の
+  メンバー名やフィールド分割が異なっても扱えます。型付き scalar パターンは、既定値が
+  通常の値であるパラメータも上書きできます。unpacked パターンは配列の位置と形状を保持します。
 - **変数の寿命**は IEEE 1800-2023 6.21 に従います。プロセスのブロック、関数、タスクの中で宣言した
   変数は、その変数自身、そのサブルーチン、またはそのモジュール（`module automatic`）が `automatic`
   と宣言されていない限り static です。ブロックの static なローカル変数は、ブロックの実行をまたいで値を
@@ -162,3 +199,27 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 - テストベンチ用のモジュール（クロックや `$finish` のスケジューリングを伴う `initial`
   ブロック、階層代入）と interface は、シミュレーション可能な SystemVerilog モジュールとして
   出力されません。
+
+`$timeunit` と `$timeprecision` は秒を基準とする指数を32ビットの符号付き整数で
+返します（IEEE 1800-2023 20.4.1）。現在の時間スコープ、`$unit`、`$root`、
+別ファイルを含むスカラーのモジュールインスタンス階層を解決します。
+`timeunit`、`timeprecision`、先行する `timescale`、`resetall` の優先順位は
+3.14.2.3に従い、デフォルトは1 ns / 1 psです。グローバル精度には、
+インスタンス化されていない定義も含め、すべての精度宣言とディレクティブの精度を
+使用します（3.14.3）。インスタンス配列の選択とgenerate階層は、展開後の階層検索が
+必要なため、現在は未対応として診断します。
+
+時間単位と精度は、他のスコープ項目より前で別々に宣言でき、同じ値の宣言は
+後でも繰り返せます。明示指定・継承による設定とデフォルトがデザイン内で混在する
+場合は診断します（3.14.2.3）。モジュール定義とパッケージは、同名でもそれぞれの
+時間単位と精度を保持します（3.13）。同名のモジュールがインスタンス化されていても、
+パッケージ名による問い合わせを解決します。ルートを含む階層インスタンスが見つかった
+場合は、同名パッケージより優先します。シミュレータのルート検索は選択したトップと
+到達可能な階層を使用し、未使用module内のインスタンス化で選択したルートを隠しません。
+時間リテラルの整数・固定小数点表記では、
+先頭ゼロを含めた数値を解釈します。interfaceの関数は、展開でモジュールに
+コピーされた後も、宣言元の時間スコープとコンパイル単位を使用します。
+スカラーのinterfaceインスタンス・ポートへの問い合わせは、展開前にバインドされた
+interface型から解決します。generic interfaceポートとgenerate内のローカルハンドルも
+対象です。`child.info`のように子module内のinterfaceインスタンスを指定する
+スカラー階層も、インスタンスが展開で消える前に解決します。

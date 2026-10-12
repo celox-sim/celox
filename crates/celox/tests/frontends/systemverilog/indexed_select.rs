@@ -3,6 +3,21 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn nested_array_indices_preserve_cast_widths(sim) {
+        @case "indexed_select::nested_array_indices_preserve_cast_widths";
+    }
+
+    fn nested_array_indices_freeze_concat_targets(sim) {
+        @case "indexed_select::nested_array_indices_freeze_concat_targets";
+    }
+
+    fn nested_array_indices_preserve_elements_and_ranges(sim) {
+        @case "indexed_select::nested_array_indices_preserve_elements_and_ranges";
+    }
+
+    fn nested_array_indices_preserve_invalid_reads_and_writes(sim) {
+        @case "indexed_select::nested_array_indices_preserve_invalid_reads_and_writes";
+    }
 
     fn signed_indices_access_clocked_negative_range_arrays(sim) {
         @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
@@ -120,6 +135,26 @@ sv_backends! {
     // IEEE 1800-2023 11.6.1: both ternary arms determine the result width.
     fn indexed_ternaries_preserve_both_arm_types(sim) {
         @case "indexed_select::indexed_ternaries_preserve_both_arm_types";
+    }
+
+    fn constant_parameter_initializers_preserve_selections(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_selections";
+    }
+
+    fn constant_parameter_initializers_preserve_imported_shapes(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_imported_shapes";
+    }
+
+    fn constant_parameter_initializers_preserve_overhanging_parts(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_overhanging_parts";
+    }
+
+    fn constant_parameter_initializers_preserve_unknown_indices(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_unknown_indices";
+    }
+
+    fn constant_parameter_initializers_shape_ports_and_generate(sim) {
+        @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
     }
 
     fn indexed_parameter_initializers_preserve_selections(sim) {

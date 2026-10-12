@@ -244,7 +244,13 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             .cloned()
             .or_else(|| {
                 let value = *const_env.get(&name)?;
-                if const_env.contains_key(&enum_marker(&name)) {
+                // Generate indices carry the same width/signing markers as
+                // enum values. Preserve them instead of creating a literal
+                // such as "-2147483648", whose minus is an expression operator.
+                if const_env.contains_key(&enum_marker(&name))
+                    || (!const_env.contains_key(&parameter_marker(&name))
+                        && const_env.contains_key(&parameter_width_marker(&name)))
+                {
                     let width = const_env
                         .get(&parameter_width_marker(&name))
                         .and_then(|width| usize::try_from(*width).ok())?;
@@ -376,19 +382,25 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => {
             let args: Vec<_> = args
                 .into_iter()
                 .map(|arg| {
-                    substitute_expr_constants_with_parameter_literals(
-                        arg,
-                        const_env,
-                        parameter_literals,
-                    )
+                    arg.map(|arg| {
+                        substitute_expr_constants_with_parameter_literals(
+                            arg,
+                            const_env,
+                            parameter_literals,
+                        )
+                    })
                 })
                 .collect();
             if matches!(name.as_str(), "$signed" | "$unsigned")
-                && let [arg] = args.as_slice()
+                && let [Some(arg)] = args.as_slice()
                 && let Some(constant) = expr_to_const(arg.clone())
                 && let Some(ty) =
                     infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
@@ -400,9 +412,20 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 }
             } else if name == "$countbits" {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
-                fold_const_integral_expr_preserving_mask(Expr::Call { name, args }, const_env)
+                fold_const_integral_expr_preserving_mask(
+                    Expr::Call {
+                        name,
+                        args,
+                        arg_order,
+                    },
+                    const_env,
+                )
             } else {
-                Expr::Call { name, args }
+                Expr::Call {
+                    name,
+                    args,
+                    arg_order,
+                }
             }
         }
     }
@@ -460,6 +483,32 @@ fn substitute_const_expr_constants_impl(
             ConstExpr::Literal(value.to_string())
         }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            msb: Box::new(substitute_const_expr_constants_impl(
+                *msb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            lsb: Box::new(substitute_const_expr_constants_impl(
+                *lsb,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            signed,
+        },
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
             expr: Box::new(substitute_const_expr_constants_impl(
                 *expr,
@@ -760,10 +809,21 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             then_expr: Box::new(expr_to_const(*then_expr)?),
             else_expr: Box::new(expr_to_const(*else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call {
             name,
-            args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
-        )),
+            args,
+            arg_order,
+        } => {
+            if !arg_order.is_empty() {
+                return None;
+            }
+            Some(ConstExpr::call(
+                name,
+                args.into_iter()
+                    .map(|arg| expr_to_const(arg?))
+                    .collect::<Option<_>>()?,
+            ))
+        }
         Expr::Select { .. }
         | Expr::Concat(_)
         | Expr::RepeatConcat { .. }
@@ -799,12 +859,17 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             op,
             right: Box::new(expr_to_index_const(*right, dimensions)?),
         }),
-        Expr::Select { expr, msb, lsb, .. }
-            if msb == lsb && !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) =>
-        {
-            Some(ConstExpr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+            Some(ConstExpr::SelectRange {
                 expr: Box::new(expr_to_index_const(*expr, dimensions)?),
-                bit: Box::new(msb),
+                msb: Box::new(msb),
+                lsb: Box::new(lsb),
+                signed,
             })
         }
         Expr::Mux {
@@ -816,12 +881,23 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
             else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call {
             name,
-            args.into_iter()
-                .map(|arg| expr_to_index_const(arg, dimensions))
-                .collect::<Option<_>>()?,
-        )),
+            args,
+            arg_order,
+        } => {
+            // Pure calls were expanded before index conversion. Retaining a
+            // named call here would discard the order of its procedural effects.
+            if !arg_order.is_empty() {
+                return None;
+            }
+            Some(ConstExpr::call(
+                name,
+                args.into_iter()
+                    .map(|arg| expr_to_index_const(arg?, dimensions))
+                    .collect::<Option<_>>()?,
+            ))
+        }
         Expr::Select {
             expr,
             msb,
@@ -966,22 +1042,38 @@ impl IndexBitSource {
                     extend_signed,
                 }
             }
-            Expr::Select { expr, msb, lsb, .. } => {
-                let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-                let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
-                let step = if left >= right { 1 } else { -1 };
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => {
                 match *expr {
-                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => Self::Slice {
-                        part: Box::new(Self::from_expr(expr, dimensions)?),
-                        width,
-                        right,
-                        step,
-                    },
+                    expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
+                        let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                        Self::Slice {
+                            part: Box::new(Self::from_expr(expr, dimensions)?),
+                            width,
+                            right,
+                            step: if left >= right { 1 } else { -1 },
+                        }
+                    }
                     expr => Self::Scalar {
-                        expr: expr_to_index_const(expr, dimensions)?,
+                        // The selected value has [width-1:0] coordinates even
+                        // when its position in an unpacked array is dynamic.
+                        expr: expr_to_index_const(
+                            Expr::Select {
+                                expr: Box::new(expr),
+                                msb,
+                                lsb,
+                                signed,
+                            },
+                            dimensions,
+                        )?,
                         width,
-                        right,
-                        step,
+                        right: 0,
+                        step: 1,
                     },
                 }
             }
@@ -1187,16 +1279,13 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     )
                     .map(ConstExpr::Ident)
                 );
-                Ok(Some(
-                    const_select_expr(
-                        base.clone(),
-                        &parameter.nodes.1,
-                        syntax_tree,
-                        const_env,
-                        type_aliases,
-                    )?
-                    .unwrap_or(base),
-                ))
+                const_select_expr(
+                    base,
+                    &parameter.nodes.1,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
                 if let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0
@@ -1207,6 +1296,13 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         args.as_deref(),
                         system_functions::CallSite::Expression,
                     )?;
+                    if matches!(name, "$timeunit" | "$timeprecision") {
+                        return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
+                            i128::from(timescales::query(system_call, syntax_tree)?),
+                            32,
+                            true,
+                        ))));
+                    }
                     parameters::reject_unbounded_data_query(
                         system_call,
                         syntax_tree,
@@ -1234,15 +1330,18 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     {
                         return Ok(Some(ConstExpr::Literal(count.to_string())));
                     }
-                    if matches!(
-                        name,
-                        "$left"
-                            | "$right"
-                            | "$low"
-                            | "$high"
-                            | "$increment"
-                            | "$unpacked_dimensions"
-                    ) {
+                    if name == "$unpacked_dimensions"
+                        && let Some(count) = dimensions::unpacked_dimensions_call_value(
+                            system_call,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                            None,
+                        )
+                    {
+                        return Ok(Some(ConstExpr::Literal(count.to_string())));
+                    }
+                    if matches!(name, "$left" | "$right" | "$low" | "$high" | "$increment") {
                         return Ok(dimensions::array_query_call(
                             system_call,
                             syntax_tree,
@@ -1267,13 +1366,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         CALL_CONTEXT_COPIES.with(|count| count.set(count.get() + 1));
                         PackedDimensions::new(HashMap::default(), const_env, type_aliases)
                     };
-                    return Ok(expr_from_function_subroutine_call(
-                        &call.nodes.0,
-                        syntax_tree,
-                        &dimensions,
-                    )
-                    .ok()
-                    .and_then(expr_to_const));
+                    return Ok(const_user_call(tf_call, syntax_tree, dimensions, const_env));
                 }
                 if let Some(ty) =
                     size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
@@ -1443,6 +1536,9 @@ fn const_select_expr(
     if select.nodes.2.is_some() {
         return Ok(None);
     }
+    if bit_selects.is_empty() {
+        return Ok(Some(base));
+    }
     // An element of a packed parameter takes its width and signedness from
     // the parameter's dimensions.
     if let ConstExpr::Ident(name) = &base {
@@ -1477,6 +1573,48 @@ fn const_select_expr(
     }))
 }
 
+fn const_user_call(
+    call: &sv_parser::TfCall,
+    tree: &SyntaxTree,
+    mut dimensions: PackedDimensions,
+    constants: &HashMap<String, i128>,
+) -> Option<ConstExpr> {
+    dimensions.subroutine_param_names = const_functions::argument_names();
+    let expression = expr_from_tf_call(call, tree, &dimensions).ok()?;
+    if let Expr::Call {
+        args, arg_order, ..
+    } = &expression
+        && (!arg_order.is_empty() || args.iter().any(Option::is_none))
+    {
+        // Effectful runtime named calls keep their source order. Constant calls
+        // are folded only when their bodies and actuals evaluate successfully.
+        let literal = const_functions::eval_expression_literal(&expression, constants)?;
+        let Expr::Call { name, args, .. } = &expression else {
+            unreachable!()
+        };
+        let types = parameter_types_from_const_env(constants)
+            .into_iter()
+            .map(|(name, ty)| (name, (ty.width, ty.signed)))
+            .collect();
+        let args = const_functions::resolved_arguments(name, args)?
+            .into_iter()
+            .map(|arg| {
+                expr_to_const(arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(&arg, constants, &types)
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // Keep references to parameters for consumers that re-specialize the
+        // declaration contract; retain the native function's result type too.
+        return Some(ConstExpr::Resize {
+            expr: Box::new(ConstExpr::call(name.clone(), args)),
+            width: literal.width,
+            signed: literal.signed,
+        });
+    }
+    expr_to_const(expression)
+}
+
 /// A system function call in a constant expression. The call is checked
 /// against the system function catalog: no path converts a call it rejects.
 fn const_expr_from_function_subroutine_call(
@@ -1490,11 +1628,12 @@ fn const_expr_from_function_subroutine_call(
         // procedural lowering evaluates it before the operation. Without
         // parentheses the name parses as a call but is an identifier.
         sv_parser::SubroutineCall::TfCall(tf_call) if tf_call.nodes.2.is_some() => {
-            return Ok(
-                expr_from_tf_call(tf_call, syntax_tree, &PackedDimensions::default())
-                    .ok()
-                    .and_then(expr_to_const),
-            );
+            return Ok(const_user_call(
+                tf_call,
+                syntax_tree,
+                PackedDimensions::new(HashMap::default(), const_env, &HashMap::default()),
+                const_env,
+            ));
         }
         // `$unit::x` names an item of the compilation unit.
         sv_parser::SubroutineCall::TfCall(tf_call)
@@ -1572,9 +1711,10 @@ fn countbits_constant_call(
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let Expr::Call { name, mut args } = expression else {
+    let Expr::Call { name, args, .. } = expression else {
         return None;
     };
+    let mut args = args.into_iter().collect::<Option<Vec<_>>>()?;
     let operand = args.remove(0);
     let controls = args
         .into_iter()

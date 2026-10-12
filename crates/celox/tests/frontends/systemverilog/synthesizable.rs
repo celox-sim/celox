@@ -3,6 +3,9 @@
 use super::*;
 
 sv_backends! {
+    fn named_calls_preserve_defaults_and_declaration_scope(sim) { @case "synthesizable::named_calls_preserve_defaults_and_declaration_scope"; }
+    fn named_calls_in_constant_contexts(sim) { @case "synthesizable::named_calls_in_constant_contexts"; }
+    fn named_calls_respect_generate_signatures(sim) { @case "synthesizable::named_calls_respect_generate_signatures"; }
     fn enum_members_without_values_follow_their_predecessor(sim) {
         @case "synthesizable::enum_members_without_values_follow_their_predecessor";
     }
@@ -149,24 +152,9 @@ sv_backends! {
     }
 }
 
-#[test]
-fn block_local_names_may_not_shadow_other_signals() {
-    for source in [
-        "module Top(input logic a, output logic t); \
-         always_comb begin logic t; t = a; end endmodule",
-        "module Top(input logic a, output logic y, z); \
-         always_comb begin logic t; t = a; y = t; end \
-         always_comb begin logic t; t = ~a; z = t; end endmodule",
-    ] {
-        let error = Simulator::from_sv_sources(vec![(source, Path::new("shadow.sv"))], "Top")
-            .build_cranelift()
-            .expect_err("a shadowing block-local name must be rejected")
-            .to_string();
-        assert!(
-            error.contains("duplicate internal signal")
-                || error.contains("duplicate port or signal name"),
-            "{error}"
-        );
+sv_backends! {
+    fn block_local_names_shadow_other_signals(sim) {
+        @case "synthesizable::block_local_names_shadow_other_signals";
     }
 }
 

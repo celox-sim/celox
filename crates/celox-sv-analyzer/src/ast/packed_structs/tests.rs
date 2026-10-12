@@ -10,6 +10,8 @@ fn preserves_layout_signedness_and_state_kind() {
                 typedef struct packed { logic signed [3:0] x; bit [3:0] y; } mixed_t;
                 typedef struct packed signed { bit [3:0] x, y; } signed_t;
                 mixed_t mixed;
+                union packed signed { logic signed [7:0] a; bit [7:0] b; } mixed_union;
+                union packed { bit [129:0] a; bit [129:0] b; } wide_union;
                 signed_t signed_value;
                 struct packed { byte a; shortint b; int c; longint d; } atoms;
             endmodule
@@ -22,6 +24,8 @@ fn preserves_layout_signedness_and_state_kind() {
         ("mixed", 8, false, ir::TypeKind::Logic),
         ("signed_value", 8, true, ir::TypeKind::Bit),
         ("atoms", 120, false, ir::TypeKind::Bit),
+        ("mixed_union", 8, true, ir::TypeKind::Logic),
+        ("wide_union", 130, false, ir::TypeKind::Bit),
     ] {
         let ty = signals
             .iter()
@@ -38,7 +42,9 @@ fn preserves_layout_signedness_and_state_kind() {
 fn rejects_invalid_or_unsupported_struct_shapes() {
     for body in [
         "struct { logic a; } value;",
-        "union packed { logic a; logic b; } value;",
+        "union packed { logic a; logic [1:0] b; } value;",
+        "union tagged packed { logic a; logic b; } value;",
+        "union packed { logic a; logic b; } value; always_comb value = '{a: 1'b1, b: 1'b0};",
         "struct packed { real a; } value;",
         "struct packed { logic a[2]; } value;",
         "struct packed { logic a; logic a; } value;",

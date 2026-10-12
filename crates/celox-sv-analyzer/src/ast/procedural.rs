@@ -269,6 +269,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => self.rename_name(name),
             },
             ConstExpr::Literal(_) => {}
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.rename_const(expr);
+                self.rename_const(msb);
+                self.rename_const(lsb);
+            }
             ConstExpr::Select { expr, bit } => {
                 self.rename_const(expr);
                 self.rename_const(bit);
@@ -326,7 +331,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.rename_expr(then_expr);
                 self.rename_expr(else_expr);
             }
-            Expr::Call { args, .. } => args.iter_mut().for_each(|arg| self.rename_expr(arg)),
+            Expr::Call { args, .. } => args
+                .iter_mut()
+                .flatten()
+                .for_each(|arg| self.rename_expr(arg)),
             Expr::Inside { expr, items } => {
                 self.rename_expr(expr);
                 for item in items {
@@ -733,9 +741,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.tree,
                 )
                 .ok_or_else(|| unsupported("subroutine call"))?;
-                let args =
+                let (args, arg_order) =
                     self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
-                Ok(vec![Stmt::Call { name, args }])
+                Ok(vec![Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                }])
             }
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
@@ -745,6 +757,16 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     args.as_deref(),
                     system_functions::CallSite::Statement(self.body),
                 )?;
+                if name == "$printtimescale" {
+                    return Ok(vec![Stmt::SystemTask {
+                        name: "$display".into(),
+                        args: vec![SystemTaskArg::Str(timescales::print_message(
+                            system_call,
+                            self.tree,
+                            system_functions::CallSite::Statement(self.body),
+                        )?)],
+                    }]);
+                }
                 if tf.expression {
                     // A system function called as a statement is converted
                     // and checked like the same call in an expression, then
@@ -781,29 +803,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     }
                 };
                 let name = name.ok_or_else(|| unsupported("system task"))?.to_string();
-                // Veryl's `$assert(cond, ...)` and `$assert_continue(cond, ...)`
-                // are immediate assertions that end the simulation or continue.
-                if let ("$assert" | "$assert_continue", Some(SystemTaskArg::Expr(condition))) =
-                    (name.as_str(), args.first())
-                {
-                    let mut message = args[1..].to_vec();
-                    if !matches!(message.first(), Some(SystemTaskArg::Str(_))) {
-                        message.insert(0, SystemTaskArg::Str("assertion failed".to_string()));
-                    }
-                    let task = if name == "$assert" {
-                        "$fatal"
-                    } else {
-                        "$error"
-                    };
-                    return Ok(vec![Stmt::If {
-                        condition: procedural_truth_condition(condition.clone()),
-                        then_body: Vec::new(),
-                        else_body: vec![Stmt::SystemTask {
-                            name: task.to_string(),
-                            args: message,
-                        }],
-                    }]);
-                }
+                // Keep Veryl's assertion calls as calls: their message arguments
+                // execute even on success, unlike an SV assertion's fail action.
                 Ok(vec![Stmt::SystemTask { name, args }])
             }
             _ => Err(unsupported("method or randomize call")),
@@ -860,38 +861,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &self,
         name: &str,
         args: Option<&sv_parser::ListOfArguments>,
-    ) -> Result<Vec<Option<Expr>>, AnalyzerError> {
-        let Some(args) = args else {
-            return Ok(Vec::new());
+    ) -> Result<(Vec<Option<Expr>>, Vec<usize>), AnalyzerError> {
+        let signatures = if self.dims.subroutine_param_names.is_empty() {
+            self.state.subroutine_params
+        } else {
+            &self.dims.subroutine_param_names
         };
-        let (positional, named): (Vec<Option<&sv_parser::Expression>>, Vec<_>) = match args {
-            sv_parser::ListOfArguments::Ordered(args) => {
-                let contents = args.nodes.0.contents();
-                let positional = if contents.len() == 1 && contents[0].is_none() {
-                    Vec::new()
-                } else {
-                    contents.into_iter().map(|arg| arg.as_ref()).collect()
-                };
-                let named = args
-                    .nodes
-                    .1
-                    .iter()
-                    .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref()))
-                    .collect();
-                (positional, named)
-            }
-            sv_parser::ListOfArguments::Named(args) => {
-                let mut named = vec![(&args.nodes.1, args.nodes.2.nodes.1.as_ref())];
-                named.extend(
-                    args.nodes
-                        .3
-                        .iter()
-                        .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref())),
-                );
-                (Vec::new(), named)
-            }
-        };
-        let mut lowered: Vec<Option<Expr>> = positional
+        let (bindings, order) =
+            expressions::bind_call_arguments(name, args, self.tree, signatures)?;
+        let args = bindings
             .into_iter()
             .enumerate()
             .map(|(position, arg)| {
@@ -899,28 +877,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        if !named.is_empty() {
-            let params = self
-                .state
-                .subroutine_params
-                .get(name)
-                .ok_or_else(|| unsupported(format!("named arguments to `{name}`")))?;
-            for (identifier, value) in named {
-                let formal = identifier_text(RefNode::Identifier(identifier), self.tree)
-                    .ok_or_else(|| unsupported("named argument"))?;
-                let position = params
-                    .iter()
-                    .position(|param| *param == formal)
-                    .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
-                if lowered.len() <= position {
-                    lowered.resize(position + 1, None);
-                }
-                lowered[position] = value
-                    .map(|value| self.call_argument(name, position, value))
-                    .transpose()?;
-            }
-        }
-        Ok(lowered)
+        Ok((args, order))
     }
 
     /// One subroutine argument; an assignment pattern takes the formal's shape.
@@ -974,6 +931,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => Vec::new(),
         };
         for (condition, then_body) in branches.into_iter().rev() {
+            // A generate index or parameter can make a procedural branch
+            // unreachable. Remove its writes before checking process drivers.
+            let constant = if inlining::calls_subroutine(&condition) {
+                // Even a constant return value does not make the run-time
+                // call's display, output or module-variable effects optional.
+                None
+            } else {
+                expr_to_const(condition.clone())
+                    .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
+            };
+            if let Some(value) = constant {
+                if value != 0 {
+                    else_body = then_body;
+                }
+                continue;
+            }
             else_body = vec![Stmt::If {
                 condition,
                 then_body,
@@ -1596,6 +1569,7 @@ pub(super) fn subroutine_declared_dimensions(
     tree: &SyntaxTree,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
+    target_span: (usize, usize),
 ) -> Option<VariablePackedDimensions> {
     let syntax = match node {
         RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1604,6 +1578,22 @@ pub(super) fn subroutine_declared_dimensions(
     }?;
     let params =
         subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    // The implicit result is a body variable. Discovering it while a query
+    // is still resolving the return declaration would rebuild that same type.
+    let in_body = syntax
+        .block_items
+        .iter()
+        .map(|item| RefNode::BlockItemDeclaration(item))
+        .chain(
+            syntax
+                .statements
+                .iter()
+                .map(|stmt| RefNode::Statement(stmt)),
+        )
+        .any(|node| {
+            dimensions::ref_node_source_span(node)
+                .is_some_and(|(start, end)| start <= target_span.0 && target_span.1 <= end)
+        });
     let mut dimensions: VariablePackedDimensions = params
         .into_iter()
         .map(|(name, _, ty, _)| (name, dimensions_from_type(&ty)))
@@ -1614,6 +1604,14 @@ pub(super) fn subroutine_declared_dimensions(
         env,
         aliases,
     )?);
+    if in_body && let RefNode::FunctionDeclaration(declaration) = node {
+        dimensions.extend(functions::function_result_dimensions(
+            declaration,
+            tree,
+            env,
+            aliases,
+        ));
+    }
     Some(dimensions)
 }
 
@@ -1659,7 +1657,7 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
-    for item in generate::items(node, tree, const_env, type_aliases)? {
+    for item in generate::subroutine_items(node, tree, const_env, type_aliases)? {
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1685,12 +1683,9 @@ pub(super) fn subroutine_argument_names(
                 .collect();
             let param_directions: Vec<ParamDirection> =
                 params.iter().map(|(_, direction, ..)| *direction).collect();
-            directions.insert(syntax.name.clone(), param_directions.clone());
             directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
-            names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
-            shapes.insert(syntax.name.clone(), param_shapes.clone());
             shapes.insert(qualified, param_shapes);
         }
     }
@@ -1728,11 +1723,34 @@ pub(super) fn subroutines_from_module_node_with(
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
+    rejected: Option<&mut HashMap<String, AnalyzerError>>,
+) -> Result<Vec<Subroutine>, AnalyzerError> {
+    subroutines_with_symbolic_parameters(
+        node,
+        tree,
+        const_env,
+        packed_dimensions,
+        parameter_literals,
+        state,
+        rejected,
+        &HashSet::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subroutines_with_symbolic_parameters(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
+    parameter_literals: &HashMap<String, Expr>,
+    state: &mut BodyState<'_>,
     mut rejected: Option<&mut HashMap<String, AnalyzerError>>,
+    symbolic_parameters: &HashSet<String>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
-    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let active = generate::subroutine_items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
         if item.is_parameter_declaration() {
@@ -1748,20 +1766,44 @@ pub(super) fn subroutines_from_module_node_with(
                 continue;
             };
             let (item_dimensions, literals) = views.get(item);
+            let item_dimensions = if symbolic_parameters.is_empty() {
+                std::borrow::Cow::Borrowed(item_dimensions)
+            } else {
+                let mut dimensions = item_dimensions.clone();
+                for parameter in symbolic_parameters {
+                    dimensions.const_env.remove(parameter);
+                    dimensions.parameter_values.remove(parameter);
+                }
+                std::borrow::Cow::Owned(dimensions)
+            };
+            let item_dimensions = &*item_dimensions;
+
+            let declaration_env = if symbolic_parameters.is_empty() {
+                std::borrow::Cow::Borrowed(&*item.env)
+            } else {
+                std::borrow::Cow::Owned(
+                    item.env
+                        .iter()
+                        .filter(|(name, _)| !symbolic_parameters.contains(*name))
+                        .map(|(name, value)| (name.clone(), *value))
+                        .collect::<HashMap<_, _>>(),
+                )
+            };
+
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
                     syntax.ports,
                     syntax.items,
                     tree,
-                    &item.env,
+                    &declaration_env,
                     &type_aliases,
                 )?;
                 let return_type = match syntax.return_type {
                     Some(node) => function_type_from_ref_node(
                         RefNode::FunctionDataTypeOrImplicit(node),
                         tree,
-                        &item.env,
+                        &declaration_env,
                         &type_aliases,
                     )
                     .or_else(|| match node {
@@ -1786,16 +1828,21 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 let first_static = builder.state.statics.len();
                 builder.push_scope();
+                // Defaults bind in the enclosing declaration scope, before
+                // any formal can shadow those names (IEEE 1800-2023 13.5.3).
+                let defaults = params
+                    .iter()
+                    .map(|(_, _, _, default)| default.map(|expr| builder.expr(expr)).transpose())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut lowered_params = Vec::new();
-                for (source, direction, r#type, default) in params {
-                    let default = default.map(|expr| builder.expr(expr)).transpose()?;
+                for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
                     let name = builder.declare(&source, r#type.clone());
                     lowered_params.push(SubroutineParam {
                         name,
                         source_name: source,
                         direction,
                         r#type: crate::ir::Type::from_ast(
-                            scoped_type(r#type, &item.env),
+                            scoped_type(r#type, &declaration_env),
                             &item.env,
                         ),
                         default,
@@ -1832,7 +1879,7 @@ pub(super) fn subroutines_from_module_node_with(
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
                     return_type: return_type.map(|r#type| {
-                        crate::ir::Type::from_ast(scoped_type(r#type, &item.env), &item.env)
+                        crate::ir::Type::from_ast(scoped_type(r#type, &declaration_env), &item.env)
                     }),
                     params: lowered_params,
                     return_var,
@@ -1840,7 +1887,7 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 for stmt in &mut subroutine.body {
                     qualify_stmt(item, stmt);
-                    substitute_stmt_constants(stmt, &item.env, literals);
+                    substitute_stmt_constants(stmt, &declaration_env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {

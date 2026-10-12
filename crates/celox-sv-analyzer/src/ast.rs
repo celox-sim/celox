@@ -55,6 +55,7 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -102,7 +103,7 @@ use dimensions::{
     parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
     size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
     variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
-    variable_size_marker,
+    variable_size_marker, variable_unpacked_dimensions_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
@@ -214,6 +215,7 @@ impl Source {
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -298,6 +300,7 @@ impl Source {
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
+        let _timescales = timescales::install_for_tree(packages.timescales.clone(), syntax_tree)?;
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -392,6 +395,9 @@ pub struct Module {
     dpi_imports: Vec<crate::ir::DpiImport>,
     /// The functions its constant expressions may call.
     constant_functions: const_functions::ConstantFunctions,
+    /// Expression bodies used to publish symbolic declaration contracts.
+    symbolic_functions: HashMap<String, Function>,
+    declaration_subroutines: Vec<crate::ir::Subroutine>,
     /// The package parameters the module sees, by qualified name and by the
     /// names its imports bind.
     imported_parameters: Vec<Parameter>,
@@ -400,6 +406,25 @@ pub struct Module {
 }
 
 impl Module {
+    pub(crate) fn declaration_expr(
+        &self,
+        expr: &ConstExpr,
+        signedness: &HashMap<String, bool>,
+    ) -> ConstExpr {
+        let expanded = expand_expr_calls(
+            const_expr_to_expr(expr.clone()),
+            &self.symbolic_functions,
+            signedness,
+            0,
+            true,
+        );
+        expr_to_index_const(expanded, &PackedDimensions::default()).unwrap_or_else(|| expr.clone())
+    }
+
+    pub(crate) fn declaration_subroutines(&self) -> &[crate::ir::Subroutine] {
+        &self.declaration_subroutines
+    }
+
     /// Make the module's constant functions available to the constant
     /// evaluator until the guard is dropped.
     pub(crate) fn install_constant_functions(&self) -> impl Drop {
@@ -512,6 +537,22 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        // Contract dependency analysis must see module parameter references
+        // before the normal procedural lowering substitutes default literals.
+        let symbolic_parameters = parameters
+            .iter()
+            .map(|parameter| parameter.name().to_string())
+            .collect();
+        let declaration_subroutines =
+            with_imported(const_functions::symbolic_module_constant_functions(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+                &imported.parameter_values,
+                &symbolic_parameters,
+            ))
+            .declarations();
         const_functions::replace(with_imported(const_functions::module_constant_functions(
             node.clone(),
             syntax_tree,
@@ -540,7 +581,7 @@ impl Module {
             &const_env,
             &type_aliases,
             &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-            &parameter_value_env(&parameters, &const_env),
+            &parameter_value_env_with_imported(&parameters, &const_env, &imported),
         ) {
             Ok(()) => {}
             // A parameter initializer may inspect a port or signal type
@@ -599,7 +640,7 @@ impl Module {
                     &const_env,
                     &type_aliases,
                     &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                    &parameter_value_env(&parameters, &const_env),
+                    &parameter_value_env_with_imported(&parameters, &const_env, &imported),
                 )?;
             }
             Err(error) => return Err(error),
@@ -697,7 +738,28 @@ impl Module {
                     .or_insert(directions);
             }
         }
+        let mut dpi_imports = dpi::dpi_imports_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
+        for import in &dpi_imports {
+            subroutine_params.insert(
+                import.name().to_string(),
+                import
+                    .arguments()
+                    .iter()
+                    .map(|arg| arg.name().to_string())
+                    .collect(),
+            );
+            subroutine_directions.insert(
+                import.name().to_string(),
+                vec![crate::procedural::ParamDirection::Input; import.arguments().len()],
+            );
+        }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
+        packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
         let mut instances = instances_from_module_node(
             node.clone(),
             syntax_tree,
@@ -774,7 +836,7 @@ impl Module {
             packed_dimensions
                 .function_return_types
                 .entry(name.clone())
-                .or_insert(*metadata);
+                .or_insert_with(|| metadata.clone());
         }
         packed_dimensions
             .function_return_types
@@ -782,6 +844,7 @@ impl Module {
                 (
                     name.clone(),
                     FunctionReturnMetadata {
+                        arguments: Some(function_argument_metadata(&function.params)),
                         width: function.return_width,
                         first_packed_dimension_width: function.return_first_packed_dimension_width,
                         dimensions: function.return_dimensions,
@@ -790,12 +853,6 @@ impl Module {
                     },
                 )
             }));
-        let mut dpi_imports = dpi::dpi_imports_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
         packed_dimensions
             .function_return_types
             .extend(dpi_imports.iter().filter_map(|import| {
@@ -803,6 +860,7 @@ impl Module {
                 Some((
                     import.name().to_string(),
                     FunctionReturnMetadata {
+                        arguments: Some(dpi_argument_metadata(import)),
                         width: Some(r#type.width()),
                         first_packed_dimension_width: (r#type.width() > 1)
                             .then_some(r#type.width()),
@@ -1014,6 +1072,7 @@ impl Module {
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
             aliases: imported.aliases.clone(),
+            generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module
         // uses are lowered with it.
@@ -1042,6 +1101,50 @@ impl Module {
         imported_parameters
             .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
 
+        // Expression construction tracks only whole-variable assignments.
+        // Leave calls of functions with selected/concatenated writes symbolic
+        // in declaration contracts rather than publishing a partial body.
+        // Expression inlining also sizes formal and return conversions at the
+        // default specialization; symbolic signature widths cannot be inlined.
+        for subroutine in &declaration_subroutines {
+            let mut selected_write = false;
+            for statement in &subroutine.body {
+                statement.walk(&mut |statement| {
+                    selected_write |= matches!(
+                        statement,
+                        crate::procedural::StmtBase::Assign {
+                            lhs: crate::ir::LValue::Select { .. },
+                            ..
+                        } | crate::procedural::StmtBase::AssignConcat { .. }
+                    );
+                });
+            }
+            let symbolic_type = subroutine
+                .return_type
+                .as_ref()
+                .is_some_and(crate::ir::Type::has_symbolic_ranges)
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.r#type.has_symbolic_ranges());
+            if (selected_write || symbolic_type)
+                && let Some(function) = functions.get_mut(&subroutine.name)
+            {
+                function.body = None;
+            }
+        }
+
+        // A native default value is not evidence of a representable symbolic
+        // body. Keep failed declaration lowerings visible to contract checking.
+        for function in functions.values_mut() {
+            if !declaration_subroutines
+                .iter()
+                .any(|subroutine| subroutine.name == function.name)
+            {
+                function.body = None;
+            }
+        }
+
         Ok(Self {
             name,
             parameters,
@@ -1056,6 +1159,8 @@ impl Module {
             subroutines,
             dpi_imports,
             constant_functions: const_functions::installed(),
+            symbolic_functions: functions,
+            declaration_subroutines,
             imported_parameters,
             symbols,
         })
@@ -1115,6 +1220,20 @@ impl Module {
     }
 }
 
+pub(crate) fn component_identifier(
+    identifier: &sv_parser::InterfaceIdentifier,
+    tree: &SyntaxTree,
+) -> Option<String> {
+    identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
+}
+
+pub(crate) fn generated_time_declarations(
+    sources: &[(&str, &std::path::Path)],
+    roots: Option<&[&str]>,
+) -> Result<String, AnalyzerError> {
+    timescales::generated_source_declarations(sources, roots)
+}
+
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1123,6 +1242,7 @@ pub struct Parameter {
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
     packed_ranges: Vec<PackedRange>,
+    members: Vec<packed_structs::PackedMember>,
     declared_signed: Option<bool>,
     declared_is_2state: bool,
     has_declared_type: bool,
@@ -1146,6 +1266,7 @@ impl Parameter {
             value,
             declared_width,
             packed_ranges: Vec::new(),
+            members: Vec::new(),
             declared_signed,
             declared_is_2state,
             has_declared_type,
@@ -1261,6 +1382,10 @@ impl Parameter {
             .or(inferred.map(|r#type| r#type.signed))
             .unwrap_or(false);
         Some(ExprType { width, signed })
+    }
+
+    pub(crate) fn packed_ranges(&self) -> &[PackedRange] {
+        &self.packed_ranges
     }
 
     pub(crate) fn declared_width(&self) -> Option<usize> {
@@ -1437,6 +1562,7 @@ pub struct ParameterOverride {
     value: Option<ConstExpr>,
     /// The source text of a data type, for a `parameter type` override.
     type_text: Option<String>,
+    pattern_text: Option<String>,
 }
 
 impl ParameterOverride {
@@ -1445,6 +1571,7 @@ impl ParameterOverride {
             name,
             value,
             type_text: None,
+            pattern_text: None,
         }
     }
 
@@ -1453,7 +1580,13 @@ impl ParameterOverride {
             name,
             value: None,
             type_text: Some(type_text),
+            pattern_text: None,
         }
+    }
+
+    /// A constant assignment pattern, evaluated in the caller scope.
+    pub fn pattern_text(&self) -> Option<&str> {
+        self.pattern_text.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -1636,6 +1769,13 @@ pub enum ConstExpr {
     Select {
         expr: Box<ConstExpr>,
         bit: Box<ConstExpr>,
+    },
+    /// A typed selection used inside another selection's index.
+    SelectRange {
+        expr: Box<ConstExpr>,
+        msb: Box<ConstExpr>,
+        lsb: Box<ConstExpr>,
+        signed: bool,
     },
     /// An integral cast whose width and signedness remain independent of
     /// the enclosing index arithmetic.
@@ -1947,6 +2087,29 @@ struct Function {
     return_is_2state: bool,
 }
 
+fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
+    params
+        .iter()
+        .map(|param| FunctionArgumentMetadata {
+            name: param.name.clone(),
+            direction: param.direction,
+            has_default: param.has_default,
+        })
+        .collect()
+}
+
+fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgumentMetadata]> {
+    import
+        .arguments()
+        .iter()
+        .map(|argument| FunctionArgumentMetadata {
+            name: argument.name().to_string(),
+            direction: ParamDirection::Input,
+            has_default: false,
+        })
+        .collect()
+}
+
 /// How a function argument is passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParamDirection {
@@ -1976,6 +2139,7 @@ impl ParamDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionParam {
+    has_default: bool,
     direction: ParamDirection,
     name: String,
     width: Option<usize>,
@@ -2029,7 +2193,10 @@ pub enum Expr {
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        /// Missing actuals retain their formal slots for declaration-scope defaults.
+        args: Vec<Option<Expr>>,
+        /// Formal positions in source evaluation/copy-out order; empty means positional.
+        arg_order: Vec<usize>,
     },
     /// `expr inside { items }`: true when `expr` matches any item.
     Inside {
@@ -2104,6 +2271,11 @@ fn parameter_packed_dimensions_with_imported(
     imported: &scope::ScopeSymbols,
 ) -> VariablePackedDimensions {
     let mut dimensions = parameter_packed_dimensions(&imported.parameters);
+    // A local scalar or implicitly typed parameter also shadows an imported
+    // packed parameter, even though it contributes no explicit packed ranges.
+    for parameter in parameters {
+        dimensions.remove(parameter.name());
+    }
     dimensions.extend(parameter_packed_dimensions(parameters));
     dimensions
 }
@@ -2156,8 +2328,17 @@ struct VariableDimensions {
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionArgumentMetadata {
+    name: String,
+    direction: ParamDirection,
+    has_default: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FunctionReturnMetadata {
+    /// Validate calls in type queries without retaining or executing bodies.
+    arguments: Option<Arc<[FunctionArgumentMetadata]>>,
     width: Option<usize>,
     first_packed_dimension_width: Option<usize>,
     dimensions: Option<usize>,
@@ -2178,9 +2359,12 @@ struct PackedDimensions {
     /// The current lexical scope has already collected its visible declarations.
     /// Preliminary parameter/function/range lowering must keep this false.
     scope_types_complete: bool,
+    /// Calls are checked for legality while their operands remain unexecuted.
+    type_query: bool,
     /// The declared shape of each argument of each subroutine, for
     /// assignment patterns passed as arguments.
     subroutine_param_shapes: Arc<HashMap<String, Vec<VariableDimensions>>>,
+    subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
 }
 
 impl PackedDimensions {
@@ -2199,7 +2383,9 @@ impl PackedDimensions {
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
             scope_types_complete: false,
+            type_query: false,
             subroutine_param_shapes: Arc::default(),
+            subroutine_param_names: Arc::default(),
         }
     }
 }
