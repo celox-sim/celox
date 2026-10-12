@@ -3414,4 +3414,32 @@ mod process_metadata_tests {
             matches!(broken.to_container_bytes(), Err(NativeImageContainerError::InvalidImage(message)) if message.contains("conflicting periods"))
         );
     }
+
+    #[test]
+    fn lane_ticks_report_zero_progress_for_pre_edge_comb_failure() {
+        use crate::backend::SimBackend;
+        let source = r#"module Top(clk: input clock, ok: input logic, q: output logic, a: output logic, b: output logic, c: output logic, v: output logic) {
+            assign v = if ok ? 1'd0 : ~v;
+            always_ff(clk) { q=1; }
+            always_ff(clk) { a=1; }
+            always_ff(clk) { b=1; }
+            always_ff(clk) { c=1; }
+        }"#;
+        let mut sim = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .threads(4)
+            .parallel_partition(crate::ParallelPartition::Always)
+            .build_native()
+            .unwrap();
+        let event = sim.event("clk");
+        assert!(sim.backend.lane_event_kernel(event));
+        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 10);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
+        assert_eq!(sim.backend.get_as::<u8>(sim.signal("q")), 0);
+    }
 }
