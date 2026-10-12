@@ -803,29 +803,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     }
                 };
                 let name = name.ok_or_else(|| unsupported("system task"))?.to_string();
-                // Veryl's `$assert(cond, ...)` and `$assert_continue(cond, ...)`
-                // are immediate assertions that end the simulation or continue.
-                if let ("$assert" | "$assert_continue", Some(SystemTaskArg::Expr(condition))) =
-                    (name.as_str(), args.first())
-                {
-                    let mut message = args[1..].to_vec();
-                    if !matches!(message.first(), Some(SystemTaskArg::Str(_))) {
-                        message.insert(0, SystemTaskArg::Str("assertion failed".to_string()));
-                    }
-                    let task = if name == "$assert" {
-                        "$fatal"
-                    } else {
-                        "$error"
-                    };
-                    return Ok(vec![Stmt::If {
-                        condition: procedural_truth_condition(condition.clone()),
-                        then_body: Vec::new(),
-                        else_body: vec![Stmt::SystemTask {
-                            name: task.to_string(),
-                            args: message,
-                        }],
-                    }]);
-                }
+                // Keep Veryl's assertion calls as calls: their message arguments
+                // execute even on success, unlike an SV assertion's fail action.
                 Ok(vec![Stmt::SystemTask { name, args }])
             }
             _ => Err(unsupported("method or randomize call")),

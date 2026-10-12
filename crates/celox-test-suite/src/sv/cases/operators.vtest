@@ -1291,3 +1291,67 @@ endmodule
   (top Top)
   (modify (set a (fourstate 0x10000000000000005 0x10000000000000000)) (set n 1))
   (assert_eq y (fourstate 0x18000000000000002 0x18000000000000000)))
+
+; IEEE 1800-2023 11.4.6: `!=?` is the logical negation of `==?`. An
+; indeterminate wildcard comparison is therefore X in both operators and
+; equal to `!` of the other one; only a definite mismatch (or match) clears
+; the mask. A result that is unknown must be encoded as payload 1 / mask 1,
+; never as Z (payload 0 / mask 1).
+(case wildcard_comparisons_normalize_unknown_to_x
+  (four_state)
+  (source "wildcard_normalize.sv" #"
+module Top(input logic [3:0] x, input logic [3:0] y,
+           output logic eqw, newq, not_eqw);
+    assign eqw = (x ==? y);
+    assign newq = (x !=? y);
+    assign not_eqw = !(x ==? y);
+endmodule
+"#)
+  (top Top)
+  ; x = 4'b01zz, y = 4'b0100: the compared bits agree, the remaining z bits
+  ; are unknown (not wildcards, because y has no X/Z bits), so all three
+  ; results are X.
+  (modify (set x (fourstate 4 3)) (set y 4))
+  (assert_eq eqw (fourstate 1 1))
+  (assert_eq newq (fourstate 1 1))
+  (assert_eq not_eqw (fourstate 1 1))
+  ; X payload bits differ from y, but no compared known bit mismatches.
+  (modify (set x (fourstate 7 3)) (set y 4))
+  (assert_eq eqw (fourstate 1 1))
+  (assert_eq newq (fourstate 1 1))
+  (assert_eq not_eqw (fourstate 1 1))
+  ; x = 4'b0101, y = 4'b0100: a definite mismatch at a compared position
+  ; makes both operators definite.
+  (modify (set x 5) (set y 4))
+  (assert_eq newq (fourstate 1 0))
+  (assert_eq eqw (fourstate 0 0))
+  (assert_eq not_eqw (fourstate 1 0))
+  (modify (set x (fourstate 4 3)) (set y (fourstate 4 3)))
+  (assert_eq eqw (fourstate 1 0))
+  (assert_eq newq (fourstate 0 0))
+  (assert_eq not_eqw (fourstate 0 0)))
+
+; The same contract for operands wider than one machine word, which take the
+; multi-chunk comparison path.
+(case wide_wildcard_comparisons_normalize_unknown_to_x
+  (four_state)
+  (source "wide_wildcard_normalize.sv" #"
+module Top(input logic [127:0] x, input logic [127:0] y,
+           output logic eqw, newq, not_eqw);
+    assign eqw = (x ==? y);
+    assign newq = (x !=? y);
+    assign not_eqw = !(x ==? y);
+endmodule
+"#)
+  (top Top)
+  ; x = 128'h...04 with bits 1:0 unknown (z), y = 128'h...04: the compared
+  ; bits agree and the z bits are not wildcards, so all three results are X.
+  (modify (set x (fourstate 4 3)) (set y 4))
+  (assert_eq eqw (fourstate 1 1))
+  (assert_eq newq (fourstate 1 1))
+  (assert_eq not_eqw (fourstate 1 1))
+  ; A definite mismatch above bit 64 clears the mask.
+  (modify (set x (fourstate (| 4 (<< 1 65)) 3)) (set y 4))
+  (assert_eq newq (fourstate 1 0))
+  (assert_eq eqw (fourstate 0 0))
+  (assert_eq not_eqw (fourstate 1 0)))

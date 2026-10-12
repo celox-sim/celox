@@ -36,7 +36,7 @@ export interface DirtyState {
 // DataView helpers
 // ---------------------------------------------------------------------------
 
-/** Read an unsigned integer of the given byte-size (little-endian), masked to width. */
+/** Read only the allocated scalar bytes, masked to width. */
 function readNumber(view: DataView, offset: number, width: number): number {
 	if (width <= 8) {
 		const raw = view.getUint8(offset);
@@ -46,17 +46,29 @@ function readNumber(view: DataView, offset: number, width: number): number {
 		const raw = view.getUint16(offset, true);
 		return width === 16 ? raw : raw & ((1 << width) - 1);
 	}
+	if (width <= 24) {
+		const raw =
+			view.getUint16(offset, true) | (view.getUint8(offset + 2) << 16);
+		return width === 24 ? raw : (raw & ((1 << width) - 1)) >>> 0;
+	}
 	if (width <= 32) {
 		const raw = view.getUint32(offset, true);
 		return width === 32 ? raw : (raw & ((1 << width) - 1)) >>> 0;
 	}
 	// 33..53 bits — fits safely in a JS number
 	const lo = view.getUint32(offset, true);
-	const hi = view.getUint32(offset + 4, true) & ((1 << (width - 32)) - 1);
-	return lo + hi * 0x1_0000_0000;
+	let hi: number;
+	if (width <= 40) {
+		hi = view.getUint8(offset + 4);
+	} else if (width <= 48) {
+		hi = view.getUint16(offset + 4, true);
+	} else {
+		hi = view.getUint16(offset + 4, true) | (view.getUint8(offset + 6) << 16);
+	}
+	return lo + (hi & ((1 << (width - 32)) - 1)) * 0x1_0000_0000;
 }
 
-/** Write an unsigned integer of the given byte-size (little-endian). */
+/** Write an unsigned integer without touching adjacent signal storage. */
 function writeNumber(
 	view: DataView,
 	offset: number,
@@ -67,12 +79,25 @@ function writeNumber(
 		view.setUint8(offset, value & ((1 << width) - 1));
 	} else if (width <= 16) {
 		view.setUint16(offset, value & ((1 << width) - 1), true);
+	} else if (width <= 24) {
+		const masked = (value & ((1 << width) - 1)) >>> 0;
+		view.setUint16(offset, masked & 0xffff, true);
+		view.setUint8(offset + 2, (masked >>> 16) & 0xff);
 	} else if (width <= 32) {
 		view.setUint32(offset, value >>> 0, true);
 	} else {
-		// 33..53 bits
+		// 33..53 bits — the high word also uses the exact remaining size
+		const hi = Math.floor(value / 0x1_0000_0000) & ((1 << (width - 32)) - 1);
 		view.setUint32(offset, value >>> 0, true);
-		view.setUint32(offset + 4, Math.floor(value / 0x1_0000_0000) >>> 0, true);
+		if (width <= 40) {
+			view.setUint8(offset + 4, hi & 0xff);
+		} else if (width <= 48) {
+			view.setUint16(offset + 4, hi & 0xffff, true);
+		} else {
+			// 7 bytes: split the high word so the last byte stays inside the signal
+			view.setUint16(offset + 4, hi & 0xffff, true);
+			view.setUint8(offset + 6, (hi >>> 16) & 0xff);
+		}
 	}
 }
 
@@ -123,7 +148,7 @@ function readSignal(view: DataView, sig: SignalLayout): bigint {
 	if (sig.width <= 53) {
 		return BigInt(readNumber(view, sig.offset, sig.width));
 	}
-	return readBigInt(view, sig.offset, sig.byteSize);
+	return BigInt.asUintN(sig.width, readBigInt(view, sig.offset, sig.byteSize));
 }
 
 /** Write a signal value to the DataView. Accepts bigint (number accepted for compat). */
@@ -132,7 +157,10 @@ function writeSignal(
 	sig: SignalLayout,
 	value: bigint | number,
 ): void {
-	const bigVal = typeof value === "bigint" ? value : BigInt(value);
+	const bigVal = BigInt.asUintN(
+		sig.width,
+		typeof value === "bigint" ? value : BigInt(value),
+	);
 	if (sig.width <= 53) {
 		writeNumber(view, sig.offset, sig.width, Number(bigVal));
 	} else {
