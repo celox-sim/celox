@@ -338,7 +338,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.rename_expr(then_expr);
                 self.rename_expr(else_expr);
             }
-            Expr::Call { args, .. } => args.iter_mut().for_each(|arg| self.rename_expr(arg)),
+            Expr::Call { args, .. } => args
+                .iter_mut()
+                .flatten()
+                .for_each(|arg| self.rename_expr(arg)),
             Expr::Inside { expr, items } => {
                 self.rename_expr(expr);
                 for item in items {
@@ -882,9 +885,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.tree,
                 )
                 .ok_or_else(|| unsupported("subroutine call"))?;
-                let args =
+                let (args, arg_order) =
                     self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
-                Ok(vec![Stmt::Call { name, args }])
+                Ok(vec![Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                }])
             }
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
@@ -1019,38 +1026,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &self,
         name: &str,
         args: Option<&sv_parser::ListOfArguments>,
-    ) -> Result<Vec<Option<Expr>>, AnalyzerError> {
-        let Some(args) = args else {
-            return Ok(Vec::new());
+    ) -> Result<(Vec<Option<Expr>>, Vec<usize>), AnalyzerError> {
+        let signatures = if self.dims.subroutine_param_names.is_empty() {
+            self.state.subroutine_params
+        } else {
+            &self.dims.subroutine_param_names
         };
-        let (positional, named): (Vec<Option<&sv_parser::Expression>>, Vec<_>) = match args {
-            sv_parser::ListOfArguments::Ordered(args) => {
-                let contents = args.nodes.0.contents();
-                let positional = if contents.len() == 1 && contents[0].is_none() {
-                    Vec::new()
-                } else {
-                    contents.into_iter().map(|arg| arg.as_ref()).collect()
-                };
-                let named = args
-                    .nodes
-                    .1
-                    .iter()
-                    .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref()))
-                    .collect();
-                (positional, named)
-            }
-            sv_parser::ListOfArguments::Named(args) => {
-                let mut named = vec![(&args.nodes.1, args.nodes.2.nodes.1.as_ref())];
-                named.extend(
-                    args.nodes
-                        .3
-                        .iter()
-                        .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref())),
-                );
-                (Vec::new(), named)
-            }
-        };
-        let mut lowered: Vec<Option<Expr>> = positional
+        let (bindings, order) =
+            expressions::bind_call_arguments(name, args, self.tree, signatures)?;
+        let args = bindings
             .into_iter()
             .enumerate()
             .map(|(position, arg)| {
@@ -1058,28 +1042,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        if !named.is_empty() {
-            let params = self
-                .state
-                .subroutine_params
-                .get(name)
-                .ok_or_else(|| unsupported(format!("named arguments to `{name}`")))?;
-            for (identifier, value) in named {
-                let formal = identifier_text(RefNode::Identifier(identifier), self.tree)
-                    .ok_or_else(|| unsupported("named argument"))?;
-                let position = params
-                    .iter()
-                    .position(|param| *param == formal)
-                    .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
-                if lowered.len() <= position {
-                    lowered.resize(position + 1, None);
-                }
-                lowered[position] = value
-                    .map(|value| self.call_argument(name, position, value))
-                    .transpose()?;
-            }
-        }
-        Ok(lowered)
+        Ok((args, order))
     }
 
     /// One subroutine argument; an assignment pattern takes the formal's shape.
@@ -1133,6 +1096,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => Vec::new(),
         };
         for (condition, then_body) in branches.into_iter().rev() {
+            // A generate index or parameter can make a procedural branch
+            // unreachable. Remove its writes before checking process drivers.
+            let constant = if inlining::calls_subroutine(&condition) {
+                // Even a constant return value does not make the run-time
+                // call's display, output or module-variable effects optional.
+                None
+            } else {
+                expr_to_const(condition.clone())
+                    .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
+            };
+            if let Some(value) = constant {
+                if value != 0 {
+                    else_body = then_body;
+                }
+                continue;
+            }
             else_body = vec![Stmt::If {
                 condition,
                 then_body,
@@ -1910,12 +1889,9 @@ pub(super) fn subroutine_argument_names(
                 .collect();
             let param_directions: Vec<ParamDirection> =
                 params.iter().map(|(_, direction, ..)| *direction).collect();
-            directions.insert(syntax.name.clone(), param_directions.clone());
             directions.insert(qualified.clone(), param_directions);
             let params: Vec<String> = params.into_iter().map(|(name, ..)| name).collect();
-            names.insert(syntax.name.clone(), params.clone());
             names.insert(qualified.clone(), params);
-            shapes.insert(syntax.name.clone(), param_shapes.clone());
             shapes.insert(qualified, param_shapes);
         }
     }
@@ -2060,9 +2036,14 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 builder.is_task = syntax.is_task;
                 let first_static = builder.state.statics.len();
                 builder.push_scope();
+                // Defaults bind in the enclosing declaration scope, before
+                // any formal can shadow those names (IEEE 1800-2023 13.5.3).
+                let defaults = params
+                    .iter()
+                    .map(|(_, _, _, default)| default.map(|expr| builder.expr(expr)).transpose())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut lowered_params = Vec::new();
-                for (source, direction, r#type, default) in params {
-                    let default = default.map(|expr| builder.expr(expr)).transpose()?;
+                for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
                     let name = builder.declare(&source, r#type.clone());
                     lowered_params.push(SubroutineParam {
                         name,

@@ -863,8 +863,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                     );
                 }
                 let call = sv::ir::Expr::Call {
+                    arg_order: Vec::new(),
                     name: name.clone(),
-                    args: lowered,
+                    args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -1151,9 +1152,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     "DPI-C function `{name}` called in combinational logic"
                 )));
             }
-            Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
-                let result = self.call(store, frames, name, &args)?;
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.subroutines.contains_key(name) => {
+                let args = args.clone();
+                let result = self.call(store, frames, name, &args, arg_order)?;
                 let Some((node, sources)) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -1174,11 +1179,20 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.write(store, temp, full(width), (node, sources))?;
                 Expr::Ident(temp_name)
             }
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| self.hoist(store, frames, arg))
+                    .map(|arg| {
+                        arg.as_ref()
+                            .map(|arg| self.hoist(store, frames, arg))
+                            .transpose()
+                    })
                     .collect::<Result<_, _>>()?,
             },
             Expr::Binary { left, op, right }
@@ -1871,7 +1885,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.set_flag(&mut store, return_flag, true)?;
                 Ok(store)
             }
-            sv::ir::Stmt::Call { name, args } => {
+            sv::ir::Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => {
                 if self.m.dpi_imports.contains_key(name) {
                     return Err(unsupported(format!(
                         "DPI-C function `{name}` called in combinational logic"
@@ -1880,7 +1898,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
-                self.call(&mut store, frames, name, args)?;
+                self.call(&mut store, frames, name, args, arg_order)?;
                 Ok(store)
             }
             sv::ir::Stmt::Eval(expr) => {
@@ -2866,6 +2884,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         name: &str,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
         let subroutine = self
             .m
@@ -2886,7 +2905,16 @@ impl<'p, 'a> Comb<'p, 'a> {
         // Copy the inputs in, left to right, in the caller's scope.
         let mut outputs = Vec::new();
         let mut copied = Vec::new();
-        for (position, param) in subroutine.params.iter().enumerate() {
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        for position in positions {
+            let param = subroutine
+                .params
+                .get(position)
+                .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             let id = self
                 .m
                 .id(&param.name)
@@ -3518,7 +3546,7 @@ impl Comb<'_, '_> {
                         record(self, part, writes);
                     }
                 }
-                sv::ir::Stmt::Call { name, args } => calls.push((name.clone(), args.clone())),
+                sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
                 _ => {}
             });
         }
@@ -3738,9 +3766,14 @@ fn substitute_literals(
             then_expr: Box::new(go(then_expr)),
             else_expr: Box::new(go(else_expr)),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
-            args: args.iter().map(go).collect(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(go(expr)),

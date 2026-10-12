@@ -140,6 +140,7 @@ pub(crate) struct LoweredSvParameterOverride {
     pub value: Option<sv::ir::ConstExpr>,
     /// The data type bound to a `parameter type`, as source text.
     pub type_text: Option<String>,
+    pub pattern_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1317,6 +1318,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                     name: name.clone(),
                     value: Some(value.expression()),
                     type_text: None,
+                    pattern_text: None,
                 })
                 .collect();
             requested_roots.insert(name.clone(), key.clone());
@@ -1331,6 +1333,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                     name: name.clone(),
                     value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
                     type_text: None,
+                    pattern_text: None,
                 })
                 .collect();
         }
@@ -1391,6 +1394,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                             name: name.clone(),
                             value: Some(value.expression()),
                             type_text: None,
+                            pattern_text: None,
                         })
                         .collect();
                     requested_roots.insert(name.clone(), dependency.clone());
@@ -1599,6 +1603,7 @@ pub fn schedule_sources(
                 name: name.clone(),
                 value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
                 type_text: None,
+                pattern_text: None,
             })
             .collect(),
     };
@@ -1788,7 +1793,16 @@ fn specialize_module(
         .iter()
         .filter_map(|parameter| Some((parameter.name.clone(), parameter.type_text.clone()?)))
         .collect();
-    let ir = module.source.analyze_module(
+    let pattern_overrides: Vec<_> = key
+        .parameter_overrides
+        .iter()
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.pattern_text.clone()?)))
+        .collect();
+    let pattern_source = module
+        .source
+        .with_pattern_parameter_overrides(&module.name, &pattern_overrides)?;
+    let source = pattern_source.as_ref().unwrap_or(&module.source);
+    let ir = source.analyze_module(
         &module.name,
         &overrides,
         &type_overrides,
@@ -2293,6 +2307,7 @@ fn lower_parameter_overrides(
                 name: parameter.name().to_string(),
                 value,
                 type_text: parameter.type_text().map(str::to_string),
+                pattern_text: parameter.pattern_text().map(str::to_string),
             }
         })
         .collect()
@@ -2769,11 +2784,16 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 .map(|item| item.map(&mut |operand| expr_for_state_mode(operand, four_state)))
                 .collect(),
         },
-        sv::ir::Expr::Call { name, args } => sv::ir::Expr::Call {
+        sv::ir::Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => sv::ir::Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
             args: args
                 .iter()
-                .map(|arg| expr_for_state_mode(arg, four_state))
+                .map(|arg| arg.as_ref().map(|arg| expr_for_state_mode(arg, four_state)))
                 .collect(),
         },
     }
@@ -4169,13 +4189,16 @@ fn lower_glue_parent_expr(
             context_width,
             context_signed,
         ),
-        sv::ir::Expr::Call { name, args }
-            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
-        {
+        sv::ir::Expr::Call {
+            name,
+            args,
+            arg_order,
+        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
             let mut source_ids = Vec::new();
             for arg in args {
+                let arg = arg.as_ref()?;
                 let width =
                     sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
                 let (inner, arg_sources, arg_source_ids) = lower_glue_parent_expr(
@@ -4401,7 +4424,10 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
                     .flat_map(sv::ir::InsideItem::exprs)
                     .any(|operand| expr_references_ident(operand, name))
         }
-        sv::ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident(arg, name)),
+        sv::ir::Expr::Call { args, .. } => args
+            .iter()
+            .flatten()
+            .any(|arg| expr_references_ident(arg, name)),
     }
 }
 
@@ -5328,13 +5354,16 @@ fn lower_expr_with_context(
             context_width,
             context_signed,
         ),
-        sv::ir::Expr::Call { name, args }
-            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
-        {
+        sv::ir::Expr::Call {
+            name,
+            args,
+            arg_order,
+        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
 
             for arg in args {
+                let arg = arg.as_ref()?;
                 let width =
                     sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
                 let (inner, arg_sources) = lower_expr_with_context(
@@ -6411,6 +6440,7 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
         }
         sv::ir::Expr::Call { args, .. } => args
             .iter()
+            .flatten()
             .any(|arg| expr_uses_ident_as_condition(arg, name)),
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
     }
@@ -6502,7 +6532,7 @@ fn sv_glue_expr_is_signed(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args } => {
+        sv::ir::Expr::Call { name, args, .. } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len())
                 .is_some_and(|(_, signed)| signed)
         }
@@ -6564,7 +6594,7 @@ fn sv_expr_is_signed_with_parameters(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args } => {
+        sv::ir::Expr::Call { name, args, .. } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len())
                 .is_some_and(|(_, signed)| signed)
         }
@@ -6808,7 +6838,7 @@ fn sv_expr_natural_width(
                 )?),
         ),
         sv::ir::Expr::Inside { .. } => Some(1),
-        sv::ir::Expr::Call { name, args } => {
+        sv::ir::Expr::Call { name, args, .. } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len()).map(|(width, _)| width)
         }
     }

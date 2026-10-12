@@ -286,6 +286,29 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Combinational",
+      "detail": "Verilator 5.052 binds the default b=a to the earlier formal a and returns 22 for f(.a(2)) when the enclosing module a is 5. IEEE 1800-2023 13.5.3 evaluates defaults in the scope containing the subroutine declaration, requiring 25. Celox passes all five backend variants.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_default_argument_scope",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 binds the default b=a to the earlier formal a and returns 22 for f(.a(2)) when the enclosing module a is 5. IEEE 1800-2023 13.5.3 evaluates defaults in the scope containing the subroutine declaration, requiring 25. Celox passes all five backend variants.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "synthesizable::named_calls_preserve_defaults_and_declaration_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

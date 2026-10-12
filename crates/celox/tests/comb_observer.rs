@@ -2650,14 +2650,10 @@ module Top (
 }
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
-    // SV frontend rejects named function arguments: "named arguments of `add`" (#88).
-    @ignore_on(sv);
     @case "comb_observer::test_named_function_inputs_evaluate_in_source_order";
 }
 
 fn test_named_function_outputs_apply_in_source_order(sim) {
-    // SV frontend rejects named function arguments: "named arguments of `write_outputs`" (#88).
-    @ignore_on(sv);
     @case "comb_observer::test_named_function_outputs_apply_in_source_order";
 }
 
