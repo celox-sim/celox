@@ -7,6 +7,7 @@ export class GenTsCache {
 	private _data: GenTsJsonOutput | undefined;
 	private _sourceKey = "";
 	private _configKey = "";
+	private _lockfileKey = "";
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -21,19 +22,22 @@ export class GenTsCache {
 	/** Refresh when a source or generator configuration file changes. */
 	get(): GenTsJsonOutput {
 		const key = this.computeSourceKey();
-		const configKey = this.computeConfigKey();
+		const configKey = this.computeConfigKey(["Veryl.toml", "celox.toml"]);
+		const lockfileKey = this.computeConfigKey(["Veryl.lock"]);
 		if (
 			this._data &&
 			this._sourceKey === key &&
-			this._configKey === configKey
+			this._configKey === configKey &&
+			this._lockfileKey === lockfileKey
 		) {
 			return this._data;
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
 		this._sourceKey = key;
-		// Generation may create or update Veryl.lock. Record its new state
-		// without scanning source files a second time.
-		this._configKey = this.computeConfigKey();
+		// Preserve the state read before generation so concurrent config edits
+		// trigger another refresh. Only Veryl.lock may be written by generation.
+		this._configKey = configKey;
+		this._lockfileKey = this.computeConfigKey(["Veryl.lock"]);
 		return this._data;
 	}
 
@@ -43,9 +47,9 @@ export class GenTsCache {
 		this._data = undefined;
 	}
 
-	private computeConfigKey(): string {
+	private computeConfigKey(names: readonly string[]): string {
 		return JSON.stringify(
-			["Veryl.toml", "celox.toml", "Veryl.lock"].map((name) => {
+			names.map((name) => {
 				try {
 					const stat = statSync(join(this._projectRoot, name));
 					return [name, stat.mtimeMs, stat.size];
