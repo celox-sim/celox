@@ -365,6 +365,8 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
+    /// Odd periods alternate floor/ceil half periods. Periods below two
+    /// time units use a two-unit period so both phases advance time.
     /// `initial_delay` specifies when the first rising edge occurs.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
         let signal = self.simulator.signal(port);
@@ -396,7 +398,14 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Advance time and run until `end_time` (inclusive).
+    /// Targets earlier than the current time leave time and state unchanged.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        if end_time < self.state.time() {
+            // Time only moves forward. Moving the timestamp back while the
+            // design keeps the state it reached would leave the two describing
+            // different moments, so an earlier target is a no-op.
+            return Ok(());
+        }
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
@@ -721,5 +730,45 @@ mod process_tests {
     #[test]
     fn long_processes_dispatch_through_two_switch_levels() {
         check_all_backends(false, 300);
+    }
+    #[test]
+    fn odd_clock_phase_survives_checkpoint_across_backends() {
+        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
+            // Use a known low initial clock in both state representations.
+            let clock = backend.signal("clk");
+            let count = backend.signal("count");
+            backend
+                .modify(|io| {
+                    io.set(clock, 0u8);
+                    io.set(count, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("clk", 3, 5);
+            sim.run_until(11).unwrap();
+            assert_eq!(sim.get(count), 3u8.into());
+            let saved = sim.checkpoint().unwrap();
+            sim.run_until(14).unwrap();
+            assert_eq!(sim.get(count), 4u8.into());
+            sim.restore(&saved).unwrap();
+            assert_eq!(sim.time(), 11);
+            assert_eq!(sim.get(count), 3u8.into());
+            sim.run_until(14).unwrap();
+            assert_eq!(sim.get(count), 4u8.into());
+        }
+        let code = "module Top (clk: input clock, count: output logic<8>) { always_ff (clk) { count += 1; } }";
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::builder(code, "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            check(build().build_interpreter().unwrap());
+            check(build().build_cranelift().unwrap());
+            check(build().build_wasm().unwrap());
+            check(build().build_tiered().unwrap());
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap());
+        }
     }
 }

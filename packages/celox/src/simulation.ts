@@ -400,7 +400,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 * Register a periodic clock.
 	 *
 	 * @param name    Clock event name (must match a `clock` port).
-	 * @param opts    `period` in time units; optional `initialDelay`.
+	 * @param opts    Full `period` in time units; 0/1 use the minimum period 2.
+	 *               Optional `initialDelay` locates the first rising edge.
 	 */
 	addClock(
 		name: string,
@@ -408,8 +409,9 @@ export class Simulation<P = Record<string, unknown>> {
 	): void {
 		this.ensureAlive();
 		const eventId = this.resolveEvent(name);
-		this._handle.addClock(eventId, opts.period, opts.initialDelay ?? 0);
-		this._clocks.set(name, { period: opts.period, eventId });
+		const period = opts.period === 0 || opts.period === 1 ? 2 : opts.period;
+		this._handle.addClock(eventId, period, opts.initialDelay ?? 0);
+		this._clocks.set(name, { period, eventId });
 	}
 
 	/**

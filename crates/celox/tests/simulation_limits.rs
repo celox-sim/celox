@@ -223,3 +223,126 @@ fn test_regular_reset() {
     vsim.run_until(45).unwrap();
     assert_eq!(vsim.get(cnt), 1u8.into());
 }
+
+/// An odd clock period stays exact: consecutive rising edges are one
+/// full period apart, not the truncated `period - 1` a halved period gives.
+#[test]
+fn test_odd_clock_period_is_exact() {
+    let code = r#"
+        module Top (
+            clk: input  clock,
+            cnt: output logic<8>
+        ) {
+            var r_cnt: logic<8>;
+            always_ff (clk) {
+                r_cnt = r_cnt + 8'd1;
+            }
+            assign cnt = r_cnt;
+        }
+    "#;
+    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+    vsim.add_clock("clk", 3, 0);
+
+    let clk = vsim.signal("clk");
+    let mut rising = Vec::new();
+    while let Some(time) = vsim.next_event_time() {
+        if time > 30 {
+            break;
+        }
+        vsim.step().unwrap();
+        if vsim.get(clk) == 1u8.into() {
+            rising.push(time);
+        }
+    }
+    assert_eq!(
+        rising,
+        (0..=10).map(|edge| edge * 3).collect::<Vec<_>>(),
+        "rising edges of a period-3 clock"
+    );
+}
+
+/// A period below two time units cannot be split in half exactly, but
+/// the clock must keep advancing time instead of stalling at time zero.
+#[test]
+fn test_degenerate_clock_period_still_advances() {
+    let code = r#"
+        module Top (
+            clk: input  clock,
+            cnt: output logic<8>
+        ) {
+            var r_cnt: logic<8>;
+            always_ff (clk) {
+                r_cnt = r_cnt + 8'd1;
+            }
+            assign cnt = r_cnt;
+        }
+    "#;
+    for period in [0, 1] {
+        let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+        vsim.add_clock("clk", period, 0);
+        assert_eq!(vsim.clock_periods()[0].1, 2);
+
+        let mut times = Vec::new();
+        for _ in 0..8 {
+            if let Some(time) = vsim.step().unwrap() {
+                times.push(time);
+            }
+        }
+        assert_eq!(times, (0..8).collect::<Vec<_>>(), "period {period}");
+        let cnt = vsim.signal("cnt");
+        assert_eq!(
+            vsim.get(cnt),
+            4u8.into(),
+            "a period-{period} clock rises at 0, 2, 4 and 6"
+        );
+    }
+}
+
+/// Running until a time that already passed leaves simulation time
+/// and state alone instead of moving the timestamp behind the design state.
+#[test]
+fn test_run_until_an_earlier_time_changes_nothing() {
+    let code = r#"
+        module Top (
+            clk: input  clock,
+            cnt: output logic<8>
+        ) {
+            var r_cnt: logic<8>;
+            always_ff (clk) {
+                r_cnt = r_cnt + 8'd1;
+            }
+            assign cnt = r_cnt;
+        }
+    "#;
+    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+    vsim.add_clock("clk", 10, 5);
+
+    let cnt = vsim.signal("cnt");
+    vsim.run_until(40).unwrap();
+    assert_eq!(vsim.get(cnt), 4u8.into());
+
+    vsim.run_until(20).unwrap();
+    assert_eq!(vsim.time(), 40);
+    assert_eq!(vsim.get(cnt), 4u8.into());
+
+    vsim.run_until(50).unwrap();
+    assert_eq!(vsim.time(), 50);
+    assert_eq!(
+        vsim.get(cnt),
+        5u8.into(),
+        "time resumes from where it stopped"
+    );
+}
+
+#[test]
+fn clock_time_overflow_is_a_runtime_error() {
+    let code = "module Top (clk: input clock) { always_ff (clk) {} }";
+    let mut sim = Simulation::builder(code, "Top").build().unwrap();
+    sim.add_clock("clk", 2, u64::MAX);
+    let error = sim.step().unwrap_err();
+    assert!(
+        matches!(error, celox::RuntimeErrorCode::Runtime { ref message, .. }
+        if message.contains("overflows simulation time"))
+    );
+    assert_eq!(sim.time(), u64::MAX);
+}

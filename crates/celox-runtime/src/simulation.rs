@@ -224,7 +224,9 @@ impl<B: SimBackend> SimulationState<B> {
         if event_id >= self.scheduler.clocks.len() {
             self.scheduler.clocks.resize(event_id + 1, None);
         }
-        self.scheduler.clocks[event_id] = Some(ClockDef { period });
+        self.scheduler.clocks[event_id] = Some(ClockDef {
+            period: period.max(2),
+        });
         self.push_periodic_event(SimEvent {
             time: initial_delay,
             event_ref: event,
@@ -580,8 +582,19 @@ impl<B: SimBackend> SimulationState<B> {
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
+                // Alternate floor/ceil half periods so odd periods stay exact.
+                // A clock needs at least one time unit in each phase.
+                let period = clock.period.max(2);
+                let half = (period / 2) + ((period & 1) & u64::from(event.next_val == 0));
+                let time =
+                    current_time
+                        .checked_add(half)
+                        .ok_or_else(|| SimulatorErrorCode::Runtime {
+                            message: format!("event {event_id} overflows simulation time"),
+                            signals: Vec::new(),
+                        })?;
                 self.push_periodic_event(SimEvent {
-                    time: current_time + clock.period / 2,
+                    time,
                     event_ref: event.event_ref,
                     signal: event.signal,
                     next_val: 1 - event.next_val,
@@ -619,7 +632,7 @@ impl<B: SimBackend> SimulationState<B> {
             .clocks
             .iter()
             .enumerate()
-            .filter_map(|(id, clock)| Some((id, clock.as_ref()?.period)))
+            .filter_map(|(id, clock)| Some((id, clock.as_ref()?.period.max(2))))
             .collect()
     }
 
