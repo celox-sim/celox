@@ -64,6 +64,7 @@ pub struct BlockStorage {
     pub delay: SourceVarId,
     pub clock: SourceVarId,
     pub release: SourceVarId,
+    pub event_counters: Vec<(VarId, SourceVarId, SourceVarId)>,
     pub scratch: Vec<(ScratchNeed, SourceVarId)>,
     /// The block's own copy of each function-local variable, so a call
     /// that waits keeps its arguments and locals while another block calls
@@ -97,6 +98,22 @@ pub(crate) fn declare_storage(
         .iter()
         .map(|&local| (local, variables[&ids[&local]].clone()))
         .collect::<Vec<_>>();
+    let mut event_variables = ir
+        .variables
+        .keys()
+        .filter(|id| {
+            ir.variables[id].affiliation != Affiliation::Function
+                && matches!(
+                    variables[&ids[id]].metadata.kind,
+                    celox_design::DomainKind::ClockPosedge
+                        | celox_design::DomainKind::ClockNegedge
+                        | celox_design::DomainKind::ResetAsyncHigh
+                        | celox_design::DomainKind::ResetAsyncLow
+                )
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    event_variables.sort_unstable();
     let mut next = variables.len() as u32;
     let mut declare = |path: Vec<String>, template: Option<&SymbolicVariable>, width: usize| {
         let id = SourceVarId(next);
@@ -182,6 +199,24 @@ pub(crate) fn declare_storage(
             delay: declare(name("delay"), None, PROCESS_DELAY_WIDTH),
             clock: declare(name("clock"), None, PROCESS_CLOCK_WIDTH),
             release: declare(name("release"), None, PROCESS_RELEASE_WIDTH),
+            event_counters: event_variables
+                .iter()
+                .map(|&var| {
+                    (
+                        var,
+                        declare(
+                            name(&format!("event_rises@{}", ids[&var].0)),
+                            None,
+                            celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                        ),
+                        declare(
+                            name(&format!("event_falls@{}", ids[&var].0)),
+                            None,
+                            celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                        ),
+                    )
+                })
+                .collect(),
             scratch,
             private,
             expression_values,
@@ -683,6 +718,7 @@ struct BlockLowering<'a> {
     /// gave the host a chance to drain them (see
     /// [`BlockLowering::yield_for_runtime_event`]).
     event_yield: Option<SourceVarId>,
+    event_counters: HashMap<VarId, (SourceVarId, SourceVarId)>,
 }
 
 /// Bits of the runtime-event yield counter.
@@ -779,6 +815,11 @@ fn lower_block(
         sources: Vec::new(),
         dirty: false,
         event_yield: None,
+        event_counters: storage
+            .event_counters
+            .iter()
+            .map(|(var, rises, falls)| (*var, (*rises, *falls)))
+            .collect(),
     };
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
         lowering.event_yield = Some(lowering.take_scratch("event_yield", EVENT_YIELD_WIDTH)?.1);
@@ -891,6 +932,28 @@ fn lower_block(
         .runtime_schema
         .testbench_kernels
         .get_or_insert(scheduled.runtime_schema.processes.len());
+    for (var, rises, falls) in &storage.event_counters {
+        let signal = to_state(&SourceAddr {
+            instance_id: instance,
+            var_id: ids[var],
+        })?;
+        let signal = scheduled.design.events.canonical(signal);
+        if scheduled.design.events.ordered_events.contains(&signal) {
+            let counters = celox_design::ProcessEventCounters {
+                signal,
+                rises: to_state(&stable(*rises).into_absolute())?,
+                falls: to_state(&stable(*falls).into_absolute())?,
+            };
+            scheduled
+                .runtime_schema
+                .testbench_read_roots
+                .extend([counters.rises, counters.falls]);
+            scheduled
+                .runtime_schema
+                .process_event_counters
+                .push(counters);
+        }
+    }
     scheduled.sir.processes.push(unit);
     scheduled.runtime_schema.processes.push(slots);
     Ok(())
@@ -1139,7 +1202,7 @@ impl<'a> BlockLowering<'a> {
         self.scan_clocks(statements, &mut active);
     }
 
-    fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<VarId>) {
+    fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<VarId>) -> bool {
         for statement in statements {
             let mut calls = Vec::new();
             for expr in expressions::statement_inputs(statement) {
@@ -1148,9 +1211,14 @@ impl<'a> BlockLowering<'a> {
             for call in calls {
                 if active.insert(call.id) {
                     if let Some(body) = function_body(&self.ir.functions, call) {
-                        self.scan_clocks(&body.statements, active);
+                        let continues = self.scan_clocks(&body.statements, active);
+                        active.remove(&call.id);
+                        if !continues {
+                            return false;
+                        }
+                    } else {
+                        active.remove(&call.id);
                     }
-                    active.remove(&call.id);
                 }
             }
             match statement {
@@ -1171,38 +1239,57 @@ impl<'a> BlockLowering<'a> {
                     }
                     _ => {}
                 },
-                Statement::If(stmt) => match constant_truth(&stmt.cond) {
-                    Some(true) => self.scan_clocks(&stmt.true_side, active),
-                    Some(false) => self.scan_clocks(&stmt.false_side, active),
-                    None => {
-                        self.scan_clocks(&stmt.true_side, active);
-                        self.scan_clocks(&stmt.false_side, active);
+                Statement::If(stmt) => {
+                    let continues = match constant_truth(&stmt.cond) {
+                        Some(true) => self.scan_clocks(&stmt.true_side, active),
+                        Some(false) => self.scan_clocks(&stmt.false_side, active),
+                        None => {
+                            let a = self.scan_clocks(&stmt.true_side, active);
+                            let b = self.scan_clocks(&stmt.false_side, active);
+                            a || b
+                        }
+                    };
+                    if !continues {
+                        return false;
                     }
-                },
+                }
                 Statement::IfReset(stmt) => {
                     self.scan_clocks(&stmt.true_side, active);
                     self.scan_clocks(&stmt.false_side, active);
                 }
                 Statement::Case(stmt) => {
+                    let mut continues = self.scan_clocks(&stmt.default, active);
                     for arm in &stmt.arms {
-                        self.scan_clocks(&arm.body, active);
+                        continues |= self.scan_clocks(&arm.body, active);
                     }
-                    self.scan_clocks(&stmt.default, active);
+                    if !continues {
+                        return false;
+                    }
                 }
                 Statement::For(stmt) if !constant_empty_range(&stmt.range) => {
-                    self.scan_clocks(&stmt.body, active)
+                    self.scan_clocks(&stmt.body, active);
                 }
                 Statement::FunctionCall(call) => {
                     if active.insert(call.id)
                         && let Some(body) = function_body(&self.ir.functions, call)
                     {
-                        self.scan_clocks(&body.statements, active);
+                        let continues = self.scan_clocks(&body.statements, active);
                         active.remove(&call.id);
+                        if !continues {
+                            return false;
+                        }
                     }
                 }
+                Statement::SystemFunctionCall(call)
+                    if matches!(call.kind, SystemFunctionKind::Finish) =>
+                {
+                    return false;
+                }
+                Statement::Break => return false,
                 _ => {}
             }
         }
+        true
     }
 
     fn declare_clock(&mut self, inst: StrId, period: u64) {
@@ -1360,16 +1447,105 @@ impl<'a> BlockLowering<'a> {
         if !self.private.contains_key(&destination.id) {
             self.dirty = true;
         }
-        let (parser, kernel, targets, sources, convert) = parts!(self);
-        parser.push_value(value);
-        parser.op_store(
-            destination,
-            targets,
-            &Domain::Process,
-            &convert,
-            sources,
-            kernel.builder(),
-        )
+        let counters = self.event_counters.get(&destination.id).copied();
+        let before = if counters.is_some() {
+            self.parser.clear_register_cache();
+            Some(self.load_var(destination.id)?)
+        } else {
+            None
+        };
+        {
+            let (parser, kernel, targets, sources, convert) = parts!(self);
+            parser.push_value(value);
+            parser.op_store(
+                destination,
+                targets,
+                &Domain::Process,
+                &convert,
+                sources,
+                kernel.builder(),
+            )?;
+        }
+        if let (Some((rises, falls)), Some(before)) = (counters, before) {
+            self.parser.clear_register_cache();
+            let after = self.load_var(destination.id)?;
+            self.record_event_edges(before, after, rises, falls);
+        }
+        Ok(())
+    }
+
+    fn record_event_edges(
+        &mut self,
+        before: RegisterId,
+        after: RegisterId,
+        rises: SourceVarId,
+        falls: SourceVarId,
+    ) {
+        let builder = self.kernel.builder();
+        let logic = matches!(builder.register(&before), RegisterType::Logic { .. });
+        let mut known = Vec::new();
+        for value in [0u8, 1] {
+            let reg = if logic {
+                builder.alloc_logic(1)
+            } else {
+                builder.alloc_bit(1, false)
+            };
+            builder.emit(SIRInstruction::Imm(reg, SIRValue::new(value)));
+            known.push(reg);
+        }
+        let mut eq = Vec::new();
+        for value in [before, after] {
+            for constant in &known {
+                let reg = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    reg,
+                    value,
+                    BinaryOp::EqCase,
+                    *constant,
+                ));
+                eq.push(reg);
+            }
+        }
+        for (counter, a, b, c, d) in [
+            (rises, eq[0], eq[2], eq[1], eq[3]),
+            (falls, eq[1], eq[3], eq[0], eq[2]),
+        ] {
+            let not_b = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Unary(not_b, UnaryOp::BitNot, b));
+            let first = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(first, a, BinaryOp::And, not_b));
+            let not_c = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Unary(not_c, UnaryOp::BitNot, c));
+            let second = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(second, not_c, BinaryOp::And, d));
+            let edge = builder.alloc_bit(1, false);
+            builder.emit(SIRInstruction::Binary(edge, first, BinaryOp::Or, second));
+            let width = celox_design::PROCESS_EVENT_COUNTER_WIDTH;
+            let delta = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Unary(delta, UnaryOp::Ident, edge));
+            let address = RegionedSourceAddr {
+                region: STABLE_REGION,
+                instance_id: self.instance,
+                var_id: counter,
+            };
+            let old = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Load(
+                old,
+                address,
+                SIROffset::Static(0),
+                width,
+            ));
+            let next = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Binary(next, old, BinaryOp::Add, delta));
+            builder.emit(SIRInstruction::Store(
+                address,
+                SIROffset::Static(0),
+                width,
+                next,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
     }
 
     /// Settle the combinational logic before a read of design state that

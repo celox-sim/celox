@@ -110,6 +110,20 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         result
     }
 
+    fn finish_requested(&mut self, time: u64) -> bool {
+        if self.testbench_random.is_some() {
+            let ctx = crate::simulator::RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            };
+            let events = self.collect_sited_runtime_events(ctx);
+            self.testbench_events.extend(events);
+        }
+        self.testbench_events
+            .iter()
+            .any(|(_, event)| matches!(event, crate::RuntimeEvent::Finish))
+    }
+
     fn tick_many(&mut self, event: B::Event, count: u64) -> (u64, Result<(), RuntimeErrorCode>) {
         if count == 0 {
             return (0, Ok(()));

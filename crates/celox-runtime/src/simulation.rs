@@ -41,6 +41,11 @@ pub trait SimulationExecutor {
         self.backend_mut().run_process(index)
     }
 
+    /// Whether an internal settle or process execution emitted a finish event.
+    fn finish_requested(&mut self, _time: u64) -> bool {
+        false
+    }
+
     /// Run up to `count` rising edges of `event` as fused ticks: each one
     /// evaluates the combinational logic and then the sequential domain,
     /// without toggling the clock signal. Returns how many completed before
@@ -1003,6 +1008,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.finished || executor.finish_requested(current_time) {
+            self.finished = true;
+            return Ok(false);
+        }
         let mut progressed = false;
         let mut pass = ready;
         loop {
@@ -1027,6 +1036,10 @@ impl<B: SimBackend> SimulationState<B> {
                         })
                         .collect::<Vec<_>>();
                     executor.run_process(process, current_time)?;
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
                     for ((id, rises, falls), (old_rises, old_falls)) in
                         self.process_event_counters.iter().zip(before)
                     {
@@ -1046,6 +1059,10 @@ impl<B: SimBackend> SimulationState<B> {
                     match ProcessStatus::from_code(status) {
                         Some(ProcessStatus::Settle) => {
                             executor.eval_comb()?;
+                            if executor.finish_requested(current_time) {
+                                self.finished = true;
+                                return Ok(true);
+                            }
                             any_ran = true;
                             continue;
                         }

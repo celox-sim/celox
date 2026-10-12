@@ -1013,3 +1013,95 @@ fn overlapping_function_outputs_copy_in_declaration_order() {
     }"#;
     check_passes_on_every_backend(code);
 }
+
+#[test]
+fn finished_paths_do_not_initialize_unreachable_clocks() {
+    for tail in [
+        "$finish(); clk.next();",
+        "if 1'd1 { $finish(); } clk.next();",
+    ] {
+        let code =
+            format!("#[test(Top)] module Top {{ inst clk: $tb::clock_gen; initial {{ {tail} }} }}");
+        let mut sim = Simulator::builder(&code, "Top")
+            .build_interpreter()
+            .unwrap();
+        let clk = sim.signal("clk");
+        sim.set(clk, 1u8);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(clk), 1u8.into());
+    }
+}
+
+#[test]
+fn design_finish_during_settle_stops_kernel_continuations() {
+    let code = r#"#[test(Top)] module Top {
+        var go: logic;
+        var after: logic;
+        always_comb { if go { $finish(); } }
+        initial { go=1; after=1; $assert(1'd0, "continued after finish"); }
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("after")), 0u8.into());
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}
+
+#[test]
+fn overlapping_clock_outputs_retain_the_intermediate_rising_edge() {
+    let code = r#"#[test(Top)] module Top {
+        var clk: clock;
+        var q: logic;
+        function update(a: output clock, b: output clock) { a=1; b=0; }
+        always_ff (clk) { q=1; }
+        initial { clk=0; update(clk, clk); $assert(clk == 0); $finish(); }
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+    }
+    for four_state in [false, true] {
+        check(
+            Simulator::builder(code, "Top")
+                .four_state(four_state)
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulator::builder(code, "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(
+            Simulator::builder(code, "Top")
+                .four_state(four_state)
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulator::builder(code, "Top")
+                .four_state(four_state)
+                .build_native()
+                .unwrap(),
+        );
+    }
+}
