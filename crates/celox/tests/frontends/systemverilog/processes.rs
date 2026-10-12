@@ -1904,3 +1904,14 @@ fn independent_clock_nba_pulses_require_an_ordered_queue() {
         .to_string();
     assert!(error.contains("require ordered NBA updates"), "{error}");
 }
+
+#[test]
+fn disjoint_combinational_slices_do_not_hide_a_watched_bit() {
+    let source = "module Top(input bit a,b,output bit seen);wire[1:0]q;assign q[0]=a;assign q[1]=b;initial begin @(posedge q[0]);seen=1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    let a = sim.signal("a");
+    sim.modify(|sim| sim.set(a, 1u8)).unwrap();
+    sim.step().unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}

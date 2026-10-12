@@ -2810,17 +2810,32 @@ impl<'p, 'a> Ff<'p, 'a> {
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
-        let eval = seal_drained(self.b);
-        let mut apply = SIRBuilder::new();
+        let eval = seal_drained(std::mem::replace(&mut self.b, SIRBuilder::new()));
+        self.working.clear();
+        self.aliases.clear();
+        self.overlay.clear();
+        self.nonblocking_store = false;
         let nonblocking_targets = self
             .nonblocking_targets
-            .into_iter()
+            .iter()
+            .copied()
             .map(|(id, access)| VarAtomBase::new(id, access.lsb, access.msb))
             .collect::<Vec<_>>();
-        emit_ff_commits(&mut apply, &nonblocking_targets);
-        let zero = apply.alloc_bit(1, false);
-        apply.emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
-        apply.emit(SIRInstruction::Store(
+        for target in &nonblocking_targets {
+            let watchers = self
+                .m
+                .watchers_by_var
+                .get(&target.id)
+                .cloned()
+                .unwrap_or_default();
+            let previous = self.snapshot_watchers(&watchers)?;
+            emit_ff_commits(&mut self.b, std::slice::from_ref(target));
+            self.count_watchers(&watchers, previous)?;
+        }
+        let zero = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
+        self.b.emit(SIRInstruction::Store(
             stable(pending),
             SIROffset::Static(0),
             1,
@@ -2828,7 +2843,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             Vec::new(),
             Vec::new(),
         ));
-        Ok((eval, seal_builder(apply), targets))
+        Ok((eval, seal_builder(self.b), targets))
     }
 }
 
@@ -3056,6 +3071,16 @@ fn watched_nba_count(
     expr: &sv::ir::Expr,
     visiting: &mut HashSet<String>,
 ) -> usize {
+    watched_write_count(stmts, pm, expr, visiting, true)
+}
+
+fn watched_write_count(
+    stmts: &[sv::ir::Stmt],
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    visiting: &mut HashSet<String>,
+    nonblocking: bool,
+) -> usize {
     let mut names = HashSet::default();
     expr_idents(expr, &mut names);
     subroutine_reads(pm, expr, &mut names);
@@ -3094,25 +3119,32 @@ fn watched_nba_count(
         let mut count = match stmt {
             sv::ir::Stmt::Assign {
                 lhs,
-                nonblocking: true,
+                nonblocking: nba,
                 ..
-            } => usize::from(affects(lhs)),
+            } if *nba == nonblocking => usize::from(affects(lhs)),
             sv::ir::Stmt::AssignConcat {
                 parts,
-                nonblocking: true,
+                nonblocking: nba,
                 ..
-            } => usize::from(parts.iter().any(affects)),
+            } if *nba == nonblocking => {
+                if nonblocking {
+                    usize::from(parts.iter().any(affects))
+                } else {
+                    parts.iter().filter(|part| affects(part)).count().min(2)
+                }
+            }
             sv::ir::Stmt::If {
                 then_body,
                 else_body,
                 ..
-            } => watched_nba_count(then_body, pm, expr, visiting)
-                .max(watched_nba_count(else_body, pm, expr, visiting)),
+            } => watched_write_count(then_body, pm, expr, visiting, nonblocking).max(
+                watched_write_count(else_body, pm, expr, visiting, nonblocking),
+            ),
             sv::ir::Stmt::Case { items, default, .. } => items
                 .iter()
                 .map(|item| item.body.as_slice())
                 .chain(default.iter().map(Vec::as_slice))
-                .map(|body| watched_nba_count(body, pm, expr, visiting))
+                .map(|body| watched_write_count(body, pm, expr, visiting, nonblocking))
                 .max()
                 .unwrap_or(0),
             sv::ir::Stmt::Loop {
@@ -3131,10 +3163,10 @@ fn watched_nba_count(
                         pm.parameter_types,
                     )
                 });
-                watched_nba_count(init, pm, expr, visiting)
+                watched_write_count(init, pm, expr, visiting, nonblocking)
                     + trips
-                        * (watched_nba_count(body, pm, expr, visiting)
-                            + watched_nba_count(step, pm, expr, visiting))
+                        * (watched_write_count(body, pm, expr, visiting, nonblocking)
+                            + watched_write_count(step, pm, expr, visiting, nonblocking))
             }
             _ => 0,
         };
@@ -3143,13 +3175,32 @@ fn watched_nba_count(
         for (name, args) in calls {
             if visiting.insert(name.clone()) {
                 if let Some(subroutine) = pm.subroutine(&name) {
-                    count += watched_nba_count(&subroutine.body, pm, expr, visiting);
+                    count += watched_write_count(&subroutine.body, pm, expr, visiting, nonblocking);
+                    if !nonblocking {
+                        for (param, arg) in subroutine.params.iter().zip(&args) {
+                            if param.direction.is_written() {
+                                count += arg
+                                    .as_ref()
+                                    .and_then(lvalue_from_expr)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter(|target| affects(target))
+                                    .count();
+                            }
+                        }
+                    }
                     let mut defaults = Vec::new();
                     default_calls(subroutine, &args, &mut defaults);
                     for (name, _) in defaults {
                         if visiting.insert(name.clone()) {
                             if let Some(subroutine) = pm.subroutine(&name) {
-                                count += watched_nba_count(&subroutine.body, pm, expr, visiting);
+                                count += watched_write_count(
+                                    &subroutine.body,
+                                    pm,
+                                    expr,
+                                    visiting,
+                                    nonblocking,
+                                );
                             }
                             visiting.remove(&name);
                         }
@@ -3256,6 +3307,12 @@ pub fn declare_event_counters(
             && names
                 .iter()
                 .any(|name| pm.hidden_comb_pulses.contains(name))
+            && pm
+                .comb_bodies
+                .iter()
+                .map(|body| watched_write_count(body, pm, &expr, &mut HashSet::default(), false))
+                .sum::<usize>()
+                > 1
         {
             return Err(unsupported(
                 "event expression reading a combinational signal with multiple blocking writes",

@@ -14,7 +14,7 @@ pub(crate) fn project_observability(
     if !source.kernels {
         runtime_schema.runtime_event_sites.extend(sites);
     }
-    runtime_schema.testbench_read_roots = read_variables;
+    runtime_schema.testbench_read_roots.extend(read_variables);
     Ok(())
 }
 
