@@ -1611,6 +1611,7 @@ pub(super) fn subroutine_declared_dimensions(
     tree: &SyntaxTree,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
+    target_span: (usize, usize),
 ) -> Option<VariablePackedDimensions> {
     let syntax = match node {
         RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1619,6 +1620,22 @@ pub(super) fn subroutine_declared_dimensions(
     }?;
     let params =
         subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
+    // The implicit result is a body variable. Discovering it while a query
+    // is still resolving the return declaration would rebuild that same type.
+    let in_body = syntax
+        .block_items
+        .iter()
+        .map(|item| RefNode::BlockItemDeclaration(item))
+        .chain(
+            syntax
+                .statements
+                .iter()
+                .map(|stmt| RefNode::Statement(stmt)),
+        )
+        .any(|node| {
+            dimensions::ref_node_source_span(node)
+                .is_some_and(|(start, end)| start <= target_span.0 && target_span.1 <= end)
+        });
     let mut dimensions: VariablePackedDimensions = params
         .into_iter()
         .map(|(name, _, ty, _)| (name, dimensions_from_type(&ty)))
@@ -1629,6 +1646,14 @@ pub(super) fn subroutine_declared_dimensions(
         env,
         aliases,
     )?);
+    if in_body && let RefNode::FunctionDeclaration(declaration) = node {
+        dimensions.extend(functions::function_result_dimensions(
+            declaration,
+            tree,
+            env,
+            aliases,
+        ));
+    }
     Some(dimensions)
 }
 
@@ -1743,7 +1768,30 @@ pub(super) fn subroutines_from_module_node_with(
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
+    rejected: Option<&mut HashMap<String, AnalyzerError>>,
+) -> Result<Vec<Subroutine>, AnalyzerError> {
+    subroutines_with_symbolic_parameters(
+        node,
+        tree,
+        const_env,
+        packed_dimensions,
+        parameter_literals,
+        state,
+        rejected,
+        &HashSet::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subroutines_with_symbolic_parameters(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
+    parameter_literals: &HashMap<String, Expr>,
+    state: &mut BodyState<'_>,
     mut rejected: Option<&mut HashMap<String, AnalyzerError>>,
+    symbolic_parameters: &HashSet<String>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let type_aliases = packed_dimensions.type_aliases.clone();
     let mut subroutines = Vec::new();
@@ -1763,20 +1811,44 @@ pub(super) fn subroutines_from_module_node_with(
                 continue;
             };
             let (item_dimensions, literals) = views.get(item);
+            let item_dimensions = if symbolic_parameters.is_empty() {
+                std::borrow::Cow::Borrowed(item_dimensions)
+            } else {
+                let mut dimensions = item_dimensions.clone();
+                for parameter in symbolic_parameters {
+                    dimensions.const_env.remove(parameter);
+                    dimensions.parameter_values.remove(parameter);
+                }
+                std::borrow::Cow::Owned(dimensions)
+            };
+            let item_dimensions = &*item_dimensions;
+
+            let declaration_env = if symbolic_parameters.is_empty() {
+                std::borrow::Cow::Borrowed(&*item.env)
+            } else {
+                std::borrow::Cow::Owned(
+                    item.env
+                        .iter()
+                        .filter(|(name, _)| !symbolic_parameters.contains(*name))
+                        .map(|(name, value)| (name.clone(), *value))
+                        .collect::<HashMap<_, _>>(),
+                )
+            };
+
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
                     syntax.ports,
                     syntax.items,
                     tree,
-                    &item.env,
+                    &declaration_env,
                     &type_aliases,
                 )?;
                 let return_type = match syntax.return_type {
                     Some(node) => function_type_from_ref_node(
                         RefNode::FunctionDataTypeOrImplicit(node),
                         tree,
-                        &item.env,
+                        &declaration_env,
                         &type_aliases,
                     )
                     .or_else(|| match node {
@@ -1810,7 +1882,7 @@ pub(super) fn subroutines_from_module_node_with(
                         source_name: source,
                         direction,
                         r#type: crate::ir::Type::from_ast(
-                            scoped_type(r#type, &item.env),
+                            scoped_type(r#type, &declaration_env),
                             &item.env,
                         ),
                         default,
@@ -1847,7 +1919,7 @@ pub(super) fn subroutines_from_module_node_with(
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
                     return_type: return_type.map(|r#type| {
-                        crate::ir::Type::from_ast(scoped_type(r#type, &item.env), &item.env)
+                        crate::ir::Type::from_ast(scoped_type(r#type, &declaration_env), &item.env)
                     }),
                     params: lowered_params,
                     return_var,
@@ -1855,7 +1927,7 @@ pub(super) fn subroutines_from_module_node_with(
                 };
                 for stmt in &mut subroutine.body {
                     qualify_stmt(item, stmt);
-                    substitute_stmt_constants(stmt, &item.env, literals);
+                    substitute_stmt_constants(stmt, &declaration_env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {

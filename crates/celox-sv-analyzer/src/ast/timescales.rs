@@ -469,6 +469,48 @@ fn scope_at(scopes: &[Scope], parents: &[Option<usize>], at: usize) -> Option<us
     None
 }
 
+fn time_declarations(unit: Option<i32>, precision: Option<i32>) -> String {
+    fn literal(exponent: i32) -> String {
+        let suffix = match exponent.div_euclid(3) {
+            -5 => "fs",
+            -4 => "ps",
+            -3 => "ns",
+            -2 => "us",
+            -1 => "ms",
+            _ => "s",
+        };
+        format!("{}{suffix}", 10u32.pow(exponent.rem_euclid(3) as u32))
+    }
+    let mut declarations = String::new();
+    if let Some(unit) = unit {
+        declarations.push_str(&format!("timeunit {};\n", literal(unit)));
+    }
+    if let Some(precision) = precision {
+        declarations.push_str(&format!("timeprecision {};\n", literal(precision)));
+    }
+    declarations
+}
+
+pub(crate) fn generated_source_declarations(
+    sources: &[(&str, &Path)],
+    roots: Option<&[&str]>,
+) -> Converted<String> {
+    let trees = sources
+        .iter()
+        .map(|(code, path)| crate::syntax::parse_source(code, path).map(|tree| (tree, *path)))
+        .collect::<Converted<Vec<_>>>()?;
+    let mut scales = Timescales::collect(
+        &trees
+            .iter()
+            .map(|(tree, path)| (tree, *path))
+            .collect::<Vec<_>>(),
+    )?;
+    if let Some(roots) = roots {
+        scales.select_roots(roots);
+    }
+    Ok(scales.generated_declarations())
+}
+
 impl Timescales {
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
         let local = Self::collect(&[(tree, Path::new(""))])?;
@@ -502,6 +544,31 @@ impl Timescales {
             || !self.instantiated.contains(name),
             |roots| roots.contains(name),
         )
+    }
+
+    pub(super) fn generated_declarations(&self) -> String {
+        let unit = self
+            .definitions
+            .values()
+            .filter(|scope| self.is_root(&scope.name))
+            .map(|scope| scope.scale.unit)
+            .min()
+            .unwrap_or(DEFAULT.unit);
+        time_declarations(
+            (self.specified[0] == 2).then_some(unit),
+            (self.specified[1] == 2).then_some(self.precision.unwrap_or(DEFAULT.precision)),
+        )
+    }
+
+    pub(super) fn declaration_statements(&self, name: &str) -> Converted<String> {
+        let scope = self
+            .definitions
+            .get(name)
+            .ok_or_else(|| unsupported(format!("unknown time scope `{name}`")))?;
+        Ok(time_declarations(
+            scope.specified.0.then_some(scope.scale.unit),
+            scope.specified.1.then_some(scope.scale.precision),
+        ))
     }
 
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {

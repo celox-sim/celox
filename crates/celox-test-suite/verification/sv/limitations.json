@@ -148,7 +148,11 @@
       "icarus": [
         "procedural::aggregate_parameters_are_constant_tables",
         "system_functions::dimensions_resolves_package_array_constants",
-        "system_functions::isunbounded_reports_bounded_array_parameters"
+        "system_functions::isunbounded_reports_bounded_array_parameters",
+        "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
+        "system_functions::unpacked_dimensions_resolves_package_array_constants",
+        "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
+        "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"
       ]
     }
   },
@@ -224,7 +228,9 @@
         "procedural::select_index_call_skipped_by_logical_and",
         "procedural::select_index_calls_run_as_written",
         "procedural::select_indices_call_functions",
-        "synthesizable::function_output_and_inout_arguments_are_written_back"
+        "synthesizable::function_output_and_inout_arguments_are_written_back",
+        "system_functions::unpacked_dimensions_accepts_function_result_arguments",
+        "system_functions::unpacked_dimensions_validates_writable_function_arguments"
       ]
     }
   },
@@ -702,7 +708,9 @@
     "cases": {
       "icarus": [
         "system_functions::dimensions_resolves_procedural_scopes",
-        "system_functions::dimensions_types_function_pattern_arguments"
+        "system_functions::dimensions_types_function_pattern_arguments",
+        "system_functions::unpacked_dimensions_resolves_procedural_scopes",
+        "system_functions::unpacked_dimensions_types_function_pattern_arguments"
       ]
     }
   },
@@ -1073,6 +1081,58 @@
     "cases": {
       "icarus": [
         "system_functions::timescale_queries_resolve_interface_instances_and_ports"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_element",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns 1 for $unpacked_dimensions(a[0]) when a is declared logic [7:0] a [0:1]. The selected element has no unpacked dimensions, so IEEE 1800-2023 20.7 requires 0. This four-state case is outside the Verilator adapter.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_is_independent_of_unknown_values"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_dimensions_partial_array",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects $unpacked_dimensions of a partially selected multidimensional array (\"needs 2 indices, but got only 1\") and of an unpacked array slice (\"Array cannot be indexed by a range\"). IEEE 1800-2023 20.7 permits querying the remaining array type. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_preserves_selection_and_return_types",
+        "system_functions::unpacked_dimensions_checks_unevaluated_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_wildcard_typedef_shadowing",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 reports a syntax error when a local variable declared after a wildcard import has the same name as an unpacked typedef in the package. IEEE 1800-2023 26.3 gives local declarations precedence over potentially visible wildcard imports. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::unpacked_dimensions_prefers_values_over_imported_types"
       ]
     }
   },

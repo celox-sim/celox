@@ -165,7 +165,9 @@ pub fn schedule_symbolic_rtl(
     let mut dynamic_for_diagnostics = Vec::new();
     for source in testbench_source.sources() {
         let instance = source.base_instance(lookup);
-        let module = module_ir[&lookup.instance_module[&instance]];
+        let Some(&module) = module_ir.get(&lookup.instance_module[&instance]) else {
+            continue;
+        };
         dynamic_for_diagnostics.extend(super::check_elaborated_dynamic_for_bounds(
             &output.scheduled,
             source,
