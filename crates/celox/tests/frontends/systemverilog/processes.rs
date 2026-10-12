@@ -1725,3 +1725,18 @@ fn blocking_ff_publication_precedes_inactive_continuations() {
         assert_eq!(sim.get(sim.signal("q")), final_q.into(), "{assign}");
     }
 }
+
+#[test]
+fn blocking_ff_effects_settle_before_nbas_without_inactive_processes() {
+    let mut sim = simulation(
+        r#"module Top(input bit clk, output bit seen);
+        bit a,q; wire c=a & ~q;
+        always @(posedge clk) begin a=1; q<=1; end
+        always @(posedge c) seen<=1;
+    endmodule"#,
+    );
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("c")), 0u8.into());
+}
