@@ -166,9 +166,9 @@ overrides:
   '@celox-sim/celox': workspace:*
   '@celox-sim/celox-napi': workspace:*
   '@celox-sim/vite-plugin': workspace:*
-  '@emnapi/core': 2.0.0-alpha.5
-  '@emnapi/runtime': 2.0.0-alpha.5
-  emnapi: 2.0.0-alpha.5
+  '@emnapi/core': 2.0.0-alpha.6
+  '@emnapi/runtime': 2.0.0-alpha.6
+  emnapi: 2.0.0-alpha.6
 
 importers:
 
@@ -178,14 +178,14 @@ importers:
         specifier: ^2.4.5
         version: 2.5.15
       '@emnapi/core':
-        specifier: 2.0.0-alpha.5
-        version: 2.0.0-alpha.5
+        specifier: 2.0.0-alpha.6
+        version: 2.0.0-alpha.6
       '@emnapi/runtime':
-        specifier: 2.0.0-alpha.5
-        version: 2.0.0-alpha.5
+        specifier: 2.0.0-alpha.6
+        version: 2.0.0-alpha.6
       '@napi-rs/wasm-runtime':
-        specifier: 1.2.4
-        version: 1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)
+        specifier: 1.2.5
+        version: 1.2.5(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)
       '@tybys/wasm-util':
         specifier: ^0.10.1
         version: 0.10.4
@@ -193,8 +193,8 @@ importers:
         specifier: ^4.4.0
         version: 4.5.1
       emnapi:
-        specifier: 2.0.0-alpha.5
-        version: 2.0.0-alpha.5
+        specifier: 2.0.0-alpha.6
+        version: 2.0.0-alpha.6
       lefthook:
         specifier: ^2.1.2
         version: 2.1.16
@@ -212,7 +212,7 @@ importers:
         version: 6.0.3
       vitepress:
         specifier: ^1.6.4
-        version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.9)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@6.0.3)
+        version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.9)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(typescript@6.0.3)
       vue-chartjs:
         specifier: ^5.3.0
         version: 5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3))
@@ -221,7 +221,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: 3.10.6
-        version: 3.10.6(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)(@types/node@25.9.9)(emnapi@2.0.0-alpha.5)
+        version: 3.10.6(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)(@types/node@25.9.9)(emnapi@2.0.0-alpha.6)
 
   packages/celox:
     dependencies:
@@ -476,14 +476,14 @@ packages:
       search-insights:
         optional: true
 
-  '@emnapi/core@2.0.0-alpha.5':
-    resolution: {integrity: sha512-DbeLFquQJyYGwM3LzPdjvb4IRmAAQuTzEmqUGtIAYxlAO4ArfUZ7WMytLWDSsCAYm6MZJNeojaawQQiFrFVehg==}
+  '@emnapi/core@2.0.0-alpha.6':
+    resolution: {integrity: sha512-MNVvMV7WtEJMgqaWJMvCyupK7Oi8sZctUIgPRZTsiS3cVvefk8DXPflOU3MSBddtj/rrYHygpYgpHDgwXnI3+w==}
 
-  '@emnapi/runtime@2.0.0-alpha.5':
-    resolution: {integrity: sha512-SS4jUXRklsrPKTEtW92WHdneh9QBrZGmRyeYEac2ktLN3ie1wd/BrkBbk4DqPWKhjSFfrR8NClXwMlfZ73m60A==}
+  '@emnapi/runtime@2.0.0-alpha.6':
+    resolution: {integrity: sha512-5ZR49ZsZ3cLvu5lkrVj6CMpHRgZjYz7XSlqK23GYYpyEqp749RVuIH0bEUKaGNghMh2pXRhIC3cnVrH28Y1j1Q==}
 
-  '@emnapi/wasi-threads@2.1.0':
-    resolution: {integrity: sha512-DM18NXgQ5coifswrwhFgrqeW/UiFRaLj0aLKU0cp0FoYjEfP/hj/yUeF+Hz754ViG+jQmG2HIeDCUeQsPnRwOA==}
+  '@emnapi/wasi-threads@2.2.0':
+    resolution: {integrity: sha512-JP7OYH38Q7+pyTAe14raZHLQIK7BDKbdwji+Xi3pcd/6QkJYQH3SX4wu6EplGrGJWRepoNzedfm0G3B9Z4e9Rw==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -787,9 +787,9 @@ packages:
     engines: {node: ^20.17.0 || ^22.13.0 || >= 23.5.0}
     hasBin: true
     peerDependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
-      emnapi: 2.0.0-alpha.5
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      emnapi: 2.0.0-alpha.6
     peerDependenciesMeta:
       '@emnapi/core':
         optional: true
@@ -1054,8 +1054,15 @@ packages:
     resolution: {integrity: sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
     peerDependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+
+  '@napi-rs/wasm-runtime@1.2.5':
+    resolution: {integrity: sha512-HshSvXzmBxNzqejd3k/KemgQ3hdREUYFRRrgxOZ+gPljDIsO2SDZrVZMd4Z/HsxudQbE62OVyVFE8z9BCurfjA==}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
+    peerDependencies:
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.1.0':
     resolution: {integrity: sha512-p6J8PB59I8d/XItXB/go5JH6nKW+xIbpzaL43EBTV0hi7mrS/Z4gs+MsB04ZrlqZN29BdZV8fChRyasuXLhRaA==}
@@ -1878,8 +1885,8 @@ packages:
   dompurify@3.4.15:
     resolution: {integrity: sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==}
 
-  emnapi@2.0.0-alpha.5:
-    resolution: {integrity: sha512-E8LRA0oYT1KKPLMLtwWF1BNrXSpNNnOBlu1PU4m5wmBh8cNvrhm28UreTvfwJ2gg60ruyfylk4uCaJUXVhvSSg==}
+  emnapi@2.0.0-alpha.6:
+    resolution: {integrity: sha512-+A54DE5YkbMVOa/0GDs3jhRmu2KnAFvOjEgAYuaPWdmF7A822PtB2znC23QbQ4l/qcC1ZFOrmvXVIuo9xWX2bg==}
     peerDependencies:
       node-addon-api: '>= 6.1.0'
     peerDependenciesMeta:
@@ -2228,10 +2235,6 @@ packages:
 
   postcss@8.5.16:
     resolution: {integrity: sha512-vuwillviilfKZsg0VGj5R/YwwcHx4SLsIOI/7K6mQkWx+l5cUHTjj5g0AasTBcyXsbfTgrwsUNmVUb5xVwyPwg==}
-    engines: {node: ^10 || ^12 || >=14}
-
-  postcss@8.5.26:
-    resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
   postcss@8.5.28:
@@ -2766,16 +2769,16 @@ snapshots:
     transitivePeerDependencies:
       - '@algolia/client-search'
 
-  '@emnapi/core@2.0.0-alpha.5':
+  '@emnapi/core@2.0.0-alpha.6':
     dependencies:
-      '@emnapi/wasi-threads': 2.1.0
+      '@emnapi/wasi-threads': 2.2.0
       tslib: 2.8.1
 
-  '@emnapi/runtime@2.0.0-alpha.5':
+  '@emnapi/runtime@2.0.0-alpha.6':
     dependencies:
       tslib: 2.8.1
 
-  '@emnapi/wasi-threads@2.1.0':
+  '@emnapi/wasi-threads@2.2.0':
     dependencies:
       tslib: 2.8.1
 
@@ -2997,7 +3000,7 @@ snapshots:
 
   '@kurkle/color@0.3.4': {}
 
-  '@napi-rs/cli@3.10.6(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)(@types/node@25.9.9)(emnapi@2.0.0-alpha.5)':
+  '@napi-rs/cli@3.10.6(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)(@types/node@25.9.9)(emnapi@2.0.0-alpha.6)':
     dependencies:
       '@inquirer/prompts': 8.5.2(@types/node@25.9.9)
       '@napi-rs/cross-toolchain': 1.0.3
@@ -3012,9 +3015,9 @@ snapshots:
       typanion: 3.14.0
       typescript: 6.0.3
     optionalDependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
-      emnapi: 2.0.0-alpha.5
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      emnapi: 2.0.0-alpha.6
     transitivePeerDependencies:
       - '@napi-rs/cross-toolchain-arm64-target-aarch64'
       - '@napi-rs/cross-toolchain-arm64-target-armv7'
@@ -3078,9 +3081,9 @@ snapshots:
 
   '@napi-rs/lzma-wasm32-wasi@1.5.1':
     dependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
-      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)
     optional: true
 
   '@napi-rs/lzma-win32-arm64-msvc@1.5.1':
@@ -3150,9 +3153,9 @@ snapshots:
 
   '@napi-rs/tar-wasm32-wasi@1.1.1':
     dependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
-      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)
     optional: true
 
   '@napi-rs/tar-win32-arm64-msvc@1.1.1':
@@ -3183,10 +3186,17 @@ snapshots:
       '@napi-rs/tar-win32-ia32-msvc': 1.1.1
       '@napi-rs/tar-win32-x64-msvc': 1.1.1
 
-  '@napi-rs/wasm-runtime@1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)':
+  '@napi-rs/wasm-runtime@1.2.4(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)':
     dependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      '@tybys/wasm-util': 0.10.4
+    optional: true
+
+  '@napi-rs/wasm-runtime@1.2.5(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)':
+    dependencies:
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
       '@tybys/wasm-util': 0.10.4
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.1.0':
@@ -3218,9 +3228,9 @@ snapshots:
 
   '@napi-rs/wasm-tools-wasm32-wasi@1.1.0':
     dependencies:
-      '@emnapi/core': 2.0.0-alpha.5
-      '@emnapi/runtime': 2.0.0-alpha.5
-      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)
+      '@emnapi/core': 2.0.0-alpha.6
+      '@emnapi/runtime': 2.0.0-alpha.6
+      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.6)(@emnapi/runtime@2.0.0-alpha.6)
     optional: true
 
   '@napi-rs/wasm-tools-win32-arm64-msvc@1.1.0':
@@ -3840,7 +3850,7 @@ snapshots:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
-  emnapi@2.0.0-alpha.5: {}
+  emnapi@2.0.0-alpha.6: {}
 
   emoji-regex-xs@1.0.0: {}
 
@@ -4160,13 +4170,6 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postcss@8.5.26:
-    dependencies:
-      nanoid: 3.3.19
-      picocolors: 1.1.1
-      source-map-js: 1.2.1
-    optional: true
-
   postcss@8.5.28:
     dependencies:
       nanoid: 3.3.19
@@ -4435,7 +4438,7 @@ snapshots:
       fsevents: 2.3.3
       yaml: 2.9.0
 
-  vitepress@1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.9)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@6.0.3):
+  vitepress@1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.9)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(typescript@6.0.3):
     dependencies:
       '@docsearch/css': 3.8.2
       '@docsearch/js': 3.8.2(@algolia/client-search@5.49.1)(search-insights@2.17.3)
@@ -4456,7 +4459,7 @@ snapshots:
       vite: 5.4.21(@types/node@25.9.9)(lightningcss@1.33.0)
       vue: 3.5.29(typescript@6.0.3)
     optionalDependencies:
-      postcss: 8.5.26
+      postcss: 8.5.28
     transitivePeerDependencies:
       - '@algolia/client-search'
       - '@types/node'
