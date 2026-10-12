@@ -735,3 +735,37 @@
   (assert_eq positional 74)
   (tick clk)
   (assert_eq q 74))
+
+; IEEE 1800-2023 12.5.1: casex ignores X/Z on either side.
+(case casex_ignores_unknown_selector_bits
+  (four_state)
+  (source "casex_selector.sv" #"
+module Top(input logic clk, input logic [3:0] a,
+           input logic [127:0] wide,
+           output logic [1:0] comb, registered, wide_match);
+    always_comb casex (a)
+        4'b1x0x: comb = 1;
+        4'b01zz: comb = 2;
+        default: comb = 3;
+    endcase
+    always_ff @(posedge clk) casex (a)
+        4'b1x0x: registered <= 1;
+        4'b01zz: registered <= 2;
+        default: registered <= 3;
+    endcase
+    always_comb casex (wide)
+        128'h0: wide_match = 1;
+        default: wide_match = 2;
+    endcase
+endmodule
+"#)
+  (top Top)
+  (for (value mask expected) (list (10 15 1) (0 15 1) (12 5 1) (4 3 2) (4 0 2) (15 0 3))
+    (modify (set a (fourstate value mask)))
+    (assert_eq comb expected)
+    (tick clk)
+    (assert_eq registered expected))
+  (modify (set wide (fourstate 0 (<< 1 100))))
+  (assert_eq wide_match 1)
+  (modify (set wide (fourstate (<< 1 65) (<< 1 100))))
+  (assert_eq wide_match 2))

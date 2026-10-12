@@ -2022,6 +2022,16 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let node = coerce_node_width(self.arena, node, Some(width), all_signed)
                     .map_err(slt_error)?;
                 let matched = self.alloc(SLTNode::Binary(selector_node, op, node))?;
+                let matched = if kind == sv::ir::CaseKind::X {
+                    // A wildcard comparison returns X when only selector
+                    // unknowns prevent a definite match. casex ignores those
+                    // bits too, so only a definite zero rejects the label.
+                    // IEEE 1800-2023 12.5.1.
+                    let zero = self.constant(0, 1)?;
+                    self.alloc(SLTNode::Binary(matched, BinaryOp::NeCase, zero))?
+                } else {
+                    matched
+                };
                 let matched = slt_truth(self.arena, matched)?;
                 sources.extend(selector_sources.iter().copied());
                 condition = Some(match condition {
