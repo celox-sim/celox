@@ -433,6 +433,10 @@ pub(super) fn parameters_from_ref_node_with_environment(
         && declared_alias
             .as_ref()
             .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
+    let parameter_members = declared_alias
+        .as_ref()
+        .map(|ty| ty.members.clone())
+        .unwrap_or_default();
     let parameter_is_2state = declared_alias
         .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
@@ -453,7 +457,9 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 if expr.into_iter().any(|node| {
                     matches!(
                         node,
-                        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                        RefNode::ConstantIndexedRange(_)
+                            | RefNode::IndexedRange(_)
+                            | RefNode::ConstantCast(_)
                     )
                 }) {
                     let mut dimensions = PackedDimensions::new(
@@ -528,6 +534,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 is_local,
             );
             parameter.packed_ranges = parameter_ranges.clone();
+            parameter.members = parameter_members.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
             environment.append(&parameter);
             parameters.push(parameter);
@@ -1424,8 +1431,12 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             signed,
         },
         ConstExpr::Function { name, args, .. } => Expr::Call {
+            arg_order: Vec::new(),
             name,
-            args: args.into_iter().map(const_expr_to_expr).collect(),
+            args: args
+                .into_iter()
+                .map(|arg| Some(const_expr_to_expr(arg)))
+                .collect(),
         },
         ConstExpr::Unary { op, expr } => Expr::Unary {
             op,

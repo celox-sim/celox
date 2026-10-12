@@ -250,19 +250,19 @@
     },
     {
       "category": "Functions",
-      "detail": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+      "detail": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_function_return_dimensions",
         "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
+        "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_function_return_dimensions",
-        "observed_version": "Icarus 13.0",
-        "phase": "execute",
-        "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
-        "upstream": []
+        ]
       },
       "name": "system_functions::dimensions_resolves_imported_function_returns",
       "phase": "skip",

@@ -494,7 +494,7 @@ impl Flow<'_> {
                 }
                 Ok(Exits::default())
             }
-            Stmt::Call { name, args } => {
+            Stmt::Call { name, args, .. } => {
                 let mut outputs = false;
                 for (index, arg) in args.iter().enumerate() {
                     let Some(arg) = arg else {
@@ -584,7 +584,7 @@ impl Flow<'_> {
                 }
                 // A task may write an output or inout argument; one of a
                 // subroutine whose directions are unknown may be either.
-                Stmt::Call { name, args } => {
+                Stmt::Call { name, args, .. } => {
                     let directions = self.directions.get(name);
                     writes |= args.iter().enumerate().any(|(index, arg)| {
                         arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
@@ -615,7 +615,7 @@ impl Flow<'_> {
         visit_calls(expr, &mut |name, args| {
             let directions = self.directions.get(name);
             writes |= args.iter().enumerate().any(|(index, arg)| {
-                expr_reads(arg, self.name)
+                arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
                     && directions
                         .and_then(|directions| directions.get(index))
                         .is_some_and(|direction| {
@@ -673,12 +673,12 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
 }
 
 /// Call `f` with the name and arguments of every call in `expr`.
-fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Expr])) {
+fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Option<Expr>])) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
-        Expr::Call { name, args } => {
+        Expr::Call { name, args, .. } => {
             f(name, args);
-            for arg in args {
+            for arg in args.iter().flatten() {
                 visit_calls(arg, f);
             }
         }
@@ -740,7 +740,7 @@ fn expr_reads(expr: &Expr, name: &str) -> bool {
                 || expr_reads(then_expr, name)
                 || expr_reads(else_expr, name)
         }
-        Expr::Call { args, .. } => args.iter().any(|arg| expr_reads(arg, name)),
+        Expr::Call { args, .. } => args.iter().flatten().any(|arg| expr_reads(arg, name)),
         Expr::Inside { expr, items } => {
             expr_reads(expr, name)
                 || items.iter().any(|item| match item {
@@ -809,7 +809,7 @@ fn expr_is_constant(expr: &Expr) -> bool {
         // A call is constant when it folds, as a pure system function or a
         // constant function of constant arguments does.
         Expr::Call { args, .. } => {
-            args.iter().all(expr_is_constant)
+            args.iter().flatten().all(expr_is_constant)
                 && expr_to_const(expr.clone())
                     .and_then(|call| eval_ast_const_expr(&call, &HashMap::default()))
                     .is_some()

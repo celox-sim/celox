@@ -119,13 +119,17 @@ pub(super) fn expr_from_expression_for_lvalue(
         if let LValue::Ident(name) = lhs
             && let Some(shape) = packed_dimensions.get(name)
         {
-            return patterns::expr_from_pattern(
+            let value = patterns::expr_from_pattern(
                 &pattern.nodes.1,
                 shape,
                 syntax_tree,
                 packed_dimensions,
-            )
-            .or_else(|pattern_error| {
+            );
+            // The legacy structure fallback cannot concatenate union aliases.
+            if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
+                return value;
+            }
+            return value.or_else(|pattern_error| {
                 // A packed structure or a vector `default` fill.
                 expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions)
                     .map_err(|_| pattern_error)
@@ -363,9 +367,17 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
                 .map(|item| item.map(&mut |operand| guard_zero_divisions(operand)))
                 .collect(),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
             name,
-            args: args.into_iter().map(guard_zero_divisions).collect(),
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| arg.map(guard_zero_divisions))
+                .collect(),
         },
     }
 }
@@ -663,8 +675,9 @@ fn expr_from_system_function_call(
                 )?);
             }
             Ok(Expr::Call {
+                arg_order: Vec::new(),
                 name: name.to_string(),
-                args,
+                args: args.into_iter().map(Some).collect(),
             })
         }
         "$clog2" | "$countones" | "$onehot" | "$onehot0" | "$isunknown" => {
@@ -688,8 +701,9 @@ fn expr_from_system_function_call(
                 return Ok(Expr::Literal(value.to_string()));
             }
             Ok(Expr::Call {
+                arg_order: Vec::new(),
                 name: name.to_string(),
-                args: vec![arg],
+                args: vec![Some(arg)],
             })
         }
         _ => Err(AnalyzerError::Unsupported(format!(
@@ -749,26 +763,28 @@ pub(super) fn expr_from_tf_call(
                 .and_then(|metadata| metadata.arguments.as_deref())
         })
         .flatten();
-    let actuals = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
-        None => Vec::new(),
-        Some(sv_parser::ListOfArguments::Ordered(args)) => {
-            let contents = args.nodes.0.contents();
-            if contents.len() == 1 && contents[0].is_none() {
-                Vec::new()
-            } else {
-                contents
-            }
-        }
-        Some(sv_parser::ListOfArguments::Named(_)) => {
-            return Err(unsupported(format!("named arguments of `{name}`")));
-        }
+    let query_names;
+    let signatures = if let Some(formals) = query_formals {
+        query_names = HashMap::from_iter([(
+            name.clone(),
+            formals.iter().map(|formal| formal.name.clone()).collect(),
+        )]);
+        &query_names
+    } else {
+        &packed_dimensions.subroutine_param_names
     };
+    let (bindings, arg_order) = bind_call_arguments(
+        &name,
+        call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
+        syntax_tree,
+        signatures,
+    )?;
     if let Some(formals) = query_formals {
-        if actuals.len() > formals.len() {
+        if bindings.len() > formals.len() {
             return Err(unsupported(format!("extra arguments of `{name}`")));
         }
         for (position, formal) in formals.iter().enumerate() {
-            if actuals.get(position).is_none_or(|actual| actual.is_none()) && !formal.has_default {
+            if bindings.get(position).is_none_or(|actual| actual.is_none()) && !formal.has_default {
                 return Err(unsupported(format!(
                     "omitted argument {} of `{name}`",
                     position + 1
@@ -777,18 +793,10 @@ pub(super) fn expr_from_tf_call(
         }
     }
     let mut args = Vec::new();
-    for (position, expression) in actuals.into_iter().enumerate() {
-        let Some(expression) = expression.as_ref() else {
-            if query_formals.is_some_and(|formals| formals[position].has_default) {
-                // The query never evaluates the call or its default expression.
-                // Keep the argument positions while querying the return type.
-                args.push(Expr::Literal("0".into()));
-                continue;
-            }
-            return Err(unsupported(format!(
-                "omitted argument {} of `{name}`",
-                position + 1
-            )));
+    for (position, expr) in bindings.into_iter().enumerate() {
+        let Some(expr) = expr else {
+            args.push(None);
+            continue;
         };
         let shape = packed_dimensions
             .subroutine_param_shapes
@@ -796,14 +804,14 @@ pub(super) fn expr_from_tf_call(
             .and_then(|shapes| shapes.get(position));
         if let Some(shape) = shape {
             check_unpacked_array_assignment(
-                expression,
+                expr,
                 shape,
                 || format!("argument {} of `{name}`", position + 1),
                 syntax_tree,
                 packed_dimensions,
             )?;
         }
-        let argument = match (patterns::pattern_expression(expression), shape) {
+        let arg = match (patterns::pattern_expression(expr), shape) {
             (Some(pattern), Some(shape)) if pattern.nodes.0.is_none() => {
                 patterns::expr_from_pattern(
                     &pattern.nodes.1,
@@ -812,19 +820,23 @@ pub(super) fn expr_from_tf_call(
                     packed_dimensions,
                 )?
             }
-            _ => expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?,
+            _ => expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?,
         };
         if query_formals.is_some_and(|formals| formals[position].direction.is_written())
-            && !query_actual_is_writable(&argument, packed_dimensions)
+            && !query_actual_is_writable(&arg, packed_dimensions)
         {
             return Err(unsupported(format!(
                 "non-writable argument {} of `{name}`",
                 position + 1
             )));
         }
-        args.push(argument);
+        args.push(Some(arg));
     }
-    Ok(Expr::Call { name, args })
+    Ok(Expr::Call {
+        name,
+        args,
+        arg_order,
+    })
 }
 
 fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
@@ -930,4 +942,75 @@ pub(super) fn system_tf_call_parts<'a>(
         }
     };
     Some((syntax_tree.get_str(&identifier.nodes.0)?, args))
+}
+
+/// Bind actuals to formal positions while retaining their source order.
+/// IEEE 1800-2023 13.5.4 allows positional actuals followed by named actuals.
+pub(super) fn bind_call_arguments<'a>(
+    name: &str,
+    args: Option<&'a sv_parser::ListOfArguments>,
+    tree: &SyntaxTree,
+    signatures: &HashMap<String, Vec<String>>,
+) -> Converted<(Vec<Option<&'a sv_parser::Expression>>, Vec<usize>)> {
+    let Some(args) = args else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let (mut positional, named): (Vec<_>, Vec<_>) = match args {
+        sv_parser::ListOfArguments::Ordered(args) => {
+            let contents = args.nodes.0.contents();
+            let positional = if contents.len() == 1 && contents[0].is_none() {
+                Vec::new()
+            } else {
+                contents.into_iter().map(|arg| arg.as_ref()).collect()
+            };
+            (
+                positional,
+                args.nodes
+                    .1
+                    .iter()
+                    .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref()))
+                    .collect(),
+            )
+        }
+        sv_parser::ListOfArguments::Named(args) => {
+            let mut named = vec![(&args.nodes.1, args.nodes.2.nodes.1.as_ref())];
+            named.extend(
+                args.nodes
+                    .3
+                    .iter()
+                    .map(|(_, _, identifier, value)| (identifier, value.nodes.1.as_ref())),
+            );
+            (Vec::new(), named)
+        }
+    };
+    if named.is_empty() {
+        return Ok((positional, Vec::new()));
+    }
+    let params = signatures
+        .get(name)
+        .ok_or_else(|| unsupported(format!("named arguments of `{name}`")))?;
+    if positional.len() > params.len() {
+        return Err(unsupported(format!("too many arguments of `{name}`")));
+    }
+    let mut order: Vec<_> = (0..positional.len()).collect();
+    let mut bound: HashSet<_> = order.iter().copied().collect();
+    positional.resize(params.len(), None);
+    for (identifier, expr) in named {
+        let formal = identifier_text(RefNode::Identifier(identifier), tree)
+            .ok_or_else(|| unsupported("named argument"))?;
+        let position = params
+            .iter()
+            .position(|param| *param == formal)
+            .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
+        if !bound.insert(position) {
+            return Err(unsupported(format!(
+                "duplicate argument `{formal}` of `{name}`"
+            )));
+        }
+        positional[position] = expr;
+        order.push(position);
+    }
+    // Defaults for unbound formals are resolved by the call lowerer.
+    order.extend((0..params.len()).filter(|position| !bound.contains(position)));
+    Ok((positional, order))
 }

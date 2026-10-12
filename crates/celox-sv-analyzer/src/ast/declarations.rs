@@ -146,7 +146,7 @@ pub(super) fn ports_from_module_node(
 }
 
 /// The positional interface of a module: its ports in declaration order and
-/// the overridable (non-local, non-type) parameters of its `#(...)` list.
+/// its overridable value parameters: in the header when present, otherwise body.
 pub(super) fn module_interface_from_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -170,7 +170,7 @@ pub(super) fn module_interface_from_node(
         }
     }
     let mut parameters = Vec::new();
-    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node) {
+    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node.clone()) {
         let push_declaration = |declaration: &sv_parser::ParameterPortDeclaration,
                                 parameters: &mut Vec<String>| {
             if matches!(
@@ -216,6 +216,25 @@ pub(super) fn module_interface_from_node(
                 }
             }
             sv_parser::ParameterPortList::Empty(_) => {}
+        }
+    }
+    if module_parameter_port_list(node.clone()).is_none() {
+        for declaration in scope_declarations(node) {
+            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) =
+                declaration
+            else {
+                continue;
+            };
+            for child in RefNode::ParameterDeclaration(&declaration.0) {
+                if let RefNode::ParamAssignment(parameter) = child
+                    && let Some(name) = identifier_text(
+                        RefNode::ParameterIdentifier(&parameter.nodes.0),
+                        syntax_tree,
+                    )
+                {
+                    parameters.push(name);
+                }
+            }
         }
     }
     Ok(ModuleInterface { ports, parameters })
@@ -593,27 +612,6 @@ fn signals_from_module_common_item(
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item
-        && always_kind(always) == AlwaysKind::Comb
-    {
-        // A variable declared inside an `always_comb` block is hoisted to a
-        // module signal. A clash with another signal of the same name is
-        // reported as a duplicate internal signal.
-        for node in RefNode::Statement(&always.nodes.1) {
-            if let RefNode::DataDeclaration(data) = node {
-                let mut declared = signals_from_data_declaration(
-                    data,
-                    syntax_tree,
-                    type_aliases,
-                    const_env,
-                    selected_name,
-                )?;
-                substitute_signal_local_constants(&mut declared, const_env);
-                signals.extend(declared);
-            }
-        }
-        return Ok(());
-    }
     if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = item {
         let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
             declaration,
