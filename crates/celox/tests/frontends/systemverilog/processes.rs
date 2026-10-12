@@ -1778,8 +1778,7 @@ fn repeated_watched_nbas_require_an_ordered_update_queue() {
         let error =
             Simulation::from_sv_sources(vec![(&source, Path::new("ordered_nba.sv"))], "Top")
                 .build()
-                .err()
-                .expect("collapsed watched NBA pulse must be rejected")
+                .expect_err("collapsed watched NBA pulse must be rejected")
                 .to_string();
         assert!(error.contains("require ordered NBA updates"), "{error}");
     }

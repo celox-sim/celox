@@ -52,9 +52,6 @@ all_backends! {
         @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
     }
     fn dynamic_param_array_read_uses_its_elements(sim) {
-        // SV frontend rejects the unpacked-array parameter override `#(.Q('{-3, -5}))`:
-        // "parameter override expression" (#88).
-        @ignore_on(sv);
         @case "veryl_context_regressions::dynamic_param_array_read_uses_its_elements";
     }
     fn constant_case_target_uses_comparison_context(sim) {
