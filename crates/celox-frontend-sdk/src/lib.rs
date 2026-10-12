@@ -877,7 +877,16 @@ impl FrontendArtifact {
         }
         // The same requirements as `ModuleBuilder::clock_period` and
         // `ModuleBuilder::process` put on the clocks processes wait on.
+        let mut declared_clocks = std::collections::BTreeSet::new();
         for (clock, period) in &self.clock_periods {
+            if !declared_clocks.insert(clock.index()) {
+                let name = self
+                    .signal(*clock)
+                    .ok_or(BuildError::UnknownSignal(clock.index()))?
+                    .name
+                    .clone();
+                return Err(BuildError::DuplicateClockPeriod { name });
+            }
             let signal = self
                 .signal(*clock)
                 .ok_or(BuildError::UnknownSignal(clock.index()))?;
@@ -1042,6 +1051,8 @@ pub enum BuildError {
     InvalidControlWidth { name: String },
     #[error("a clock period must be at least two time units, not {period}")]
     InvalidClockPeriod { period: u64 },
+    #[error("duplicate process-clock period for `{name}`")]
+    DuplicateClockPeriod { name: String },
     #[error("clock `{name}` needs a period and a register it clocks before a process waits on it")]
     UnknownProcessClock { name: String },
     #[error("process clock `{name}` also has a continuous, register or process driver")]
