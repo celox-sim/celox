@@ -334,6 +334,56 @@ mod timed_staging_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    #[ignore = "requires Icarus, Verilator and a C++ compiler; frontend lacks implicit generate hierarchy analysis"]
+    fn ff_staging_preserves_implicit_generate_names() {
+        let text = r##"(group names (category sequential))
+(case names (source "names.sv" #"module Top(input bit clk,output bit q,y);
+ always_ff @(posedge clk) q<=1;
+ if(1) begin bit x;assign x=1;end
+ assign y=genblk1.x;
+ endmodule"#)(top Top)(set clk 1)(run_until 0)(assert_eq q 1)(assert_eq y 1))"##;
+        let case = load_group("names.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/generate-name-protocol")
+            .join(std::process::id().to_string());
+        struct NamesFrontend;
+        impl celox_test_suite::frontend::Frontend for NamesFrontend {
+            fn source_extension(&self) -> &'static str {
+                "sv"
+            }
+            fn prepare(
+                &self,
+                design: &celox_test_suite::Design,
+            ) -> celox_test_suite::Result<celox_test_suite::frontend::PreparedDesign> {
+                let frontend = celox_test_suite::sv::verification::SvFrontend;
+                let mut actual = frontend.prepare(design)?;
+                // The adapter preserves names even when the frontend cannot
+                // analyze the original implicit generate hierarchy.
+                let stub = celox_test_suite::Design::new(
+                    "module Top(input bit clk, output bit q,y); endmodule",
+                    "Top",
+                );
+                actual.info = frontend.prepare(&stub)?.info;
+                Ok(actual)
+            }
+        }
+        let frontend = NamesFrontend;
+        let mut icarus =
+            celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+                .unwrap();
+        icarus.run_testbench().unwrap();
+        let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+            &frontend,
+            case,
+            &root.join("verilator"),
+        )
+        .unwrap();
+        verilator.run_testbench().unwrap();
+        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     #[ignore = "requires Verilator and a C++ compiler; Icarus rejects deferred assertions"]
     fn deferred_assertions_retain_staged_edges() {
         let text = r##"(group deferred (category sequential))

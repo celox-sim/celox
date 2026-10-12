@@ -2191,6 +2191,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             site_id,
             args: regs,
         });
+        if matches!(kind, SystemTaskKind::Finish) {
+            self.b.seal_block(SIRTerminator::Return);
+            return Ok(false);
+        }
         if matches!(kind, SystemTaskKind::Fatal) {
             let code = self
                 .m
@@ -2696,6 +2700,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     pub fn lower_process(
         mut self,
         body: &[sv::ir::Stmt],
+        events: &[sv::ir::FfEvent],
     ) -> Result<
         (
             ExecutionUnit<Addr>,
@@ -2710,7 +2715,21 @@ impl<'p, 'a> Ff<'p, 'a> {
         // Ordered pulses are unsupported only when a feasible path updates
         // a watched expression more than once.
         for watcher in &self.m.event_watchers {
-            if watched_nba_count(body, self.m, &watcher.expr, &mut HashSet::default()) > 1 {
+            let count = self
+                .m
+                .ff_processes
+                .iter()
+                .filter(|process| process.events().iter().any(|event| events.contains(event)))
+                .map(|process| {
+                    watched_nba_count(
+                        process.body(),
+                        self.m,
+                        &watcher.expr,
+                        &mut HashSet::default(),
+                    )
+                })
+                .sum::<usize>();
+            if count > 1 {
                 return Err(unsupported(
                     "multiple nonblocking assignments affecting an event expression require ordered NBA updates",
                 ));
