@@ -20,7 +20,7 @@ pub(super) fn system_inputs(kind: &SystemFunctionKind) -> Vec<&Expression> {
         SystemFunctionKind::Finish => Vec::new(),
     }
 }
-fn selection<'s>(index: &'s VarIndex, select: &'s VarSelect) -> Vec<&'s Expression> {
+pub(super) fn selection<'s>(index: &'s VarIndex, select: &'s VarSelect) -> Vec<&'s Expression> {
     index
         .0
         .iter()
@@ -33,7 +33,15 @@ pub(super) fn children(expr: &Expression) -> Vec<&Expression> {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(_, index, select, _) => selection(index, select),
             Factor::HierVariable(reference) => selection(&reference.index, &reference.select),
-            Factor::FunctionCall(call) => call.inputs.values().collect(),
+            Factor::FunctionCall(call) => call
+                .inputs
+                .values()
+                .chain(call.outputs.values().flat_map(|destinations| {
+                    destinations
+                        .iter()
+                        .flat_map(|dst| selection(&dst.index, &dst.select))
+                }))
+                .collect(),
             Factor::SystemFunctionCall(call)
                 if !matches!(
                     call.kind,
@@ -105,16 +113,30 @@ pub(super) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
                 })
                 .collect()
         }
-        Statement::FunctionCall(call) => call.inputs.values().collect(),
+        Statement::FunctionCall(call) => call
+            .inputs
+            .values()
+            .chain(call.outputs.values().flat_map(|destinations| {
+                destinations
+                    .iter()
+                    .flat_map(|dst| selection(&dst.index, &dst.select))
+            }))
+            .collect(),
         Statement::SystemFunctionCall(call) => system_inputs(&call.kind),
-        Statement::TbMethodCall(tb) => match &tb.method {
-            TbMethod::ClockNext { count, .. } => count.iter().collect(),
-            TbMethod::ResetAssert { duration, .. } => duration.iter().collect(),
-            TbMethod::RandomSeed { value, .. } => vec![value],
-            TbMethod::RandomGetRange { min, max, .. } => vec![min, max],
-            TbMethod::Component { args, .. } => args.iter().map(|arg| &arg.0).collect(),
-            _ => Vec::new(),
-        },
+        Statement::TbMethodCall(tb) => {
+            let mut inputs: Vec<&Expression> = match &tb.method {
+                TbMethod::ClockNext { count, .. } => count.iter().collect(),
+                TbMethod::ResetAssert { duration, .. } => duration.iter().collect(),
+                TbMethod::RandomSeed { value, .. } => vec![value],
+                TbMethod::RandomGetRange { min, max, .. } => vec![min, max],
+                TbMethod::Component { args, .. } => args.iter().map(|arg| &arg.0).collect(),
+                _ => Vec::new(),
+            };
+            if let Some(ret) = tb.ret.as_deref() {
+                inputs.extend(selection(&ret.index, &ret.select));
+            }
+            inputs
+        }
         _ => Vec::new(),
     }
 }

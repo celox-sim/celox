@@ -1909,6 +1909,7 @@ impl<B: SimBackend> SimulationState<B> {
             done: self.done.clone(),
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
+            tick_budget: self.tick_budget,
             inactive: self.inactive.clone(),
             scheduled_clock_drives: self.scheduled_clock_drives.clone(),
             scheduled_clock_time: self.scheduled_clock_time,
@@ -1967,6 +1968,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.done.clone_from(&snapshot.done);
         self.pending_releases.clone_from(&snapshot.pending_releases);
         self.ticks = snapshot.ticks;
+        self.tick_budget = snapshot.tick_budget;
         self.inactive.clone_from(&snapshot.inactive);
         self.scheduled_clock_drives
             .clone_from(&snapshot.scheduled_clock_drives);
@@ -2168,6 +2170,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     done: BTreeSet<usize>,
     pending_releases: BTreeMap<usize, usize>,
     ticks: u64,
+    tick_budget: Option<u64>,
     inactive: BTreeSet<usize>,
     scheduled_clock_drives: BitSet,
     scheduled_clock_time: u64,
@@ -2190,6 +2193,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             done: self.done.clone(),
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
+            tick_budget: self.tick_budget,
             inactive: self.inactive.clone(),
             scheduled_clock_drives: self.scheduled_clock_drives.clone(),
             scheduled_clock_time: self.scheduled_clock_time,

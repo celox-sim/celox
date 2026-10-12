@@ -297,6 +297,24 @@ fn constant_empty_range(range: &ForRange) -> bool {
     }
 }
 
+fn constant_nonempty_range(range: &ForRange) -> bool {
+    let (start, end) = match range {
+        ForRange::Forward { start, end, .. }
+        | ForRange::Reverse { start, end, .. }
+        | ForRange::Stepped { start, end, .. } => (start, end),
+    };
+    matches!((start, end), (ForBound::Const(..), ForBound::Const(..)))
+        && !constant_empty_range(range)
+}
+fn contains_loop_break(statements: &[Statement]) -> bool {
+    statements.iter().any(|stmt| {
+        matches!(stmt, Statement::Break)
+            || expressions::statement_bodies(stmt)
+                .iter()
+                .any(|body| contains_loop_break(body))
+    })
+}
+
 /// How a `for` loop compares and steps, following the testbench
 /// interpreter: the counter is kept at its own width, bounds compare in
 /// the counter's signedness only when the bound is signed too, and a
@@ -1273,7 +1291,13 @@ impl<'a> BlockLowering<'a> {
                     }
                 }
                 Statement::For(stmt) if !constant_empty_range(&stmt.range) => {
-                    self.scan_clocks(&stmt.body, active);
+                    let continues = self.scan_clocks(&stmt.body, active);
+                    if !continues
+                        && constant_nonempty_range(&stmt.range)
+                        && !contains_loop_break(&stmt.body)
+                    {
+                        return false;
+                    }
                 }
                 Statement::FunctionCall(call) => {
                     if active.insert(call.id)
@@ -1428,6 +1452,19 @@ impl<'a> BlockLowering<'a> {
             comptime: Default::default(),
             token,
         }
+    }
+
+    fn copy_back(
+        &mut self,
+        destination: &AssignDestination,
+        load: impl FnOnce(&mut Self) -> Result<RegisterId, ParserError>,
+    ) -> Result<(), ParserError> {
+        let inputs = expressions::selection(&destination.index, &destination.select);
+        let bindings = self.expression_bindings(&inputs)?;
+        self.parser.push_process_expression_values(bindings);
+        let result = load(self).and_then(|value| self.store(destination, value));
+        self.parser.pop_process_expression_values();
+        result
     }
 
     fn store(
@@ -2183,7 +2220,8 @@ impl<'a> BlockLowering<'a> {
         self.parser.loop_exit_blocks_mut().push(exit);
         let flow = self.lower_statements(&stmt.body);
         self.parser.loop_exit_blocks_mut().pop();
-        if let Flow::Continue = flow? {
+        let body_flow = flow?;
+        if let Flow::Continue = body_flow {
             self.kernel
                 .builder()
                 .seal_block(SIRTerminator::Jump(latch, Vec::new()));
@@ -2270,7 +2308,16 @@ impl<'a> BlockLowering<'a> {
         }
         self.kernel.builder().switch_to_block(exit);
         self.parser.clear_register_cache();
-        Ok(Flow::Continue)
+        if matches!(body_flow, Flow::Ended)
+            && constant_nonempty_range(&stmt.range)
+            && !contains_loop_break(&stmt.body)
+        {
+            // The exit is unreachable for this known nonempty terminating body.
+            self.kernel.finish();
+            Ok(Flow::Ended)
+        } else {
+            Ok(Flow::Continue)
+        }
     }
 
     /// `value` at `width` bits, sign-extended when `signed`.
@@ -2602,8 +2649,7 @@ impl<'a> BlockLowering<'a> {
             };
             if let Some(&formal) = body.arg_map.get(path) {
                 for destination in destinations {
-                    let value = self.load_var(formal)?;
-                    self.store(destination, value)?;
+                    self.copy_back(destination, |this| this.load_var(formal))?;
                 }
             }
         }
@@ -2719,9 +2765,9 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    let value = self.load_scratch(slot, result_width, *signed);
-                    let _ = width;
-                    self.store(ret, value)?;
+                    self.copy_back(ret, |this| {
+                        Ok(this.load_scratch(slot, result_width, *signed))
+                    })?;
                 }
                 Ok(Flow::Continue)
             }
@@ -2758,8 +2804,9 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    let value = self.load_scratch(slot, result_width, *signed);
-                    self.store(ret, value)?;
+                    self.copy_back(ret, |this| {
+                        Ok(this.load_scratch(slot, result_width, *signed))
+                    })?;
                 }
                 Ok(Flow::Continue)
             }
@@ -2770,8 +2817,7 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    let value = self.load_scratch(slot, 64, false);
-                    self.store(ret, value)?;
+                    self.copy_back(ret, |this| Ok(this.load_scratch(slot, 64, false)))?;
                 }
                 Ok(Flow::Continue)
             }
@@ -2824,8 +2870,9 @@ impl<'a> BlockLowering<'a> {
                     strict: tb.ret_strict,
                 })?;
                 if let (Some(ret), Some((value, slot))) = (tb.ret.as_deref(), result) {
-                    let reg = self.load_scratch(slot, value.width, tb.ret_signed);
-                    self.store(ret, reg)?;
+                    self.copy_back(ret, |this| {
+                        Ok(this.load_scratch(slot, value.width, tb.ret_signed))
+                    })?;
                 }
                 Ok(Flow::Continue)
             }

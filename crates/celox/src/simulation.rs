@@ -150,6 +150,8 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.vcd_writer.is_none()
             && !self.components.has_scheduled_components()
             && self.program.runtime_schema.comb_observers.is_empty()
+            // Design events must return to the scheduler to drain the ring.
+            && self.program.runtime_schema.runtime_event_sites.iter().all(|site|site.location.is_some())
             && !self.program.runtime_schema.clock_phase_sensitive_comb
     }
 
@@ -2058,5 +2060,26 @@ mod rtl_finish_backend_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(builder().build_native().unwrap()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tick_budget_snapshot_tests {
+    use super::*;
+    #[test]
+    fn restoring_a_checkpoint_restores_the_remaining_tick_budget() {
+        let code =
+            "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{clk.next(3);$finish();}}";
+        let mut sim = Simulation::new(Simulator::builder(code, "Top").build_interpreter().unwrap());
+        sim.state.set_tick_budget(Some(1));
+        let saved = sim.checkpoint().unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert!(sim.state.tick_budget_spent());
+        sim.restore(&saved).unwrap();
+        assert!(!sim.state.tick_budget_spent());
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert!(sim.state.tick_budget_spent());
     }
 }

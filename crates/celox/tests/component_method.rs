@@ -3182,3 +3182,19 @@ fn invalid_component_returns_precede_output_assertions() {
         );
     }
 }
+
+#[test]
+fn component_return_selection_helpers_resume() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"#[test(t)]module t{inst clk:$tb::clock_gen;var c:$comp::celox_counter;var words:u8[2];
+ function index()->u32{clk.next();$assert(1,"index");return 1;}
+ initial{c.set(7);words[index()]=c.get();$assert(words[1]==7);$finish();}}"#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}

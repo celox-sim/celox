@@ -1263,3 +1263,35 @@ fn private_assignments_and_event_yields_do_not_replay_clean_comb_logic() {
     assert_eq!(count("helper();"), count(""));
     assert_eq!(count(&"$assert(1);".repeat(600)), count(""));
 }
+
+#[test]
+fn copyback_selection_helpers_resume_for_random_and_function_outputs() {
+    for action in [
+        "words[index()]=random.get_range(7,7);",
+        "give(words[index()]);",
+    ] {
+        let code = format!(
+            r#"#[test(Top)]module Top{{inst clk:$tb::clock_gen;var random:$tb::random::<u8>;var words:u8[2];
+   function index()->u32{{clk.next();$assert(1,"index");return 1;}}
+   function give(value:output u8){{value=7;}}
+   initial{{{action}$assert(words[1]==7);$finish();}}
+  }}"#
+        );
+        check_passes_on_every_backend(&code);
+    }
+}
+#[test]
+fn guaranteed_finish_loops_do_not_register_unreachable_clocks() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{for i in 0..1{$finish();}clk.next();}}"#;
+    let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
+    let clk = sim.signal("clk");
+    sim.set(clk, 1u8);
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    assert_eq!(sim.get(clk), 1u8.into());
+}
+#[test]
+fn long_clock_waits_drain_design_runtime_events() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:u32;always_ff(clk){$display("edge");q+=1;}initial{clk.next(1500);$assert(q==1500);$finish();}}"#;
+    check_passes_on_every_backend(code);
+}
