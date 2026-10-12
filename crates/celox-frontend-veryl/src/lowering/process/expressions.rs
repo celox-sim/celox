@@ -148,6 +148,9 @@ pub(super) fn statement_bodies(statement: &Statement) -> Vec<&[Statement]> {
             None => vec![&stmt.true_side, &stmt.false_side],
         },
         Statement::IfReset(stmt) => vec![&stmt.true_side, &stmt.false_side],
+        Statement::Case(stmt) if selected_case_body(stmt).is_some() => {
+            vec![selected_case_body(stmt).unwrap()]
+        }
         Statement::Case(stmt) => stmt
             .arms
             .iter()

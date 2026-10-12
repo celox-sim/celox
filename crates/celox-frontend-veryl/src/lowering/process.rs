@@ -251,6 +251,21 @@ fn constant_truth(expr: &Expression) -> Option<bool> {
     }
 }
 
+type FunctionKey = (VarId, Option<Vec<usize>>);
+fn function_key(call: &veryl_analyzer::ir::FunctionCall) -> FunctionKey {
+    (call.id, call.index.clone())
+}
+fn selected_case_body(stmt: &veryl_analyzer::ir::CaseStatement) -> Option<&[Statement]> {
+    for arm in &stmt.arms {
+        match constant_truth(&case_arm_condition_expr(&stmt.case_target, &arm.patterns)) {
+            Some(true) => return Some(&arm.body),
+            Some(false) => {}
+            None => return None,
+        }
+    }
+    Some(&stmt.default)
+}
+
 /// Whether a range with constant bounds has no value.
 fn constant_empty_range(range: &ForRange) -> bool {
     let constant = |bound: &ForBound| match bound {
@@ -435,13 +450,13 @@ fn function_body(
 fn collect_expression_storage(
     ir: &Module,
     statements: &[Statement],
-    active: &mut HashSet<VarId>,
+    active: &mut HashSet<FunctionKey>,
     values: &mut HashMap<TokenRange, usize>,
 ) {
     fn expr(
         ir: &Module,
         value: &Expression,
-        active: &mut HashSet<VarId>,
+        active: &mut HashSet<FunctionKey>,
         values: &mut HashMap<TokenRange, usize>,
     ) {
         if expressions::has_call(value) {
@@ -455,12 +470,12 @@ fn collect_expression_storage(
         }
         if let Expression::Term(factor) = value
             && let veryl_analyzer::ir::Factor::FunctionCall(call) = factor.as_ref()
-            && active.insert(call.id)
+            && active.insert(function_key(call))
         {
             if let Some(body) = function_body(&ir.functions, call) {
                 collect_expression_storage(ir, &body.statements, active, values);
             }
-            active.remove(&call.id);
+            active.remove(&function_key(call));
         }
     }
     for statement in statements {
@@ -487,12 +502,12 @@ fn collect_expression_storage(
             }
         }
         if let Statement::FunctionCall(call) = statement
-            && active.insert(call.id)
+            && active.insert(function_key(call))
         {
             if let Some(body) = function_body(&ir.functions, call) {
                 collect_expression_storage(ir, &body.statements, active, values);
             }
-            active.remove(&call.id);
+            active.remove(&function_key(call));
         }
         for body in expressions::statement_bodies(statement) {
             collect_expression_storage(ir, body, active, values);
@@ -523,7 +538,7 @@ fn scratch_needs(ir: &Module, statements: &[Statement]) -> Result<Vec<ScratchNee
 fn contains_runtime_event(
     ir: &Module,
     statements: &[Statement],
-    active: &mut HashSet<VarId>,
+    active: &mut HashSet<FunctionKey>,
 ) -> bool {
     for statement in statements {
         if matches!(statement, Statement::SystemFunctionCall(call) if matches!(call.kind, SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) | SystemFunctionKind::Assert {..}))
@@ -538,10 +553,10 @@ fn contains_runtime_event(
             calls.push(call);
         }
         for call in calls {
-            if active.insert(call.id) {
+            if active.insert(function_key(call)) {
                 let emits = function_body(&ir.functions, call)
                     .is_some_and(|body| contains_runtime_event(ir, &body.statements, active));
-                active.remove(&call.id);
+                active.remove(&function_key(call));
                 if emits {
                     return true;
                 }
@@ -559,7 +574,7 @@ fn contains_runtime_event(
 fn collect_scratch_needs(
     ir: &Module,
     statements: &[Statement],
-    active: &mut HashSet<VarId>,
+    active: &mut HashSet<FunctionKey>,
     needs: &mut Vec<ScratchNeed>,
 ) -> Result<(), ParserError> {
     let need = |needs: &mut Vec<ScratchNeed>, purpose: &'static str, width: usize| {
@@ -574,11 +589,11 @@ fn collect_scratch_needs(
             expressions::expression_calls(expr, &mut calls);
         }
         for call in calls {
-            if active.insert(call.id) {
+            if active.insert(function_key(call)) {
                 if let Some(body) = function_body(&ir.functions, call) {
                     collect_scratch_needs(ir, &body.statements, active, needs)?;
                 }
-                active.remove(&call.id);
+                active.remove(&function_key(call));
             }
         }
         match statement {
@@ -594,11 +609,10 @@ fn collect_scratch_needs(
                 collect_scratch_needs(ir, &stmt.true_side, active, needs)?;
                 collect_scratch_needs(ir, &stmt.false_side, active, needs)?;
             }
-            Statement::Case(stmt) => {
-                for arm in &stmt.arms {
-                    collect_scratch_needs(ir, &arm.body, active, needs)?;
+            Statement::Case(_) => {
+                for body in expressions::statement_bodies(statement) {
+                    collect_scratch_needs(ir, body, active, needs)?;
                 }
-                collect_scratch_needs(ir, &stmt.default, active, needs)?;
             }
             Statement::For(stmt) => {
                 if constant_empty_range(&stmt.range) {
@@ -613,11 +627,11 @@ fn collect_scratch_needs(
                 collect_scratch_needs(ir, &stmt.body, active, needs)?;
             }
             Statement::FunctionCall(call) => {
-                if active.insert(call.id)
+                if active.insert(function_key(call))
                     && let Some(body) = function_body(&ir.functions, call)
                 {
                     collect_scratch_needs(ir, &body.statements, active, needs)?;
-                    active.remove(&call.id);
+                    active.remove(&function_key(call));
                 }
             }
             Statement::TbMethodCall(tb) => match &tb.method {
@@ -724,7 +738,7 @@ struct BlockLowering<'a> {
     host_requests: Vec<HostRequest<SourceAddr>>,
     clock_periods: &'a HashMap<StrId, u64>,
     resource_prefix: String,
-    active_functions: HashSet<VarId>,
+    active_functions: HashSet<FunctionKey>,
     site_base: u32,
     targets: Vec<VarAtomBase<RegionedSourceAddr>>,
     sources: Vec<VarAtomBase<RegionedSourceAddr>>,
@@ -1037,7 +1051,7 @@ fn resolve_hierarchical(
 fn collect_hierarchical_references(
     statements: &[Statement],
     functions: &HashMap<VarId, Function>,
-    active: &mut HashSet<VarId>,
+    active: &mut HashSet<FunctionKey>,
     out: &mut Vec<HierVarRef>,
 ) {
     let mut reads = Vec::new();
@@ -1086,11 +1100,11 @@ fn collect_hierarchical_references(
                 collect_hierarchical_references(&stmt.body, functions, active, out);
             }
             Statement::FunctionCall(call) => {
-                if active.insert(call.id)
+                if active.insert(function_key(call))
                     && let Some(body) = function_body(functions, call)
                 {
                     collect_hierarchical_references(&body.statements, functions, active, out);
-                    active.remove(&call.id);
+                    active.remove(&function_key(call));
                 }
             }
             Statement::TbMethodCall(_)
@@ -1220,7 +1234,7 @@ impl<'a> BlockLowering<'a> {
         self.scan_clocks(statements, &mut active);
     }
 
-    fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<VarId>) -> bool {
+    fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<FunctionKey>) -> bool {
         for statement in statements {
             let mut calls = Vec::new();
             let mut unconditional = Vec::new();
@@ -1229,10 +1243,10 @@ impl<'a> BlockLowering<'a> {
                 expressions::unconditional_expression_calls(expr, &mut unconditional);
             }
             for call in calls {
-                if active.insert(call.id) {
+                if active.insert(function_key(call)) {
                     if let Some(body) = function_body(&self.ir.functions, call) {
                         let continues = self.scan_clocks(&body.statements, active);
-                        active.remove(&call.id);
+                        active.remove(&function_key(call));
                         if !continues
                             && unconditional
                                 .iter()
@@ -1241,7 +1255,7 @@ impl<'a> BlockLowering<'a> {
                             return false;
                         }
                     } else {
-                        active.remove(&call.id);
+                        active.remove(&function_key(call));
                     }
                 }
             }
@@ -1282,6 +1296,12 @@ impl<'a> BlockLowering<'a> {
                     self.scan_clocks(&stmt.false_side, active);
                 }
                 Statement::Case(stmt) => {
+                    if let Some(body) = selected_case_body(stmt) {
+                        if !self.scan_clocks(body, active) {
+                            return false;
+                        }
+                        continue;
+                    }
                     let mut continues = self.scan_clocks(&stmt.default, active);
                     for arm in &stmt.arms {
                         continues |= self.scan_clocks(&arm.body, active);
@@ -1300,11 +1320,11 @@ impl<'a> BlockLowering<'a> {
                     }
                 }
                 Statement::FunctionCall(call) => {
-                    if active.insert(call.id)
+                    if active.insert(function_key(call))
                         && let Some(body) = function_body(&self.ir.functions, call)
                     {
                         let continues = self.scan_clocks(&body.statements, active);
-                        active.remove(&call.id);
+                        active.remove(&function_key(call));
                         if !continues {
                             return false;
                         }
@@ -1796,6 +1816,9 @@ impl<'a> BlockLowering<'a> {
     ) -> Result<Flow, ParserError> {
         let value = self.expression(&stmt.case_target)?;
         self.save_expression(&stmt.case_target, value)?;
+        if let Some(body) = selected_case_body(stmt) {
+            return self.lower_statements(body);
+        }
         self.lower_case_arm(stmt, 0)
     }
 
@@ -2616,7 +2639,7 @@ impl<'a> BlockLowering<'a> {
             }
             values.push((*path, *expr, value));
         }
-        if !self.active_functions.insert(call.id) {
+        if !self.active_functions.insert(function_key(call)) {
             return Err(self.error(
                 "function call in an initial block",
                 "recursive call",
@@ -2635,7 +2658,7 @@ impl<'a> BlockLowering<'a> {
             }
         }
         let flow = self.lower_statements(&body.statements)?;
-        self.active_functions.remove(&call.id);
+        self.active_functions.remove(&function_key(call));
         if let Flow::Ended = flow {
             return Ok(Flow::Ended);
         }

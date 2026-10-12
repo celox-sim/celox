@@ -1319,3 +1319,21 @@ fn optimized_mixed_testbenches_preserve_sv_process_pulses() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(builder().build_native().unwrap());
 }
+
+#[test]
+fn unselected_constant_case_arms_leave_host_clocks_unchanged() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{case 1 {1:{$assert(1);},2:{clk.next();},default:{$assert(0);}}$finish();}}"#;
+    let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
+    let clk = sim.signal("clk");
+    sim.set(clk, 1u8);
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    assert_eq!(sim.get(clk), 1u8.into());
+}
+#[test]
+fn function_specializations_can_call_other_specializations() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;
+ function helper::<N:u32>()->u32 {if N==0 {return helper::<1>();}else{clk.next();$assert(1);return 7;}}
+ initial{$assert(helper::<0>()==7);$finish();}}"#;
+    check_passes_on_every_backend(code);
+}
