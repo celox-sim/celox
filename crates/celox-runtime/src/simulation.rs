@@ -977,8 +977,11 @@ impl<B: SimBackend> SimulationState<B> {
             *id != usize::MAX
                 && self.edge_triggers(
                     *id,
-                    self.last_clock_values.contains(*id),
-                    backend.get_as::<u8>(*signal) != 0,
+                    (
+                        self.last_clock_values.contains(*id),
+                        self.unknown_clock_values.contains(*id),
+                    ),
+                    sample_event_signal(backend, *signal),
                 )
         })
     }
