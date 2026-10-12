@@ -140,7 +140,7 @@ module Top (
             panic!("unexpected event {event:?}");
         };
         // The display observes the pre-increment value under FF scheduling.
-        assert_eq!(message, &format!("tick {}", index));
+        assert_eq!(message, &format!("tick {}", index).into_bytes());
     }
 
     // Wait out background compilation, then drive more ticks on the
@@ -174,7 +174,7 @@ module Top (
             panic!("unexpected event {event:?}");
         };
         let expected = (u32::from(base) + index as u32) % 16;
-        assert_eq!(message, &format!("tick {expected}"));
+        assert_eq!(message, &format!("tick {expected}").into_bytes());
     }
 
     let expected_final = (u32::from(base) + POST_TICKS) % 16;

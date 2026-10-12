@@ -6,6 +6,26 @@ use celox::{DeadStorePolicy, Simulator};
 mod test_utils;
 
 all_backends! {
+fn test_runtime_messages_preserve_binary_bytes_in_four_state_mode(sim) {
+    @omit_veryl;
+    @build Simulator::builder(r#"
+module Top(d: input logic<24>, out: output logic<24>) {
+    always_comb {
+        out = d;
+        $write("%s%c", d, d);
+        $display("%s", d);
+    }
+}
+"#, "Top").four_state(true);
+    let d = sim.signal("d");
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(d, [0x80u8, 0, 0xff])).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![
+        celox::RuntimeEvent::Write { message: vec![255, 0, 128, 128] },
+        celox::RuntimeEvent::Display { message: vec![255, 0, 128] },
+    ]);
+}
+
 fn test_comb_display_preserves_argument_value_before_later_output_writeback(sim) {
     @omit_veryl;
     @build Simulator::builder(r#"
@@ -36,7 +56,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "before=1 ret=12".to_string(),
+            message: b"before=1 ret=12".to_vec(),
         }],
     );
 }
@@ -78,7 +98,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "before=1 local=7 ret=12".to_string(),
+            message: b"before=1 local=7 ret=12".to_vec(),
         }],
     );
 }
@@ -112,7 +132,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "ret=12 out=11".to_string(),
+            message: b"ret=12 out=11".to_vec(),
         }],
     );
 }
@@ -155,7 +175,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "first=12 second=11".to_string(),
+            message: b"first=12 second=11".to_vec(),
         }],
     );
 }
@@ -200,7 +220,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "first=1 second=12".to_string(),
+            message: b"first=1 second=12".to_vec(),
         }],
     );
 }
@@ -240,7 +260,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "first=12 module=11".to_string(),
+            message: b"first=12 module=11".to_vec(),
         }],
     );
 }
@@ -273,7 +293,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "x=0".to_string(),
+            message: b"x=0".to_vec(),
         }],
     );
 }
@@ -330,7 +350,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "index=1".to_string(),
+            message: b"index=1".to_vec(),
         }],
     );
 }
@@ -373,7 +393,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "if=10".to_string(),
+            message: b"if=10".to_vec(),
         }],
     );
 }
@@ -420,10 +440,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "rhs=10".to_string(),
+                message: b"rhs=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "rhs=11".to_string(),
+                message: b"rhs=11".to_vec(),
             },
         ],
     );
@@ -468,7 +488,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "target=2".to_string(),
+            message: b"target=2".to_vec(),
         }],
     );
 }
@@ -509,7 +529,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "index=2".to_string(),
+            message: b"index=2".to_vec(),
         }],
     );
 }
@@ -546,7 +566,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "wrapped=10".to_string(),
+            message: b"wrapped=10".to_vec(),
         }],
     );
 }
@@ -577,7 +597,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "case=11".to_string(),
+            message: b"case=11".to_vec(),
         }],
     );
 }
@@ -620,7 +640,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bound=1".to_string(),
+            message: b"bound=1".to_vec(),
         }],
     );
 }
@@ -651,7 +671,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "y=1".to_string(),
+            message: b"y=1".to_vec(),
         }],
     );
 
@@ -671,7 +691,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "y=1".to_string(),
+            message: b"y=1".to_vec(),
         }],
     );
 }
@@ -708,7 +728,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "tmp=5".to_string(),
+            message: b"tmp=5".to_vec(),
         }],
     );
 
@@ -738,7 +758,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "hi".to_string(),
+            message: b"hi".to_vec(),
         }],
     );
 
@@ -771,7 +791,7 @@ module Top {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "constant fail".to_string(),
+            message: b"constant fail".to_vec(),
         }],
     );
 }
@@ -861,7 +881,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=0".to_string(),
+            message: b"a=0".to_vec(),
         }],
     );
 }
@@ -889,7 +909,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "a must be set".to_string(),
+            message: b"a must be set".to_vec(),
         }],
     );
 }
@@ -916,7 +936,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=7".to_string(),
+            message: b"a=7".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 7);
@@ -946,7 +966,7 @@ module Top (
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=11".to_string(),
+            message: b"a=11".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 11);
@@ -977,7 +997,7 @@ module Top (
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=12".to_string(),
+            message: b"a=12".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 12);
@@ -1004,7 +1024,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=0".to_string(),
+            message: b"a=0".to_vec(),
         }],
     );
     let mut drain = sim.runtime_event_drain().expect("runtime event drain handle");
@@ -1014,7 +1034,7 @@ module Top (
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=13".to_string(),
+            message: b"a=13".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 13);
@@ -1058,10 +1078,10 @@ module Top (
         drain.drain(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "ff=3".to_string(),
+                message: b"ff=3".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "comb=3".to_string(),
+                message: b"comb=3".to_vec(),
             },
         ],
     );
@@ -1105,10 +1125,10 @@ module Top (
         drain.drain(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "comb=9".to_string(),
+                message: b"comb=9".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "ff=4".to_string(),
+                message: b"ff=4".to_vec(),
             },
         ],
     );
@@ -1142,7 +1162,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertContinue {
-            message: "bad y=1".to_string(),
+            message: b"bad y=1".to_vec(),
         }],
     );
 
@@ -1155,7 +1175,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertContinue {
-            message: "bad y=1".to_string(),
+            message: b"bad y=1".to_vec(),
         }],
     );
 
@@ -1195,7 +1215,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "fatal y".to_string(),
+            message: b"fatal y".to_vec(),
         }],
     );
 }
@@ -1270,10 +1290,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "comb=5".to_string(),
+                message: b"comb=5".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "ff=7".to_string(),
+                message: b"ff=7".to_vec(),
             },
         ],
     );
@@ -1322,7 +1342,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "q=7".to_string(),
+            message: b"q=7".to_vec(),
         }],
     );
 
@@ -1360,7 +1380,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "x=9".to_string(),
+            message: b"x=9".to_vec(),
         }],
     );
 }
@@ -1409,7 +1429,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=5 b=5".to_string(),
+            message: b"a=5 b=5".to_vec(),
         }],
     );
 }
@@ -1448,10 +1468,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "x1=0".to_string(),
+                message: b"x1=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "x1=1".to_string(),
+                message: b"x1=1".to_vec(),
             },
         ],
     );
@@ -1488,10 +1508,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "observed=0".to_string(),
+                message: b"observed=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "observed=1".to_string(),
+                message: b"observed=1".to_vec(),
             },
         ],
     );
@@ -1530,10 +1550,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "x3=0".to_string(),
+                message: b"x3=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "x3=1".to_string(),
+                message: b"x3=1".to_vec(),
             },
         ],
     );
@@ -1571,13 +1591,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "x1=0 x2=0".to_string(),
+                message: b"x1=0 x2=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "x1=1 x2=0".to_string(),
+                message: b"x1=1 x2=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "x1=1 x2=1".to_string(),
+                message: b"x1=1 x2=1".to_vec(),
             },
         ],
     );
@@ -1625,13 +1645,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "xj=0".to_string(),
+                message: b"xj=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "xj=0".to_string(),
+                message: b"xj=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "xj=1".to_string(),
+                message: b"xj=1".to_vec(),
             },
         ],
     );
@@ -1669,7 +1689,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "hit x1=1".to_string(),
+            message: b"hit x1=1".to_vec(),
         }],
     );
 }
@@ -1710,7 +1730,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "x1 became 1".to_string(),
+            message: b"x1 became 1".to_vec(),
         }],
     );
 }
@@ -1755,16 +1775,16 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=0".to_string(),
+                message: b"first=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=0".to_string(),
+                message: b"second=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "first=1".to_string(),
+                message: b"first=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=1".to_string(),
+                message: b"second=1".to_vec(),
             },
         ],
     );
@@ -1811,16 +1831,16 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0 x1=0".to_string(),
+                message: b"i=0 x1=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 x1=0".to_string(),
+                message: b"i=1 x1=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=0 x1=1".to_string(),
+                message: b"i=0 x1=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 x1=1".to_string(),
+                message: b"i=1 x1=1".to_vec(),
             },
         ],
     );
@@ -1870,10 +1890,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "x1=0".to_string(),
+                message: b"x1=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "x1=1".to_string(),
+                message: b"x1=1".to_vec(),
             },
         ],
     );
@@ -1915,10 +1935,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "ff=3".to_string(),
+                message: b"ff=3".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "comb=3".to_string(),
+                message: b"comb=3".to_vec(),
             },
         ],
     );
@@ -1955,7 +1975,7 @@ module Top (
             scope: Some("tb.top"),
         }),
         vec![celox::RuntimeEvent::Display {
-            message: "loc=tb.top time=42 a=5".to_string(),
+            message: b"loc=tb.top time=42 a=5".to_vec(),
         }],
     );
 }
@@ -1986,7 +2006,7 @@ module Top (
             scope: Some("tb.top"),
         }),
         vec![celox::RuntimeEvent::Display {
-            message: "loc=tb.top a=5".to_string(),
+            message: b"loc=tb.top a=5".to_vec(),
         }],
     );
 }
@@ -2027,7 +2047,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "active=3".to_string(),
+            message: b"active=3".to_vec(),
         }],
     );
 
@@ -2036,7 +2056,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "active=4".to_string(),
+            message: b"active=4".to_vec(),
         }],
     );
 
@@ -2046,10 +2066,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inactive_display=7".to_string(),
+                message: b"inactive_display=7".to_vec(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "inactive_assert=7".to_string(),
+                message: b"inactive_assert=7".to_vec(),
             },
         ],
     );
@@ -2095,10 +2115,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=6".to_string(),
+                message: b"first=6".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=7".to_string(),
+                message: b"second=7".to_vec(),
             },
         ],
     );
@@ -2109,10 +2129,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=7".to_string(),
+                message: b"first=7".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=8".to_string(),
+                message: b"second=8".to_vec(),
             },
         ],
     );
@@ -2155,13 +2175,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "before i=0 sum=10".to_string(),
+                message: b"before i=0 sum=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "before i=1 sum=11".to_string(),
+                message: b"before i=1 sum=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "before i=2 sum=13".to_string(),
+                message: b"before i=2 sum=13".to_vec(),
             },
         ],
     );
@@ -2208,7 +2228,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "then=20".to_string(),
+            message: b"then=20".to_vec(),
         }],
     );
 
@@ -2217,7 +2237,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "else=40".to_string(),
+            message: b"else=40".to_vec(),
         }],
     );
 }
@@ -2253,8 +2273,8 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=000000000000000000010010001101000101011001111000100110101011110011011110xxxx0000"
-                .to_string(),
+            message: b"a=000000000000000000010010001101000101011001111000100110101011110011011110xxxx0000"
+                .to_vec(),
         }],
     );
 }
@@ -2290,7 +2310,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bump=10".to_string(),
+            message: b"bump=10".to_vec(),
         }],
     );
 }
@@ -2355,7 +2375,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "notify=5".to_string(),
+            message: b"notify=5".to_vec(),
         }],
     );
 }
@@ -2417,7 +2437,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "notify=7".to_string(),
+            message: b"notify=7".to_vec(),
         }],
     );
 
@@ -2427,16 +2447,16 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "notify=7".to_string(),
+                message: b"notify=7".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "notify=8".to_string(),
+                message: b"notify=8".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "notify=9".to_string(),
+                message: b"notify=9".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "notify=7".to_string(),
+                message: b"notify=7".to_vec(),
             },
         ],
     );
@@ -2540,10 +2560,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "loop=0".to_string(),
+                message: b"loop=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "loop=1".to_string(),
+                message: b"loop=1".to_vec(),
             },
         ],
     );
@@ -2596,7 +2616,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "after-loop".to_string(),
+            message: b"after-loop".to_vec(),
         }],
     );
 
@@ -2745,22 +2765,22 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inner=0,0".to_string(),
+                message: b"inner=0,0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=0,1".to_string(),
+                message: b"inner=0,1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "outer=0".to_string(),
+                message: b"outer=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=1,0".to_string(),
+                message: b"inner=1,0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=1,1".to_string(),
+                message: b"inner=1,1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "outer=1".to_string(),
+                message: b"outer=1".to_vec(),
             },
         ],
     );
@@ -2771,19 +2791,19 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inner=0,0".to_string(),
+                message: b"inner=0,0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=0,1".to_string(),
+                message: b"inner=0,1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "outer=0".to_string(),
+                message: b"outer=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=1,0".to_string(),
+                message: b"inner=1,0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inner=1,1".to_string(),
+                message: b"inner=1,1".to_vec(),
             },
         ],
     );
@@ -2819,7 +2839,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "arg=6".to_string(),
+            message: b"arg=6".to_vec(),
         }],
     );
 }
@@ -2869,7 +2889,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertContinue {
-            message: "zero=0".to_string(),
+            message: b"zero=0".to_vec(),
         }],
     );
 }
@@ -2902,13 +2922,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0 sum=2".to_string(),
+                message: b"i=0 sum=2".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 sum=5".to_string(),
+                message: b"i=1 sum=5".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=2 sum=9".to_string(),
+                message: b"i=2 sum=9".to_vec(),
             },
         ],
     );
@@ -2941,10 +2961,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=1".to_string(),
+                message: b"first=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=2".to_string(),
+                message: b"second=2".to_vec(),
             },
         ],
     );
@@ -2986,7 +3006,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "before=0".to_string(),
+            message: b"before=0".to_vec(),
         }],
     );
 
@@ -2999,7 +3019,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "before=1".to_string(),
+            message: b"before=1".to_vec(),
         }],
     );
 }
@@ -3042,7 +3062,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=4".to_string(),
+            message: b"mid=4".to_vec(),
         }],
     );
 
@@ -3051,7 +3071,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=4".to_string(),
+            message: b"mid=4".to_vec(),
         }],
     );
 }
@@ -3097,7 +3117,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=85".to_string(),
+            message: b"mid=85".to_vec(),
         }],
     );
 
@@ -3106,7 +3126,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=85".to_string(),
+            message: b"mid=85".to_vec(),
         }],
     );
 }
@@ -3158,7 +3178,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=1".to_string(),
+            message: b"mid=1".to_vec(),
         }],
     );
 
@@ -3167,7 +3187,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=1".to_string(),
+            message: b"mid=1".to_vec(),
         }],
     );
 
@@ -3180,7 +3200,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=0".to_string(),
+            message: b"mid=0".to_vec(),
         }],
     );
 }
@@ -3217,13 +3237,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=3".to_string(),
+                message: b"first=3".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=4".to_string(),
+                message: b"second=4".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "third=5".to_string(),
+                message: b"third=5".to_vec(),
             },
         ],
     );
@@ -3274,7 +3294,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "then=7".to_string(),
+            message: b"then=7".to_vec(),
         }],
     );
 
@@ -3283,7 +3303,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "else=11".to_string(),
+            message: b"else=11".to_vec(),
         }],
     );
 }
@@ -3319,13 +3339,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0 tmp=2".to_string(),
+                message: b"i=0 tmp=2".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 tmp=5".to_string(),
+                message: b"i=1 tmp=5".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=2 tmp=9".to_string(),
+                message: b"i=2 tmp=9".to_vec(),
             },
         ],
     );
@@ -3372,7 +3392,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "after_f=13".to_string(),
+            message: b"after_f=13".to_vec(),
         }],
     );
 }
@@ -3421,7 +3441,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "after_split=11,12".to_string(),
+            message: b"after_split=11,12".to_vec(),
         }],
     );
     assert_eq!(sim.get_as::<u8>(out), 41);
@@ -3462,7 +3482,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "mid=133".to_string(),
+            message: b"mid=133".to_vec(),
         }],
     );
 }
@@ -3503,7 +3523,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "sum=16".to_string(),
+            message: b"sum=16".to_vec(),
         }],
     );
 }
@@ -3545,16 +3565,16 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0 sum=10".to_string(),
+                message: b"i=0 sum=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 sum=11".to_string(),
+                message: b"i=1 sum=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=2 sum=13".to_string(),
+                message: b"i=2 sum=13".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=3 sum=16".to_string(),
+                message: b"i=3 sum=16".to_vec(),
             },
         ],
     );
@@ -3593,7 +3613,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "first=0".to_string(),
+            message: b"first=0".to_vec(),
         }],
     );
 
@@ -3607,13 +3627,13 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0 sum=10".to_string(),
+                message: b"i=0 sum=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1 sum=11".to_string(),
+                message: b"i=1 sum=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=2 sum=13".to_string(),
+                message: b"i=2 sum=13".to_vec(),
             },
         ],
     );
@@ -3646,10 +3666,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "same".to_string(),
+                message: b"same".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "same".to_string(),
+                message: b"same".to_vec(),
             },
         ],
     );
@@ -3699,10 +3719,10 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "i=0".to_string(),
+                message: b"i=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "i=1".to_string(),
+                message: b"i=1".to_vec(),
             },
         ],
     );
@@ -3747,19 +3767,19 @@ module Top (
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "before=10".to_string(),
+                message: b"before=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inside i=0 sum=10".to_string(),
+                message: b"inside i=0 sum=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inside i=1 sum=11".to_string(),
+                message: b"inside i=1 sum=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "inside i=2 sum=13".to_string(),
+                message: b"inside i=2 sum=13".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "after=13".to_string(),
+                message: b"after=13".to_vec(),
             },
         ],
     );
@@ -3799,7 +3819,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=52 hi=18".to_string(),
+            message: b"lo=52 hi=18".to_vec(),
         }],
     );
 
@@ -3848,7 +3868,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "slice=171".to_string(),
+            message: b"slice=171".to_vec(),
         }],
     );
 
@@ -3893,7 +3913,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=5".to_string(),
+            message: b"lo=5".to_vec(),
         }],
     );
 
@@ -3941,7 +3961,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "x=11".to_string(),
+            message: b"x=11".to_vec(),
         }],
     );
 
@@ -3989,7 +4009,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "internal=21".to_string(),
+            message: b"internal=21".to_vec(),
         }],
     );
 
@@ -4028,7 +4048,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=10100000".to_string(),
+            message: b"a=10100000".to_vec(),
         }],
     );
 
@@ -4047,7 +4067,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=1010zzzz".to_string(),
+            message: b"a=1010zzzz".to_vec(),
         }],
     );
 }
@@ -4084,7 +4104,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "slice=90".to_string(),
+            message: b"slice=90".to_vec(),
         }],
     );
 }
@@ -4126,7 +4146,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=00010000".to_string(),
+            message: b"lo=00010000".to_vec(),
         }],
     );
 
@@ -4145,7 +4165,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=0001zzzz".to_string(),
+            message: b"lo=0001zzzz".to_vec(),
         }],
     );
 }
@@ -4190,7 +4210,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "v=51".to_string(),
+            message: b"v=51".to_vec(),
         }],
     );
 }
@@ -4236,7 +4256,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "tmp=0".to_string(),
+            message: b"tmp=0".to_vec(),
         }],
     );
 }
@@ -4274,7 +4294,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "y=7".to_string(),
+            message: b"y=7".to_vec(),
         }],
     );
 
@@ -4308,7 +4328,7 @@ module Top (a: input logic<8>, out: output logic<8>) {
     sim.modify(|io| io.set(a, 12u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 13);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "observed=12".to_string(),
+        message: b"observed=12".to_vec(),
     }]);
 }
 
@@ -4342,12 +4362,12 @@ module Top (sel: input logic, a: input logic<8>, b: input logic<8>, out: output 
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 7);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "left=7".to_string(),
+        message: b"left=7".to_vec(),
     }]);
     sim.modify(|io| io.set(sel, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 9);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "right=9".to_string(),
+        message: b"right=9".to_vec(),
     }]);
 }
 
@@ -4374,7 +4394,7 @@ module Top (a: input logic<8>, out: output logic<8>) {
     sim.modify(|io| io.set(a, 23u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 23);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "inner=23".to_string(),
+        message: b"inner=23".to_vec(),
     }]);
 }
 
@@ -4417,7 +4437,7 @@ module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) 
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 42);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "index=2".to_string(),
+        message: b"index=2".to_vec(),
     }]);
 }
 
@@ -4453,12 +4473,12 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
     }).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "after=1".to_string(),
+        message: b"after=1".to_vec(),
     }]);
     sim.modify(|io| io.set(sel, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 17);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "after=17".to_string(),
+        message: b"after=17".to_vec(),
     }]);
 }
 
@@ -4519,7 +4539,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "preview=12".to_string(),
+            message: b"preview=12".to_vec(),
         }],
     );
 }
@@ -4572,7 +4592,7 @@ module Top (
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "preview=12".to_string(),
+            message: b"preview=12".to_vec(),
         }],
     );
 }
@@ -4608,8 +4628,8 @@ module Top (value: input logic<8>, out: output logic<8>) {
     sim.drain_runtime_events();
     sim.modify(|io| io.set(value, 31u8)).unwrap();
     assert_eq!(sim.drain_runtime_events(), vec![
-        celox::RuntimeEvent::Display { message: "bound=31".to_string() },
-        celox::RuntimeEvent::Display { message: "body=31".to_string() },
+        celox::RuntimeEvent::Display { message: b"bound=31".to_vec() },
+        celox::RuntimeEvent::Display { message: b"body=31".to_vec() },
     ]);
     assert_eq!(sim.get_as::<u8>(out), 31);
 }
@@ -4643,7 +4663,7 @@ module Top (value: input logic, out: output logic) {
     sim.modify(|io| io.set(value, 1u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 1);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "index_seen=1".to_string(),
+        message: b"index_seen=1".to_vec(),
     }]);
 }
 
@@ -4691,7 +4711,7 @@ module Top (
     sim.modify(|io| io.set(skip, 0u8)).unwrap();
     assert_eq!(sim.get_as::<u8>(out), 45);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "active_bound=45".to_string(),
+        message: b"active_bound=45".to_vec(),
     }]);
 }
 
@@ -4722,7 +4742,7 @@ module Top (trigger: input logic, out: output logic<2>) {
     let out = sim.signal("out");
     assert_eq!(sim.get_as::<u8>(out), 2);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "concat_seen=1".to_string(),
+        message: b"concat_seen=1".to_vec(),
     }]);
 }
 
@@ -4756,7 +4776,7 @@ module Top (trigger: input logic, out: output logic<2>) {
     let out = sim.signal("out");
     assert_eq!(sim.get_as::<u8>(out), 2);
     assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-        message: "function_concat_seen=1".to_string(),
+        message: b"function_concat_seen=1".to_vec(),
     }]);
 }
 

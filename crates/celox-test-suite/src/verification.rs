@@ -550,7 +550,7 @@ impl Backend for ObservedBackend {
             .tick(event)
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
-    fn take_output(&mut self) -> Result<String> {
+    fn take_output(&mut self) -> Result<Vec<u8>> {
         self.backend
             .take_output()
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
@@ -606,7 +606,7 @@ fn run_script(
     match backend.run_testbench() {
         Ok(()) => {
             let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
-            match crate::script::sv::check_output(&String::from_utf8_lossy(&log)) {
+            match crate::script::sv::check_output(&log) {
                 Ok(()) => ("passed", "execute", String::new()),
                 Err(detail) => ("mismatch", "execute", detail),
             }

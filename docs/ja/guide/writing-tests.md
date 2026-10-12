@@ -249,3 +249,24 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 - [デッドストア除去](./dead-store-elimination.md) -- DSE によるシミュレーションの高速化。
 - [アーキテクチャ](/internals/architecture) -- シミュレーションパイプラインの詳細。
 - [API リファレンス](/api/) -- TypeScript API の完全なドキュメント。
+
+### HDL出力のバイト列
+
+Rustの`RuntimeEvent::{Display, Write, AssertContinue, AssertFatal}`と詳細テスト結果の
+assertionメッセージは`Vec<u8>`を返します。JavaScriptの`runTest`、
+`runTestFromProject`、`runTestWithFrontendArtifact`では`Uint8Array`です。
+`%s`と`%c`には非UTF-8やNULが含まれるため、暗黙のデコードは行いません。
+`$display`と`$write`の転送もバイト列をそのまま書き込みます。
+
+UTF-8のテキストを出す設計では、明示的にデコードしてください。
+
+```ts
+const text = new TextDecoder("utf-8", { fatal: true }).decode(
+  result.assertions[0]?.message,
+);
+```
+
+Rustでは`String::from_utf8(message)`で検証するか、バイト列のまま比較します。
+シミュレータのエラーや失敗概要は診断用の文字列です。非UTF-8の出力は
+エスケープして表示し、元のバイト列はイベントまたはassertion結果に保持します。
+従来の文字列メッセージAPIからの変更に伴い、比較やデコードの利用箇所も更新してください。

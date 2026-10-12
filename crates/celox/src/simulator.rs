@@ -126,19 +126,21 @@ mod host {
         Io(std::io::Error),
     }
 
+    /// HDL output is an arbitrary sequence of 8-bit character codes.
+    /// Message payloads are byte-exact; decode explicitly if text is required.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
         Display {
-            message: String,
+            message: Vec<u8>,
         },
         Write {
-            message: String,
+            message: Vec<u8>,
         },
         AssertContinue {
-            message: String,
+            message: Vec<u8>,
         },
         AssertFatal {
-            message: String,
+            message: Vec<u8>,
         },
         /// The design executed `$finish`. The host decides whether to stop.
         Finish,
@@ -312,7 +314,7 @@ mod host {
         spec: char,
         sizing: DisplaySizing,
         field: FieldSpec,
-    ) -> String {
+    ) -> Vec<u8> {
         let value = runtime_event_words_to_biguint(&arg.values, arg.width);
         let mask = runtime_event_words_to_biguint(&arg.masks, arg.width);
         let arg = DisplayFormatArg {
@@ -332,7 +334,7 @@ mod host {
         site: &RuntimeEventSite,
         args: &[RuntimeEventArgValue],
         ctx: RuntimeFormatContext<'_>,
-    ) -> String {
+    ) -> Vec<u8> {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
                 // Veryl prints arguments without a format string in hexadecimal.
@@ -346,7 +348,7 @@ mod host {
                 }
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
-                        return "assertion failed".to_string();
+                        return b"assertion failed".to_vec();
                     }
                     'x'
                 }
@@ -357,19 +359,19 @@ mod host {
                     runtime_event_format_arg(arg, default_spec, site.sizing, FieldSpec::default())
                 })
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(&b' ');
         };
-        let mut out = String::new();
+        let mut out = Vec::new();
         let mut arg_idx = 0usize;
         let mut chars = template.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch != '%' {
-                out.push(ch);
+                out.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
                 continue;
             }
             if matches!(chars.peek(), Some('%')) {
                 chars.next();
-                out.push('%');
+                out.push(b'%');
                 continue;
             }
             let field = FieldSpec::parse(&mut chars, site.sizing == DisplaySizing::Veryl);
@@ -380,7 +382,7 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
+                    out.extend_from_slice(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
                 'd' | 'D' | 'i' | 'I' => {
@@ -388,7 +390,7 @@ mod host {
                         arg_idx += 1;
                         continue;
                     };
-                    out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
+                    out.extend_from_slice(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
                 't' | 'T' if site.sizing == DisplaySizing::Ieee => {
@@ -400,7 +402,7 @@ mod host {
                         width: Some(field.width.unwrap_or(20)),
                         ..field
                     };
-                    out.push_str(&runtime_event_format_arg(arg, 'd', site.sizing, field));
+                    out.extend_from_slice(&runtime_event_format_arg(arg, 'd', site.sizing, field));
                     arg_idx += 1;
                 }
                 't' | 'T' | 'm' | 'M' => {
@@ -412,14 +414,14 @@ mod host {
                             .unwrap_or("<hierarchy>")
                             .to_string()
                     };
-                    out.push_str(&match site.sizing {
-                        DisplaySizing::Veryl => pad_veryl_field(text, spec, field),
-                        DisplaySizing::Ieee => text,
+                    out.extend_from_slice(&match site.sizing {
+                        DisplaySizing::Veryl => pad_veryl_field(text.into_bytes(), spec, field),
+                        DisplaySizing::Ieee => text.into_bytes(),
                     });
                 }
                 other => {
-                    out.push('%');
-                    out.push(other);
+                    out.push(b'%');
+                    out.extend_from_slice(other.encode_utf8(&mut [0; 4]).as_bytes());
                 }
             }
         }
@@ -1233,11 +1235,11 @@ mod host {
                     return None;
                 }
                 Some(RuntimeErrorCode::Runtime {
-                    message: render_runtime_event_message(
+                    message: message_diagnostic(&render_runtime_event_message(
                         site,
                         args,
                         RuntimeFormatContext::default(),
-                    ),
+                    )),
                     signals: Vec::new(),
                 })
             })
@@ -2131,3 +2133,12 @@ mod host {
 
 #[cfg(feature = "host-runtime")]
 pub use host::*;
+
+/// Human-readable diagnostics are separate from the byte-exact event payload.
+#[cfg(feature = "host-runtime")]
+pub(crate) fn message_diagnostic(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => bytes.escape_ascii().to_string(),
+    }
+}
