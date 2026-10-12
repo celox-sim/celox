@@ -2293,3 +2293,26 @@ mod finish_and_cotrigger_tests {
         check(Simulation::new(builder().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_comb_nba_tests {
+    use super::*;
+    #[test]
+    fn blocking_comb_waiters_run_before_nbas_on_every_backend() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+        }
+        let source = "module Top(input bit clk,output bit q,observed);bit a;wire c=a;always @(posedge clk)begin a=1;q<=1;end initial begin @(posedge c);observed=q;end endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("active.sv"))], "Top");
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
