@@ -1625,3 +1625,19 @@ fn bounded_steps_poll_host_waiters_without_consuming_later_delays() {
     assert_eq!(sim.step_until(0).unwrap(), None);
     assert_eq!(sim.next_event_time(), Some(1));
 }
+
+#[test]
+fn called_tasks_with_hidden_comb_pulses_are_rejected() {
+    for body in ["pulse();", "relay();"] {
+        let source = format!(
+            r#"module Top(input bit go, output bit seen); bit q;
+            task pulse; q=1; q=0; endtask
+            task relay; pulse(); endtask
+            always_comb begin q=0; if(go) {body} end
+            initial begin @(posedge q); seen=1; end
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(error.contains("multiple blocking writes"), "{error}");
+    }
+}
