@@ -904,7 +904,16 @@ fn preserves_overhanging_constant_parameter_part_selects() {
 
 #[test]
 fn bounds_constant_parameter_part_select_folding() {
-    for selection in ["W[65536:0]", "W[1000000000:0]", "W[0 +: 1000000000]"] {
+    for selection in [
+        "W[65536:0]",
+        "W[1000000000:0]",
+        "W[0 +: 1000000000]",
+        "W[1'bx +: 65537]",
+        "W[1'bz -: 1000000000]",
+        "W[1'bx +: 0]",
+        "W[1'bx +: -1]",
+        "W[1'bx +: 1'bx]",
+    ] {
         let source = format!(
             "module Top; parameter logic [7:0] W = 0; localparam N = {selection}; endmodule"
         );
@@ -912,12 +921,16 @@ fn bounds_constant_parameter_part_select_folding() {
             .expect_err("oversized selections must be rejected before allocating their bits");
         assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
     }
-    let source = "module Top; parameter logic [7:0] W = 0; \
-        localparam N = W[65535:0]; localparam BITS = $bits(N); endmodule";
-    let ir = analyze_source(source, Path::new("maximum_parameter_select.sv")).unwrap();
-    let parameters = ir.modules()[0].parameters();
-    assert_eq!(parameters[1].resolved_width(), Some(65_536));
-    assert_eq!(parameters[2].resolved_value(), Some(65_536));
+    for selection in ["W[65535:0]", "W[1'bx +: 65536]"] {
+        let source = format!(
+            "module Top; parameter logic [7:0] W = 0; \
+            localparam N = {selection}; localparam BITS = $bits(N); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("maximum_parameter_select.sv")).unwrap();
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_width(), Some(65_536));
+        assert_eq!(parameters[2].resolved_value(), Some(65_536));
+    }
 }
 
 #[test]
@@ -960,6 +973,8 @@ fn permits_wide_unevaluated_constant_parameter_query_operands() {
         ("$bits(65537'bx)", 65_537),
         ("$bits($bits(65537'd0))", 32),
         ("$size(65537'd0)", 65_537),
+        ("$bits({2{65537'd0}})", 131_074),
+        ("$bits(8'(65537'd0))", 8),
     ] {
         let source = format!("module Top; localparam N = {query}; endmodule");
         let ir = analyze_source(&source, Path::new("wide_query_operand.sv"))
@@ -979,6 +994,81 @@ fn permits_wide_unevaluated_constant_parameter_query_operands() {
         error.to_string().contains("constant materialization limit"),
         "{error}"
     );
+}
+
+#[test]
+fn preserves_unknown_constant_parameter_indexed_part_select_bases() {
+    for (declaration, selection, expected, number, width) in [
+        ("logic [1:0][7:4]", "W[1][1'bx +: 2]", "2'bxx", None, 2),
+        ("logic [1:0][7:4]", "W[0][1'bz -: 2]", "2'bxx", None, 2),
+        ("logic [1:0][7:4]", "W[I +: 1]", "4'bxxxx", None, 4),
+        ("logic [7:0]", "W[I -: 3]", "3'bxxx", None, 3),
+        ("logic [7:0]", "{W}[I +: 3]", "3'bxxx", None, 3),
+        ("bit [7:0]", "W[1'bx +: 2]", "2'bxx", None, 2),
+        ("logic [4:7]", "W[1'bz -: 2]", "2'bxx", None, 2),
+        (
+            "logic [1:0][7:4]",
+            "W[0][(1'bx & 1'b0) + 4 +: 2]",
+            "2'b11",
+            Some(3),
+            2,
+        ),
+        (
+            "logic [7:0]",
+            "W[(1'bx === 1'bx) +: 2]",
+            "2'b01",
+            Some(1),
+            2,
+        ),
+    ] {
+        let source = format!(
+            "module Top; parameter {declaration} W = 8'hab; localparam I = 1'bx; \
+             localparam N = {selection}; localparam SAME = N === {expected}; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("unknown_parameter_part_select.sv"))
+            .unwrap_or_else(|error| panic!("{declaration} {selection}: {error}"));
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[2].resolved_value(), number, "{selection}");
+        assert_eq!(parameters[2].resolved_width(), Some(width), "{selection}");
+        assert_eq!(parameters[2].resolved_signed(), Some(false), "{selection}");
+        assert_eq!(parameters[3].resolved_value(), Some(1), "{selection}");
+    }
+}
+
+#[test]
+fn bounds_evaluated_constant_parameter_query_subexpressions() {
+    for literal_width in [65_537, 1_000_000_000] {
+        for query in [
+            format!("$bits(W[0 +: {literal_width}'d1])"),
+            format!("$bits(W[{literal_width}'d0:0])"),
+            format!("$bits(W[{literal_width}'d0])"),
+            format!("$bits({{{literal_width}'d1{{W}}}})"),
+            format!("$bits({literal_width}'d1'(W))"),
+            format!("$bits($size(W, {literal_width}'d1))"),
+            format!("$bits({{<<{literal_width}'d1{{W}}}})"),
+            format!("$bits(logic [{literal_width}'d0:0])"),
+        ] {
+            let source = format!(
+                "module Top; parameter logic [7:0] W = 0; localparam N = {query}; endmodule"
+            );
+            let error = analyze_source(&source, Path::new("wide_query_shape.sv"))
+                .expect_err("type-shaping values must be bounded even inside unevaluated operands");
+            assert!(
+                error.to_string().contains("constant materialization limit"),
+                "{query}: {error}"
+            );
+        }
+    }
+    let ir = analyze_source(
+        "module Top; parameter logic [7:0] W = 0; \
+         localparam N = $bits(W[0 +: 65536'd1]); \
+         localparam COUNT = $bits({65536'd1{W}}); endmodule",
+        Path::new("bounded_query_shape.sv"),
+    )
+    .unwrap();
+    let parameters = ir.modules()[0].parameters();
+    assert_eq!(parameters[1].resolved_value(), Some(1));
+    assert_eq!(parameters[2].resolved_value(), Some(8));
 }
 
 #[test]
@@ -1722,12 +1812,15 @@ fn converts_unknowns_when_constant_casting_to_two_state_types() {
             module Top;
                 typedef bit [1:0] two_t;
                 localparam logic [1:0] P = two_t'(2'bx1);
+                localparam logic [7:0] X = 8'b10xz_01zx;
+                localparam byte unsigned U = unsigned'(byte'(X));
             endmodule
         "#,
         Path::new("two_state_constant_cast.sv"),
     )
     .expect("two-state constant casts should convert unknown bits to zero");
     assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(0x84));
 }
 
 #[test]
@@ -4281,4 +4374,46 @@ fn isunbounded_argument_validation_is_not_skipped_by_bits() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
+    let ir = analyze_source(
+        r#"
+            module Top(output logic y);
+                function automatic int choose(input int v);
+                    $display("choose %0d", v);
+                    return 1;
+                endfunction
+                always_comb if (choose(1)) y = 1; else y = 0;
+            endmodule
+        "#,
+        Path::new("conditional_call.sv"),
+    )
+    .unwrap();
+    assert!(matches!(
+        ir.modules()[0].comb_processes()[0].body()[0],
+        crate::ir::Stmt::If { .. }
+    ));
+}
+
+#[test]
+fn named_constant_calls_retain_parameter_dependencies() {
+    let source = "module Top #(parameter W=8, parameter N=f(.value(W)))(); function automatic integer f(input integer value); return value+1; endfunction endmodule";
+    let syntax =
+        crate::syntax::parse_source(source, std::path::Path::new("named_dependency.sv")).unwrap();
+    let source = ast::Source::from_syntax(&syntax).unwrap();
+    let module = &source.modules()[0];
+    let _functions = module.install_constant_functions();
+    let expression: ir::ConstExpr = module
+        .parameters()
+        .iter()
+        .find(|param| param.name() == "N")
+        .unwrap()
+        .value()
+        .unwrap()
+        .clone()
+        .into();
+    let values = fxhash::FxHashMap::from_iter([("W".to_string(), 16i128)]);
+    assert_eq!(typecheck::eval_const_expr(&expression, &values), Some(17));
 }

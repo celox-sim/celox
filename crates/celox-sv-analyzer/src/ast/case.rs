@@ -52,7 +52,7 @@ pub(super) fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimension
                     || (expr_is_two_state(condition, packed_dimensions)
                         && expr_is_two_state(else_expr, packed_dimensions)))
         }
-        Expr::Call { name, args } => {
+        Expr::Call { name, args, .. } => {
             typecheck::bit_vector_function_return_type(name, args.len()).is_some()
                 || packed_dimensions
                     .function_return_types

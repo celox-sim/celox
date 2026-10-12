@@ -92,7 +92,7 @@
     "category": "simulator_compile_limitation",
     "phase": "compile",
     "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
-    "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed assignment patterns, and parameter type declarations in generate blocks. Verilator passes these cases.",
+    "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -108,7 +108,10 @@
         "indexed_select::indexed_select_multidimensional_packed_reads",
         "synthesizable::struct_assignment_patterns_follow_the_target_layout",
         "review_regressions::preserves_four_state_shift_and_bit_select_constants",
-        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays"
+        "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
+        "hierarchy::parameter_patterns_transfer_packed_values",
+        "hierarchy::parameter_patterns_override_scalar_defaults",
+        "hierarchy::parameter_patterns_preserve_packed_member_states"
       ]
     }
   },
@@ -146,9 +149,15 @@
     ],
     "cases": {
       "icarus": [
+        "hierarchy::parameter_patterns_bind_caller_types",
+        "hierarchy::parameter_patterns_bind_nested_caller_types",
+        "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context",
+        "hierarchy::parameter_patterns_keep_unknown_fill",
         "procedural::aggregate_parameters_are_constant_tables",
         "system_functions::dimensions_resolves_package_array_constants",
         "system_functions::isunbounded_reports_bounded_array_parameters",
+        "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
+        "hierarchy::parameter_patterns_override_body_declarations",
         "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
         "system_functions::unpacked_dimensions_resolves_package_array_constants",
         "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
@@ -719,7 +728,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 returns 0 for $dimensions of a call to a package function returning a multidimensional packed value. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes the case.",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of package functions returning multidimensional packed values and named/defaulted integral function calls. IEEE 1800-2023 20.7 requires the declared return rank. Verilator passes these cases.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
@@ -727,7 +736,8 @@
     ],
     "cases": {
       "icarus": [
-        "system_functions::dimensions_resolves_imported_function_returns"
+        "system_functions::dimensions_resolves_imported_function_returns",
+        "synthesizable::named_calls_in_constant_contexts"
       ]
     }
   },
@@ -1085,6 +1095,92 @@
     }
   },
   {
+    "id": "sv_verilator_printtimescale_special_scopes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects standalone $unit and $root operands of $printtimescale, expecting :: and a dotted hierarchy respectively. IEEE 1800-2023 20.4.2 explicitly accepts both special scope operands.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::printtimescale_displays_unit_and_global_precision"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_printtimescale_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 prints the Top caller scale for a package operand of $printtimescale, reports 1ps instead of the declared 10ps precision inside the package procedure, and omits the required parentheses around the design element name. IEEE 1800-2023 20.4.2 selects the queried/current design element and specifies the display format; 3.14.2.3 preserves its declared precision.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::printtimescale_preserves_package_subroutine_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_printtimescale_operands",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::printtimescale_displays_unit_and_global_precision",
+        "system_functions::printtimescale_preserves_package_subroutine_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_default_argument_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 binds the default b=a to the earlier formal a and returns 22 for f(.a(2)) when the enclosing module a is 5. IEEE 1800-2023 13.5.3 evaluates defaults in the scope containing the subroutine declaration, requiring 25. Celox passes all five backend variants.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "synthesizable::named_calls_preserve_defaults_and_declaration_scope"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_dynamic_argument_defaults",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 requires function port defaults to be constant expressions and rejects a reference to a net or variable. IEEE 1800-2023 13.5.3 evaluates a used default in the enclosing declaration scope on each call; the shared case retains its dynamic module-signal default.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "synthesizable::named_calls_preserve_defaults_and_declaration_scope"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_unpacked_dimensions_element",
     "category": "simulator_disagreement",
     "phase": "execute",
@@ -1137,28 +1233,11 @@
     }
   },
   {
-    "id": "sv_verilator_printtimescale_special_scopes",
-    "category": "simulator_compile_limitation",
-    "phase": "compile",
-    "observed_version": "Verilator 5.052",
-    "reason": "Verilator 5.052 rejects standalone $unit and $root operands of $printtimescale, expecting :: and a dotted hierarchy respectively. IEEE 1800-2023 20.4.2 explicitly accepts both special scope operands.",
-    "upstream": [],
-    "evidence": [
-      "verification/sv/limitations/verilator.json",
-      "LIMITATIONS.md#systemverilog-suite"
-    ],
-    "cases": {
-      "verilator": [
-        "system_functions::printtimescale_displays_unit_and_global_precision"
-      ]
-    }
-  },
-  {
-    "id": "sv_verilator_printtimescale_scope",
+    "id": "sv_verilator_typed_pattern_sign_extension",
     "category": "simulator_disagreement",
     "phase": "execute",
-    "observed_version": "Verilator 5.052",
-    "reason": "Verilator 5.052 prints the Top caller scale for a package operand of $printtimescale, reports 1ps instead of the declared 10ps precision inside the package procedure, and omits the required parentheses around the design element name. IEEE 1800-2023 20.4.2 selects the queried/current design element and specifies the display format; 3.14.2.3 preserves its declared precision.",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 zero-extends int'{default: 1} to a 64-bit parameter (0x00000000ffffffff). IEEE 1800-2023 10.9 gives the expression the self-determined int type, signed under 6.11.3; 6.20.2 requires assignment conversion to the parameter, giving 0xffffffffffffffff. The same Verilator probe sign-extends through an int variable or explicit int cast.",
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/verilator.json",
@@ -1166,25 +1245,7 @@
     ],
     "cases": {
       "verilator": [
-        "system_functions::printtimescale_preserves_package_subroutine_scope"
-      ]
-    }
-  },
-  {
-    "id": "sv_icarus_printtimescale_operands",
-    "category": "simulator_compile_limitation",
-    "phase": "compile",
-    "observed_version": "Icarus 13.0",
-    "reason": "Icarus 13.0 rejects standalone $unit and bare package operands of $printtimescale with syntax errors. IEEE 1800-2023 20.4.2 accepts a design element argument and explicitly includes $unit and $root. The shared assertions retain their standard output and precision.",
-    "upstream": [],
-    "evidence": [
-      "verification/sv/limitations/icarus.json",
-      "LIMITATIONS.md#systemverilog-suite"
-    ],
-    "cases": {
-      "icarus": [
-        "system_functions::printtimescale_displays_unit_and_global_precision",
-        "system_functions::printtimescale_preserves_package_subroutine_scope"
+        "hierarchy::parameter_patterns_override_scalar_defaults"
       ]
     }
   },

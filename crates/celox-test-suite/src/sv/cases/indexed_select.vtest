@@ -301,10 +301,10 @@
 
 (case constant_parameter_initializers_preserve_overhanging_parts
   ; These comparisons require the X bits specified by IEEE 1800-2023
-  ; 11.5.1, including partially out-of-range indexed part-selects.
+  ; 11.5.1, including overhanging indexed part-selects and X/Z bases.
   (four_state)
   (source "overhanging_parameter_selections.sv" #"
-    module Top(output logic [8:0] checks, output int width);
+    module Top(output logic [12:0] checks, output int width);
       parameter logic [7:0] W = 8'hab;
       parameter bit [7:0] B = 8'hab;
       parameter logic [11:4] D = 8'hab;
@@ -318,15 +318,21 @@
       localparam UP = U[3:6];
       localparam BIT_ABOVE = B[8:5];
       localparam BIT_PLUS = B[6 +: 4];
+      localparam X_PLUS = W[1'bx +: 2];
+      localparam Z_MINUS = B[1'bz -: 3];
+      localparam X_UP = U[1'bx +: 4];
+      localparam KNOWN = W[(1'bx === 1'bx) +: 2];
       assign checks = {ABOVE === 4'bx101, BELOW === 4'b011x,
         PLUS === 4'bxx10, MINUS === 4'b11xx, OUTSIDE === 4'bxxxx,
         OFFSET === 4'bx101, UP === 4'bx101,
-        BIT_ABOVE === 4'bx101, BIT_PLUS === 4'bxx10};
+        BIT_ABOVE === 4'bx101, BIT_PLUS === 4'bxx10,
+        X_PLUS === 2'bxx, Z_MINUS === 3'bxxx, X_UP === 4'bxxxx,
+        KNOWN === 2'b01};
       assign width = $bits(ABOVE);
     endmodule
   "#)
   (top Top)
-  (assert_eq checks 511)
+  (assert_eq checks 8191)
   (assert_eq width 4))
 
 (case constant_parameter_initializers_preserve_unknown_indices
@@ -334,7 +340,7 @@
   ; and zero for two-state values, with the selected element's width.
   (four_state)
   (source "unknown_parameter_indices.sv" #"
-    module Top(output logic [5:0] checks, output int width);
+    module Top(output logic [9:0] checks, output int width, output int indexed_width);
       parameter logic [1:0][7:4] W = 8'hab;
       parameter bit [1:0][7:4] B = 8'hab;
       localparam IDX = 1'bz;
@@ -344,15 +350,22 @@
       localparam MASKED = W[1'bx & 1'b0][4];
       localparam KNOWN = W[1'bx === 1'bx][4];
       localparam ZERO = B[1'bx][5];
+      localparam PLUS = W[1][1'bx +: 2];
+      localparam MINUS = W[0][IDX -: 2];
+      localparam OUTER_PLUS = W[IDX +: 1];
+      localparam MASKED_PART = W[0][(1'bx & 1'b0) + 4 +: 2];
       assign checks = {OUTER === 1'bx, INNER === 1'bx,
         PART === 4'bxxxx, MASKED === 1'b1, KNOWN === 1'b0,
-        ZERO === 1'b0};
+        ZERO === 1'b0, PLUS === 2'bxx, MINUS === 2'bxx,
+        OUTER_PLUS === 4'bxxxx, MASKED_PART === 2'b11};
       assign width = $bits(PART);
+      assign indexed_width = $bits(PLUS) + $bits(MINUS) + $bits(OUTER_PLUS);
     endmodule
   "#)
   (top Top)
-  (assert_eq checks 63)
-  (assert_eq width 4))
+  (assert_eq checks 1023)
+  (assert_eq width 4)
+  (assert_eq indexed_width 8))
 
 (case constant_parameter_initializers_shape_ports_and_generate
   (source "constant_parameter_widths.sv" #"

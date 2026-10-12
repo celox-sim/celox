@@ -436,6 +436,10 @@ pub(super) fn parameters_from_ref_node_with_environment(
         && declared_alias
             .as_ref()
             .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
+    let parameter_members = declared_alias
+        .as_ref()
+        .map(|ty| ty.members.clone())
+        .unwrap_or_default();
     let parameter_is_2state = declared_alias
         .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
@@ -454,7 +458,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
                 validate_parameter_initializer_literal_widths(expr, syntax_tree)?;
-                if selects::parameter_initializer_needs_typed_selection(expr) {
+                if selects::parameter_initializer_needs_typed_lowering(expr) {
                     let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
                         parameter_packed_dimensions_with_imported(parameters, &imported),
@@ -529,6 +533,7 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 is_local,
             );
             parameter.packed_ranges = parameter_ranges.clone();
+            parameter.members = parameter_members.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
             validate_parameter_materialization_width(
                 parameter
@@ -559,14 +564,19 @@ fn validate_parameter_initializer_literal_widths(
     tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
     let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
-    let mut unevaluated_depth = 0usize;
+    let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
+    let mut evaluated_constants = HashSet::<*const sv_parser::ConstantExpression>::default();
+    let mut evaluation_stack = vec![true];
     for event in initializer.into_iter().event() {
         let (entering, node) = match event {
             sv_parser::NodeEvent::Enter(node) => (true, node),
             sv_parser::NodeEvent::Leave(node) => (false, node),
         };
-        if entering
-            && let RefNode::SystemTfCall(call) = node
+        if !entering {
+            evaluation_stack.pop();
+            continue;
+        }
+        if let RefNode::SystemTfCall(call) = node
             && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
                 matches!(
                     name,
@@ -585,22 +595,75 @@ fn validate_parameter_initializer_literal_widths(
             && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
         {
             query_operands.insert(argument as *const sv_parser::Expression);
-        }
-        if let RefNode::Expression(expression) = node
-            && query_operands.contains(&(expression as *const sv_parser::Expression))
-        {
-            if entering {
-                unevaluated_depth += 1;
-            } else {
-                unevaluated_depth -= 1;
+            // Dimension arguments are values, even when the query itself
+            // occurs inside another query's unevaluated operand.
+            for argument in call
+                .nodes
+                .1
+                .nodes
+                .1
+                .0
+                .contents()
+                .into_iter()
+                .skip(1)
+                .flatten()
+            {
+                evaluated_expressions.insert(argument as *const sv_parser::Expression);
             }
         }
+        match node {
+            RefNode::MultipleConcatenation(concat) => {
+                evaluated_expressions
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::Expression);
+            }
+            RefNode::ConstantMultipleConcatenation(concat) => {
+                evaluated_constants
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            RefNode::AssignmentPatternRepeat(pattern) => {
+                evaluated_constants
+                    .insert(&pattern.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            _ => {}
+        }
+        let evaluated_operand = match node {
+            RefNode::Expression(expression) => {
+                evaluated_expressions.contains(&(expression as *const sv_parser::Expression))
+            }
+            RefNode::ConstantExpression(expression) => {
+                evaluated_constants.contains(&(expression as *const sv_parser::ConstantExpression))
+            }
+            _ => false,
+        };
+        let evaluated = if let RefNode::Expression(expression) = node
+            && query_operands.contains(&(expression as *const sv_parser::Expression))
+        {
+            false
+        } else if evaluated_operand
+            || matches!(
+                node,
+                RefNode::ConstantRange(_)
+                    | RefNode::ConstantIndexedRange(_)
+                    | RefNode::IndexedRange(_)
+                    | RefNode::BitSelect(_)
+                    | RefNode::ConstantBitSelect(_)
+                    | RefNode::CastingType(_)
+                    | RefNode::SliceSize(_)
+                    | RefNode::ArrayRangeExpression(_)
+                    | RefNode::ArrayPatternKey(_)
+            )
+        {
+            // Type queries do not evaluate the value, but selecting its type
+            // still evaluates bounds, widths, counts and cast sizes. A nested
+            // type query can in turn exempt its own first operand.
+            true
+        } else {
+            *evaluation_stack.last().unwrap()
+        };
+        evaluation_stack.push(evaluated);
         // Inspect a sized literal's prefix without parsing its payload.
         // Query operands are types; trailing dimension arguments are values.
-        if entering
-            && unevaluated_depth == 0
-            && let RefNode::Size(size) = node
-        {
+        if evaluated && let RefNode::Size(size) = node {
             let width = tree
                 .get_str(&size.nodes.0.nodes.0)
                 .and_then(|size| size.replace('_', "").parse::<usize>().ok())
@@ -1499,8 +1562,12 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             signed,
         },
         ConstExpr::Function { name, args, .. } => Expr::Call {
+            arg_order: Vec::new(),
             name,
-            args: args.into_iter().map(const_expr_to_expr).collect(),
+            args: args
+                .into_iter()
+                .map(|arg| Some(const_expr_to_expr(arg)))
+                .collect(),
         },
         ConstExpr::Unary { op, expr } => Expr::Unary {
             op,
