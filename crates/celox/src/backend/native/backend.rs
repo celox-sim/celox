@@ -549,6 +549,40 @@ impl NativeProgramImage {
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
         }
+        for process in &self.runtime_schema.processes {
+            if !self
+                .design
+                .state_objects
+                .get(&process.clock)
+                .is_some_and(|metadata| {
+                    metadata.width == celox_design::PROCESS_CLOCK_WIDTH
+                        && !metadata.is_4state
+                        && metadata.array_dims.is_empty()
+                })
+            {
+                return Err("a process clock control slot has an invalid state object".into());
+            }
+            for clock in &process.clocks {
+                if clock.period < 2
+                    || !self.event_map.contains_key(&clock.signal)
+                    || !self
+                        .design
+                        .state_objects
+                        .get(&clock.signal)
+                        .is_some_and(|metadata| {
+                            metadata.width == 1
+                                && metadata.array_dims.is_empty()
+                                && matches!(
+                                    metadata.kind,
+                                    celox_design::DomainKind::ClockPosedge
+                                        | celox_design::DomainKind::ClockNegedge
+                                )
+                        })
+                {
+                    return Err("a process clock has an invalid event domain or period".into());
+                }
+            }
+        }
         for counters in &self.runtime_schema.process_event_counters {
             if !self.event_map.contains_key(&counters.signal) {
                 return Err("a process edge counter names an unknown event domain".into());
@@ -3282,5 +3316,70 @@ impl super::super::SimBackend for NativeBackend {
             }
         }
         bs
+    }
+}
+
+#[cfg(test)]
+mod process_metadata_tests {
+    use super::super::image_file::NativeImageContainerError;
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn image() -> NativeProgramImage {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
+        crate::Simulator::from_frontend(module.finish())
+            .compile_native()
+            .unwrap()
+            .into_program_image()
+    }
+
+    #[test]
+    fn process_clock_metadata_is_checked_before_image_attachment() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for corruption in 0..4 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes[0];
+            match corruption {
+                0 => slots.clocks[0].signal = slots.delay,
+                1 => slots.clocks[0].period = 1,
+                2 => slots.clock = slots.status,
+                _ => {
+                    let signal = *broken
+                        .design
+                        .state_objects
+                        .iter()
+                        .find(|(_, metadata)| {
+                            metadata.width == 1 && metadata.kind == celox_design::DomainKind::Other
+                        })
+                        .unwrap()
+                        .0;
+                    let event = broken.event_map[&slots.clocks[0].signal];
+                    broken.event_map.insert(signal, event);
+                    slots.clocks[0].signal = signal;
+                }
+            }
+            assert!(
+                matches!(
+                    broken.to_container_bytes(),
+                    Err(NativeImageContainerError::InvalidImage(_))
+                ),
+                "accepted corruption {corruption}"
+            );
+        }
     }
 }
