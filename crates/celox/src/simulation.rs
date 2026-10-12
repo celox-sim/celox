@@ -719,7 +719,11 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.simulator.eval_comb()
+        self.simulator.eval_comb()?;
+        if self.simulator.has_pending_runtime_finish() {
+            self.state.finish();
+        }
+        Ok(())
     }
 
     /// Returns a raw pointer to the backend memory and its total size in bytes.
@@ -2350,6 +2354,85 @@ mod active_comb_nba_tests {
         let source = "module Top(input bit clk,output bit q,observed);bit a;wire c=a;always @(posedge clk)begin a=1;q<=1;end initial begin @(posedge c);observed=q;end endmodule";
         let builder =
             || Simulator::from_sv_sources(vec![(source, std::path::Path::new("active.sv"))], "Top");
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod static_task_ff_tests {
+    use super::*;
+    #[test]
+    fn static_ff_task_state_survives_checkpoint_and_state_file() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, expected: u8) {
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("out")), expected.into());
+            let checkpoint = sim.checkpoint().unwrap();
+            let file = sim.save_state().unwrap();
+            fn next<B: SimBackend>(sim: &mut Simulation<B>, expected: u8) {
+                sim.schedule("clk", 2, 0).unwrap();
+                sim.schedule("clk", 3, 1).unwrap();
+                sim.run_until(3).unwrap();
+                assert_eq!(sim.get(sim.signal("out")), expected.into());
+            }
+            next(&mut sim, expected + 1);
+            sim.restore(&checkpoint).unwrap();
+            next(&mut sim, expected + 1);
+            sim.load_state(&file).unwrap();
+            next(&mut sim, expected + 1);
+        }
+        for (assignment, expected) in [("n=n+1", 11), ("n[3:0]=n[3:0]+1", 11), ("n<=n+1", 10)] {
+            let source = format!(
+                "module Top(input bit clk,output bit[7:0]out);task tick(output bit[7:0]value);static bit[7:0]n=10;{assignment};value=n;endtask always_ff @(posedge clk)tick(out);endmodule"
+            );
+            let builder = || {
+                Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("static.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                expected,
+            );
+            check(
+                Simulation::new(builder().build_cranelift().unwrap()),
+                expected,
+            );
+            check(Simulation::new(builder().build_wasm().unwrap()), expected);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(builder().build_native().unwrap()), expected);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod direct_finish_tests {
+    use super::*;
+    #[test]
+    fn direct_comb_settle_finishes_without_consuming_a_future_event() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.schedule("clk", 10, 1).unwrap();
+            sim.run_until(0).unwrap();
+            sim.simulator.set(sim.signal("go"), 1u8);
+            sim.eval_comb().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.next_event_time(), None);
+            assert_eq!(sim.time(), 0);
+            assert!(
+                sim.drain_runtime_events()
+                    .contains(&crate::RuntimeEvent::Finish)
+            );
+            assert_eq!(sim.step().unwrap(), None);
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        let source = "module Top(input bit clk,go,output bit q);always_comb if(go)$finish;always @(posedge clk)q<=1;endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("finish.sv"))], "Top");
         check(Simulation::new(builder().build_interpreter().unwrap()));
         check(Simulation::new(builder().build_cranelift().unwrap()));
         check(Simulation::new(builder().build_wasm().unwrap()));
