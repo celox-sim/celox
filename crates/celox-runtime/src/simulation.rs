@@ -691,7 +691,11 @@ impl<B: SimBackend> SimulationState<B> {
             }
             let mut events = Vec::new();
             let ready = self.take_ready_processes(executor, current_time, &mut events);
-            if ready.is_empty() && self.waiting.is_empty() && events.is_empty() {
+            if ready.is_empty()
+                && self.waiting.is_empty()
+                && events.is_empty()
+                && !self.settle_before_processes
+            {
                 if fired {
                     // The edges may have released waits that resume now.
                     continue;
@@ -1368,7 +1372,9 @@ impl<B: SimBackend> SimulationState<B> {
         for event in &events_to_process {
             executor.backend_mut().set(event.signal, event.next_val);
         }
-        if std::mem::take(&mut self.settle_before_processes) {
+        if std::mem::take(&mut self.settle_before_processes)
+            && (!ready_processes.is_empty() || !self.waiting.is_empty())
+        {
             executor.eval_comb()?;
         }
 

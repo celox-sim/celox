@@ -84,6 +84,9 @@ unsafe extern "C" fn call_method(
             if unsafe { args[0].str_.as_str() } == "hello" {
                 state.value = 7;
                 0
+            } else if unsafe { args[0].str_.as_str() }.is_empty() {
+                state.value = 9;
+                0
             } else {
                 1
             }
@@ -3098,4 +3101,48 @@ fn failed_component_vcd_registration_calls_finish_on_each_run() {
         );
         assert_eq!(VCD_FINISH_CALLS.load(Ordering::Relaxed), expected);
     }
+}
+
+#[test]
+fn empty_component_string_arguments_preserve_bytecode_behavior() {
+    register_component();
+    for kernels in [false, true] {
+        let (_dir, metadata) = component_metadata();
+        let code = r#"#[test(t)] module t { var c:$comp::celox_counter;
+            initial { c.set_str(""); var value:u8; value=c.get(); $assert(value==9); $finish(); }
+        }"#;
+        assert_eq!(
+            Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(kernels)
+                .run_test()
+                .unwrap(),
+            TestResult::Pass
+        );
+    }
+}
+
+#[test]
+fn clean_component_calls_do_not_replay_comb_assertions() {
+    register_component();
+    let count = |calls: &str| {
+        let (_dir, metadata) = component_metadata();
+        let code = format!(
+            r#"#[test(t)] module t {{ var c:$comp::celox_counter;
+            always_comb {{ $assert(1,"comb"); }}
+            initial {{ {calls} $finish(); }}
+        }}"#
+        );
+        let result = Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        result
+            .assertions
+            .iter()
+            .filter(|a| a.message.as_deref() == Some("comb"))
+            .count()
+    };
+    assert_eq!(count("c.get(); c.get();"), count(""));
 }

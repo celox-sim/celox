@@ -1151,3 +1151,49 @@ fn consecutive_reset_helpers_share_the_first_clock_edge() {
         );
     }
 }
+
+#[test]
+fn empty_dynamic_loop_bounds_settle_their_effects() {
+    let code = r#"#[test(Top)] module Top {
+        var source:u32; let derived:u32=source+1; var limit:u32;
+        function bound(value:output u32)->u32 { value=7; return 1; }
+        initial { limit=0; for i in bound(source)..limit { source=9; } $assert(derived==8); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+#[test]
+fn random_arguments_settle_their_effects() {
+    for op in [
+        "random.seed(bound(source));",
+        "value=random.get_range(bound(source),bound(source));",
+    ] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            var random:$tb::random::<u32>; var source:u32; let derived:u32=source+1; var value:u32;
+            function bound(value:output u32)->u32 {{ value=7; return 3; }}
+            initial {{ {op} $assert(derived==8); $finish(); }}
+        }}"#
+        );
+        check_passes_on_every_backend(&code);
+    }
+}
+#[test]
+fn tick_limit_settles_reset_releases_without_domains() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk:$tb::clock_gen; inst rst:$tb::reset_gen(clk); let released:logic=rst;
+        initial { rst.assert(1); $finish(); }
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1);
+        assert_eq!(result.result, TestResult::Pass);
+        assert_eq!(result.ticks, 1);
+        assert_eq!(sim.get(sim.signal("rst")), sim.get(sim.signal("released")));
+        assert_eq!(sim.get(sim.signal("released")), 1u8.into());
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}

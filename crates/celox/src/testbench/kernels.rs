@@ -344,8 +344,12 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             declared_width,
             strict,
         } => {
-            // The component reads settled design state.
-            sim.eval_comb_checked().map_err(|error| error.to_string())?;
+            // Effectful arguments have a lowering barrier. A clean call
+            // must not replay combinational displays/assertions.
+            if sim.dirty {
+                sim.eval_comb_checked().map_err(|error| error.to_string())?;
+                sim.dirty = false;
+            }
             let host_args = args
                 .iter()
                 .map(|arg| {

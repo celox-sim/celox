@@ -1611,6 +1611,8 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn host_request(&mut self, request: HostRequest<SourceAddr>) -> Result<(), ParserError> {
+        // Random requests do not settle the design themselves.
+        self.settle_if_dirty()?;
         self.host_requests.push(request);
         let index = self.kernel.add_host_request();
         debug_assert_eq!(index as usize + 1, self.host_requests.len());
@@ -1925,7 +1927,10 @@ impl<'a> BlockLowering<'a> {
         self.store_scratch(start_slot, width, start_reg);
         let end_reg = self.for_bound(shape.end, width, cmp_signed)?;
         self.store_scratch(end_slot, width, end_reg);
+        // Bounds can write design state even when the range is empty.
+        self.settle_if_dirty()?;
         let start_reg = self.load_scratch(start_slot, width, cmp_signed);
+        let end_reg = self.load_scratch(end_slot, width, cmp_signed);
         let var = self.destination(stmt.var_id, stmt.token);
         let stall_message = format!(
             "non-progressing stepped for loop (loop variable `{}`)",
@@ -2776,9 +2781,14 @@ impl<'a> BlockLowering<'a> {
                 for arg in args {
                     let is_string = arg.0.comptime().r#type.is_string();
                     let signed = expression_signed(&arg.0);
-                    let (value, slot) =
+                    let (mut value, slot) =
                         self.host_scratch("component_arg", argument_width(arg), signed, is_string)?;
                     let width = value.width;
+                    if is_string
+                        && FfParser::static_string_expr(&arg.0).is_some_and(|text| text.is_empty())
+                    {
+                        value.width = 0; // logical byte length; physical scratch still has one bit
+                    }
                     let reg = if let Some(text) = FfParser::static_string_expr(&arg.0) {
                         let builder = self.kernel.builder();
                         let reg = builder.alloc_bit(width, false);

@@ -908,6 +908,9 @@ pub(crate) fn host_value_from_bits(
     is_string: bool,
 ) -> HostValue {
     if is_string {
+        if width == 0 {
+            return HostValue::Str(String::new());
+        }
         let byte_len = width.div_ceil(8);
         let mut bytes = value.to_bytes_be();
         if bytes.len() < byte_len {
