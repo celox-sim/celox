@@ -256,11 +256,46 @@ fn function_key(call: &veryl_analyzer::ir::FunctionCall) -> FunctionKey {
     (call.id, call.index.clone())
 }
 fn selected_case_body(stmt: &veryl_analyzer::ir::CaseStatement) -> Option<&[Statement]> {
+    // Arithmetic targets need each label's comparison width. Prune only
+    // self-determined known nonnegative terms whose value fits in u64.
+    let value = |expr: &Expression| {
+        if !matches!(expr, Expression::Term(_))
+            || expressions::has_call(expr)
+            || !expr.comptime().is_const
+        {
+            return None;
+        }
+        let value = expr.comptime().get_value().ok()?;
+        let width = value.width();
+        if value.is_xz() || width == 0 || width > 64 {
+            return None;
+        }
+        let bits = value.payload_u64();
+        if value.signed() && bits & (1u64 << (width - 1)) != 0 {
+            return None;
+        }
+        Some(bits)
+    };
+    let target = value(&stmt.case_target)?;
     for arm in &stmt.arms {
-        match constant_truth(&case_arm_condition_expr(&stmt.case_target, &arm.patterns)) {
-            Some(true) => return Some(&arm.body),
-            Some(false) => {}
-            None => return None,
+        let mut selected = false;
+        for pattern in &arm.patterns {
+            selected |= match pattern {
+                veryl_analyzer::ir::CasePattern::Eq(pattern) => target == value(pattern)?,
+                veryl_analyzer::ir::CasePattern::Range { lo, hi, inclusive } => {
+                    let lo = value(lo)?;
+                    let hi = value(hi)?;
+                    lo <= target
+                        && if *inclusive {
+                            target <= hi
+                        } else {
+                            target < hi
+                        }
+                }
+            };
+        }
+        if selected {
+            return Some(&arm.body);
         }
     }
     Some(&stmt.default)
