@@ -5,7 +5,8 @@
 //! inlined subroutine bodies. Nonblocking targets are read from the stable
 //! region and written to the working region, so every process of a trigger
 //! observes the pre-edge state; blocking targets and procedural locals are
-//! both read and written in the working region (IEEE 1800-2023 10.4).
+//! published in stable state in the active region; procedural scratch
+//! stays in the working region (IEEE 1800-2023 10.4).
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
@@ -40,6 +41,8 @@ pub(super) struct Ff<'p, 'a> {
     working: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
+    nonblocking_targets: Vec<(SourceVarId, BitAccess)>,
+    nonblocking_store: bool,
     loops: Vec<LoopBlocks>,
     functions: Vec<FunctionBlocks>,
     /// Loop variables of unrolled loops and their literal values.
@@ -108,6 +111,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             b: SIRBuilder::new(),
             working: HashSet::default(),
             targets: Vec::new(),
+            nonblocking_targets: Vec::new(),
+            nonblocking_store: false,
             loops: Vec::new(),
             functions: Vec::new(),
             overlay: HashMap::default(),
@@ -127,7 +132,11 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Where a write of `id`, and a read of a value the process wrote, go:
     /// the working region, or stable state in a process kernel.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() || self.event_counter_state.contains(&id) {
+        let variable = self.aliases.get(&id).copied().unwrap_or(id);
+        if self.kernel.is_some()
+            || self.event_counter_state.contains(&variable)
+            || (self.working.contains(&variable) && !self.m.is_hidden(variable))
+        {
             stable(*self.private.get(&id).unwrap_or(&id))
         } else {
             working(id)
@@ -202,6 +211,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             }),
         };
         self.targets.push((id, access));
+        if !blocking {
+            self.nonblocking_targets.push((id, access));
+        }
     }
 
     /// Collect the variables a body writes, following calls into subroutines.
@@ -277,7 +289,16 @@ impl<'p, 'a> Ff<'p, 'a> {
             } else if counters.contains(id) {
                 stable(*id)
             } else if let Some(var) = aliases.get(id) {
-                working(*var)
+                if !self.nonblocking_store
+                    && working_set.contains(var)
+                    && variables.get(var).is_some_and(|var| !var.hidden)
+                {
+                    stable(*var)
+                } else {
+                    working(*var)
+                }
+            } else if working_set.contains(id) && variables.get(id).is_some_and(|var| !var.hidden) {
+                stable(*id)
             } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
                 working(*id)
             } else {
@@ -1042,7 +1063,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         value: RegisterId,
     ) -> Result<(), sv::AnalyzerError> {
         let variable = self.aliases.get(&id).copied().unwrap_or(id);
-        let watchers = if (self.kernel.is_some() || self.working.contains(&variable))
+        let watchers = if (self.kernel.is_some()
+            || (!self.nonblocking_store && self.working.contains(&variable)))
             && !self.recording_events
         {
             let variable = self.aliases.get(&id).copied().unwrap_or(id);
@@ -1167,8 +1189,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         previous
     }
 
+    fn store_target(&self, id: SourceVarId) -> Addr {
+        if self.nonblocking_store && self.kernel.is_none() {
+            working(id)
+        } else {
+            self.target(id)
+        }
+    }
+
     fn store_raw(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
-        let target = self.target(id);
+        let target = self.store_target(id);
         self.b.emit(SIRInstruction::Store(
             target,
             offset,
@@ -1219,13 +1249,25 @@ impl<'p, 'a> Ff<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.assign_with_kind(lhs, rhs, false)
+    }
+
+    fn assign_with_kind(
+        &mut self,
+        lhs: &sv::ir::LValue,
+        rhs: &sv::ir::Expr,
+        nonblocking: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
         let width = self.lvalue_width(&lhs)?;
         let signed = self.expr_signed(rhs);
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(rhs, Some((width, signed)), &mut arena)?;
-        self.write(&lhs, &mut arena, node, signed, rhs)
+        let previous = std::mem::replace(&mut self.nonblocking_store, nonblocking);
+        let result = self.write(&lhs, &mut arena, node, signed, rhs);
+        self.nonblocking_store = previous;
+        result
     }
 
     fn lvalue_width(&self, lvalue: &sv::ir::LValue) -> Result<usize, sv::AnalyzerError> {
@@ -1558,7 +1600,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     dynamic_bit_offset: None,
                 };
                 let old = self.b.alloc_logic(packed_element_width);
-                let target = self.target(id);
+                let target = self.store_target(id);
                 self.b.emit(SIRInstruction::Load(
                     old,
                     target,
@@ -1585,7 +1627,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             dynamic_bit_offset: None,
         };
         let old = self.b.alloc_logic(target_width);
-        let target = self.target(id);
+        let target = self.store_target(id);
         self.b.emit(SIRInstruction::Load(
             old,
             target,
@@ -1602,6 +1644,15 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        self.assign_concat_with_kind(parts, rhs, false)
+    }
+
+    fn assign_concat_with_kind(
+        &mut self,
+        parts: &[sv::ir::LValue],
+        rhs: &sv::ir::Expr,
+        nonblocking: bool,
     ) -> Result<(), sv::AnalyzerError> {
         // The positions of the parts are evaluated before any part is written.
         let mut evaluated = Vec::with_capacity(parts.len());
@@ -1637,7 +1688,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
                 signed: false,
             };
-            self.assign(part, &slice)?;
+            self.assign_with_kind(part, &slice, nonblocking)?;
         }
         Ok(())
     }
@@ -1660,12 +1711,20 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
         match stmt {
-            sv::ir::Stmt::Assign { lhs, rhs, .. } => {
-                self.assign(lhs, rhs)?;
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking,
+            } => {
+                self.assign_with_kind(lhs, rhs, *nonblocking)?;
                 Ok(true)
             }
-            sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
-                self.assign_concat(parts, rhs)?;
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking,
+            } => {
+                self.assign_concat_with_kind(parts, rhs, *nonblocking)?;
                 Ok(true)
             }
             sv::ir::Stmt::Local {
@@ -2670,7 +2729,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let eval = seal_drained(self.b);
         let mut apply = SIRBuilder::new();
-        emit_ff_commits(&mut apply, &targets);
+        let nonblocking_targets = self
+            .nonblocking_targets
+            .into_iter()
+            .map(|(id, access)| VarAtomBase::new(id, access.lsb, access.msb))
+            .collect::<Vec<_>>();
+        emit_ff_commits(&mut apply, &nonblocking_targets);
         let zero = apply.alloc_bit(1, false);
         apply.emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
         apply.emit(SIRInstruction::Store(

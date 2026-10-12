@@ -168,10 +168,24 @@ impl<'a> ProcModule<'a> {
                 unpacked_bounds.insert(id, bounds);
             }
         }
-        let hidden_comb_pulses = module
+        let comb_writes = module
             .comb_processes()
             .iter()
-            .flat_map(|process| repeated_comb_writes(process.body(), &subroutines))
+            .map(|process| combinational_write_counts(process.body(), &subroutines))
+            .collect::<Vec<_>>();
+        let hidden_comb_pulses = comb_writes
+            .iter()
+            .flat_map(|writes| {
+                writes
+                    .iter()
+                    .filter_map(|(name, count)| (*count > 1).then_some(name.clone()))
+            })
+            .collect();
+        let combinational = module
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.lhs().to_string())
+            .chain(comb_writes.iter().flat_map(|writes| writes.keys().cloned()))
             .collect();
         Self {
             variables,
@@ -197,24 +211,7 @@ impl<'a> ProcModule<'a> {
                 .flat_map(|process| process.events())
                 .map(|event| event.signal().to_string())
                 .collect(),
-            combinational: module
-                .assignments()
-                .iter()
-                .map(|assignment| assignment.lhs().to_string())
-                .chain(module.comb_processes().iter().flat_map(|process| {
-                    let mut names = Vec::new();
-                    for stmt in process.body() {
-                        stmt.walk(&mut |stmt| match stmt {
-                            sv::ir::Stmt::Assign { lhs, .. } => names.push(lhs.name().to_string()),
-                            sv::ir::Stmt::AssignConcat { parts, .. } => {
-                                names.extend(parts.iter().map(|part| part.name().to_string()))
-                            }
-                            _ => {}
-                        });
-                    }
-                    names
-                }))
-                .collect(),
+            combinational,
             hidden_comb_pulses,
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
@@ -2278,10 +2275,10 @@ pub(super) type EventWatchPlan = (
 );
 
 /// Variables whose combinational process can write them repeatedly in one run.
-fn repeated_comb_writes(
+fn combinational_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
-) -> HashSet<String> {
+) -> HashMap<String, usize> {
     fn counts(
         stmts: &[sv::ir::Stmt],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
@@ -2333,13 +2330,15 @@ fn repeated_comb_writes(
                         next.insert(name, 2);
                     }
                 }
-                sv::ir::Stmt::Call { name, .. } if visiting.insert(name.clone()) => {
-                    if let Some(subroutine) = subroutines.get(name) {
-                        next = counts(&subroutine.body, subroutines, visiting);
-                    }
-                    visiting.remove(name);
-                }
                 _ => {}
+            }
+            let mut calls = Vec::new();
+            stmt_calls(stmt, &mut calls);
+            for (name, args) in calls {
+                for (name, count) in call_counts(&name, &args, subroutines, visiting) {
+                    let entry = next.entry(name).or_default();
+                    *entry = (*entry + count).min(2);
+                }
             }
             for (name, count) in next {
                 let entry = result.entry(name).or_default();
@@ -2348,8 +2347,45 @@ fn repeated_comb_writes(
         }
         result
     }
+    fn call_counts(
+        name: &str,
+        args: &[Option<sv::ir::Expr>],
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        visiting: &mut HashSet<String>,
+    ) -> HashMap<String, usize> {
+        if !visiting.insert(name.to_string()) {
+            return HashMap::default();
+        }
+        let mut result = HashMap::default();
+        if let Some(subroutine) = subroutines.get(name) {
+            result = counts(&subroutine.body, subroutines, visiting);
+            for param in &subroutine.params {
+                result.remove(&param.name);
+            }
+            for (param, arg) in subroutine.params.iter().zip(args) {
+                if param.direction.is_written() {
+                    for target in arg
+                        .as_ref()
+                        .and_then(lvalue_from_expr)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let entry = result.entry(target.name().to_string()).or_default();
+                        *entry = (*entry + 1).min(2);
+                    }
+                }
+            }
+            let mut defaults = Vec::new();
+            default_calls(subroutine, args, &mut defaults);
+            for (name, args) in defaults {
+                for (name, count) in call_counts(&name, &args, subroutines, visiting) {
+                    let entry = result.entry(name).or_default();
+                    *entry = (*entry + count).min(2);
+                }
+            }
+        }
+        visiting.remove(name);
+        result
+    }
     counts(stmts, subroutines, &mut HashSet::default())
-        .into_iter()
-        .filter_map(|(name, count)| (count > 1).then_some(name))
-        .collect()
 }
