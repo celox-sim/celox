@@ -94,8 +94,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				const nextPaths = generateSidecars(data, projectRoot, {
 					removeOrphans: false,
 				});
-				const retained = new Set(nextPaths);
-				cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
+				cleanSidecars(sidecarPaths, nextPaths);
 				sidecarPaths = nextPaths;
 				generatedData = data;
 			}
@@ -175,8 +174,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			cache = new GenTsCache(projectRoot, componentManifests);
 			// Run generator and create type sidecars
 			const data = cache.get();
-			cleanSidecars(sidecarPaths);
-			sidecarPaths = generateSidecars(data, projectRoot);
+			const nextPaths = generateSidecars(data, projectRoot);
+			cleanSidecars(sidecarPaths, nextPaths);
+			sidecarPaths = nextPaths;
 			generatedData = data;
 		},
 

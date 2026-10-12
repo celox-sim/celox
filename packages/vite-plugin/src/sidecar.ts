@@ -2,6 +2,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
+	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -57,12 +58,40 @@ export function generateSidecars(
 	// Startup may find declarations left by an earlier server process. Sweep
 	// only after all replacement declarations have been generated successfully.
 	if (options.removeOrphans !== false && existsSync(outDir)) {
-		removeOrphanSidecars(outDir, new Set(written));
+		removeOrphanSidecars(outDir, retainedSidecars(written));
 	}
 	return written;
 }
 
-function removeOrphanSidecars(dir: string, retained: Set<string>): void {
+function retainedSidecars(paths: string[]): Map<string, string[]> {
+	const retained = new Map<string, string[]>();
+	for (const path of paths) {
+		const key = path.toLowerCase();
+		retained.set(key, [...(retained.get(key) ?? []), path]);
+	}
+	return retained;
+}
+
+function isRetainedSidecar(
+	path: string,
+	retained: Map<string, string[]>,
+): boolean {
+	const candidates = retained.get(path.toLowerCase());
+	if (!candidates) return false;
+	if (candidates.includes(path)) return true;
+	// A case-only rename may leave the old directory-entry spelling. Confirm
+	// file identity so distinct case-sensitive files can still be removed.
+	const current = statSync(path, { bigint: true });
+	return candidates.some((candidate) => {
+		const written = statSync(candidate, { bigint: true });
+		return current.dev === written.dev && current.ino === written.ino;
+	});
+}
+
+function removeOrphanSidecars(
+	dir: string,
+	retained: Map<string, string[]>,
+): void {
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		const path = join(dir, entry.name);
 		if (entry.isDirectory()) {
@@ -70,7 +99,7 @@ function removeOrphanSidecars(dir: string, retained: Set<string>): void {
 		} else if (
 			entry.isFile() &&
 			entry.name.endsWith(".d.veryl.ts") &&
-			!retained.has(path)
+			!isRetainedSidecar(path, retained)
 		) {
 			unlinkSync(path);
 		}
@@ -78,12 +107,16 @@ function removeOrphanSidecars(dir: string, retained: Set<string>): void {
 }
 
 /**
- * Remove all sidecar files that were previously generated.
+ * Remove previous sidecars while preserving replacement files and aliases.
  */
-export function cleanSidecars(paths: string[]): void {
+export function cleanSidecars(
+	paths: string[],
+	retainedPaths: string[] = [],
+): void {
+	const retained = retainedSidecars(retainedPaths);
 	for (const p of paths) {
 		try {
-			if (existsSync(p)) {
+			if (existsSync(p) && !isRetainedSidecar(p, retained)) {
 				unlinkSync(p);
 			}
 		} catch {
