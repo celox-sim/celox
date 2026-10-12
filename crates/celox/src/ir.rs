@@ -445,7 +445,29 @@ pub struct UnoptimizedSir {
 }
 
 impl UnoptimizedSir {
-    pub(crate) fn new(sir: SirProgram, runtime: RuntimeProgram) -> Self {
+    pub(crate) fn new(sir: SirProgram, mut runtime: RuntimeProgram) -> Self {
+        runtime.runtime_schema.clock_phase_sensitive_comb = sir
+            .eval_comb
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                if let SIRInstruction::Load(_, address, _, _) = instruction {
+                    runtime
+                        .design
+                        .state_objects
+                        .get(&address.absolute_addr())
+                        .is_some_and(|metadata| {
+                            matches!(
+                                metadata.kind,
+                                celox_design::DomainKind::ClockPosedge
+                                    | celox_design::DomainKind::ClockNegedge
+                            )
+                        })
+                } else {
+                    false
+                }
+            });
         Self {
             sir,
             layout_requirements: Default::default(),

@@ -422,6 +422,9 @@ impl<B: SimBackend> SimulationState<B> {
         let Some(current_time) = self.next_event_time() else {
             return Ok(None);
         };
+        if current_time > limit {
+            return Ok(None);
+        }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()

@@ -388,6 +388,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) clock_phase_sensitive_comb: bool,
     pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
@@ -489,6 +490,7 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                clock_phase_sensitive_comb: self.runtime_schema.clock_phase_sensitive_comb,
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
@@ -2301,6 +2303,7 @@ fn compile_program(
                     .iter()
                     .copied()
                     .collect(),
+                clock_phase_sensitive_comb: sir.runtime().runtime_schema.clock_phase_sensitive_comb,
                 dead_store_policy: sir.runtime().runtime_schema.dead_store_policy,
                 live_signals: sir
                     .runtime()
