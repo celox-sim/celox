@@ -611,3 +611,31 @@
       initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
     endmodule"#)
   (top Top) (run_until 1) (assert_eq observed 2) (assert_eq derived_seen 3) (assert_eq q 7))
+
+(case single_item_generate_ff_rewrites_keep_their_else
+  (source "generate_ff.sv" #"module Top(input bit clk, output bit [1:0] q, seen);
+      if (0) always_ff @(posedge clk) q<=1;
+      else always_ff @(posedge clk) q<=2;
+      initial seen=q;
+    endmodule"#)
+  (top Top) (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 2))
+
+(case immediate_assertion_ff_keeps_both_actions
+  (source "assert_ff.sv" #"module Top(input bit clk, en, output bit q);
+      always_ff @(posedge clk) assert (en) q<=1; else q<=0;
+    endmodule"#)
+  (top Top) (set en 0) (set clk 1) (run_until 0) (assert_eq q 0)
+  (set clk 0) (eval) (set en 1) (set clk 1) (run_until 1) (assert_eq q 1))
+
+(case printed_finish_notice_is_design_output
+  (source "printed.sv" #"module Top;
+      initial begin $display("source_0.sv:17: $finish called at 0 (1ps)"); #1; $finish; end
+    endmodule"#)
+  (top Top) (run_until 0) (expect_output "source_0.sv:17: $finish called at 0 (1ps)\n") (run_to_finish))
+
+(case combinational_finish_ends_timed_execution
+  (source "comb_finish.sv" #"module Top(output bit done);
+      initial begin #1; done=1; end
+      always_comb if(done) $finish;
+    endmodule"#)
+  (top Top) (run_to_finish) (assert_eq done 1))
