@@ -1228,3 +1228,22 @@ fn imported_clock_periods_reject_duplicate_signal_entries() {
         "{error}"
     );
 }
+
+#[test]
+fn one_shot_events_conflict_with_new_process_clock_generators() {
+    for time in [0, 4] {
+        let (mut m, clk, _) = clocked_by_process_waits(4);
+        let one = constant(&mut m, 1, 64);
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+        let mut sim = Simulation::from_frontend(m.finish()).build().unwrap();
+        sim.schedule("clk", time, 1).unwrap();
+        let error = sim.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(sim.ticks(), 0);
+        assert_eq!(sim.get(sim.signal("count")), 0u32.into());
+    }
+}

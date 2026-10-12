@@ -1738,9 +1738,14 @@ mod clock_failure_progress_tests {
     };
 
     fn design(on_rising: bool) -> crate::frontend_sdk::FrontendArtifact {
+        module_design(on_rising).0.finish()
+    }
+
+    fn module_design(on_rising: bool) -> (ModuleBuilder, crate::frontend_sdk::SignalId) {
         let bit = ValueType::bits(1).unwrap();
         let word = ValueType::bits(32).unwrap();
         let mut m = ModuleBuilder::new("Progress").unwrap();
+        let other = m.internal("other", bit).unwrap();
         let clk = m.internal("clk", bit).unwrap();
         let bad = m.input("bad", bit).unwrap();
         let count = m.output("count", word).unwrap();
@@ -1785,7 +1790,7 @@ mod clock_failure_progress_tests {
         let count = m.constant(Constant::two_state(2u8, 64).unwrap());
         m.process(vec![Statement::ClockCycles { clock: clk, count }])
             .unwrap();
-        m.finish()
+        (m, other)
     }
 
     fn check<B: SimBackend>(mut sim: Simulation<B>, on_rising: bool) {
@@ -1824,6 +1829,119 @@ mod clock_failure_progress_tests {
             check(builder().build_wasm().unwrap(), on_rising);
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(builder().build_native().unwrap(), on_rising);
+        }
+    }
+
+    struct FailingExecutor<B: SimBackend> {
+        sim: Simulator<B>,
+        fail: Option<usize>,
+        in_apply: bool,
+    }
+    impl<B: SimBackend> SimulationExecutor for FailingExecutor<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if !self.in_apply && self.fail == Some(event.id()) {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: "injected FF failure".into(),
+                    signals: Vec::new(),
+                });
+            }
+            SimulationExecutor::eval_only_ff_at(&mut self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if self.in_apply && self.fail == Some(event.id()) {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: "injected publication failure".into(),
+                    signals: Vec::new(),
+                });
+            }
+            SimulationExecutor::apply_ff_at(&mut self.sim, event)
+        }
+        fn fused_ticks_allowed(&self) -> bool {
+            false
+        }
+    }
+
+    fn coincident_design() -> crate::frontend_sdk::FrontendArtifact {
+        let (mut m, other) = module_design(false);
+        let word = ValueType::bits(32).unwrap();
+        let count = m.output("other_count", word).unwrap();
+        let current = m.read(count).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 32).unwrap());
+        let next = m.binary(BinaryOp::Add, current, one, word).unwrap();
+        let target = m.whole(count).unwrap();
+        m.register(target, next, other, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(other, 2).unwrap();
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: other,
+            count: two,
+        }])
+        .unwrap();
+        m.finish()
+    }
+
+    fn check_coincident_failure<B: SimBackend>(sim: Simulator<B>, in_apply: bool) {
+        let mut state = simulation_state(&sim);
+        let mut executor = FailingExecutor {
+            sim,
+            fail: None,
+            in_apply,
+        };
+        assert_eq!(state.step_until(&mut executor, 0).unwrap(), Some(0));
+        let initial_ticks = state.ticks();
+        assert_eq!(state.step_until(&mut executor, 1).unwrap(), Some(1));
+        let failed = executor
+            .sim
+            .event(if in_apply { "fallclk" } else { "other" });
+        executor.fail = Some(failed.id());
+        assert!(state.step_until(&mut executor, 2).is_err());
+        assert_eq!(state.ticks(), initial_ticks + u64::from(in_apply));
+        let falls = executor.sim.signal("falls");
+        assert_eq!(executor.backend().get_as::<u32>(falls), 0);
+        assert_eq!(state.next_event_time(), Some(2));
+        executor.fail = None;
+        assert_eq!(state.step_until(&mut executor, 2).unwrap(), Some(2));
+        assert_eq!(executor.backend().get_as::<u32>(falls), 1);
+        assert_eq!(state.ticks(), initial_ticks + 1);
+        assert_eq!(
+            executor
+                .backend()
+                .get_as::<u32>(executor.sim.signal("other_count")),
+            2
+        );
+    }
+
+    #[test]
+    fn coincident_ff_failures_do_not_discard_unpublished_falling_domains() {
+        for in_apply in [false, true] {
+            let builder = || {
+                Simulator::from_frontend(coincident_design())
+                    .emit_triggers()
+                    .true_loop(
+                        (Vec::new(), vec!["v".into()]),
+                        (Vec::new(), vec!["v".into()]),
+                        8,
+                    )
+            };
+            check_coincident_failure(builder().build_interpreter().unwrap(), in_apply);
+            check_coincident_failure(builder().build_cranelift().unwrap(), in_apply);
+            check_coincident_failure(builder().build_wasm().unwrap(), in_apply);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check_coincident_failure(builder().build_native().unwrap(), in_apply);
         }
     }
 }

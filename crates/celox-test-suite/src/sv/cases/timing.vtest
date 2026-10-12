@@ -543,3 +543,36 @@
   (top Top)
   (set clk 1) (run_until 1) (assert_eq q 0)
   (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))
+
+(case imported_timed_tasks_do_not_replay_setup_edges
+  (source "delays.sv" #"package delays;
+      task automatic tick(output bit value); #1 value=1; endtask
+    endpackage"#)
+  (source "imported.sv" #"module Top(input bit clk, output bit q);
+      import delays::*;
+      always @(posedge clk) tick(q);
+    endmodule"#)
+  (top Top)
+  (set clk 1) (run_until 1) (assert_eq q 0)
+  (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))
+
+(case untimed_local_tasks_shadow_timed_tasks_in_other_scopes
+  (source "slow.sv" #"package slow;
+      task automatic tick(output bit value); #1 value=1; endtask
+    endpackage"#)
+  (source "local.sv" #"module Top(input bit clk, output bit q, seen);
+      task tick; q<=1; endtask
+      always @(posedge clk) tick();
+      initial seen=q;
+    endmodule"#)
+  (top Top)
+  (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 1))
+
+(case automatic_module_ff_staging_keeps_its_state
+  (source "automatic.sv" #"module automatic Top(input bit clk, output bit q, seen);
+      always_ff @(posedge clk) q<=1;
+      initial seen=q;
+    endmodule"#)
+  (top Top)
+  (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 1)
+  (set clk 0) (eval) (set clk 1) (run_until 1) (assert_eq q 1))

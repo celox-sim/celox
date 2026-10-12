@@ -70,9 +70,15 @@ pub(crate) fn stage(
             source.text.as_bytes(),
         )?;
     }
-    let prepared =
+    let mut prepared =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
+    if design.timed {
+        for source in &mut prepared.sources {
+            *source = expanded_timed_source(source)?;
+        }
+    }
+    let task_timing = timed_ff::TaskTiming::new(&prepared.sources);
     let control_names = timed_names(&prepared.sources);
     let timescale = directory.join("timescale.sv");
     write_if_changed(&timescale, TIMESCALE.as_bytes())?;
@@ -85,7 +91,7 @@ pub(crate) fn stage(
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
         let source = if design.timed {
-            timed_source(source, &control_names)?
+            timed_source(source, &control_names, &task_timing)?
         } else {
             source.clone()
         };
@@ -217,33 +223,32 @@ impl TimedNames {
     }
 }
 
-fn timed_source(source: &str, names: &TimedNames) -> Result<String> {
-    // Stage actual declarations after macro expansion, including process
-    // keywords supplied as macro arguments.
+fn expanded_timed_source(source: &str) -> Result<String> {
     let syntax = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
-    let expanded = syntax
+    Ok(syntax
         .get_str(vec![root])
-        .ok_or("missing timed source text")?;
+        .ok_or("missing timed source text")?
+        .to_owned())
+}
+
+fn timed_source(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {
     Ok(format!(
         "import {}::*;\n{}",
         names.package,
-        timed_content(expanded, names)?
+        timed_content(source, names, tasks)?
     ))
 }
 
-fn timed_content(source: &str, names: &TimedNames) -> Result<String> {
+fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {
     let mut output = String::new();
     let mut previous = 0;
-    let timed_tasks = timed_ff::timed_tasks(source);
     for (start, end, word) in sv_words(source) {
         if start < previous {
             continue;
         }
-        if word == "always_ff"
-            || (word == "always" && timed_ff::edge_control(source, end, &timed_tasks))
-        {
-            let (body_end, replacement) = timed_ff::gated(source, start, end, names)?;
+        if word == "always_ff" || (word == "always" && timed_ff::edge_control(source, end, tasks)) {
+            let (body_end, replacement) = timed_ff::gated(source, start, end, names, tasks)?;
             output.push_str(&source[previous..start]);
             output.push_str(&timed_ff::in_macro(source, start, replacement));
             previous = body_end;
