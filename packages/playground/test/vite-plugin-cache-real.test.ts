@@ -16,7 +16,11 @@ test("configuration-only edits refresh the real generated catalogue", () => {
 		writeFileSync(join(root, "src", "Main.veryl"), "module Main {}\n");
 		writeFileSync(join(root, "extra", "Extra.veryl"), "module Extra {}\n");
 		const cache = new GenTsCache(root);
+		const generated = cache.get();
+		// Creating Veryl.lock conservatively refreshes the next lookup because
+		// cache fingerprints cannot distinguish generator and external writes.
 		const initial = cache.get();
+		expect(initial).toEqual(generated);
 		expect(initial.modules.some((m) => m.moduleName === "Extra")).toBe(false);
 		expect(cache.get()).toBe(initial);
 		writeFileSync(join(root, "celox.toml"), '[test]\nsources = ["extra"]\n');

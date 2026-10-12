@@ -34,10 +34,11 @@ export class GenTsCache {
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
 		this._sourceKey = key;
-		// Preserve the state read before generation so concurrent config edits
-		// trigger another refresh. Only Veryl.lock may be written by generation.
+		// Preserve every pre-generation fingerprint: an external process can
+		// change even Veryl.lock after the generator has read it. A lockfile
+		// written by generation also triggers one conservative refresh.
 		this._configKey = configKey;
-		this._lockfileKey = this.computeConfigKey(["Veryl.lock"]);
+		this._lockfileKey = lockfileKey;
 		return this._data;
 	}
 

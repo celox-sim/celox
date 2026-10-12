@@ -73,7 +73,7 @@ describe("GenTsCache", () => {
 		},
 	);
 
-	test("records lockfile writes made by the generator", () => {
+	test("refreshes once after the generator writes the lockfile", () => {
 		const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-"));
 		temporaryRoots.push(root);
 		vi.mocked(runGenTs).mockImplementationOnce((projectRoot) => {
@@ -81,10 +81,38 @@ describe("GenTsCache", () => {
 			return { projectPath: projectRoot, modules: [], fileModules: {} };
 		});
 		const cache = new GenTsCache(root);
-		cache.get();
-		cache.get();
-		expect(runGenTs).toHaveBeenCalledTimes(1);
+		const initial = cache.get();
+		const updated = cache.get();
+		expect(updated).not.toBe(initial);
+		expect(runGenTs).toHaveBeenCalledTimes(2);
+		expect(cache.get()).toBe(updated);
+		expect(runGenTs).toHaveBeenCalledTimes(2);
 	});
+
+	test.each(["creation", "edit", "deletion"])(
+		"refreshes again after external lockfile %s during generation",
+		(change) => {
+			const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-race-"));
+			temporaryRoots.push(root);
+			const lockfile = join(root, "Veryl.lock");
+			if (change !== "creation") writeFileSync(lockfile, "initial lock");
+			vi.mocked(runGenTs).mockImplementationOnce((projectRoot) => {
+				// Generation has already read the old dependency resolution when
+				// another process changes the lockfile before generation returns.
+				if (change === "deletion") unlinkSync(lockfile);
+				else writeFileSync(lockfile, "externally updated lockfile");
+				return { projectPath: projectRoot, modules: [], fileModules: {} };
+			});
+
+			const cache = new GenTsCache(root);
+			const initial = cache.get();
+			const updated = cache.get();
+			expect(updated).not.toBe(initial);
+			expect(runGenTs).toHaveBeenCalledTimes(2);
+			expect(cache.get()).toBe(updated);
+			expect(runGenTs).toHaveBeenCalledTimes(2);
+		},
+	);
 
 	test.each(["Veryl.toml", "celox.toml"])(
 		"refreshes again when %s changes during generation",
