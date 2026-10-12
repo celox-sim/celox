@@ -99,8 +99,9 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Multiple nonblocking updates along one FF path affecting the same event
-  expression, including updates of different dependencies. Ordered NBA updates
+- Multiple nonblocking updates affecting the same event expression along one
+  FF path or across independent domains that can share an NBA batch, including
+  updates of different dependencies. Ordered NBA updates
   need a queue to preserve intermediate edges. Mutually exclusive assignments
   and writes outside a watched fixed select are supported.
 - Classes, and timing controls in `always_ff`, `always_comb` and the

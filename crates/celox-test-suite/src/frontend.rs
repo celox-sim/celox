@@ -60,6 +60,7 @@ pub(crate) fn stage(
     design: &Design,
     directory: &Path,
     script: Option<&ScriptCase>,
+    defines: &[&str],
 ) -> Result<Staged> {
     validate_timed_design(design)?;
     fs::create_dir_all(directory)?;
@@ -75,7 +76,7 @@ pub(crate) fn stage(
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
     if design.timed {
         for source in &mut prepared.sources {
-            *source = expanded_timed_source(source)?;
+            *source = expanded_timed_source(source, defines)?;
         }
     }
     let task_timing = timed_ff::TaskTiming::new(&prepared.sources);
@@ -223,8 +224,15 @@ impl TimedNames {
     }
 }
 
-fn expanded_timed_source(source: &str) -> Result<String> {
-    let syntax = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))?;
+fn expanded_timed_source(source: &str, defines: &[&str]) -> Result<String> {
+    let prefix = defines
+        .iter()
+        .map(|name| format!("`define {name}\n"))
+        .collect::<String>();
+    let syntax = celox_sv_analyzer::syntax::parse_source(
+        &format!("{prefix}{source}"),
+        Path::new("timed.sv"),
+    )?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
     Ok(syntax
         .get_str(vec![root])
@@ -384,6 +392,33 @@ mod timed_staging_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    #[ignore = "requires Icarus, Verilator and a C++ compiler; tests external compilation-unit startup staging"]
+    fn compilation_unit_callables_retain_staged_edges() {
+        let text = r##"(group unit (category sequential))
+      (case callable (source "unit.sv" #"function bit tick();return 1;endfunction
+        module Top(input bit clk,output bit q,seen);always @(posedge clk)q<=tick();initial seen=q;endmodule"#)
+        (top Top)(set clk 1)(run_until 0)(assert_eq seen 0)(assert_eq q 1))"##;
+        let case = load_group("unit.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/unit-callable-protocol")
+            .join(std::process::id().to_string());
+        let frontend = celox_test_suite::sv::verification::SvFrontend;
+        let mut icarus =
+            celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+                .unwrap();
+        icarus.run_testbench().unwrap();
+        let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+            &frontend,
+            case,
+            &root.join("verilator"),
+        )
+        .unwrap();
+        verilator.run_testbench().unwrap();
+        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     #[ignore = "requires Verilator and a C++ compiler; Icarus rejects deferred assertions"]
     fn deferred_assertions_retain_staged_edges() {
         let text = r##"(group deferred (category sequential))
@@ -405,5 +440,20 @@ mod timed_staging_tests {
         .unwrap();
         backend.run_testbench().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod adapter_define_tests {
+    use super::*;
+    #[test]
+    fn timed_macro_expansion_uses_the_adapter_define_set() {
+        let source = "module Top;\n`ifdef CELOX_SUITE_ICARUS\ninitial q=1;\n`else\ninitial q=0;\n`endif\nendmodule";
+        let icarus = expanded_timed_source(source, &["CELOX_SUITE_ICARUS"]).unwrap();
+        let other = expanded_timed_source(source, &[]).unwrap();
+        assert!(icarus.contains("q=1"));
+        assert!(!icarus.contains("q=0"));
+        assert!(other.contains("q=0"));
+        assert!(!other.contains("q=1"));
     }
 }

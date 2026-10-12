@@ -1009,6 +1009,11 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    /// Record a finish emitted by the host while settling current-time writes.
+    pub fn finish(&mut self) {
+        self.finished = true;
+    }
+
     /// Whether a process requested the end of the simulation.
     pub fn is_finished(&self) -> bool {
         self.finished

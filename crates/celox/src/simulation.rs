@@ -520,6 +520,9 @@ impl<B: SimBackend> Simulation<B> {
         if self.simulator.dirty {
             self.simulator.eval_comb()?;
         }
+        if self.simulator.has_pending_runtime_finish() {
+            self.state.finish();
+        }
         Ok(())
     }
 
@@ -1955,6 +1958,42 @@ mod active_ff_metadata_tests {
 #[cfg(all(test, feature = "systemverilog"))]
 mod rtl_finish_backend_tests {
     use super::*;
+    #[test]
+    fn host_finish_stops_at_current_time_without_waiters() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, future: bool) {
+            if future {
+                sim.schedule("clk", 10, 1).unwrap();
+            }
+            sim.simulator.set_wide(sim.signal("go"), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+            assert!(sim.is_finished());
+            assert_eq!(sim.time(), 0);
+            sim.run_until(20).unwrap();
+            assert_eq!(sim.time(), 0);
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        let code = "module Top(input bit go,clk,output bit q);always_comb if(go)$finish;always_ff @(posedge clk)q<=1;endmodule";
+        for future in [false, true] {
+            let builder = || {
+                Simulator::from_sv_sources(
+                    vec![(code, std::path::Path::new("host_finish.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                future,
+            );
+            check(
+                Simulation::new(builder().build_cranelift().unwrap()),
+                future,
+            );
+            check(Simulation::new(builder().build_wasm().unwrap()), future);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(builder().build_native().unwrap()), future);
+        }
+    }
+
     #[test]
     fn finish_stops_ff_and_comb_publication_on_all_backends() {
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
