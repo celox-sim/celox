@@ -576,3 +576,11 @@
   (top Top)
   (set clk 1) (run_until 0) (assert_eq seen 0) (assert_eq q 1)
   (set clk 0) (eval) (set clk 1) (run_until 1) (assert_eq q 1))
+
+(case control_members_do_not_pollute_user_package_imports
+  (source "user.sv" #"package user_values; localparam bit started=1; localparam bit finished=1; endpackage"#)
+  (source "top.sv" #"module Top(output bit q); import user_values::*;
+      initial begin q=started & finished; #1; $finish; end
+    endmodule"#)
+  (top Top)
+  (run_until 0) (assert_eq q 1) (run_to_finish))
