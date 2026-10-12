@@ -149,7 +149,7 @@ fn run<B: SimBackend>(
 
     // The scheduler samples the clocks it detects edges on from settled
     // state.
-    if sim.dirty {
+    if sim.dirty && !sim.components.finish_requested() {
         if let Err(error) = sim.eval_comb_checked() {
             // The components were installed above; take them down again.
             let _ = sim.components.finish(0);

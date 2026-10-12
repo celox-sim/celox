@@ -2061,7 +2061,9 @@ fn component_finish_request_during_init_skips_testbench_execution() {
         module t {
             inst clk: $tb::clock_gen;
             inst component: $comp::celox_init_finisher (clk);
+            always_comb { $assert(0, "on_init finish must skip initial settling"); }
             initial {
+                clk.next();
                 $assert(0, "on_init finish must skip this statement");
             }
         }

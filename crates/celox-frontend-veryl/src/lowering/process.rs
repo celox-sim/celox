@@ -1205,15 +1205,21 @@ impl<'a> BlockLowering<'a> {
     fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<VarId>) -> bool {
         for statement in statements {
             let mut calls = Vec::new();
+            let mut unconditional = Vec::new();
             for expr in expressions::statement_inputs(statement) {
                 expressions::expression_calls(expr, &mut calls);
+                expressions::unconditional_expression_calls(expr, &mut unconditional);
             }
             for call in calls {
                 if active.insert(call.id) {
                     if let Some(body) = function_body(&self.ir.functions, call) {
                         let continues = self.scan_clocks(&body.statements, active);
                         active.remove(&call.id);
-                        if !continues {
+                        if !continues
+                            && unconditional
+                                .iter()
+                                .any(|required| std::ptr::eq(*required, call))
+                        {
                             return false;
                         }
                     } else {

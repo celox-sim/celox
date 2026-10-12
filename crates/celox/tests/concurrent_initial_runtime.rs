@@ -1105,3 +1105,19 @@ fn overlapping_clock_outputs_retain_the_intermediate_rising_edge() {
         );
     }
 }
+
+#[test]
+fn conditional_finish_calls_preserve_reachable_clocks() {
+    for expression in ["if flag ? stop() : 0", "flag && stop()", "!flag || stop()"] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            inst clk: $tb::clock_gen;
+            var flag: logic;
+            var value: logic;
+            function stop() -> logic {{ $finish(); return 1; }}
+            initial {{ flag=0; value={expression}; clk.next(); $finish(); }}
+        }}"#
+        );
+        check_passes_on_every_backend(&code);
+    }
+}
