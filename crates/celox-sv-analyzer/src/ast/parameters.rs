@@ -399,6 +399,9 @@ pub(super) fn parameters_from_ref_node_with_environment(
         type_aliases,
         parameter_overrides,
     );
+    // Check the source width before normalizing fill literals or building
+    // declaration-order value environments, even for a narrow later select.
+    validate_parameter_materialization_width(parameter_width)?;
     let has_declared_type = type_node.clone().into_iter().any(|child| {
         matches!(
             child,
@@ -454,24 +457,20 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
-                if expr.into_iter().any(|node| {
-                    matches!(
-                        node,
-                        RefNode::ConstantIndexedRange(_)
-                            | RefNode::IndexedRange(_)
-                            | RefNode::ConstantCast(_)
-                    )
-                }) {
+                validate_parameter_initializer_literal_widths(expr, syntax_tree)?;
+                if selects::parameter_initializer_needs_typed_lowering(expr) {
+                    let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
-                        parameter_packed_dimensions(parameters),
+                        parameter_packed_dimensions_with_imported(parameters, &imported),
                         const_env,
                         type_aliases,
                     );
-                    dimensions.parameter_values = parameter_value_env(parameters, const_env).into();
+                    dimensions.parameter_values =
+                        parameter_value_env_with_imported(parameters, const_env, &imported).into();
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.
-                    selects::indexed_parameter_initializer(
+                    selects::selected_parameter_initializer(
                         expr,
                         syntax_tree,
                         &dimensions,
@@ -536,8 +535,140 @@ pub(super) fn parameters_from_ref_node_with_environment(
             parameter.packed_ranges = parameter_ranges.clone();
             parameter.members = parameter_members.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
+            validate_parameter_materialization_width(
+                parameter
+                    .resolved_type(&environment.types)
+                    .map(|ty| ty.width),
+            )?;
             environment.append(&parameter);
             parameters.push(parameter);
+        }
+    }
+    Ok(())
+}
+
+fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), AnalyzerError> {
+    if let Some(width) = width
+        && width > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
+        return Err(unsupported(format!(
+            "parameter width {width} exceeds the {}-bit constant materialization limit",
+            constant_folding::MAX_CONSTANT_CONCAT_BITS
+        )));
+    }
+    Ok(())
+}
+
+fn validate_parameter_initializer_literal_widths(
+    initializer: &sv_parser::ConstantParamExpression,
+    tree: &SyntaxTree,
+) -> Result<(), AnalyzerError> {
+    let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
+    let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
+    let mut evaluated_constants = HashSet::<*const sv_parser::ConstantExpression>::default();
+    let mut evaluation_stack = vec![true];
+    for event in initializer.into_iter().event() {
+        let (entering, node) = match event {
+            sv_parser::NodeEvent::Enter(node) => (true, node),
+            sv_parser::NodeEvent::Leave(node) => (false, node),
+        };
+        if !entering {
+            evaluation_stack.pop();
+            continue;
+        }
+        if let RefNode::SystemTfCall(call) = node
+            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "$bits"
+                        | "$size"
+                        | "$left"
+                        | "$right"
+                        | "$low"
+                        | "$high"
+                        | "$increment"
+                        | "$dimensions"
+                        | "$unpacked_dimensions"
+                )
+            })
+            && let sv_parser::SystemTfCall::ArgExpression(call) = call
+            && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
+        {
+            query_operands.insert(argument as *const sv_parser::Expression);
+            // Dimension arguments are values, even when the query itself
+            // occurs inside another query's unevaluated operand.
+            for argument in call
+                .nodes
+                .1
+                .nodes
+                .1
+                .0
+                .contents()
+                .into_iter()
+                .skip(1)
+                .flatten()
+            {
+                evaluated_expressions.insert(argument as *const sv_parser::Expression);
+            }
+        }
+        match node {
+            RefNode::MultipleConcatenation(concat) => {
+                evaluated_expressions
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::Expression);
+            }
+            RefNode::ConstantMultipleConcatenation(concat) => {
+                evaluated_constants
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            RefNode::AssignmentPatternRepeat(pattern) => {
+                evaluated_constants
+                    .insert(&pattern.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            _ => {}
+        }
+        let evaluated_operand = match node {
+            RefNode::Expression(expression) => {
+                evaluated_expressions.contains(&(expression as *const sv_parser::Expression))
+            }
+            RefNode::ConstantExpression(expression) => {
+                evaluated_constants.contains(&(expression as *const sv_parser::ConstantExpression))
+            }
+            _ => false,
+        };
+        let evaluated = if let RefNode::Expression(expression) = node
+            && query_operands.contains(&(expression as *const sv_parser::Expression))
+        {
+            false
+        } else if evaluated_operand
+            || matches!(
+                node,
+                RefNode::ConstantRange(_)
+                    | RefNode::ConstantIndexedRange(_)
+                    | RefNode::IndexedRange(_)
+                    | RefNode::BitSelect(_)
+                    | RefNode::ConstantBitSelect(_)
+                    | RefNode::CastingType(_)
+                    | RefNode::SliceSize(_)
+                    | RefNode::ArrayRangeExpression(_)
+                    | RefNode::ArrayPatternKey(_)
+            )
+        {
+            // Type queries do not evaluate the value, but selecting its type
+            // still evaluates bounds, widths, counts and cast sizes. A nested
+            // type query can in turn exempt its own first operand.
+            true
+        } else {
+            *evaluation_stack.last().unwrap()
+        };
+        evaluation_stack.push(evaluated);
+        // Inspect a sized literal's prefix without parsing its payload.
+        // Query operands are types; trailing dimension arguments are values.
+        if evaluated && let RefNode::Size(size) = node {
+            let width = tree
+                .get_str(&size.nodes.0.nodes.0)
+                .and_then(|size| size.replace('_', "").parse::<usize>().ok())
+                .ok_or_else(|| unsupported("parameter literal width"))?;
+            validate_parameter_materialization_width(Some(width))?;
         }
     }
     Ok(())

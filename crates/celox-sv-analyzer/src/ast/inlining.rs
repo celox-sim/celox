@@ -19,7 +19,7 @@ pub(super) fn expr_signedness_with_return_types(
     match expr {
         Expr::Ident(name) => identifiers.signedness(name),
         Expr::Literal(literal) => {
-            typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
+            typecheck::integral_literal_type_metadata(literal).map(|(_, signed)| signed)
         }
         Expr::Select { signed, .. } => Some(*signed),
         Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),

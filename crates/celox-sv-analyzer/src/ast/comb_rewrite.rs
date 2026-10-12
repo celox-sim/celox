@@ -15,7 +15,7 @@ pub(super) fn expr_static_width(
                     .map(|r#type| r#type.width)
             }),
         Expr::Literal(literal) => {
-            typecheck::parse_integral_literal(literal).map(|literal| literal.width)
+            typecheck::integral_literal_type_metadata(literal).map(|(width, _)| width)
         }
         Expr::Select { msb, lsb, .. } => typecheck::select_range_width(
             &msb.clone().into(),
