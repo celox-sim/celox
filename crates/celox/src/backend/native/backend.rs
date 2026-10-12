@@ -570,6 +570,18 @@ impl NativeProgramImage {
             if !self
                 .design
                 .state_objects
+                .get(&process.release)
+                .is_some_and(|metadata| {
+                    metadata.width == celox_design::PROCESS_RELEASE_WIDTH
+                        && !metadata.is_4state
+                        && metadata.array_dims.is_empty()
+                })
+            {
+                return Err("a process release control slot has an invalid state object".into());
+            }
+            if !self
+                .design
+                .state_objects
                 .get(&process.clock)
                 .is_some_and(|metadata| {
                     metadata.width == celox_design::PROCESS_CLOCK_WIDTH
