@@ -505,8 +505,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                     );
                 }
                 let call = sv::ir::Expr::Call {
+                    arg_order: Vec::new(),
                     name: name.clone(),
-                    args: lowered,
+                    args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
                     return Err(unsupported(format!("call of `{name}` in a select")));
@@ -770,16 +771,20 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, args } if self.m.dpi_imports.contains_key(name) => {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.dpi_imports.contains_key(name) => {
                 let import = self.m.dpi_imports[name].clone();
                 let Some(r#type) = import.return_type() else {
                     return Err(unsupported(format!(
                         "void DPI-C function `{name}` used as a value"
                     )));
                 };
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+                let args = args.clone();
                 let result = self
-                    .dpi_call(&import, &args)?
+                    .dpi_call(&import, &args, arg_order)?
                     .expect("a non-void DPI-C import defines a result");
                 let (temp, temp_name) = self.m.temp(
                     "dpi",
@@ -790,8 +795,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.store(temp, SIROffset::Static(0), r#type.width(), result);
                 Expr::Ident(temp_name)
             }
-            Expr::Call { name, args } if self.m.subroutines.contains_key(name) => {
-                let args: Vec<Option<Expr>> = args.iter().cloned().map(Some).collect();
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } if self.m.subroutines.contains_key(name) => {
+                let args = args.clone();
                 let subroutine = self
                     .m
                     .subroutine(name)
@@ -803,7 +812,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     )));
                 };
                 let (width, signed, is_4state) = self.m.type_shape(&r#type)?;
-                let result = self.call(name, &args)?;
+                let result = self.call(name, &args, arg_order)?;
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
                 let Some(result) = result else {
                     return Err(unsupported(format!(
@@ -843,11 +852,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                     else_expr: Box::new(else_expr),
                 }
             }
-            Expr::Call { name, args } => Expr::Call {
+            Expr::Call {
+                name,
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|arg| self.hoist(arg))
+                    .map(|arg| arg.as_ref().map(|arg| self.hoist(arg)).transpose())
                     .collect::<Result<_, _>>()?,
             },
             Expr::Select {
@@ -937,6 +951,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         import: &sv::ir::DpiImport,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
         let name = import.name();
         if args.len() != import.arguments().len() {
@@ -946,8 +961,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 import.arguments().len()
             )));
         }
-        let mut registers = Vec::with_capacity(args.len());
-        for (arg, argument) in args.iter().zip(import.arguments()) {
+        let mut registers = vec![None; args.len()];
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..args.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        // Evaluate actuals in source order, then pass registers in C formal order.
+        for position in positions {
+            let argument = import.arguments().get(position).ok_or_else(|| {
+                unsupported(format!("argument position of DPI-C function `{name}`"))
+            })?;
+            let arg = &args[position];
             let Some(arg) = arg else {
                 return Err(unsupported(format!(
                     "omitted argument of DPI-C function `{name}`"
@@ -956,8 +981,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
-            registers.push(self.dpi_register(value, r#type));
+            registers[position] = Some(self.dpi_register(value, r#type));
         }
+        let registers = registers
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| unsupported(format!("missing argument of DPI-C function `{name}`")))?;
         let func = self.m.extern_function(import);
         let dst = import
             .return_type()
@@ -1590,15 +1619,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.jump(return_block);
                 Ok(false)
             }
-            sv::ir::Stmt::Call { name, args } => {
+            sv::ir::Stmt::Call {
+                name,
+                args,
+                arg_order,
+            } => {
                 if let Some(import) = self.m.dpi_imports.get(name).cloned() {
-                    self.dpi_call(&import, args)?;
+                    self.dpi_call(&import, args, arg_order)?;
                     return Ok(true);
                 }
                 if !self.m.subroutines.contains_key(name) {
                     return Err(unsupported(format!("call of `{name}`")));
                 }
-                self.call(name, args)?;
+                self.call(name, args, arg_order)?;
                 Ok(true)
             }
             sv::ir::Stmt::Eval(expr) => {
@@ -2101,6 +2134,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         name: &str,
         args: &[Option<sv::ir::Expr>],
+        arg_order: &[usize],
     ) -> Result<Option<String>, sv::AnalyzerError> {
         let subroutine = self
             .m
@@ -2122,7 +2156,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
-        for (position, param) in subroutine.params.iter().enumerate() {
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        for position in positions {
+            let param = subroutine
+                .params
+                .get(position)
+                .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             let id = self
                 .m
                 .id(&param.name)
@@ -2464,9 +2507,14 @@ fn substitute_overlay(
             then_expr: Box::new(go(then_expr)),
             else_expr: Box::new(go(else_expr)),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name: name.clone(),
-            args: args.iter().map(go).collect(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(go(expr)),

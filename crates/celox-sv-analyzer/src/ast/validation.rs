@@ -319,7 +319,8 @@ fn reject_silently_ignored_constructs_with_dimensions(
             }
             RefNode::ConstantCast(cast)
                 if !typed_indexed_casts.contains(&RefNode::ConstantCast(cast))
-                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases)
+                    && casts::constant_cast_with_dimensions(cast, syntax_tree, indexed_dimensions).is_none() =>
             {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }

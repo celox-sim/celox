@@ -236,6 +236,28 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 0x1234_5698u32.into());
     }
 
+    fn preserves_sv_named_default_constant_function_header_dependencies(sim) {
+        @setup {
+            let veryl = "module Top(a: input logic<32>, y: output logic<32>) { inst bus: $sv::Bus #(W: 16); assign bus.req = a; assign y = bus.rsp; }";
+            let sv = r#"
+                interface Bus #(parameter W = 8, parameter N = twice(.factor()));
+                    function automatic integer width_value(); return W; endfunction
+                    function automatic integer twice(input integer factor = 2); return width_value() * factor; endfunction
+                    localparam M = twice(.factor(2));
+                    logic [N-1:0] req;
+                    logic [M-1:0] rsp;
+                    assign rsp = req + N;
+                endinterface
+            "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("bus.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x1234_5678u32)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x1234_5698u32.into());
+    }
+
     fn avoids_foreign_specialization_name_collisions(sim) {
         @setup {
             let veryl = "module Child #(param K: u32 = 1)(a: input logic<8>, y: output logic<8>) { assign y = a + K; }";
