@@ -6,7 +6,22 @@ use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath}
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
 /// A timed case: the design's own processes and clocks run.
-struct TimedBackend<B: SimBackend>(Simulation<B>);
+struct TimedBackend<B: SimBackend>(Simulation<B>, Vec<RuntimeEvent>, bool);
+impl<B: SimBackend> TimedBackend<B> {
+    fn new(sim: Simulation<B>) -> Self {
+        Self(sim, Vec::new(), false)
+    }
+    fn capture_events(&mut self) {
+        let events = self.0.drain_runtime_events();
+        self.2 |= events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Finish));
+        self.1.extend(events);
+    }
+    fn finished(&self) -> bool {
+        self.0.is_finished() || self.2
+    }
+}
 
 fn signal_of<B: SimBackend>(sim: &Simulation<B>, path: &SignalPath) -> celox::SignalRef {
     let instances: Vec<_> = path
@@ -49,6 +64,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
         self.0.settle()?;
+        self.capture_events();
         let signal = signal_of(&self.0, path);
         Ok(self.0.get_four_state(signal))
     }
@@ -56,7 +72,9 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     /// Settling also resumes the processes the writes woke, as the external
     /// simulators' settle step does.
     fn eval_comb(&mut self) -> Result<()> {
-        self.0.settle().map_err(Into::into)
+        self.0.settle()?;
+        self.capture_events();
+        Ok(())
     }
 
     fn tick(&mut self, _event: &str) -> Result<()> {
@@ -65,7 +83,8 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
 
     fn take_output(&mut self) -> Result<String> {
         self.0.settle()?;
-        collect_output(self.0.drain_runtime_events())
+        self.capture_events();
+        collect_output(std::mem::take(&mut self.1))
     }
 
     fn run_until(&mut self, time: u64) -> Result<()> {
@@ -74,7 +93,8 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
             return Err(format!("run_until {time}: the simulation is already at {now}").into());
         }
         self.0.run_until(time)?;
-        if self.0.is_finished() {
+        self.capture_events();
+        if self.finished() {
             return Err(format!(
                 "run_until {time}: the design finished the simulation at {}",
                 self.0.time()
@@ -85,13 +105,20 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_to_finish(&mut self) -> Result<()> {
-        if self.0.is_finished() {
+        self.capture_events();
+        if self.finished() {
             return Err(
                 "run_to_finish: the design already finished before the operation began".into(),
             );
         }
-        while !self.0.is_finished() && self.0.step()?.is_some() {}
-        if !self.0.is_finished() {
+        while !self.finished() {
+            let step = self.0.step()?;
+            self.capture_events();
+            if step.is_none() {
+                break;
+            }
+        }
+        if !self.finished() {
             return Err(
                 "run_to_finish: the simulation ran out of events before a process finished it"
                     .into(),
@@ -153,21 +180,21 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
-            "native" => Box::new(TimedBackend(builder.build_native()?)),
-            "cranelift" => Box::new(TimedBackend(builder.build_cranelift()?)),
-            "native-parallel" => Box::new(TimedBackend(
+            "native" => Box::new(TimedBackend::new(builder.build_native()?)),
+            "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
+            "native-parallel" => Box::new(TimedBackend::new(
                 builder
                     .threads(4)
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_native()?,
             )),
-            "cranelift-parallel" => Box::new(TimedBackend(
+            "cranelift-parallel" => Box::new(TimedBackend::new(
                 builder
                     .threads(4)
                     .parallel_partition(celox::ParallelPartition::Always)
                     .build_cranelift()?,
             )),
-            "wasm" => Box::new(TimedBackend(builder.build_wasm()?)),
+            "wasm" => Box::new(TimedBackend::new(builder.build_wasm()?)),
             _ => return Err(format!("unknown backend: {backend}").into()),
         });
     }
@@ -236,7 +263,7 @@ fn run_to_finish_reaches_the_last_scheduler_timestamp() {
         celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("last.sv"))], "Top")
             .build()
             .unwrap();
-    let mut backend = TimedBackend(simulation);
+    let mut backend = TimedBackend::new(simulation);
     backend.run_to_finish().unwrap();
     assert_eq!(backend.0.time(), u64::MAX);
     assert_eq!(backend.0.get(backend.0.signal("done")), 1u8.into());
@@ -250,7 +277,7 @@ fn run_to_finish_rejects_a_finish_during_an_earlier_settle() {
             Simulation::from_sv_sources(vec![(source, std::path::Path::new("early.sv"))], "Top")
                 .build()
                 .unwrap();
-        let mut backend = TimedBackend(simulation);
+        let mut backend = TimedBackend::new(simulation);
         backend.run_until(0).unwrap();
         let go = backend.0.signal("go");
         backend.0.set_wide(go, 1u8.into());

@@ -399,6 +399,7 @@ pub(crate) struct NativeRuntimeSchema {
     #[serde(default)]
     pub(crate) testbench_kernels: Option<usize>,
     pub(crate) process_event_counters: Vec<celox_design::ProcessEventCounters<AbsoluteAddr>>,
+    pub(crate) active_ff_events: std::collections::BTreeSet<AbsoluteAddr>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -512,6 +513,12 @@ impl NativeProgramImage {
                 processes: self.runtime_schema.processes.clone(),
                 testbench_kernels: self.runtime_schema.testbench_kernels,
                 process_event_counters: self.runtime_schema.process_event_counters.clone(),
+                active_ff_events: self
+                    .runtime_schema
+                    .active_ff_events
+                    .iter()
+                    .copied()
+                    .collect(),
             },
             testbench: self.testbench.clone(),
         }
@@ -2351,6 +2358,13 @@ fn compile_program(
                 processes: sir.runtime().runtime_schema.processes.clone(),
                 testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
                 process_event_counters: sir.runtime().runtime_schema.process_event_counters.clone(),
+                active_ff_events: sir
+                    .runtime()
+                    .runtime_schema
+                    .active_ff_events
+                    .iter()
+                    .copied()
+                    .collect(),
             },
             layout: layout.clone(),
             native_memory_size,

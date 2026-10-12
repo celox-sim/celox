@@ -2664,6 +2664,18 @@ impl<'p, 'a> Ff<'p, 'a> {
     > {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        // This FF representation has one pending value per destination.
+        // Ordered NBA pulses require an update queue; reject watched targets
+        // whose intermediate values would otherwise be silently lost.
+        let mut watched_nbas = HashSet::default();
+        for (id, _) in &self.nonblocking_targets {
+            if self.m.watchers_by_var.contains_key(id) && !watched_nbas.insert(*id) {
+                return Err(unsupported(format!(
+                    "multiple nonblocking assignments to event-watched variable `{}` require ordered NBA updates",
+                    self.m.var(*id).path[0]
+                )));
+            }
+        }
         // Merge the written ranges of each variable.
         let mut ranges: HashMap<SourceVarId, Vec<BitAccess>> = HashMap::default();
         for (id, access) in std::mem::take(&mut self.targets) {

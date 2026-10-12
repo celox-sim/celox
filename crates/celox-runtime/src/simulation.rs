@@ -293,6 +293,7 @@ pub struct SimulationState<B: SimBackend> {
     signal_to_id: FxHashMap<SignalRef, usize>,
     processes: Vec<ProcessRefs<B>>,
     process_event_counters: Vec<(usize, SignalRef, SignalRef)>,
+    active_ff_domains: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     /// Processes suspended at an event or level wait, which their kernels
     /// re-check whenever the state may have changed.
@@ -435,6 +436,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             processes,
             process_event_counters: Vec::new(),
+            active_ff_domains: BitSet::new(),
             waiting: BTreeSet::new(),
             tick_clocks: BTreeMap::new(),
             clock_waits: BTreeMap::new(),
@@ -521,6 +523,15 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.push(event);
     }
 
+    /// Mark domains whose evaluation publishes blocking stores before NBA application.
+    pub fn with_active_ff_events(mut self, events: Vec<B::Event>) -> Self {
+        self.active_ff_domains = events
+            .into_iter()
+            .map(|event| self.event_info[event.id()].canonical_id)
+            .collect();
+        self
+    }
+
     /// Attach exact kernel edge counters to their runtime event domains.
     pub fn with_process_event_counters(
         mut self,
@@ -580,8 +591,10 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
-        self.scheduled_clock_drives.make_empty();
-        self.scheduled_clock_time = current_time;
+        if self.scheduled_clock_time != current_time {
+            self.scheduled_clock_drives.make_empty();
+            self.scheduled_clock_time = current_time;
+        }
         for event in &events_to_process {
             self.scheduled_clock_drives.insert(event.event_ref.id());
             if let Some(id) = self.signal_to_id.get(&event.signal) {
@@ -1524,20 +1537,24 @@ impl<B: SimBackend> SimulationState<B> {
                 } else {
                     // Drain active combinational effects of blocking FF stores
                     // before either inactive continuations or NBA publication.
-                    executor.eval_comb()?;
-                    self.replace_triggers_with_stable_edges(executor.backend_mut());
-                    for id in ff_body_edges.iter() {
-                        executor.backend_mut().mark_triggered_bit(id);
-                    }
-                    if executor
-                        .backend()
-                        .get_triggered_bits()
-                        .iter()
-                        .any(|id| !discovered_in_this_step.contains(id))
+                    if !self.inactive.is_empty()
+                        || !triggered_domains.is_disjoint(&self.active_ff_domains)
                     {
-                        continue;
+                        executor.eval_comb()?;
+                        self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        for id in ff_body_edges.iter() {
+                            executor.backend_mut().mark_triggered_bit(id);
+                        }
+                        if executor
+                            .backend()
+                            .get_triggered_bits()
+                            .iter()
+                            .any(|id| !discovered_in_this_step.contains(id))
+                        {
+                            continue;
+                        }
+                        executor.backend_mut().clear_triggered_bits();
                     }
-                    executor.backend_mut().clear_triggered_bits();
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
@@ -1800,6 +1817,8 @@ impl<B: SimBackend> SimulationState<B> {
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
             inactive: self.inactive.clone(),
+            scheduled_clock_drives: self.scheduled_clock_drives.clone(),
+            scheduled_clock_time: self.scheduled_clock_time,
             finished: self.finished,
         }
     }
@@ -1856,6 +1875,9 @@ impl<B: SimBackend> SimulationState<B> {
         self.pending_releases.clone_from(&snapshot.pending_releases);
         self.ticks = snapshot.ticks;
         self.inactive.clone_from(&snapshot.inactive);
+        self.scheduled_clock_drives
+            .clone_from(&snapshot.scheduled_clock_drives);
+        self.scheduled_clock_time = snapshot.scheduled_clock_time;
         self.finished = snapshot.finished;
         Ok(())
     }
@@ -2054,6 +2076,8 @@ pub struct SimulationSnapshot<B: SimBackend> {
     pending_releases: BTreeMap<usize, usize>,
     ticks: u64,
     inactive: BTreeSet<usize>,
+    scheduled_clock_drives: BitSet,
+    scheduled_clock_time: u64,
     finished: bool,
 }
 
@@ -2074,6 +2098,8 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
             inactive: self.inactive.clone(),
+            scheduled_clock_drives: self.scheduled_clock_drives.clone(),
+            scheduled_clock_time: self.scheduled_clock_time,
             finished: self.finished,
         }
     }

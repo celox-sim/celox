@@ -623,6 +623,8 @@ pub struct RuntimeSchema<A> {
     /// it and the kernels after it are the testbench's, not the design's.
     pub testbench_kernels: Option<usize>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
+    /// FF evaluation domains that publish blocking stores into active state.
+    pub active_ff_events: HashSet<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -641,6 +643,7 @@ impl<A> Default for RuntimeSchema<A> {
             processes: Vec::new(),
             testbench_kernels: None,
             process_event_counters: Vec::new(),
+            active_ff_events: HashSet::default(),
         }
     }
 }
