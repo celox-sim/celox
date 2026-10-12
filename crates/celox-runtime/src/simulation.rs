@@ -575,15 +575,6 @@ impl<B: SimBackend> SimulationState<B> {
         if current_time > limit {
             return Ok(None);
         }
-        if !self.tick_budget_spent() {
-            for (id, clock) in &self.tick_clocks {
-                if clock.next_edge == current_time && self.clock_has_waiters(*id) {
-                    current_time
-                        .checked_add(clock.period)
-                        .ok_or_else(|| clock_overflow(*id))?;
-                }
-            }
-        }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -1465,6 +1456,12 @@ impl<B: SimBackend> SimulationState<B> {
         // A completed clock wait resumes before the following generated
         // rising edge. Apply that edge after the ready processes, then join
         // it to scheduled triggers so coincident FF domains share one batch.
+        for event in &generated_events {
+            let id = event.event_ref.id();
+            current_time
+                .checked_add(self.tick_clocks[&id].period)
+                .ok_or_else(|| clock_overflow(id))?;
+        }
         for event in &generated_events {
             executor.backend_mut().set(event.signal, event.next_val);
         }
