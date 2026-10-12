@@ -1498,6 +1498,7 @@ impl<'a> BlockLowering<'a> {
                         None,
                     ));
                 };
+                self.settle_if_dirty()?;
                 self.kernel
                     .builder()
                     .seal_block(SIRTerminator::Jump(exit, Vec::new()));
@@ -2405,7 +2406,14 @@ impl<'a> BlockLowering<'a> {
         if let Flow::Ended = flow {
             return Ok(Flow::Ended);
         }
-        for (path, destinations) in &call.outputs {
+        for path in &paths {
+            let Some(destinations) = call
+                .outputs
+                .iter()
+                .find_map(|(output, destinations)| (output == path).then_some(destinations))
+            else {
+                continue;
+            };
             if let Some(&formal) = body.arg_map.get(path) {
                 for destination in destinations {
                     let value = self.load_var(formal)?;

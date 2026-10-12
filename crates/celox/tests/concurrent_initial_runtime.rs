@@ -968,3 +968,48 @@ fn unknown_conditional_helpers_preserve_value_masks_and_both_effects() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     backend!(build_native);
 }
+
+#[test]
+fn statically_skipped_expression_helpers_do_not_install_clocks() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen;
+        var value: logic;
+        function wait_on_clk() -> logic { clk.next(); return 1'd1; }
+        initial {
+            value = 1'd0 && wait_on_clk();
+            value = 1'd1 || wait_on_clk();
+            value = if 1'd0 ? wait_on_clk() : 1'd1;
+            value = if 1'd1 ? 1'd1 : wait_on_clk();
+            $assert(clk == 1'd1); $finish();
+        }
+    }"#;
+    let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
+    let clk = sim.signal("clk");
+    sim.set(clk, 1u8);
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+    assert_eq!(sim.get(clk), 1u8.into());
+}
+
+#[test]
+fn dirty_break_edges_settle_before_loop_successors() {
+    let code = r#"#[test(Top)] module Top {
+        var source: u32; var derived: u32;
+        assign derived = source + 1;
+        initial { for i in 0..4 { source = 41; break; } $assert(derived == 42); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}
+
+#[test]
+fn overlapping_function_outputs_copy_in_declaration_order() {
+    let code = r#"#[test(Top)] module Top {
+        var value: u32;
+        function update(a: output u32, b: output u32) { a = 1; b = 2; }
+        initial { update(value, value); $assert(value == 2); $finish(); }
+    }"#;
+    check_passes_on_every_backend(code);
+}

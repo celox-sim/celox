@@ -140,7 +140,21 @@ pub(super) fn expression_calls<'s>(
     expr: &'s Expression,
     calls: &mut Vec<&'s veryl_analyzer::ir::FunctionCall>,
 ) {
-    for child in children(expr) {
+    let inputs = match expr {
+        Expression::Binary(lhs, Op::LogicAnd, _, _) if constant_truth(lhs) == Some(false) => {
+            vec![lhs.as_ref()]
+        }
+        Expression::Binary(lhs, Op::LogicOr, _, _) if constant_truth(lhs) == Some(true) => {
+            vec![lhs.as_ref()]
+        }
+        Expression::Ternary(cond, yes, no, _) => match constant_truth(cond) {
+            Some(true) => vec![cond.as_ref(), yes.as_ref()],
+            Some(false) => vec![cond.as_ref(), no.as_ref()],
+            None => children(expr),
+        },
+        _ => children(expr),
+    };
+    for child in inputs {
         expression_calls(child, calls);
     }
     if let Expression::Term(factor) = expr
@@ -289,6 +303,11 @@ impl BlockLowering<'_> {
         if let Expression::Binary(lhs, op, rhs, _) = expr
             && matches!(op, Op::LogicAnd | Op::LogicOr)
         {
+            if let Some(truth) = constant_truth(lhs)
+                && ((*op == Op::LogicAnd && !truth) || (*op == Op::LogicOr && truth))
+            {
+                return Ok(self.constant(u64::from(truth), 1));
+            }
             return self.logical_expression(expr, lhs, rhs, *op == Op::LogicAnd);
         }
         if let Expression::Ternary(cond, yes, no, _) = expr {
@@ -379,6 +398,11 @@ impl BlockLowering<'_> {
         yes: &Expression,
         no: &Expression,
     ) -> Result<RegisterId, ParserError> {
+        if let Some(truth) = constant_truth(cond) {
+            let value = self.expression(if truth { yes } else { no })?;
+            self.save_expression(expr, value)?;
+            return Ok(self.saved_expression(expr));
+        }
         let value = self.expression(cond)?;
         self.save_expression(cond, value)?;
         let truth = self
