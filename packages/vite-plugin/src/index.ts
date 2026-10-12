@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { Plugin, ResolvedConfig } from "vite";
+import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars } from "./sidecar.js";
 import {
@@ -16,7 +16,9 @@ import type {
 
 export type { CeloxPluginOptions } from "./types.js";
 
-const VERYL_PREFIX = "\0veryl:";
+const PROJECT_QUERY = "celox-project";
+const WATCH_QUERY = "celox-watch";
+const CONFIG_FILES = ["Veryl.toml", "celox.toml", "Veryl.lock"];
 
 /**
  * Vite plugin for importing `.veryl` files as typed `ModuleDefinition` objects.
@@ -35,9 +37,73 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let projectRoot: string;
 	let cache: GenTsCache;
 	let sidecarPaths: string[] = [];
+	let generatedData: ReturnType<GenTsCache["get"]> | undefined;
 	let testbenchComponents: string | undefined;
 	let testbenchComponentDependencies = new Set<string>();
 	let viteConfig: ResolvedConfig;
+	let projectId: string;
+	const loadedIds = new Set<string>();
+	let lastUpdate:
+		| { file: string; timestamp: number; result: Promise<boolean> }
+		| undefined;
+
+	function regenerate(file: string, timestamp: number): Promise<boolean> {
+		file = normalizePath(file);
+		if (lastUpdate?.file === file && lastUpdate.timestamp === timestamp)
+			return lastUpdate.result;
+		const result = (async () => {
+			const componentChanged = testbenchComponentDependencies.has(
+				normalizeTestbenchComponentPath(file),
+			);
+			if (
+				!file.endsWith(".veryl") &&
+				!componentChanged &&
+				!CONFIG_FILES.some((name) => resolve(projectRoot, name) === file)
+			)
+				return false;
+			if (componentChanged && testbenchComponents) {
+				const loaded = await loadTestbenchComponentModule(
+					testbenchComponents,
+					projectRoot,
+					viteConfig,
+				);
+				testbenchComponentDependencies = loaded.dependencies;
+				writeTestbenchComponentSidecar(
+					projectRoot,
+					testbenchComponents,
+					loaded.manifests,
+				);
+				cache.setTestbenchComponents(loaded.manifests);
+			}
+			// Cache fingerprints also avoid regenerating for our own lockfile writes.
+			const data = cache.get();
+			if (data !== generatedData) {
+				const nextPaths = generateSidecars(data, projectRoot);
+				const retained = new Set(nextPaths);
+				cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
+				sidecarPaths = nextPaths;
+				generatedData = data;
+			}
+			return true;
+		})();
+		lastUpdate = { file, timestamp, result };
+		return result;
+	}
+
+	function affectedModules<T>(graph: {
+		getModuleById(id: string): T | undefined;
+		invalidateModule(mod: T): void;
+	}) {
+		const modules: T[] = [];
+		for (const id of [projectId, ...loadedIds]) {
+			const mod = graph.getModuleById(id);
+			if (mod) {
+				graph.invalidateModule(mod);
+				modules.push(mod);
+			}
+		}
+		return modules;
+	}
 
 	return {
 		name: "vite-plugin-celox",
@@ -51,6 +117,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			} else {
 				projectRoot = findVerylProjectRoot(config.root);
 			}
+
+			projectRoot = normalizePath(projectRoot);
+			projectId = `${resolve(projectRoot, "Veryl.toml")}?${PROJECT_QUERY}`;
 
 			if (options?.testbenchComponents) {
 				const componentsModule = options.testbenchComponents;
@@ -89,11 +158,39 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const data = cache.get();
 			cleanSidecars(sidecarPaths);
 			sidecarPaths = generateSidecars(data, projectRoot);
+			generatedData = data;
+		},
+
+		configureServer(server) {
+			server.watcher.add(
+				CONFIG_FILES.map((name) => resolve(projectRoot, name)),
+			);
+			// New/deleted sources have no existing module node. Notify through
+			// the shared project dependency so Vitest can find all importers.
+			const catalogueChanged = (file: string) => {
+				file = normalizePath(file);
+				if (
+					(file.startsWith(`${projectRoot}/`) && file.endsWith(".veryl")) ||
+					CONFIG_FILES.slice(1).some(
+						(name) => resolve(projectRoot, name) === file,
+					)
+				) {
+					server.watcher.emit("change", resolve(projectRoot, "Veryl.toml"));
+				}
+			};
+			server.watcher.on("add", catalogueChanged);
+			server.watcher.on("unlink", catalogueChanged);
+			server.httpServer?.once("close", () => {
+				server.watcher.off("add", catalogueChanged);
+				server.watcher.off("unlink", catalogueChanged);
+			});
 		},
 
 		resolveId(source, importer) {
 			// Split off query string (e.g. "?dse=preserveAllPorts")
 			const [rawPath, queryStr] = source.split("?", 2);
+			if (queryStr === PROJECT_QUERY || queryStr === WATCH_QUERY)
+				return normalizePath(source);
 			if (!rawPath!.endsWith(".veryl")) return;
 
 			// Resolve to absolute path
@@ -101,23 +198,40 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			if (isAbsolute(rawPath!)) {
 				absPath = rawPath!;
 			} else if (importer) {
-				absPath = resolve(dirname(importer), rawPath!);
+				absPath = resolve(dirname(importer.split("?", 1)[0]!), rawPath!);
 			} else {
 				absPath = resolve(rawPath!);
 			}
 
+			absPath = normalizePath(absPath);
+
 			// Only handle .veryl files that exist
 			if (!existsSync(absPath)) return;
 
-			// Preserve query string in virtual ID
-			return VERYL_PREFIX + absPath + (queryStr ? `?${queryStr}` : "");
+			// Preserve the real file identity so Vite/Vitest can trace changes.
+			return absPath + (queryStr ? `?${queryStr}` : "");
 		},
 
 		load(id) {
-			if (!id.startsWith(VERYL_PREFIX)) return;
-
-			const rest = id.slice(VERYL_PREFIX.length);
-			const [absPath, queryStr] = rest.split("?", 2);
+			const [absPath, queryStr] = id.split("?", 2);
+			if (queryStr === WATCH_QUERY) {
+				this.addWatchFile(absPath!);
+				return "export {};";
+			}
+			if (id === projectId) {
+				cache.get();
+				const files = new Set([
+					...cache.sourceFiles.map(normalizePath),
+					...CONFIG_FILES.map((name) => resolve(projectRoot, name)),
+					...testbenchComponentDependencies,
+				]);
+				return [...files]
+					.map((file) => `import ${JSON.stringify(`${file}?${WATCH_QUERY}`)};`)
+					.join("\n");
+			}
+			if (!absPath!.endsWith(".veryl")) return;
+			loadedIds.add(id);
+			this.addWatchFile(absPath!);
 			const params = new URLSearchParams(queryStr ?? "");
 
 			// Parse ?dse= query parameter
@@ -156,7 +270,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				}
 			}
 
-			const parts: string[] = [];
+			const parts: string[] = [`import ${JSON.stringify(projectId)};`];
 
 			// Build ESM exports for regular (non-test) modules
 			for (const name of regularModules) {
@@ -179,37 +293,15 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async handleHotUpdate({ file, server }) {
-			const componentChanged =
-				testbenchComponents !== undefined &&
-				testbenchComponentDependencies.has(
-					normalizeTestbenchComponentPath(file),
-				);
-			if (!file.endsWith(".veryl") && !componentChanged) return;
+		async hotUpdate({ file, timestamp }) {
+			if ((await regenerate(file, timestamp)) === false) return;
+			return affectedModules(this.environment.moduleGraph);
+		},
 
-			if (componentChanged && testbenchComponents) {
-				const loaded = await loadTestbenchComponentModule(
-					testbenchComponents,
-					projectRoot,
-					viteConfig,
-				);
-				testbenchComponentDependencies = loaded.dependencies;
-				server.watcher.add([...testbenchComponentDependencies]);
-				writeTestbenchComponentSidecar(
-					projectRoot,
-					testbenchComponents,
-					loaded.manifests,
-				);
-				cache.setTestbenchComponents(loaded.manifests);
-			}
-
-			// Invalidate cache so next load re-runs the generator
-			cache.invalidate();
-
-			// Re-generate sidecars
-			const data = cache.get();
-			cleanSidecars(sidecarPaths);
-			sidecarPaths = generateSidecars(data, projectRoot);
+		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
+		async handleHotUpdate({ file, timestamp, server }) {
+			if ((await regenerate(file, timestamp)) === false) return;
+			return affectedModules(server.moduleGraph);
 		},
 	};
 }

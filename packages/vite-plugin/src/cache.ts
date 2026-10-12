@@ -9,6 +9,7 @@ export class GenTsCache {
 	private _sourceKey = "";
 	private _configKey = "";
 	private _lockfileKey = "";
+	private _sourceFiles: string[] = [];
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -43,6 +44,11 @@ export class GenTsCache {
 		return this._data;
 	}
 
+	/** Source paths captured during the most recent cache lookup. */
+	get sourceFiles(): readonly string[] {
+		return this._sourceFiles;
+	}
+
 	/** Force invalidation — next `get()` will re-run the generator. */
 	invalidate(): void {
 		this._sourceKey = "";
@@ -75,9 +81,12 @@ export class GenTsCache {
 	 */
 	private computeSourceKey(): string {
 		const files: Array<[path: string, mtimeMs: number, size: number]> = [];
+		const sourceFiles: string[] = [];
 		this.walkVerylFiles(this._projectRoot, (path, mtimeMs, size) => {
 			files.push([relative(this._projectRoot, path), mtimeMs, size]);
+			sourceFiles.push(path);
 		});
+		this._sourceFiles = sourceFiles;
 		files.sort(([a], [b]) => a.localeCompare(b));
 		return JSON.stringify(files);
 	}
