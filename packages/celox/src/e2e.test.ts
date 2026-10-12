@@ -3712,3 +3712,32 @@ describe("E2E: tiered + VCD", () => {
 		}
 	});
 });
+
+describe("E2E: four-state wildcard comparison", () => {
+	test("both operators produce X for unknown compared bits", () => {
+		const source = `module Wildcard (
+            a: input logic<4>, b: input logic<4>,
+            eqw: output logic, newq: output logic,
+        ) { assign eqw = a ==? b; assign newq = a !=? b; }`;
+		const sim = Simulator.fromSource<{
+			a: bigint | FourStateSignalValue;
+			b: bigint | FourStateSignalValue;
+			readonly eqw: bigint;
+			readonly newq: bigint;
+		}>(source, "Wildcard", { fourState: true });
+		try {
+			for (const value of [4n, 7n]) {
+				sim.dut.a = FourState(value, 3n);
+				sim.dut.b = 4n;
+				expect(sim.fourState("eqw")).toEqual(FourState(1n, 1n));
+				expect(sim.fourState("newq")).toEqual(FourState(1n, 1n));
+			}
+			sim.dut.a = FourState(4n, 3n);
+			sim.dut.b = FourState(4n, 3n);
+			expect(sim.fourState("eqw")).toEqual(FourState(1n, 0n));
+			expect(sim.fourState("newq")).toEqual(FourState(0n, 0n));
+		} finally {
+			sim.dispose();
+		}
+	});
+});
