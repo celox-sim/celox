@@ -498,17 +498,19 @@ impl TaskTiming {
             let (explicit, wildcard) = imports.entry(lexical.len()).or_default();
             let tail = &source[end..];
             let clause = &tail[..tail.find(';')?];
-            let words = sv_words(clause);
-            let Some((_, _, package)) = words.first() else {
-                continue;
-            };
-            let selected = words.get(1).map(|word| word.2);
-            if selected == Some(name) || (selected.is_none() && clause.contains('*')) {
-                if let Some(value) = self.tasks.get(&format!("{package}::{name}")) {
-                    if selected == Some(name) {
-                        *explicit = Some(*value);
-                    } else {
-                        *wildcard = Some(wildcard.unwrap_or(false) || *value);
+            for item in clause.split(',') {
+                let words = sv_words(item);
+                let Some((_, _, package)) = words.first() else {
+                    continue;
+                };
+                let selected = words.get(1).map(|word| word.2);
+                if selected == Some(name) || (selected.is_none() && item.contains('*')) {
+                    if let Some(value) = self.tasks.get(&format!("{package}::{name}")) {
+                        if selected == Some(name) {
+                            *explicit = Some(*value);
+                        } else {
+                            *wildcard = Some(wildcard.unwrap_or(false) || *value);
+                        }
                     }
                 }
             }
@@ -532,8 +534,51 @@ impl TaskTiming {
                     return false;
                 }
                 let tail = after_trivia(&source[start + word_end..end]);
-                (tail.starts_with('(') || tail.starts_with(';'))
+                let prefix = source[start..start + at].trim_end();
+                let statement_start = prefix.is_empty()
+                    || prefix.ends_with([';', ')', ':', '.'])
+                    || sv_words(prefix)
+                        .last()
+                        .is_some_and(|word| matches!(word.2, "begin" | "end" | "else"));
+                (tail.starts_with('(') || (tail.starts_with(';') && statement_start))
                     && self.resolve(source, start + at, name).unwrap_or(true)
             })
+    }
+}
+
+#[cfg(test)]
+mod callable_analysis_tests {
+    use super::*;
+    #[test]
+    fn local_declarations_are_not_no_argument_task_calls() {
+        for body in ["int tick; q<=1;", "int value, tick; q<=1;"] {
+            let source = format!(
+                "module Top;task tick;#1;endtask always @(posedge clk)begin {body} end endmodule"
+            );
+            let tasks = TaskTiming::new(std::slice::from_ref(&source));
+            let at = source.find("always").unwrap() + 6;
+            assert!(edge_control(&source, at, &tasks), "{body}");
+        }
+        let source =
+            "module Top;task tick;#1;endtask always @(posedge clk)begin tick; end endmodule"
+                .to_string();
+        let tasks = TaskTiming::new(std::slice::from_ref(&source));
+        assert!(!edge_control(
+            &source,
+            source.find("always").unwrap() + 6,
+            &tasks
+        ));
+    }
+    #[test]
+    fn escaped_callable_names_remain_whole_tokens() {
+        let source = r"task \pause.task ; #1; endtask";
+        assert_eq!(
+            sv_words(source)
+                .iter()
+                .filter(|x| x.2.starts_with('\\'))
+                .map(|x| x.2)
+                .collect::<Vec<_>>(),
+            vec![r"\pause.task"]
+        );
     }
 }

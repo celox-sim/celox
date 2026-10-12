@@ -343,6 +343,19 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
+    /// Whether a clock/reset differs from the last settled scheduler state.
+    /// Host reads may have already cleared backend trigger bits.
+    pub fn has_unsettled_edges(&self, backend: &B) -> bool {
+        self.topo_signals.iter().any(|(signal, id, _)| {
+            *id != usize::MAX
+                && self.edge_triggers(
+                    *id,
+                    self.last_clock_values.contains(*id),
+                    backend.get_as::<u8>(*signal) != 0,
+                )
+        })
+    }
+
     /// Whether any process is suspended on an event or a condition.
     pub fn has_waiting_processes(&self) -> bool {
         !self.waiting.is_empty()

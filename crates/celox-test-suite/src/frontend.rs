@@ -209,10 +209,18 @@ impl TimedNames {
             if source[..start].trim_end().ends_with('.') {
                 continue;
             }
+            let prefix = source[..start].trim_end();
+            let tail = after_trivia(&source[end..]);
+            let previous_word = sv_words(prefix).last().map(|word| word.2);
             let replacement = match word {
-                "celox_suite_timed_control" => &self.package,
-                "celox_suite_start_design" => &self.start,
-                "celox_suite_finish_design" => &self.finish,
+                "celox_suite_timed_control"
+                    if tail.starts_with("::")
+                        || matches!(previous_word, Some("package" | "import")) =>
+                {
+                    &self.package
+                }
+                "celox_suite_start_design" if tail.starts_with('(') => &self.start,
+                "celox_suite_finish_design" if tail.starts_with('(') => &self.finish,
                 _ => continue,
             };
             output.push_str(&source[previous..start]);
@@ -401,6 +409,34 @@ mod timed_staging_tests {
         let case = load_group("unit.vtest", text, no_std_library)[0];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/unit-callable-protocol")
+            .join(std::process::id().to_string());
+        let frontend = celox_test_suite::sv::verification::SvFrontend;
+        let mut icarus =
+            celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+                .unwrap();
+        icarus.run_testbench().unwrap();
+        let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+            &frontend,
+            case,
+            &root.join("verilator"),
+        )
+        .unwrap();
+        verilator.run_testbench().unwrap();
+        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[ignore = "requires Icarus, Verilator and a C++ compiler; exercises external declaration staging"]
+    fn local_declarations_retain_staged_edges() {
+        let text = r##"(group declarations (category sequential))
+        (case local (source "decl.sv" #"module Top(input bit clk,output bit q);
+          task tick; #1; endtask
+          always @(posedge clk)begin int tick; q<=1; end endmodule"#)
+          (top Top)(set clk 1)(run_until 0)(assert_eq q 1))"##;
+        let case = load_group("decl.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/declaration-staging")
             .join(std::process::id().to_string());
         let frontend = celox_test_suite::sv::verification::SvFrontend;
         let mut icarus =
