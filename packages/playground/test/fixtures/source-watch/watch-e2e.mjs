@@ -9,10 +9,18 @@ const root = mkdtempSync(join(import.meta.dirname, ".project-"));
 let ctx;
 const runs = [];
 const pending = [];
+let finishedRun;
 const reporter = {
   onTestRunEnd(modules, errors) {
     const result = { ok: modules.length === 1 && modules.every((m) => m.ok()) && errors.length === 0 };
-    runs.push(result);
+    finishedRun = result;
+  },
+  // onTestRunEnd precedes Vitest's watch-ready phase. Only make the next
+  // filesystem edit after the previous run has returned to watch mode.
+  onWatcherStart() {
+    if (!finishedRun) return;
+    runs.push(finishedRun);
+    finishedRun = undefined;
     pending.splice(0).forEach((resolve) => resolve());
   },
 };
