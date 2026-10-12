@@ -61,6 +61,8 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
 }
 
 sv_backends! {
+    fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
+    fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
     // Veryl extension calls emitted unchanged into SV, not SV assert statements.
     fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
         @setup { let source = r#"

@@ -391,6 +391,18 @@ mod host {
                     out.push_str(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
+                't' | 'T' if site.sizing == DisplaySizing::Ieee => {
+                    let Some(arg) = args.get(arg_idx) else {
+                        arg_idx += 1;
+                        continue;
+                    };
+                    let field = FieldSpec {
+                        width: Some(field.width.unwrap_or(20)),
+                        ..field
+                    };
+                    out.push_str(&runtime_event_format_arg(arg, 'd', site.sizing, field));
+                    arg_idx += 1;
+                }
                 't' | 'T' | 'm' | 'M' => {
                     let text = if matches!(spec, 't' | 'T') {
                         ctx.tb_time.unwrap_or(0).to_string()

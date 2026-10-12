@@ -1925,6 +1925,10 @@ module Top (
 }
 
 fn test_comb_display_capture_defers_context_formatting_until_drain(sim) {
+    // Veryl's implicit %t has no expression. The emitter leaves that bare
+    // SV specifier, contrary to IEEE 1800-2023 21.2.1.1. Native Veryl time
+    // context remains covered; scope context has a valid SV case below.
+    @ignore_on(sv);
     @omit_veryl;
     @build Simulator::builder(r#"
 module Top (
@@ -1952,6 +1956,37 @@ module Top (
         }),
         vec![celox::RuntimeEvent::Display {
             message: "loc=tb.top time=42 a=5".to_string(),
+        }],
+    );
+}
+fn test_comb_display_capture_defers_scope_context_until_drain(sim) {
+    @omit_veryl;
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    out: output logic<8>,
+) {
+    always_comb {
+        out = a;
+        $display("loc=%m a=%0d", a);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(
+        sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+            tb_time: Some(42),
+            scope: Some("tb.top"),
+        }),
+        vec![celox::RuntimeEvent::Display {
+            message: "loc=tb.top a=5".to_string(),
         }],
     );
 }
