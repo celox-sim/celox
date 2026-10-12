@@ -66,6 +66,11 @@ function createMockNative(opts?: {
 			currentTime = endTime;
 		}),
 		step: vi.fn().mockImplementation(processNextEvent),
+		hasWaitingProcesses: vi.fn().mockReturnValue(false),
+		stepUntil: vi.fn().mockImplementation((endTime: number) => {
+			if (nextScheduledTime == null || nextScheduledTime > endTime) return null;
+			return handle.step();
+		}),
 		time: vi.fn().mockImplementation(() => currentTime),
 		nextEventTime: vi.fn().mockImplementation(() => nextScheduledTime),
 		evalComb: vi.fn().mockImplementation(() => {
@@ -692,4 +697,43 @@ describe("shared writes before timed polling", () => {
 			sim.dispose();
 		},
 	);
+});
+
+describe("bounded host-wake steps", () => {
+	test("polls a waiter even when the target is the current time", () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		vi.mocked(handle.stepUntil!).mockReturnValueOnce(0);
+		sim.runUntil(0, { maxSteps: 1 });
+		expect(handle.stepUntil).toHaveBeenCalledWith(0);
+		sim.dispose();
+	});
+	test("charges the host wake before running the delays it schedules", () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		vi.mocked(handle.stepUntil!).mockImplementationOnce(() => {
+			vi.mocked(handle.nextEventTime).mockReturnValue(1);
+			return 0;
+		});
+		expect(() => sim.runUntil(10, { maxSteps: 1 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(handle.stepUntil).toHaveBeenCalledOnce();
+		expect(handle.runUntil).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+});
+
+test("bounded runUntil polls waiters after a lazy output read settled the input", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	void sim.dut.q;
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	vi.mocked(handle.stepUntil!).mockReturnValueOnce(0);
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledWith(0);
+	sim.dispose();
 });

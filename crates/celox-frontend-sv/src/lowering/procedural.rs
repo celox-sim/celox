@@ -47,6 +47,7 @@ pub(super) struct ProcModule<'a> {
     /// The event expressions some process waits on.
     pub event_watchers: Vec<EventWatcher>,
     pub combinational: HashSet<String>,
+    pub hidden_comb_pulses: HashSet<String>,
     pub event_signals: Vec<String>,
     /// The watchers whose expression reads each variable, by index.
     pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
@@ -208,6 +209,11 @@ impl<'a> ProcModule<'a> {
                     }
                     names
                 }))
+                .collect(),
+            hidden_comb_pulses: module
+                .comb_processes()
+                .iter()
+                .flat_map(|process| repeated_comb_writes(process.body()))
                 .collect(),
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
@@ -2269,3 +2275,64 @@ pub(super) type EventWatchPlan = (
     HashMap<SourceVarId, Vec<usize>>,
     Vec<SourceVarId>,
 );
+
+/// Variables whose combinational process can write them repeatedly in one run.
+fn repeated_comb_writes(stmts: &[sv::ir::Stmt]) -> HashSet<String> {
+    fn counts(stmts: &[sv::ir::Stmt]) -> HashMap<String, usize> {
+        let mut result: HashMap<String, usize> = HashMap::default();
+        for stmt in stmts {
+            let mut next: HashMap<String, usize> = HashMap::default();
+            match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => {
+                    next.insert(lhs.name().to_string(), 1);
+                }
+                sv::ir::Stmt::AssignConcat { parts, .. } => {
+                    for part in parts {
+                        *next.entry(part.name().to_string()).or_default() += 1;
+                    }
+                }
+                sv::ir::Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    next = counts(then_body);
+                    for (name, count) in counts(else_body) {
+                        let entry = next.entry(name).or_default();
+                        *entry = (*entry).max(count);
+                    }
+                }
+                sv::ir::Stmt::Case { items, default, .. } => {
+                    for body in items
+                        .iter()
+                        .map(|item| item.body.as_slice())
+                        .chain(default.iter().map(Vec::as_slice))
+                    {
+                        for (name, count) in counts(body) {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry).max(count);
+                        }
+                    }
+                }
+                sv::ir::Stmt::Loop {
+                    init, body, step, ..
+                } => {
+                    next = counts(init);
+                    for (name, _) in counts(body).into_iter().chain(counts(step)) {
+                        next.insert(name, 2);
+                    }
+                }
+                _ => {}
+            }
+            for (name, count) in next {
+                let entry = result.entry(name).or_default();
+                *entry = (*entry + count).min(2);
+            }
+        }
+        result
+    }
+    counts(stmts)
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect()
+}
