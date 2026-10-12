@@ -737,3 +737,24 @@ test("bounded runUntil polls waiters after a lazy output read settled the input"
 	expect(handle.stepUntil).toHaveBeenCalledWith(0);
 	sim.dispose();
 });
+
+test("quiescent waiters do not consume a bounded host-write poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.runUntil(10, { maxSteps: 0 });
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.dispose();
+});
+
+test("a consumed host write does not keep charging a quiescent waiter", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.runUntil(0, { maxSteps: 1 });
+	vi.mocked(handle.stepUntil!).mockClear();
+	sim.runUntil(10, { maxSteps: 0 });
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.dispose();
+});

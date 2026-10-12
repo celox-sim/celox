@@ -434,11 +434,11 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
-		const needsHostPoll =
-			this._state.dirty || (this._handle.hasWaitingProcesses?.() ?? false);
+		const needsHostPoll = this._state.pendingHostWrites ?? this._state.dirty;
 		this.settleSharedWrites();
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
+			this._state.pendingHostWrites = false;
 			this._state.dirty = false;
 			return;
 		}
@@ -472,6 +472,7 @@ export class Simulation<P = Record<string, unknown>> {
 				? this._handle.stepUntil(endTime)
 				: this._handle.step();
 			pollHost = false;
+			this._state.pendingHostWrites = false;
 			if (t == null) break;
 			this._state.dirty = false;
 			steps++;
@@ -480,6 +481,7 @@ export class Simulation<P = Record<string, unknown>> {
 		// processed, advance the clock exactly to endTime without consuming a
 		// later event, and perform the native path's final dump.
 		this._handle.runUntil(endTime);
+		this._state.pendingHostWrites = false;
 		this._state.dirty = false;
 	}
 
@@ -492,6 +494,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this.ensureAlive();
 		this.settleSharedWrites();
 		const t = this._handle.step();
+		this._state.pendingHostWrites = false;
 		this._state.dirty = false;
 		return t;
 	}
@@ -725,6 +728,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.restore(checkpoint._native);
 		this.syncClocks();
 		this._state.dirty = false;
+		this._state.pendingHostWrites = false;
 	}
 
 	/**
@@ -751,6 +755,7 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const bytes = this._handle.saveState();
 		this._state.dirty = false;
+		this._state.pendingHostWrites = false;
 		return bytes;
 	}
 
@@ -770,6 +775,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.loadState(bytes);
 		this.syncClocks();
 		this._state.dirty = false;
+		this._state.pendingHostWrites = false;
 	}
 
 	/** Release native resources. */
