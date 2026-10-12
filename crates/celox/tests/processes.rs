@@ -1149,3 +1149,82 @@ fn clock_wait_vcd_records_each_edge_timestamp() {
         );
     }
 }
+
+#[test]
+fn overflowing_generated_edges_do_not_commit_or_credit_on_retry() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let delay = constant(&mut module, u64::MAX - 3, 64);
+    let one = constant(&mut module, 1, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: delay },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    for _ in 0..2 {
+        let error = sim.step().unwrap_err();
+        assert!(
+            error.to_string().contains("overflows simulation time"),
+            "{error}"
+        );
+        assert_eq!(sim.get(sim.signal("count")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.ticks(), 0);
+    }
+}
+
+#[test]
+fn periodic_and_process_generators_for_one_clock_are_rejected() {
+    for register_first in [true, false] {
+        let (mut module, clk, _) = clocked_by_process_waits(4);
+        let two = constant(&mut module, 2, 64);
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            }])
+            .unwrap();
+        let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+        if !register_first {
+            sim.step().unwrap();
+        }
+        let count = sim.get(sim.signal("count"));
+        let ticks = sim.ticks();
+        sim.add_clock("clk", 4, 0);
+        let error = sim.step().unwrap_err();
+        assert!(
+            error.to_string().contains("already driven by add_clock"),
+            "{error}"
+        );
+        assert_eq!(sim.get(sim.signal("count")), count);
+        assert_eq!(sim.ticks(), ticks);
+    }
+}
+
+#[test]
+fn imported_clock_periods_reject_duplicate_signal_entries() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let one = constant(&mut module, 1, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&module.finish().to_json().unwrap()).unwrap();
+    let periods = value["clock_periods"].as_array_mut().unwrap();
+    let mut duplicate = periods[0].clone();
+    duplicate[1] = 8.into();
+    periods.push(duplicate);
+    let error = FrontendArtifact::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate process-clock period"),
+        "{error}"
+    );
+}

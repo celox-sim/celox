@@ -537,11 +537,23 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        for (id, clock) in &self.tick_clocks {
+            if self.clock_has_waiters(*id) || clock.falling_edge.is_some() {
+                self.check_clock_generator(*id)?;
+            }
+        }
         let Some(current_time) = self.next_event_time() else {
             return Ok(None);
         };
         if current_time > limit {
             return Ok(None);
+        }
+        for (id, clock) in &self.tick_clocks {
+            if clock.next_edge == current_time && self.clock_has_waiters(*id) {
+                current_time
+                    .checked_add(clock.period)
+                    .ok_or_else(|| clock_overflow(*id))?;
+            }
         }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
@@ -657,6 +669,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        for id in due {
+            time.checked_add(self.tick_clocks[id].period)
+                .ok_or_else(|| clock_overflow(*id))?;
+        }
         // A clock that is high when its edge is due (the host or a previous
         // run left it so) falls first, in a round of its own: the rising
         // edge that counts is then a real one. The falling edges due now
@@ -709,10 +725,12 @@ impl<B: SimBackend> SimulationState<B> {
         }
         for id in rising {
             let clock = self.tick_clocks.get_mut(&id).expect("a due process clock");
-            clock.next_edge = time
+            let next_edge = time
                 .checked_add(clock.period)
                 .ok_or_else(|| clock_overflow(id))?;
-            clock.falling_edge = Some(time + clock.period - clock.period / 2);
+            self.ticks += 1;
+            clock.next_edge = next_edge;
+            clock.falling_edge = Some(next_edge - clock.period / 2);
             let resume_at = clock.next_edge;
             self.count_edges(id, 1, resume_at);
         }
@@ -793,6 +811,16 @@ impl<B: SimBackend> SimulationState<B> {
         if count == 0 {
             return Ok(false);
         }
+        // If the batch's resumption cannot be represented, execute normal
+        // bounded edges instead. They diagnose the offending edge before it
+        // mutates the backend, retaining the valid earlier progress.
+        if count
+            .checked_mul(period)
+            .and_then(|span| time.checked_add(span))
+            .is_none()
+        {
+            return Ok(false);
+        }
         // Combinational next-state logic samples the rising level of the clock.
         executor.backend_mut().set(signal, 1u8);
         let (completed, result) = executor.tick_many(event, count);
@@ -822,7 +850,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .get_mut(&clock)
                 .expect("a due process clock");
             tick_clock.next_edge = next_edge;
-            tick_clock.falling_edge = Some(self.scheduler.time + period - period / 2);
+            tick_clock.falling_edge = Some(next_edge - period / 2);
             self.last_clock_values.insert(clock);
             self.count_edges(clock, completed, next_edge);
         }
@@ -831,6 +859,16 @@ impl<B: SimBackend> SimulationState<B> {
         // edge.
         executor.eval_comb()?;
         Ok(true)
+    }
+
+    fn check_clock_generator(&self, id: usize) -> Result<(), SimulatorErrorCode> {
+        if self.scheduler.clocks.get(id).is_some_and(Option::is_some) {
+            return Err(SimulatorErrorCode::Runtime {
+                message: format!("process clock {id} is already driven by add_clock"),
+                signals: Vec::new(),
+            });
+        }
+        Ok(())
     }
 
     /// Whether any process is suspended on an event or a condition.
@@ -1074,6 +1112,7 @@ impl<B: SimBackend> SimulationState<B> {
                                 continue;
                             } else {
                                 let id = clock.event.id();
+                                self.check_clock_generator(id)?;
                                 let tick_clock =
                                     self.tick_clocks.entry(id).or_insert_with(|| TickClock {
                                         event: clock.event,
