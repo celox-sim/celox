@@ -95,7 +95,18 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
         }
         Some("if" | "for" | "foreach" | "while" | "repeat" | "assert" | "assume" | "cover") => {
             let word = words.first()?;
-            let end = parens(source, trivia(source, at + word.1))?;
+            let mut control = trivia(source, at + word.1);
+            if matches!(keyword, Some("assert" | "assume" | "cover")) {
+                if source[control..].starts_with("#0") {
+                    control = trivia(source, control + 2);
+                } else if sv_words(&source[control..])
+                    .first()
+                    .is_some_and(|word| word.0 == 0 && word.2 == "final")
+                {
+                    control = trivia(source, control + 5);
+                }
+            }
+            let end = parens(source, control)?;
             let body = statement_end(source, end)?;
             let next = trivia(source, body);
             if matches!(keyword, Some("if" | "assert" | "assume"))
@@ -279,6 +290,16 @@ fn has_timing(source: &str) -> bool {
         if skip_token(source, &mut at) {
             continue;
         }
+        if source.as_bytes()[at] == b'#'
+            && sv_words(&source[..at])
+                .last()
+                .is_some_and(|word| matches!(word.2, "assert" | "assume" | "cover"))
+            && source[at..].starts_with("#0")
+            && source.as_bytes().get(trivia(source, at + 2)) == Some(&b'(')
+        {
+            at += 2;
+            continue;
+        }
         if matches!(source.as_bytes()[at], b'#' | b'@') {
             return true;
         }
@@ -319,6 +340,20 @@ impl TaskTiming {
         for source in sources {
             let words = sv_words(source);
             for (index, (start, end, word)) in words.iter().enumerate() {
+                if *word == "function" {
+                    let header_end = source[*end..]
+                        .find(';')
+                        .map(|offset| end + offset)
+                        .unwrap_or(source.len());
+                    let header = &source[*end..header_end];
+                    let name_end = header.find('(').unwrap_or(header.len());
+                    if let Some((_, _, name)) = sv_words(&header[..name_end]).last() {
+                        result
+                            .tasks
+                            .insert(format!("{}::{name}", container_at(source, *start)), false);
+                    }
+                    continue;
+                }
                 if *word != "task" {
                     continue;
                 }
@@ -382,6 +417,8 @@ impl TaskTiming {
         if let Some(value) = self.tasks.get(&format!("{scope}::{name}")) {
             return Some(*value);
         }
+        let mut explicit = None;
+        let mut wildcard = None;
         for (start, end, word) in sv_words(&source[..at]) {
             if word != "import" {
                 continue;
@@ -399,11 +436,15 @@ impl TaskTiming {
             let selected = words.get(1).map(|word| word.2);
             if selected == Some(name) || (selected.is_none() && clause.contains('*')) {
                 if let Some(value) = self.tasks.get(&format!("{package}::{name}")) {
-                    return Some(*value);
+                    if selected == Some(name) {
+                        explicit = Some(*value);
+                    } else {
+                        wildcard = Some(wildcard.unwrap_or(false) || *value);
+                    }
                 }
             }
         }
-        None
+        explicit.or(wildcard)
     }
 
     fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {

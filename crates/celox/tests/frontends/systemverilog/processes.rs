@@ -1799,3 +1799,66 @@ fn output_formal_writes_publish_only_the_returned_value() {
     assert!(sim.is_finished());
     assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
 }
+
+#[test]
+fn mutually_exclusive_nbas_and_disjoint_watched_bits_are_supported() {
+    for body in ["if(en) q<=1; else q<=0;", "q[0]<=en; q[1]<=1;"] {
+        let code = format!(
+            r#"module Top(input bit clk,en, output bit seen); bit [1:0] q;
+            always @(posedge clk) begin {body} end
+            initial begin @(posedge q[0]); seen=1; end
+        endmodule"#
+        );
+        let mut sim = simulation(&code);
+        sim.run_until(0).unwrap();
+        let en = sim.signal("en");
+        sim.modify(|sim| sim.set(en, 1u8)).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+}
+#[test]
+fn nba_updates_across_event_dependencies_require_an_ordered_queue() {
+    let code = r#"module Top(input bit clk, output bit seen); bit a,b;
+      always @(posedge clk) begin a<=1; b<=1; end
+      initial begin @(a ^ b); seen=1; end
+    endmodule"#;
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("multi_nba.sv"))], "Top")
+        .build()
+        .expect_err("ordered dependency pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
+#[test]
+fn event_expression_cannot_mix_comb_state_with_other_variables() {
+    let code = r#"module Top(input bit a, output bit seen); wire q=a;
+        initial begin @(q ^ a); seen=1; end endmodule"#;
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("mixed_comb.sv"))], "Top")
+        .build()
+        .expect_err("comb/source transient")
+        .to_string();
+    assert!(error.contains("together with other variables"), "{error}");
+}
+#[test]
+fn single_iteration_comb_loops_do_not_hide_event_edges() {
+    for body in [
+        "repeat(1) q=a;",
+        "repeat(N) q=a;",
+        "for(int i=0;i<1;i++) q=a;",
+        "for(int i=-1;i<0;i++) q=a;",
+        "do q=a; while(0);",
+    ] {
+        let code = format!(
+            r#"module Top(input bit a, output bit seen); localparam N=1; bit q;
+            always_comb {body}
+            initial begin @(posedge q); seen=1; end endmodule"#
+        );
+        let mut sim = simulation(&code);
+        sim.run_until(0).unwrap();
+        let a = sim.signal("a");
+        sim.modify(|sim| sim.set(a, 1u8)).unwrap();
+        sim.step().unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{body}");
+    }
+}

@@ -1919,3 +1919,25 @@ mod clock_provenance_checkpoint_tests {
         check(Simulation::from_frontend(design()).build_native().unwrap());
     }
 }
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_ff_metadata_tests {
+    #[test]
+    fn pending_control_flags_do_not_request_active_settling() {
+        for (body, expected) in [("q<=d;", false), ("q=d;", true), ("q<=d; q=d;", true)] {
+            let code = format!(
+                "module Top(input bit clk,d,output bit q); always @(posedge clk) begin {body} end initial #1; endmodule"
+            );
+            let sim = crate::Simulator::from_sv_sources(
+                vec![(&code, std::path::Path::new("active_ff.sv"))],
+                "Top",
+            )
+            .build_interpreter()
+            .unwrap();
+            assert_eq!(
+                !sim.program.runtime_schema.active_ff_events.is_empty(),
+                expected,
+                "{body}"
+            );
+        }
+    }
+}
