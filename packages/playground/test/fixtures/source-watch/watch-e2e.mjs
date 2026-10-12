@@ -6,6 +6,7 @@ import { build } from "vite";
 import celox from "../../../../vite-plugin/dist/index.js";
 
 const root = mkdtempSync(join(import.meta.dirname, ".project-"));
+const testRoot = join(root, "tests");
 let ctx;
 const runs = [];
 const pending = [];
@@ -47,17 +48,18 @@ function sourceB(amount) {
 }
 try {
   mkdirSync(join(root, "src"));
+  mkdirSync(testRoot);
   writeFileSync(join(root, "Veryl.toml"), '[project]\nname="watch_e2e"\nversion="0.1.0"\n[build]\nsources=["src"]\n');
   writeFileSync(join(root, "src/A.veryl"), sourceA());
   writeFileSync(join(root, "src/B.veryl"), sourceB(1));
   utimesSync(join(root, "src/B.veryl"), 1_700_000_000, 1_700_000_000);
   writeExpected(4, ["a", "o"]);
-  writeFileSync(join(root, "entry.test.ts"), `
+  writeFileSync(join(testRoot, "entry.test.ts"), `
     import { test, expect } from "vitest";
     import { readFileSync } from "node:fs";
     import { Simulator } from "@celox-sim/celox";
-    import { A } from "./src/A.veryl?dse=preserveAllPorts";
-    import { A as Plain } from "./src/A.veryl";
+    import { A } from "../src/A.veryl?dse=preserveAllPorts";
+    import { A as Plain } from "../src/A.veryl";
     test("source and catalogue are current", () => {
       const expected = JSON.parse(readFileSync(${JSON.stringify(join(root, "expected.json"))}, "utf8"));
       expect(Object.keys(A.ports).sort()).toEqual(expected.ports);
@@ -69,7 +71,7 @@ try {
     });
   `);
   ctx = await startVitest("test", [], {
-    root, config: false, watch: true, include: ["entry.test.ts"],
+    root: testRoot, config: false, watch: true, include: ["entry.test.ts"],
     reporters: ["default", reporter], disableConsoleIntercept: true,
   }, { plugins: [celox({ projectRoot: root })] });
   await waitForRun(0);

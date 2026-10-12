@@ -35,6 +35,7 @@ const CONFIG_FILES = ["Veryl.toml", "celox.toml", "Veryl.lock"];
  */
 export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let projectRoot: string;
+	let projectPrefix: string;
 	let cache: GenTsCache;
 	let sidecarPaths: string[] = [];
 	let generatedData: ReturnType<GenTsCache["get"]> | undefined;
@@ -130,6 +131,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 
 			projectRoot = normalizePath(projectRoot);
+			projectPrefix = projectRoot.endsWith("/")
+				? projectRoot
+				: `${projectRoot}/`;
 			projectId = `${projectFile("Veryl.toml")}?${PROJECT_QUERY}`;
 
 			if (options?.testbenchComponents) {
@@ -173,7 +177,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		configureServer(server) {
-			server.watcher.add(CONFIG_FILES.map(projectFile));
+			server.watcher.add([projectRoot, ...CONFIG_FILES.map(projectFile)]);
 			const hmrDisabled = server.config.server.hmr === false;
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
@@ -198,7 +202,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const catalogueChanged = (file: string) => {
 				file = normalizePath(file);
 				if (
-					(file.startsWith(`${projectRoot}/`) && file.endsWith(".veryl")) ||
+					(file.startsWith(projectPrefix) && file.endsWith(".veryl")) ||
 					CONFIG_FILES.some((name) => projectFile(name) === file)
 				) {
 					server.watcher.emit("change", projectFile("Veryl.toml"));
