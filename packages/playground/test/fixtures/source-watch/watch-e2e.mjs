@@ -108,6 +108,18 @@ try {
     console.log(`passed: ${name}`);
   }
   assert.ok(readFileSync(join(root, ".celox/src/A.d.veryl.ts"), "utf8").includes("mark"));
+  const lockfile = join(root, "Veryl.lock");
+  const beforeLockEdit = runs.length;
+  writeFileSync(lockfile, `${readFileSync(lockfile, "utf8")}\n# external edit\n`);
+  await waitForRun(beforeLockEdit);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(runs.length, beforeLockEdit + 1, "a changed lockfile must rerun once");
+  console.log("passed: changed lockfiles notify the project once");
+  const previous = runs.length;
+  writeFileSync(lockfile, readFileSync(lockfile));
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  assert.equal(runs.length, previous, "identical-content lockfile writes must not rerun tests");
+  console.log("passed: unchanged lockfile notifications do not rerun tests");
   await ctx.close();
   ctx = undefined;
   writeFileSync(join(root, "entry.ts"), 'export { A } from "./src/A.veryl?dse=preserveAllPorts";');
