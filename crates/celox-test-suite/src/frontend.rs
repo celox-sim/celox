@@ -218,21 +218,31 @@ impl TimedNames {
 }
 
 fn timed_source(source: &str, names: &TimedNames) -> Result<String> {
+    // Stage actual declarations after macro expansion, including process
+    // keywords supplied as macro arguments.
+    let syntax = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))?;
+    let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
+    let expanded = syntax
+        .get_str(vec![root])
+        .ok_or("missing timed source text")?;
     Ok(format!(
         "import {}::*;\n{}",
         names.package,
-        timed_content(source, names)?
+        timed_content(expanded, names)?
     ))
 }
 
 fn timed_content(source: &str, names: &TimedNames) -> Result<String> {
     let mut output = String::new();
     let mut previous = 0;
+    let timed_tasks = timed_ff::timed_tasks(source);
     for (start, end, word) in sv_words(source) {
         if start < previous {
             continue;
         }
-        if word == "always_ff" || (word == "always" && timed_ff::edge_control(source, end)) {
+        if word == "always_ff"
+            || (word == "always" && timed_ff::edge_control(source, end, &timed_tasks))
+        {
             let (body_end, replacement) = timed_ff::gated(source, start, end, names)?;
             output.push_str(&source[previous..start]);
             output.push_str(&timed_ff::in_macro(source, start, replacement));
@@ -241,6 +251,7 @@ fn timed_content(source: &str, names: &TimedNames) -> Result<String> {
         }
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
+            "always" if timed_ff::wildcard_control(source, end) => continue,
             "always" => {
                 format!("always wait ({}::started)", names.package)
             }

@@ -104,6 +104,17 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
                 Some(body)
             }
         }
+        Some("do") => {
+            let body = statement_end(source, at + words.first()?.1)?;
+            let next = trivia(source, body);
+            let word = sv_words(&source[next..]).first().copied()?;
+            if word.0 != 0 || word.2 != "while" {
+                return None;
+            }
+            let end = parens(source, trivia(source, next + word.1))?;
+            let semicolon = trivia(source, end);
+            (source.as_bytes().get(semicolon) == Some(&b';')).then_some(semicolon + 1)
+        }
         Some("forever") => statement_end(source, at + words.first()?.1),
         _ => {
             let mut cursor = at;
@@ -168,7 +179,11 @@ pub(super) fn gated(
 
 /// The frontend classifies an ordinary always as FF only when every leaf
 /// of its event list is explicitly edge-qualified.
-pub(super) fn edge_control(source: &str, end: usize) -> bool {
+pub(super) fn edge_control(
+    source: &str,
+    end: usize,
+    timed_tasks: &std::collections::BTreeSet<String>,
+) -> bool {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
         return false;
@@ -177,6 +192,17 @@ pub(super) fn edge_control(source: &str, end: usize) -> bool {
     let Some(end) = parens(source, begin) else {
         return false;
     };
+    let Some(body_end) = statement_end(source, end) else {
+        return false;
+    };
+    let body = &source[end..body_end];
+    if has_timing(body)
+        || sv_words(body)
+            .iter()
+            .any(|word| timed_tasks.contains(word.2))
+    {
+        return false;
+    }
     let event = &source[begin + 1..end - 1];
     let ors = sv_words(event)
         .into_iter()
@@ -234,4 +260,66 @@ pub(super) fn in_macro(source: &str, start: usize, replacement: String) -> Strin
         }
     }
     output
+}
+
+pub(super) fn wildcard_control(source: &str, end: usize) -> bool {
+    let at = trivia(source, end);
+    if source.as_bytes().get(at) != Some(&b'@') {
+        return false;
+    }
+    let begin = trivia(source, at + 1);
+    if source.as_bytes().get(begin) == Some(&b'*') {
+        return true;
+    }
+    parens(source, begin).is_some_and(|end| after_trivia(&source[begin + 1..end - 1]).trim() == "*")
+}
+
+fn has_timing(source: &str) -> bool {
+    if sv_words(source).iter().any(|word| word.2 == "wait") {
+        return true;
+    }
+    let mut at = 0;
+    while at < source.len() {
+        if skip_token(source, &mut at) {
+            continue;
+        }
+        if matches!(source.as_bytes()[at], b'#' | b'@') {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
+
+pub(super) fn timed_tasks(source: &str) -> std::collections::BTreeSet<String> {
+    let words = sv_words(source);
+    let mut tasks = Vec::new();
+    for (index, (_, end, word)) in words.iter().enumerate() {
+        if *word != "task" {
+            continue;
+        }
+        let Some((_, body_end, _)) = words[index + 1..].iter().find(|word| word.2 == "endtask")
+        else {
+            continue;
+        };
+        let Some((_, _, name)) = words[index + 1..]
+            .iter()
+            .find(|word| !matches!(word.2, "automatic" | "static"))
+        else {
+            continue;
+        };
+        tasks.push((name.to_string(), &source[*end..*body_end]));
+    }
+    let mut timed = std::collections::BTreeSet::new();
+    loop {
+        let before = timed.len();
+        for (name, body) in &tasks {
+            if has_timing(body) || sv_words(body).iter().any(|word| timed.contains(word.2)) {
+                timed.insert(name.clone());
+            }
+        }
+        if timed.len() == before {
+            return timed;
+        }
+    }
 }
