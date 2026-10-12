@@ -41,6 +41,7 @@ fn displays(sim: &mut Simulation) -> Vec<(u64, String)> {
             match event {
                 RuntimeEvent::Display { message } => lines.push((time, message)),
                 RuntimeEvent::Write { message } => lines.push((time, message)),
+                RuntimeEvent::Finish => {}
                 other => panic!("unexpected runtime event {other:?}"),
             }
         }

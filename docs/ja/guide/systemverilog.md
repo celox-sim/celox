@@ -85,6 +85,9 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 現在のモジュールと相対参照には実際のインスタンス階層名を使い、
 package・interface の手続きは宣言元の時間単位と精度を保持します。
 
+SV process の `$finish` は `RuntimeEvent::Finish` を発行し、保留中の順序更新より前に
+現在の時刻の実行を終了します。RTL 内の `$finish` と同じ扱いです。
+
 ## サポートしていないもの
 
 未対応の構文は、無視せずに、その構文名を示す `Unsupported` エラーを返します。エラーには
