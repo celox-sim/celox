@@ -1121,3 +1121,33 @@ fn conditional_finish_calls_preserve_reachable_clocks() {
         check_passes_on_every_backend(&code);
     }
 }
+
+#[test]
+fn consecutive_reset_helpers_share_the_first_clock_edge() {
+    for body in [
+        "for i in 1..=3 { rst.assert(i); }",
+        "reset_for(2); reset_for(4);",
+    ] {
+        let code = format!(
+            r#"module Counter(clk: input clock, rst: input reset, q: output u32) {{
+            always_ff {{ if_reset {{ q+=1; }} else {{ q+=1; }} }}
+        }}
+        #[test(Top)] module Top {{
+            inst clk: $tb::clock_gen; inst rst: $tb::reset_gen(clk); var q:u32;
+            inst dut: Counter(clk,rst,q);
+            function reset_for(n: input u32) {{ rst.assert(n); }}
+            initial {{ {body} $assert(q==6,"ticks=%d",q); $finish(); }}
+        }}"#
+        );
+        check_passes_on_every_backend(&code);
+        let mut fallback = Simulator::builder(&code, "Top")
+            .testbench_kernels(false)
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&fallback).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut fallback, &tb),
+            TestResult::Pass
+        );
+    }
+}
