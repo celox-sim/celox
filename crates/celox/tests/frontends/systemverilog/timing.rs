@@ -126,4 +126,7 @@ sv_backends! {
     fn untimed_local_tasks_shadow_timed_tasks_in_other_scopes(sim) { @case "timing::untimed_local_tasks_shadow_timed_tasks_in_other_scopes"; }
     fn automatic_module_ff_staging_keeps_its_state(sim) { @case "timing::automatic_module_ff_staging_keeps_its_state"; }
     fn control_members_do_not_pollute_user_package_imports(sim) { @case "timing::control_members_do_not_pollute_user_package_imports"; }
+    fn blocking_ff_stores_are_visible_before_inactive_work(sim) { @case "timing::blocking_ff_stores_are_visible_before_inactive_work"; }
+    fn nonblocking_ff_stores_remain_pending_during_inactive_work(sim) { @case "timing::nonblocking_ff_stores_remain_pending_during_inactive_work"; }
+    fn mixed_ff_stores_keep_their_active_and_nba_values(sim) { @case "timing::mixed_ff_stores_keep_their_active_and_nba_values"; }
 }
