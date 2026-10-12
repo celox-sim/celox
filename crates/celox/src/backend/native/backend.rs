@@ -551,6 +551,7 @@ impl NativeProgramImage {
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
         }
+        let mut process_clock_periods = fxhash::FxHashMap::default();
         for process in &self.runtime_schema.processes {
             if !self
                 .design
@@ -582,6 +583,12 @@ impl NativeProgramImage {
                         })
                 {
                     return Err("a process clock has an invalid event domain or period".into());
+                }
+                let event = self.event_map[&clock.signal].id;
+                if let Some(previous) = process_clock_periods.insert(event, clock.period)
+                    && previous != clock.period
+                {
+                    return Err("process clocks for one event have conflicting periods".into());
                 }
             }
         }
@@ -3046,7 +3053,10 @@ impl super::super::SimBackend for NativeBackend {
             if count == 0 {
                 return (0, Ok(()));
             }
-            return (1, self.eval_comb_apply_ff_at(event));
+            if let Err(error) = self.eval_comb() {
+                return (0, Err(error));
+            }
+            return (1, self.eval_apply_ff_at(event));
         }
         if self.compiled.options.native_tick_loop {
             let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
@@ -3060,11 +3070,14 @@ impl super::super::SimBackend for NativeBackend {
         } else if count == 0 {
             (0, Ok(()))
         } else {
+            if let Err(error) = self.eval_comb() {
+                return (0, Err(error));
+            }
             if fused_sequential {
                 self.lane_selectors
                     .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
             }
-            (1, self.call_func_timed(event.comb_apply_func))
+            (1, self.eval_apply_ff_at(event))
         }
     }
 
@@ -3344,6 +3357,12 @@ mod process_metadata_tests {
                 count: one,
             }])
             .unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
         crate::Simulator::from_frontend(module.finish())
             .compile_native()
             .unwrap()
@@ -3384,5 +3403,15 @@ mod process_metadata_tests {
                 "accepted corruption {corruption}"
             );
         }
+    }
+
+    #[test]
+    fn process_clock_periods_must_agree_across_slot_tables() {
+        let mut broken = image();
+        broken.to_container_bytes().unwrap();
+        broken.runtime_schema.processes[1].clocks[0].period = 4;
+        assert!(
+            matches!(broken.to_container_bytes(), Err(NativeImageContainerError::InvalidImage(message)) if message.contains("conflicting periods"))
+        );
     }
 }

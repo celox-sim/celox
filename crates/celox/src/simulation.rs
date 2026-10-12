@@ -1336,6 +1336,8 @@ mod process_review_tests {
         check_failed_batch(builder().build_cranelift().unwrap());
         check_failed_batch(builder().build_wasm().unwrap());
         check_failed_batch(builder().build_tiered().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_failed_batch(builder().build_native().unwrap());
     }
 
     fn check<B: SimBackend>(mut sim: Simulation<B>) {
@@ -1634,5 +1636,103 @@ mod ff_counter_regressions {
         check(Simulation::new(builder().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod clock_failure_progress_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+
+    fn design(on_rising: bool) -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(32).unwrap();
+        let mut m = ModuleBuilder::new("Progress").unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let bad = m.input("bad", bit).unwrap();
+        let count = m.output("count", word).unwrap();
+        let falls = m.output("falls", word).unwrap();
+        let fallclk = m.internal("fallclk", bit).unwrap();
+        let clk_expr = m.read(clk).unwrap();
+        let low = m.unary(UnaryOp::BitNot, clk_expr, bit).unwrap();
+        let count_expr = m.read(count).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 32).unwrap());
+        let running = m.binary(BinaryOp::NotEqual, count_expr, zero, bit).unwrap();
+        let fall_phase = m.binary(BinaryOp::And, low, running, bit).unwrap();
+        let target = m.whole(fallclk).unwrap();
+        m.assign(target, fall_phase).unwrap();
+        for (signal, clock) in [(count, clk), (falls, fallclk)] {
+            let value = m.read(signal).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 32).unwrap());
+            let next = m.binary(BinaryOp::Add, value, one, word).unwrap();
+            let target = m.whole(signal).unwrap();
+            m.register(target, next, clock, Edge::Posedge, None, None)
+                .unwrap();
+        }
+        let v = m.output("v", bit).unwrap();
+        let phase = m.read(clk).unwrap();
+        let phase = if on_rising {
+            phase
+        } else {
+            m.unary(UnaryOp::BitNot, phase, bit).unwrap()
+        };
+        let bad = m.read(bad).unwrap();
+        let active = m.binary(BinaryOp::And, phase, bad, bit).unwrap();
+        let count = m.read(count).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 32).unwrap());
+        let nonzero = m.binary(BinaryOp::NotEqual, count, zero, bit).unwrap();
+        let active = m.binary(BinaryOp::And, active, nonzero, bit).unwrap();
+        let previous = m.read(v).unwrap();
+        let toggled = m.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 1).unwrap());
+        let next = m.mux(active, toggled, zero).unwrap();
+        let target = m.whole(v).unwrap();
+        m.assign(target, next).unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        m.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>, on_rising: bool) {
+        sim.set_wide(sim.signal("bad"), 1u8.into());
+        let time = if on_rising { 0 } else { 2 };
+        assert!(sim.run_until(time).is_err());
+        assert_eq!(sim.time(), time);
+        assert_eq!(sim.ticks(), 1);
+        let count = sim.signal("count");
+        let falls = sim.signal("falls");
+        assert_eq!(sim.simulator.backend.get_as::<u32>(count), 1);
+        assert_eq!(sim.simulator.backend.get_as::<u32>(falls), 0);
+        assert_eq!(sim.next_event_time(), Some(2));
+        sim.set_wide(sim.signal("bad"), 0u8.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(falls), 1u32.into());
+        assert_eq!(sim.get(count), 1u32.into());
+        assert_eq!(sim.ticks(), 1);
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(count), 2u32.into());
+        assert_eq!(sim.ticks(), 2);
+    }
+
+    #[test]
+    fn generated_clock_failures_retain_committed_and_pending_phases() {
+        for on_rising in [true, false] {
+            let builder = || {
+                Simulation::from_frontend(design(on_rising)).true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+            };
+            check(builder().build_interpreter().unwrap(), on_rising);
+            check(builder().build_cranelift().unwrap(), on_rising);
+            check(builder().build_wasm().unwrap(), on_rising);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(builder().build_native().unwrap(), on_rising);
+        }
     }
 }
