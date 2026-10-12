@@ -112,3 +112,9 @@ sv_backends! {
         @case "timing::ff_startup_preserves_nested_if_case_actions";
     }
 }
+
+sv_backends! {
+    fn qualified_ff_startup_actions(sim) { @case "timing::qualified_ff_startup_actions"; }
+    fn ordinary_edge_always_retains_staged_startup_edges(sim) { @case "timing::ordinary_edge_always_retains_staged_startup_edges"; }
+    fn macro_ff_startup_actions(sim) { @case "timing::macro_ff_startup_actions"; }
+}
