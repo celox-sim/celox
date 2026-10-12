@@ -1,3 +1,4 @@
+import { withOwnedHandle } from "./handle-ownership.js";
 /**
  * Event-based Simulator.
  *
@@ -136,34 +137,36 @@ export class Simulator<P = Record<string, unknown>> {
 		// test-only plumbing and must not cross the native factory boundary.
 		const { __nativeCreate: _createOverride, ...nativeOptions } = merged;
 		const result = createFn(module.sources, module.name, nativeOptions);
-		const state: DirtyState = { dirty: false };
+		return withOwnedHandle(result.handle, () => {
+			const state: DirtyState = { dirty: false };
 
-		// Always prefer NAPI-derived ports (from hierarchy) over module.ports.
-		// module.ports has widths/arrayDims baked at generation time, which become
-		// stale when parameters are overridden. hierarchy.ports reflects the actual
-		// compiled layout, consistent with fromSource()/fromProject().
-		const hierarchy = result.hierarchy
-			? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
-			: undefined;
-		const portDefs = hierarchy?.ports ?? module.ports;
-		const dut = createDut<P>(
-			result.buffer,
-			result.layout,
-			portDefs,
-			result.handle,
-			state,
-			hierarchy,
-		);
+			// Always prefer NAPI-derived ports (from hierarchy) over module.ports.
+			// module.ports has widths/arrayDims baked at generation time, which become
+			// stale when parameters are overridden. hierarchy.ports reflects the actual
+			// compiled layout, consistent with fromSource()/fromProject().
+			const hierarchy = result.hierarchy
+				? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
+				: undefined;
+			const portDefs = hierarchy?.ports ?? module.ports;
+			const dut = createDut<P>(
+				result.buffer,
+				result.layout,
+				portDefs,
+				result.handle,
+				state,
+				hierarchy,
+			);
 
-		return new Simulator<P>(
-			result.handle,
-			dut,
-			result.events,
-			state,
-			result.buffer,
-			result.layout,
-			result.warnings ?? [],
-		);
+			return new Simulator<P>(
+				result.handle,
+				dut,
+				result.events,
+				state,
+				result.buffer,
+				result.layout,
+				result.warnings ?? [],
+			);
+		});
 	}
 
 	/**
@@ -203,60 +206,62 @@ export class Simulator<P = Record<string, unknown>> {
 					top,
 					napiOpts,
 				);
-		const isWasm = isWasmHandle(raw);
+		return withOwnedHandle(raw, () => {
+			const isWasm = isWasmHandle(raw);
 
-		const layout =
-			isWasm && options?.fourState
-				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
-				: parseNapiLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(
-			rawHierarchy,
-			options?.deadStorePolicy,
-		);
+			const layout =
+				isWasm && options?.fourState
+					? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
+					: parseNapiLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+			const hierarchy = filterHierarchyForDse(
+				rawHierarchy,
+				options?.deadStorePolicy,
+			);
 
-		// When hierarchy is populated, use its signals for port detection.
-		// When hierarchy is empty (e.g. WASM-compiled addon), fall back to
-		// the flat layout signals which always have full signal info.
-		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
-		const ports = hasHierarchySignals
-			? buildPortsFromLayout(hierarchy.signals, events)
-			: buildPortsFromLayout(layout.signals, events);
+			// When hierarchy is populated, use its signals for port detection.
+			// When hierarchy is empty (e.g. WASM-compiled addon), fall back to
+			// the flat layout signals which always have full signal info.
+			const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
+			const ports = hasHierarchySignals
+				? buildPortsFromLayout(hierarchy.signals, events)
+				: buildPortsFromLayout(layout.signals, events);
 
-		// Detect WASM-compiled addon and use the bridge
-		let buf: ArrayBuffer | SharedArrayBuffer;
-		let handle: NativeSimulatorHandle;
-		if (isWasm) {
-			const bridge = createWasmSimulatorBridge(raw);
-			buf = bridge.sharedMemory.buffer;
-			handle = bridge.handle;
-		} else {
-			buf = raw.sharedMemory().buffer;
-			handle = wrapDirectSimulatorHandle(raw);
-		}
+			// Detect WASM-compiled addon and use the bridge
+			let buf: ArrayBuffer | SharedArrayBuffer;
+			let handle: NativeSimulatorHandle;
+			if (isWasm) {
+				const bridge = createWasmSimulatorBridge(raw);
+				buf = bridge.sharedMemory.buffer;
+				handle = bridge.handle;
+			} else {
+				buf = raw.sharedMemory().buffer;
+				handle = wrapDirectSimulatorHandle(raw);
+			}
 
-		const state: DirtyState = { dirty: false };
-		const dut = createDut<P>(
-			buf,
-			layout.forDut,
-			ports,
-			handle,
-			state,
-			hasHierarchySignals ? hierarchy : undefined,
-		);
+			const state: DirtyState = { dirty: false };
+			const dut = createDut<P>(
+				buf,
+				layout.forDut,
+				ports,
+				handle,
+				state,
+				hasHierarchySignals ? hierarchy : undefined,
+			);
 
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return new Simulator<P>(
-			handle,
-			dut,
-			events,
-			state,
-			buf,
-			layout.forDut,
-			warnings,
-		);
+			return new Simulator<P>(
+				handle,
+				dut,
+				events,
+				state,
+				buf,
+				layout.forDut,
+				warnings,
+			);
+		});
 	}
 
 	/**
@@ -284,7 +289,9 @@ export class Simulator<P = Record<string, unknown>> {
 			artifactJson,
 			buildNapiOpts(options),
 		);
-		return Simulator.fromFrontendHandle<P>(raw, options);
+		return withOwnedHandle(raw, () =>
+			Simulator.fromFrontendHandle<P>(raw, options),
+		);
 	}
 
 	/**
@@ -375,57 +382,59 @@ export class Simulator<P = Record<string, unknown>> {
 					napiOpts,
 				)
 			: addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
-		const isWasm = isWasmHandle(raw);
+		return withOwnedHandle(raw, () => {
+			const isWasm = isWasmHandle(raw);
 
-		const layout =
-			isWasm && options?.fourState
-				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
-				: parseNapiLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(
-			rawHierarchy,
-			options?.deadStorePolicy,
-		);
+			const layout =
+				isWasm && options?.fourState
+					? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
+					: parseNapiLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+			const hierarchy = filterHierarchyForDse(
+				rawHierarchy,
+				options?.deadStorePolicy,
+			);
 
-		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
-		const ports = hasHierarchySignals
-			? buildPortsFromLayout(hierarchy.signals, events)
-			: buildPortsFromLayout(layout.signals, events);
+			const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
+			const ports = hasHierarchySignals
+				? buildPortsFromLayout(hierarchy.signals, events)
+				: buildPortsFromLayout(layout.signals, events);
 
-		// Detect WASM-compiled addon and use the bridge
-		let buf: ArrayBuffer | SharedArrayBuffer;
-		let handle: NativeSimulatorHandle;
-		if (isWasm) {
-			const bridge = createWasmSimulatorBridge(raw);
-			buf = bridge.sharedMemory.buffer;
-			handle = bridge.handle;
-		} else {
-			buf = raw.sharedMemory().buffer;
-			handle = wrapDirectSimulatorHandle(raw);
-		}
+			// Detect WASM-compiled addon and use the bridge
+			let buf: ArrayBuffer | SharedArrayBuffer;
+			let handle: NativeSimulatorHandle;
+			if (isWasm) {
+				const bridge = createWasmSimulatorBridge(raw);
+				buf = bridge.sharedMemory.buffer;
+				handle = bridge.handle;
+			} else {
+				buf = raw.sharedMemory().buffer;
+				handle = wrapDirectSimulatorHandle(raw);
+			}
 
-		const state: DirtyState = { dirty: false };
-		const dut = createDut<P>(
-			buf,
-			layout.forDut,
-			ports,
-			handle,
-			state,
-			hasHierarchySignals ? hierarchy : undefined,
-		);
+			const state: DirtyState = { dirty: false };
+			const dut = createDut<P>(
+				buf,
+				layout.forDut,
+				ports,
+				handle,
+				state,
+				hasHierarchySignals ? hierarchy : undefined,
+			);
 
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		return new Simulator<P>(
-			handle,
-			dut,
-			events,
-			state,
-			buf,
-			layout.forDut,
-			warnings,
-		);
+			return new Simulator<P>(
+				handle,
+				dut,
+				events,
+				state,
+				buf,
+				layout.forDut,
+				warnings,
+			);
+		});
 	}
 
 	/** The DUT accessor object — read/write ports as plain properties. */
