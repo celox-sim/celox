@@ -89,12 +89,19 @@ describe("GenTsCache", () => {
 		expect(runGenTs).toHaveBeenCalledTimes(2);
 	});
 
-	test.each(["between lookups", "during generation"])(
-		"detects lockfile edits with unchanged mtime/size %s",
-		(phase) => {
+	test.each(
+		["Veryl.toml", "celox.toml", "Veryl.lock"].flatMap((name) =>
+			["between lookups", "during generation"].map((phase) => ({
+				name,
+				phase,
+			})),
+		),
+	)(
+		"detects $name edits with unchanged mtime/size $phase",
+		({ name, phase }) => {
 			const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-content-"));
 			temporaryRoots.push(root);
-			const file = join(root, "Veryl.lock");
+			const file = join(root, name);
 			writeFileSync(file, "before");
 			utimesSync(file, 1_700_000_000, 1_700_000_000);
 			const edit = () => {
@@ -117,19 +124,22 @@ describe("GenTsCache", () => {
 		},
 	);
 
-	test("reuses data after a lockfile rewrite with unchanged contents", () => {
-		const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-rewrite-"));
-		temporaryRoots.push(root);
-		const file = join(root, "Veryl.lock");
-		writeFileSync(file, "resolution");
-		utimesSync(file, 1_700_000_000, 1_700_000_000);
-		const cache = new GenTsCache(root);
-		const initial = cache.get();
-		writeFileSync(file, "resolution");
-		utimesSync(file, 1_700_000_100, 1_700_000_100);
-		expect(cache.get()).toBe(initial);
-		expect(runGenTs).toHaveBeenCalledTimes(1);
-	});
+	test.each(["Veryl.toml", "celox.toml", "Veryl.lock"])(
+		"reuses data after a %s rewrite with unchanged contents",
+		(name) => {
+			const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-rewrite-"));
+			temporaryRoots.push(root);
+			const file = join(root, name);
+			writeFileSync(file, "resolution");
+			utimesSync(file, 1_700_000_000, 1_700_000_000);
+			const cache = new GenTsCache(root);
+			const initial = cache.get();
+			writeFileSync(file, "resolution");
+			utimesSync(file, 1_700_000_100, 1_700_000_100);
+			expect(cache.get()).toBe(initial);
+			expect(runGenTs).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	test.each(["creation", "edit", "deletion"])(
 		"refreshes again after external lockfile %s during generation",

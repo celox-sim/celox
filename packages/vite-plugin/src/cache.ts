@@ -24,7 +24,7 @@ export class GenTsCache {
 	get(): GenTsJsonOutput {
 		const key = this.computeSourceKey();
 		const configKey = this.computeConfigKey(["Veryl.toml", "celox.toml"]);
-		const lockfileKey = this.computeLockfileKey();
+		const lockfileKey = this.computeContentKey("Veryl.lock");
 		if (
 			this._data &&
 			this._sourceKey === key &&
@@ -51,24 +51,16 @@ export class GenTsCache {
 
 	private computeConfigKey(names: readonly string[]): string {
 		return JSON.stringify(
-			names.map((name) => {
-				try {
-					const stat = statSync(join(this._projectRoot, name));
-					return [name, stat.mtimeMs, stat.size];
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-					return [name, null];
-				}
-			}),
+			names.map((name) => [name, this.computeContentKey(name)]),
 		);
 	}
 
-	private computeLockfileKey(): string {
+	private computeContentKey(name: string): string {
 		try {
 			// External edits may preserve metadata; generator rewrites may change
 			// metadata without changing dependency resolution. Compare contents.
 			return createHash("sha256")
-				.update(readFileSync(join(this._projectRoot, "Veryl.lock")))
+				.update(readFileSync(join(this._projectRoot, name)))
 				.digest("hex");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
