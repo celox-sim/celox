@@ -142,7 +142,7 @@ fn is_source_finish_notice(line: &str, sources: &[String]) -> bool {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            sources.contains(&name)
+            name == "timed_control.sv" && sources.contains(&name)
         })
 }
 
@@ -1154,14 +1154,14 @@ mod tests {
 
     #[test]
     fn finish_notices_are_not_design_output() {
-        let sources = ["source_0.sv".to_string()];
-        let icarus = "done\n/tmp/case/source_0.sv:17: $finish called at 18000 (1ps)\n";
+        let sources = ["timed_control.sv".to_string(), "source_0.sv".to_string()];
+        let icarus = "done\n/tmp/case/timed_control.sv:17: $finish called at 18000 (1ps)\n";
         assert_eq!(design_output(icarus, &sources), "done\n");
-        let verilator = "done\n- /tmp/case/source_0.sv:19: Verilog $finish\n";
+        let verilator = "done\n- /tmp/case/timed_control.sv:19: Verilog $finish\n";
         assert_eq!(design_output(verilator, &sources), "done\n");
         assert_eq!(
             design_output(
-                "done\n/tmp/case/source_0.sv:17: $finish(1) called at 18000 (1ps)\n",
+                "done\n/tmp/case/timed_control.sv:17: $finish(1) called at 18000 (1ps)\n",
                 &sources
             ),
             "done\n"
@@ -1172,7 +1172,7 @@ mod tests {
         );
         assert_eq!(design_output("no newline", &sources), "no newline");
         // A design's line of the same shape names no source file.
-        let printed = "foo.sv:1: $finish called at 0 (1ps)\n";
+        let printed = "source_0.sv:17: $finish called at 0 (1ps)\n";
         assert_eq!(design_output(printed, &sources), printed);
     }
 

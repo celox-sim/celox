@@ -272,3 +272,65 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
     output.push_str(&source[previous..]);
     Ok(output)
 }
+
+#[cfg(all(test, feature = "icarus", feature = "verilator"))]
+mod timed_staging_tests {
+    use crate as celox_test_suite;
+    use crate::{Backend, load_group, no_std_library};
+
+    #[test]
+    #[ignore = "requires Icarus, Verilator and a C++ compiler; Celox does not yet support hierarchical task calls"]
+    fn qualified_timed_tasks_do_not_use_same_named_local_tasks() {
+        let text = r##"(group qualified (category sequential))
+        (case task (source "task.sv" #"module Worker(output bit q);
+            task tick; #1 q=1; endtask
+          endmodule
+          module Top(input bit clk, output bit q);
+            Worker worker(.q(q)); bit dummy;
+            task tick; dummy=1; endtask
+            always @(posedge clk) worker.tick();
+          endmodule"#)
+          (top Top) (set clk 1) (run_until 1) (assert_eq q 0)
+          (set clk 0) (eval) (set clk 1) (run_until 2) (assert_eq q 1))"##;
+        let case = load_group("qualified-task.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/qualified-task-protocol")
+            .join(std::process::id().to_string());
+        struct TaskFrontend;
+        impl celox_test_suite::frontend::Frontend for TaskFrontend {
+            fn source_extension(&self) -> &'static str {
+                "sv"
+            }
+            fn prepare(
+                &self,
+                design: &celox_test_suite::Design,
+            ) -> celox_test_suite::Result<celox_test_suite::frontend::PreparedDesign> {
+                let frontend = celox_test_suite::sv::verification::SvFrontend;
+                let mut actual = frontend.prepare(design)?;
+                // Port shapes are known independently of unsupported method-call
+                // analysis; this test exercises the external staging adapter.
+                let stub = celox_test_suite::Design::new(
+                    "module Top(input bit clk, output bit q); endmodule",
+                    "Top",
+                );
+                actual.info = frontend.prepare(&stub)?.info;
+                Ok(actual)
+            }
+        }
+        let frontend = TaskFrontend;
+        let mut icarus =
+            celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+                .unwrap();
+        icarus.run_testbench().unwrap();
+        let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+            &frontend,
+            case,
+            &root.join("verilator"),
+        )
+        .unwrap();
+        verilator.run_testbench().unwrap();
+        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -129,4 +129,11 @@ sv_backends! {
     fn blocking_ff_stores_are_visible_before_inactive_work(sim) { @case "timing::blocking_ff_stores_are_visible_before_inactive_work"; }
     fn nonblocking_ff_stores_remain_pending_during_inactive_work(sim) { @case "timing::nonblocking_ff_stores_remain_pending_during_inactive_work"; }
     fn mixed_ff_stores_keep_their_active_and_nba_values(sim) { @case "timing::mixed_ff_stores_keep_their_active_and_nba_values"; }
+    fn single_item_generate_ff_rewrites_keep_their_else(sim) { @case "timing::single_item_generate_ff_rewrites_keep_their_else"; }
+}
+
+sv_backends! {
+ fn immediate_assertion_ff_keeps_both_actions(sim) { @case "timing::immediate_assertion_ff_keeps_both_actions"; }
+ fn printed_finish_notice_is_design_output(sim) { @case "timing::printed_finish_notice_is_design_output"; }
+ fn combinational_finish_ends_timed_execution(sim) { @case "timing::combinational_finish_ends_timed_execution"; }
 }

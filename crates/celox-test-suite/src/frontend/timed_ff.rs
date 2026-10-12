@@ -93,12 +93,14 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
             }
             None
         }
-        Some("if" | "for" | "foreach" | "while" | "repeat") => {
+        Some("if" | "for" | "foreach" | "while" | "repeat" | "assert" | "assume" | "cover") => {
             let word = words.first()?;
             let end = parens(source, trivia(source, at + word.1))?;
             let body = statement_end(source, end)?;
             let next = trivia(source, body);
-            if keyword == Some("if") && source[next..].starts_with("else") {
+            if matches!(keyword, Some("if" | "assert" | "assume"))
+                && source[next..].starts_with("else")
+            {
                 statement_end(source, next + 4)
             } else {
                 Some(body)
@@ -168,12 +170,13 @@ pub(super) fn gated(
     };
     let armed = fresh("armed");
     let pending = fresh("pending");
+    let scope = fresh("scope");
     let package = &names.package;
     let event = &source[begin + 1..event_end - 1];
     Ok((
         body_end,
         format!(
-            "bit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
+            "if (1) begin : {scope}\nbit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend\nend else begin end"
         ),
     ))
 }
@@ -360,6 +363,20 @@ impl TaskTiming {
         if let Some(prefix) = prefix.strip_suffix("::") {
             let package = sv_words(prefix).last()?.2;
             return self.tasks.get(&format!("{package}::{name}")).copied();
+        }
+        if let Some(prefix) = prefix.strip_suffix('.') {
+            let instance = sv_words(prefix).last()?.2;
+            let scope = container_at(source, at);
+            let words = sv_words(&source[..at]);
+            for pair in words.windows(2) {
+                if pair[1].2 == instance && container_at(source, pair[0].0) == scope {
+                    if let Some(value) = self.tasks.get(&format!("{}::{name}", pair[0].2)) {
+                        return Some(*value);
+                    }
+                }
+            }
+            // An unresolved qualified call cannot use a same-named local task.
+            return None;
         }
         let scope = container_at(source, at);
         if let Some(value) = self.tasks.get(&format!("{scope}::{name}")) {
