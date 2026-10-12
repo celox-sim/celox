@@ -2628,13 +2628,59 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|access| VarAtomBase::new(id, access.lsb, access.msb)),
             );
         }
+        let (pending, _) = self.m.temp("ff_pending", 1, false, false);
+        self.m.static_initial_values.push(InitialStateValue {
+            address: pending,
+            data: InitialStateData::Packed {
+                value: BigUint::zero(),
+                mask: BigUint::zero(),
+                written_mask: BigUint::from(1u8),
+            },
+        });
+        let already_pending = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Load(
+            already_pending,
+            stable(pending),
+            SIROffset::Static(0),
+            1,
+        ));
+        let seed = self.b.new_block();
+        let run = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: already_pending,
+            true_block: (run, Vec::new()),
+            false_block: (seed, Vec::new()),
+        });
+        self.b.switch_to_block(seed);
         emit_ff_seeds(&mut self.b, &targets);
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        self.b.emit(SIRInstruction::Store(
+            stable(pending),
+            SIROffset::Static(0),
+            1,
+            one,
+            Vec::new(),
+            Vec::new(),
+        ));
+        self.b.seal_block(SIRTerminator::Jump(run, Vec::new()));
+        self.b.switch_to_block(run);
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let eval = seal_drained(self.b);
         let mut apply = SIRBuilder::new();
         emit_ff_commits(&mut apply, &targets);
+        let zero = apply.alloc_bit(1, false);
+        apply.emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
+        apply.emit(SIRInstruction::Store(
+            stable(pending),
+            SIROffset::Static(0),
+            1,
+            zero,
+            Vec::new(),
+            Vec::new(),
+        ));
         Ok((eval, seal_builder(apply), targets))
     }
 }
@@ -2878,13 +2924,14 @@ pub fn declare_event_counters(
             });
         }
     }
+    let explicit_expressions = exprs.len();
     for signal in &pm.event_signals {
         let expr = sv::ir::Expr::Ident(signal.clone());
         if !exprs.contains(&expr) {
             exprs.push(expr);
         }
     }
-    for expr in exprs {
+    for (position, expr) in exprs.into_iter().enumerate() {
         let mut names = HashSet::default();
         expr_idents(&expr, &mut names);
         subroutine_reads(pm, &expr, &mut names);
@@ -2896,6 +2943,15 @@ pub fn declare_event_counters(
         {
             return Err(unsupported(
                 "event expression reading multiple combinationally driven variables",
+            ));
+        }
+        if position < explicit_expressions
+            && names
+                .iter()
+                .any(|name| pm.hidden_comb_pulses.contains(name))
+        {
+            return Err(unsupported(
+                "event expression reading a combinational signal with multiple blocking writes",
             ));
         }
         let mut names: Vec<String> = names.into_iter().collect();
@@ -2938,17 +2994,28 @@ pub fn declare_event_counters(
 fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     let mut calls = Vec::new();
     collect_calls(expr, &mut calls);
-    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut pending = calls;
     let mut visited = HashSet::default();
     let mut own = HashSet::default();
     let mut reads = HashSet::default();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
+    while let Some((name, args)) = pending.pop() {
+        if !visited.insert((
+            name.clone(),
+            args.iter().map(Option::is_some).collect::<Vec<_>>(),
+        )) {
             continue;
         }
         let Some(subroutine) = pm.subroutine(&name) else {
             continue;
         };
+        default_calls(subroutine, &args, &mut pending);
+        for (position, param) in subroutine.params.iter().enumerate() {
+            if matches!(args.get(position), None | Some(None))
+                && let Some(default) = &param.default
+            {
+                expr_idents(default, &mut reads);
+            }
+        }
         own.extend(subroutine.params.iter().map(|param| param.name.clone()));
         own.extend(subroutine.return_var.clone());
         for stmt in &subroutine.body {
@@ -2964,7 +3031,7 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
                 stmt_reads(stmt, &mut reads);
                 let mut callees = Vec::new();
                 stmt_calls(stmt, &mut callees);
-                pending.extend(callees.into_iter().map(|(name, _)| name));
+                pending.extend(callees);
             });
         }
     }
@@ -2981,10 +3048,13 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
 fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut calls = Vec::new();
     collect_calls(expr, &mut calls);
-    let mut pending: Vec<String> = calls.into_iter().map(|(name, _)| name).collect();
+    let mut pending = calls;
     let mut visited = HashSet::default();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
+    while let Some((name, args)) = pending.pop() {
+        if !visited.insert((
+            name.clone(),
+            args.iter().map(Option::is_some).collect::<Vec<_>>(),
+        )) {
             continue;
         }
         if let Some(import) = pm.dpi_imports.get(&name) {
@@ -2996,6 +3066,7 @@ fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
         let Some(subroutine) = pm.subroutine(&name) else {
             continue;
         };
+        default_calls(subroutine, &args, &mut pending);
         if subroutine.is_task
             || subroutine
                 .params
@@ -3035,7 +3106,7 @@ fn impure_callee(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 }
                 let mut callees = Vec::new();
                 stmt_calls(stmt, &mut callees);
-                pending.extend(callees.into_iter().map(|(name, _)| name));
+                pending.extend(callees);
             });
         }
         if impure {

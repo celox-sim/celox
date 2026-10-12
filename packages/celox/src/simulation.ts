@@ -434,6 +434,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		const needsHostPoll =
+			this._state.dirty || (this._handle.hasWaitingProcesses?.() ?? false);
 		this.settleSharedWrites();
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
@@ -442,13 +444,18 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
-		if (this._handle.time() >= endTime) {
+		if (
+			this._handle.time() > endTime ||
+			(this._handle.time() === endTime && !needsHostPoll)
+		) {
 			this._state.dirty = false;
 			return;
 		}
+		let pollHost = needsHostPoll;
 		while (true) {
 			const nextEventTime = this._handle.nextEventTime();
-			if (nextEventTime == null || nextEventTime > endTime) break;
+			if (!pollHost && (nextEventTime == null || nextEventTime > endTime))
+				break;
 			if (steps >= max) {
 				throw new SimulationTimeoutError(
 					`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
@@ -456,7 +463,15 @@ export class Simulation<P = Record<string, unknown>> {
 					steps,
 				);
 			}
-			const t = this._handle.step();
+			if (pollHost && !this._handle.stepUntil) {
+				throw new Error(
+					"Native simulation handle lacks bounded host-wake stepping",
+				);
+			}
+			const t = this._handle.stepUntil
+				? this._handle.stepUntil(endTime)
+				: this._handle.step();
+			pollHost = false;
 			if (t == null) break;
 			this._state.dirty = false;
 			steps++;

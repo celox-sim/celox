@@ -1560,3 +1560,68 @@ fn blocking_ff_pulses_wake_process_event_waiters() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
 }
+
+#[test]
+fn retriggered_domains_keep_prior_unreassigned_nbas() {
+    let mut sim = simulation(
+        r#"module Top(output bit [7:0] q);
+        bit clk=0; bit en=1; bit [7:0] d=7;
+        always @(posedge clk) if(en) q<=d;
+        initial begin clk=1; #0 clk=0; en=0; #0 clk=1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 7u8.into());
+}
+
+#[test]
+fn event_functions_reject_effectful_omitted_default_arguments() {
+    let error = build_error(
+        r#"module Top(output bit seen); bit state=0;
+        function automatic bit mutate(); state=1; return state; endfunction
+        function automatic bit observe(input bit x=mutate()); return x; endfunction
+        initial begin @(observe()); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("effect besides its result"), "{error}");
+}
+
+#[test]
+fn pure_omitted_default_arguments_keep_event_dependencies() {
+    let mut sim = simulation(
+        r#"module Top(output bit seen); bit state=0;
+        function automatic bit observe(input bit x=state); return x; endfunction
+        initial begin @(posedge observe()); seen=1; end
+        initial begin #1; state=1; state=0; end
+    endmodule"#,
+    );
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn single_comb_signal_with_hidden_pulses_is_rejected() {
+    let error = build_error(
+        r#"module Top(input bit go, output bit seen); bit q;
+        always_comb begin q=0; if(go) begin q=1; q=0; end end
+        initial begin @(posedge q); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn bounded_steps_poll_host_waiters_without_consuming_later_delays() {
+    let mut sim = simulation(
+        r#"module Top(input bit go, output bit seen);
+        initial begin wait(go); seen=1; forever #1 seen=~seen; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    assert_eq!(sim.step_until(0).unwrap(), Some(0));
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.step_until(0).unwrap(), None);
+    assert_eq!(sim.next_event_time(), Some(1));
+}
