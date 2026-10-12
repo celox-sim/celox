@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { GenTsJsonOutput } from "./types.js";
 
@@ -16,6 +22,7 @@ export const SIDECAR_DIR = ".celox";
 export function generateSidecars(
 	data: GenTsJsonOutput,
 	projectRoot: string,
+	options: { removeOrphans?: boolean } = {},
 ): string[] {
 	const written: string[] = [];
 	const root = resolve(projectRoot);
@@ -47,7 +54,27 @@ export function generateSidecars(
 		written.push(sidecarPath);
 	}
 
+	// Startup may find declarations left by an earlier server process. Sweep
+	// only after all replacement declarations have been generated successfully.
+	if (options.removeOrphans !== false && existsSync(outDir)) {
+		removeOrphanSidecars(outDir, new Set(written));
+	}
 	return written;
+}
+
+function removeOrphanSidecars(dir: string, retained: Set<string>): void {
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			removeOrphanSidecars(path, retained);
+		} else if (
+			entry.isFile() &&
+			entry.name.endsWith(".d.veryl.ts") &&
+			!retained.has(path)
+		) {
+			unlinkSync(path);
+		}
+	}
 }
 
 /**

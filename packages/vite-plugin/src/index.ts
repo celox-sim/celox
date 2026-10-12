@@ -91,7 +91,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			if (file === projectFile("Veryl.lock") && data === generatedData)
 				return false;
 			if (data !== generatedData) {
-				const nextPaths = generateSidecars(data, projectRoot);
+				const nextPaths = generateSidecars(data, projectRoot, {
+					removeOrphans: false,
+				});
 				const retained = new Set(nextPaths);
 				cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
 				sidecarPaths = nextPaths;
