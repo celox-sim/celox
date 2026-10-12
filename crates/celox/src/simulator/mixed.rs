@@ -257,7 +257,7 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
                             dependent |= expression(count, signature, visited);
                         }
                     }
-                    Call { name, args } => {
+                    Call { name, args, .. } => {
                         dependent |= function(name, signature, visited);
                         dependent |= args
                             .iter()
@@ -338,9 +338,12 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
                     || expression(then_expr, signature, visited)
                     || expression(else_expr, signature, visited)
             }
-            Call { name, args } => {
+            Call { name, args, .. } => {
                 function(name, signature, visited)
-                    || args.iter().any(|arg| expression(arg, signature, visited))
+                    || args
+                        .iter()
+                        .flatten()
+                        .any(|arg| expression(arg, signature, visited))
             }
             Inside { expr, items } => {
                 expression(expr, signature, visited)

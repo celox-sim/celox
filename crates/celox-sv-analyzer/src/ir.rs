@@ -418,15 +418,27 @@ pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
     type_text: Option<String>,
+    pattern_text: Option<String>,
 }
 
 impl ParameterOverride {
-    pub(crate) fn new(name: String, value: Option<ConstExpr>, type_text: Option<String>) -> Self {
+    pub(crate) fn new(
+        name: String,
+        value: Option<ConstExpr>,
+        type_text: Option<String>,
+        pattern_text: Option<String>,
+    ) -> Self {
         Self {
             name,
             value,
             type_text,
+            pattern_text,
         }
+    }
+
+    /// A constant assignment pattern, evaluated in the caller scope.
+    pub fn pattern_text(&self) -> Option<&str> {
+        self.pattern_text.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -927,7 +939,10 @@ pub enum Expr {
     },
     Call {
         name: String,
-        args: Vec<Expr>,
+        /// Missing actuals retain their formal slots for declaration-scope defaults.
+        args: Vec<Option<Expr>>,
+        /// Formal positions in source evaluation/copy-out order; empty means positional.
+        arg_order: Vec<usize>,
     },
     /// `expr inside { items }`: true when `expr` matches any item.
     Inside {
@@ -1243,9 +1258,14 @@ impl From<ast::Expr> for Expr {
                 then_expr: Box::new((*then_expr).into()),
                 else_expr: Box::new((*else_expr).into()),
             },
-            ast::Expr::Call { name, args } => Expr::Call {
+            ast::Expr::Call {
                 name,
-                args: args.into_iter().map(Into::into).collect(),
+                args,
+                arg_order,
+            } => Expr::Call {
+                arg_order: arg_order.clone(),
+                name,
+                args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
                 expr: Box::new((*expr).into()),

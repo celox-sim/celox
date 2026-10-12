@@ -216,6 +216,27 @@ pub(super) fn constant_cast_const_expr(
     cast_constant_operand(operand, &cast.nodes.0, syntax_tree, const_env, type_aliases)
 }
 
+/// Evaluate a constant cast with the scope's four-state parameter literals.
+pub(super) fn constant_cast_with_dimensions(
+    cast: &sv_parser::ConstantCast,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let operand = indexed_select_base(
+        RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+        syntax_tree,
+        dimensions,
+    )
+    .ok()?;
+    cast_constant_operand(
+        operand,
+        &cast.nodes.0,
+        syntax_tree,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+    )
+}
+
 pub(super) fn runtime_constant_cast_const_expr(
     cast: &sv_parser::Cast,
     syntax_tree: &SyntaxTree,
@@ -268,7 +289,14 @@ pub(super) fn cast_constant_operand(
             typecheck::parse_integral_literal(&operand_literal)
         })?
     };
-    let target_type = cast_target_type(casting_type, syntax_tree, const_env, type_aliases)?;
+    let target_type = if let sv_parser::CastingType::Signing(signing) = casting_type {
+        ExprType {
+            width: literal.width,
+            signed: matches!(**signing, sv_parser::Signing::Signed(_)),
+        }
+    } else {
+        cast_target_type(casting_type, syntax_tree, const_env, type_aliases)?
+    };
     // A numeric size cast keeps the source expression's signedness; a type
     // cast takes the target type's signedness.
     let signed = if casting_type_is_numeric_size(casting_type, syntax_tree, const_env, type_aliases)
