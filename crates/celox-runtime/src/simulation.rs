@@ -277,6 +277,8 @@ impl PeriodicEventKey {
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
+    round_published_domains: BitSet,
+    round_evaluated: bool,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     /// Events whose signal was x or z when edge detection last sampled it:
@@ -440,6 +442,8 @@ impl<B: SimBackend> SimulationState<B> {
             inactive: BTreeSet::new(),
             finished: false,
             settle_before_processes: false,
+            round_published_domains: BitSet::new(),
+            round_evaluated: false,
         }
     }
 
@@ -593,15 +597,15 @@ impl<B: SimBackend> SimulationState<B> {
                 next_val: 1,
             });
         }
-        self.step_round(
+        let result = self.step_round(
             executor,
             current_time,
             events_to_process,
             generated_events,
             ready,
             true,
-        )?;
-        self.credit_rising_edges(current_time, rising)?;
+        );
+        self.finish_clock_round(current_time, rising, &[], result)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
         // Fused ticks may have moved the time on.
@@ -717,14 +721,37 @@ impl<B: SimBackend> SimulationState<B> {
                 rising.push(*id);
             }
         }
-        for id in falling {
-            self.tick_clocks
-                .get_mut(id)
-                .expect("a process clock with a falling edge")
-                .falling_edge = None;
+        let result = self.step_round(executor, time, events, Vec::new(), Vec::new(), true);
+        self.finish_clock_round(time, rising, falling, result)
+    }
+
+    fn finish_clock_round(
+        &mut self,
+        time: u64,
+        rising: Vec<usize>,
+        falling: &[usize],
+        result: Result<bool, SimulatorErrorCode>,
+    ) -> Result<(), SimulatorErrorCode> {
+        let committed = rising
+            .into_iter()
+            .filter(|id| {
+                result.is_ok()
+                    || self
+                        .round_published_domains
+                        .contains(self.event_info[*id].canonical_id)
+            })
+            .collect();
+        self.credit_rising_edges(time, committed)?;
+        if self.round_evaluated {
+            for id in falling {
+                self.tick_clocks
+                    .get_mut(id)
+                    .expect("a pending process-clock fall")
+                    .falling_edge = None;
+                self.last_clock_values.remove(*id);
+            }
         }
-        self.step_round(executor, time, events, Vec::new(), Vec::new(), true)?;
-        self.credit_rising_edges(time, rising)
+        result.map(|_| ())
     }
 
     fn credit_rising_edges(
@@ -751,6 +778,7 @@ impl<B: SimBackend> SimulationState<B> {
             clock.next_edge = next_edge;
             clock.falling_edge = Some(next_edge - clock.period / 2);
             let resume_at = clock.next_edge;
+            self.last_clock_values.insert(id);
             self.count_edges(id, 1, resume_at);
         }
         Ok(())
@@ -1244,6 +1272,8 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.scheduler.time = current_time;
+        self.round_published_domains.make_empty();
+        self.round_evaluated = false;
 
         // Keep periodic provenance private so the public SimEvent shape stays
         // stable. Consume matching sidecar counts before fallible work so an
@@ -1352,6 +1382,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         executor.eval_comb()?;
+        self.round_evaluated = true;
         if track_stable_edges {
             // Combinational settling before an active scheduled source domain
             // commits may expose transient derived-clock edges. In that case,
@@ -1392,6 +1423,7 @@ impl<B: SimBackend> SimulationState<B> {
                             any_new_outer_loop_trigger = true;
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
+                            self.round_published_domains.insert(info.canonical_id);
                             executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
                             if track_stable_edges {
@@ -1427,6 +1459,7 @@ impl<B: SimBackend> SimulationState<B> {
                     } else if let Some(event) = info.eval_ff_event {
                         executor.stage_external_event(event, current_time)?;
                         executor.eval_apply_ff_at(event)?;
+                        self.round_published_domains.insert(info.canonical_id);
                     } else {
                         unreachable!(
                             "FF trigger discovered without a corresponding execution unit"
@@ -1505,6 +1538,7 @@ impl<B: SimBackend> SimulationState<B> {
             for id in &newly_triggered {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
+                    self.round_published_domains.insert(*id);
                 }
             }
             for id in &newly_triggered {
