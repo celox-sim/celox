@@ -2701,7 +2701,6 @@ impl<'p, 'a> Ff<'p, 'a> {
     pub fn lower_process(
         mut self,
         body: &[sv::ir::Stmt],
-        events: &[sv::ir::FfEvent],
     ) -> Result<
         (
             ExecutionUnit<Addr>,
@@ -2716,21 +2715,32 @@ impl<'p, 'a> Ff<'p, 'a> {
         // Ordered pulses are unsupported only when a feasible path updates
         // a watched expression more than once.
         for watcher in &self.m.event_watchers {
-            let count = self
+            let counts = self
                 .m
                 .ff_processes
                 .iter()
-                .filter(|process| process.events().iter().any(|event| events.contains(event)))
                 .map(|process| {
-                    watched_nba_count(
-                        process.body(),
-                        self.m,
-                        &watcher.expr,
-                        &mut HashSet::default(),
+                    (
+                        process,
+                        watched_nba_count(
+                            process.body(),
+                            self.m,
+                            &watcher.expr,
+                            &mut HashSet::default(),
+                        ),
                     )
                 })
-                .sum::<usize>();
-            if count > 1 {
+                .collect::<Vec<_>>();
+            let repeated = counts.iter().any(|(_, count)| *count > 1)
+                || counts.iter().enumerate().any(|(i, (left, n))| {
+                    *n > 0
+                        && counts[i + 1..].iter().any(|(right, m)| {
+                            *m > 0
+                                && !ff_cascades(left, right, self.m)
+                                && !ff_cascades(right, left, self.m)
+                        })
+                });
+            if repeated {
                 return Err(unsupported(
                     "multiple nonblocking assignments affecting an event expression require ordered NBA updates",
                 ));
@@ -2999,6 +3009,47 @@ impl Ff<'_, '_> {
 }
 
 /// Count NBA updates along one feasible path that affect this expression.
+// A cascaded clock's NBA evaluation follows publication of its source
+// domain; independent domains can join one simultaneous NBA batch.
+fn ff_cascades(
+    source: &sv::ir::FfProcess,
+    target: &sv::ir::FfProcess,
+    pm: &ProcModule<'_>,
+) -> bool {
+    fn writes(
+        body: &[sv::ir::Stmt],
+        signal: &str,
+        pm: &ProcModule<'_>,
+        seen: &mut HashSet<String>,
+    ) -> bool {
+        let mut found = false;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => found |= lhs.name() == signal,
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        found |= parts.iter().any(|part| part.name() == signal)
+                    }
+                    _ => {}
+                }
+                stmt_calls(stmt, &mut calls);
+            });
+        }
+        found
+            || calls.into_iter().any(|(name, _)| {
+                seen.insert(name.clone())
+                    && pm
+                        .subroutine(&name)
+                        .is_some_and(|sub| writes(&sub.body, signal, pm, seen))
+            })
+    }
+    target
+        .events()
+        .iter()
+        .any(|event| writes(source.body(), event.signal(), pm, &mut HashSet::default()))
+}
+
 fn watched_nba_count(
     stmts: &[sv::ir::Stmt],
     pm: &ProcModule<'_>,

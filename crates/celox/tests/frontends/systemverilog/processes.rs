@@ -1894,3 +1894,13 @@ fn rtl_finish_stops_following_stores_and_nbas() {
         assert_eq!(sim.get(sim.signal("q")), 0u8.into(), "{body}");
     }
 }
+
+#[test]
+fn independent_clock_nba_pulses_require_an_ordered_queue() {
+    let code = "module Top(input bit c1,c2);bit a,b;always @(posedge c1)a<=1;always @(posedge c2)b<=1;initial @(a^b);endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("independent.sv"))], "Top")
+        .build()
+        .expect_err("independent NBA pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
