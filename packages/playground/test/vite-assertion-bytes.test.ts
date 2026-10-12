@@ -7,10 +7,17 @@ import { expect, test, vi } from "vitest";
 vi.mock("../../vite-plugin/src/generator.js", () => ({
 	runGenTs: (projectRoot: string) => ({
 		projectPath: projectRoot,
-		modules: [{
-			moduleName: "T", sourceFile: "t.veryl", dtsContent: "", mdContent: "",
-			ports: {}, events: [], isTest: true,
-		}],
+		modules: [
+			{
+				moduleName: "T",
+				sourceFile: "t.veryl",
+				dtsContent: "",
+				mdContent: "",
+				ports: {},
+				events: [],
+				isTest: true,
+			},
+		],
 		fileModules: { "t.veryl": ["T"] },
 	}),
 }));
@@ -29,21 +36,28 @@ test("generated assertion diagnostics explicitly decode or escape message bytes"
 		};
 		plugin.configResolved({ root });
 		await plugin.buildStart();
-		const code = plugin.load(plugin.resolveId(join(root, "t.veryl")))
+		const code = plugin
+			.load(plugin.resolveId(join(root, "t.veryl")))
 			.replace(/^import .*\n/gm, "");
 		for (const [bytes, expected] of [
 			[new TextEncoder().encode("failure é"), "failure é"],
 			[new Uint8Array([255, 0, 128]), "\\xff\\x00\\x80"],
 		] as const) {
 			const soft = vi.fn(() => ({ toBe: vi.fn() }));
-			const assertion = Object.assign(vi.fn(() => ({ toBe: vi.fn() })), { soft });
+			const assertion = Object.assign(
+				vi.fn(() => ({ toBe: vi.fn() })),
+				{ soft },
+			);
 			runInNewContext(code, {
 				TextDecoder,
 				test: (_name: string, callback: () => void) => callback(),
 				expect: assertion,
-				loadNativeAddon: () => ({ runTestFromProject: () => ({
-					passed: false, assertions: [{ passed: false, message: bytes }],
-				}) }),
+				loadNativeAddon: () => ({
+					runTestFromProject: () => ({
+						passed: false,
+						assertions: [{ passed: false, message: bytes }],
+					}),
+				}),
 			});
 			expect(soft).toHaveBeenCalledWith(false, expected);
 		}
