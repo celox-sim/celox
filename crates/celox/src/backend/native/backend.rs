@@ -3075,11 +3075,11 @@ impl super::super::SimBackend for NativeBackend {
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
 
-        assert!(provided_size <= allocated_size);
+        let copy_size = provided_size.min(allocated_size);
 
         if signal.array_layout.is_some() {
             let value_bytes =
-                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, provided_size) };
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
             self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
             if clear_mask {
                 self.write_signal_plane(signal, true, &BigUint::from(0u8));
@@ -3090,7 +3090,11 @@ impl super::super::SimBackend for NativeBackend {
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
-                let raw = *(&val as *const T as *const u8);
+                let raw = if copy_size == 0 {
+                    0
+                } else {
+                    *(&val as *const T as *const u8)
+                };
                 let byte = if signal.width < 8 {
                     raw & ((1u8 << signal.width) - 1)
                 } else {
@@ -3100,10 +3104,14 @@ impl super::super::SimBackend for NativeBackend {
                 return;
             }
 
-            if provided_size < allocated_size {
+            if copy_size < allocated_size {
                 std::ptr::write_bytes(base_ptr, 0, allocated_size);
             }
-            std::ptr::write_unaligned(base_ptr as *mut T, val);
+            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
+
+            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
+            }
 
             if clear_mask {
                 let mask_ptr = base_ptr.add(allocated_size);
