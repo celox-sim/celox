@@ -89,6 +89,48 @@ describe("GenTsCache", () => {
 		expect(runGenTs).toHaveBeenCalledTimes(2);
 	});
 
+	test.each(["between lookups", "during generation"])(
+		"detects lockfile edits with unchanged mtime/size %s",
+		(phase) => {
+			const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-content-"));
+			temporaryRoots.push(root);
+			const file = join(root, "Veryl.lock");
+			writeFileSync(file, "before");
+			utimesSync(file, 1_700_000_000, 1_700_000_000);
+			const edit = () => {
+				writeFileSync(file, "edited");
+				utimesSync(file, 1_700_000_000, 1_700_000_000);
+			};
+			if (phase === "during generation") {
+				vi.mocked(runGenTs).mockImplementationOnce((projectPath) => {
+					edit();
+					return { projectPath, modules: [], fileModules: {} };
+				});
+			}
+			const cache = new GenTsCache(root);
+			const initial = cache.get();
+			if (phase === "between lookups") edit();
+			const updated = cache.get();
+			expect(updated).not.toBe(initial);
+			expect(cache.get()).toBe(updated);
+			expect(runGenTs).toHaveBeenCalledTimes(2);
+		},
+	);
+
+	test("reuses data after a lockfile rewrite with unchanged contents", () => {
+		const root = mkdtempSync(join(tmpdir(), "celox-vite-lock-rewrite-"));
+		temporaryRoots.push(root);
+		const file = join(root, "Veryl.lock");
+		writeFileSync(file, "resolution");
+		utimesSync(file, 1_700_000_000, 1_700_000_000);
+		const cache = new GenTsCache(root);
+		const initial = cache.get();
+		writeFileSync(file, "resolution");
+		utimesSync(file, 1_700_000_100, 1_700_000_100);
+		expect(cache.get()).toBe(initial);
+		expect(runGenTs).toHaveBeenCalledTimes(1);
+	});
+
 	test.each(["creation", "edit", "deletion"])(
 		"refreshes again after external lockfile %s during generation",
 		(change) => {

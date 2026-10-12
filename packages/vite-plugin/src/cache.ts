@@ -1,4 +1,5 @@
-import { type Dirent, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { runGenTs } from "./generator.js";
 import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
@@ -23,7 +24,7 @@ export class GenTsCache {
 	get(): GenTsJsonOutput {
 		const key = this.computeSourceKey();
 		const configKey = this.computeConfigKey(["Veryl.toml", "celox.toml"]);
-		const lockfileKey = this.computeConfigKey(["Veryl.lock"]);
+		const lockfileKey = this.computeLockfileKey();
 		if (
 			this._data &&
 			this._sourceKey === key &&
@@ -60,6 +61,19 @@ export class GenTsCache {
 				}
 			}),
 		);
+	}
+
+	private computeLockfileKey(): string {
+		try {
+			// External edits may preserve metadata; generator rewrites may change
+			// metadata without changing dependency resolution. Compare contents.
+			return createHash("sha256")
+				.update(readFileSync(join(this._projectRoot, "Veryl.lock")))
+				.digest("hex");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return "missing";
+		}
 	}
 
 	/**
