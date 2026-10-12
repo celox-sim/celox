@@ -1438,6 +1438,7 @@ pub fn schedule_symbolic_rtl(
             live_signals: Default::default(),
             processes: process_slots,
             process_event_counters,
+            active_ff_events: HashSet::default(),
         },
     };
 

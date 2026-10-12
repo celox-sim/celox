@@ -393,6 +393,8 @@ pub struct RuntimeSchema<A> {
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
+    /// FF evaluation domains that publish blocking stores into active state.
+    pub active_ff_events: HashSet<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -410,6 +412,7 @@ impl<A> Default for RuntimeSchema<A> {
             live_signals: HashSet::default(),
             processes: Vec::new(),
             process_event_counters: Vec::new(),
+            active_ff_events: HashSet::default(),
         }
     }
 }
