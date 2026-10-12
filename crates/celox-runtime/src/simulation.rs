@@ -681,6 +681,11 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(true)
     }
 
+    /// Whether any process is suspended on an event or a condition.
+    pub fn has_waiting_processes(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
     /// Resume the processes waiting for an event or a condition at the
     /// current time, for state that was changed from outside the scheduler,
     /// and settle what they drive. Returns whether a process ran; nothing

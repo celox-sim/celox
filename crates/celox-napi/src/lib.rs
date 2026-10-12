@@ -1878,6 +1878,28 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Whether the current state may wake a suspended process.
+    #[napi]
+    pub fn has_waiting_processes(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.has_waiting_processes())
+    }
+
+    /// Run one step without consuming events after `end_time`.
+    #[napi]
+    pub fn step_until(&mut self, end_time: f64) -> Result<Option<f64>> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.step_until(end_time as u64)
+            .map(|time| time.map(|time| time as f64))
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
     /// Returns the current simulation time.
     #[napi]
     pub fn time(&self) -> Result<f64> {

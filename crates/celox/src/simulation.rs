@@ -504,6 +504,32 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
+    /// Whether a process is suspended on an event or a condition.
+    pub fn has_waiting_processes(&self) -> bool {
+        self.state.has_waiting_processes()
+    }
+
+    /// Run one step at or before `limit`, including processes a host write
+    /// woke at the current time. Leave a later event queued.
+    pub fn step_until(&mut self, limit: u64) -> Result<Option<u64>, RuntimeErrorCode> {
+        if self.state.time() > limit {
+            return Ok(None);
+        }
+        self.settle_host_writes()?;
+        if self.state.poll_waiting_until(&mut self.simulator, limit)? {
+            return Ok(Some(self.state.time()));
+        }
+        if self
+            .state
+            .next_event_time()
+            .is_some_and(|time| time <= limit)
+        {
+            self.state.step_until(&mut self.simulator, limit)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Advance time and run until `end_time` (inclusive). As for
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
