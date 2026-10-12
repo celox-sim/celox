@@ -1238,14 +1238,14 @@ impl InterpBackend {
 
         // Share one id space across the three schedule groups, mirroring the
         // compiled backend so scheduler ordering and trigger ids agree.
-        let mut next_id = 0usize;
-        let mut addr_to_id: HashMap<AbsoluteAddr, usize> = HashMap::default();
-        let mut id_to_addr: Vec<AbsoluteAddr> = Vec::new();
+        let (mut addr_to_id, mut id_to_addr) = super::event_ids(laid_out);
+        let mut next_id = id_to_addr.len();
         let mut intern_event = |addr: &AbsoluteAddr| -> usize {
-            *addr_to_id.entry(*addr).or_insert_with(|| {
+            let canonical = laid_out.design.events.canonical(*addr);
+            *addr_to_id.entry(canonical).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
-                id_to_addr.push(*addr);
+                id_to_addr.push(canonical);
                 id
             })
         };
