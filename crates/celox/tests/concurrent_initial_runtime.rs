@@ -1295,3 +1295,27 @@ fn long_clock_waits_drain_design_runtime_events() {
     let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:u32;always_ff(clk){$display("edge");q+=1;}initial{clk.next(1500);$assert(q==1500);$finish();}}"#;
     check_passes_on_every_backend(code);
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn optimized_mixed_testbenches_preserve_sv_process_pulses() {
+    let veryl = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:logic;inst dut:$sv::Pulse(q);initial{clk.next(2);$assert(q==1);$finish();}}"#;
+    let sv = "module Pulse(output bit q);bit clk;always @(posedge clk)q<=1;initial begin #1;clk=1;clk=0;end endmodule";
+    let builder = || {
+        Simulator::from_mixed_sources(
+            vec![(veryl, std::path::Path::new("top.veryl"))],
+            vec![(sv, std::path::Path::new("pulse.sv"))],
+            "Top",
+        )
+        .opt_level(celox::OptLevel::O2)
+    };
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    }
+    check(builder().build_interpreter().unwrap());
+    check(builder().build_cranelift().unwrap());
+    check(builder().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(builder().build_native().unwrap());
+}

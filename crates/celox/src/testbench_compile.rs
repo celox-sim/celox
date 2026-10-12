@@ -31,3 +31,31 @@ pub(crate) fn compile_semantic_testbench(
         random_seed,
     )
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod process_root_tests {
+    use crate::{OptLevel, Simulation, Simulator};
+    #[test]
+    fn semantic_testbench_projection_preserves_process_counter_roots() {
+        let veryl = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:logic;inst dut:$sv::Pulse(q);initial{clk.next(2);$assert(q==1);$finish();}}"#;
+        let sv = "module Pulse(output bit q);bit clk;always @(posedge clk)q<=1;initial begin #1;clk=1;clk=0;end endmodule";
+        let sim = Simulator::from_mixed_sources(
+            vec![(veryl, std::path::Path::new("top.veryl"))],
+            vec![(sv, std::path::Path::new("pulse.sv"))],
+            "Top",
+        )
+        .testbench_kernels(false)
+        .opt_level(OptLevel::O2)
+        .build_interpreter()
+        .unwrap();
+        let schema = &sim.program.runtime_schema;
+        assert!(!schema.process_event_counters.is_empty());
+        for counters in &schema.process_event_counters {
+            assert!(schema.testbench_read_roots.contains(&counters.rises));
+            assert!(schema.testbench_read_roots.contains(&counters.falls));
+        }
+        let mut sim = Simulation::new(sim);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+}
