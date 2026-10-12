@@ -47,6 +47,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		| { file: string; timestamp: number; result: Promise<boolean> }
 		| undefined;
 
+	function projectFile(name: string): string {
+		return normalizePath(resolve(projectRoot, name));
+	}
+
 	function regenerate(file: string, timestamp: number): Promise<boolean> {
 		file = normalizePath(file);
 		if (lastUpdate?.file === file && lastUpdate.timestamp === timestamp)
@@ -58,7 +62,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			if (
 				!file.endsWith(".veryl") &&
 				!componentChanged &&
-				!CONFIG_FILES.some((name) => resolve(projectRoot, name) === file)
+				!CONFIG_FILES.some((name) => projectFile(name) === file)
 			)
 				return false;
 			if (componentChanged && testbenchComponents) {
@@ -75,7 +79,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				);
 				cache.setTestbenchComponents(loaded.manifests);
 			}
-			// Cache fingerprints also avoid regenerating for our own lockfile writes.
+			// Watch events can detect edits that preserve both mtime and size.
+			// Keep fingerprint checks for generator-owned lockfile notifications.
+			if (file !== projectFile("Veryl.lock")) cache.invalidate();
 			const data = cache.get();
 			if (data !== generatedData) {
 				const nextPaths = generateSidecars(data, projectRoot);
@@ -119,7 +125,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 
 			projectRoot = normalizePath(projectRoot);
-			projectId = `${resolve(projectRoot, "Veryl.toml")}?${PROJECT_QUERY}`;
+			projectId = `${projectFile("Veryl.toml")}?${PROJECT_QUERY}`;
 
 			if (options?.testbenchComponents) {
 				const componentsModule = options.testbenchComponents;
@@ -162,25 +168,40 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		configureServer(server) {
-			server.watcher.add(
-				CONFIG_FILES.map((name) => resolve(projectRoot, name)),
-			);
+			server.watcher.add(CONFIG_FILES.map(projectFile));
+			const hmrDisabled = server.config.server.hmr === false;
+			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
+			const sourceChanged = (file: string) => {
+				void regenerate(file, Date.now())
+					.then((changed) => {
+						if (!changed) return;
+						if (server.environments) {
+							for (const environment of Object.values(server.environments))
+								affectedModules(environment.moduleGraph);
+						} else {
+							affectedModules(server.moduleGraph);
+						}
+					})
+					.catch((error) => server.config.logger.error(String(error)));
+			};
+			if (hmrDisabled) server.watcher.on("change", sourceChanged);
+			// Vite 6+ with HMR invokes hotUpdate for create/delete itself.
+			if (server.environments && !hmrDisabled) return;
 			// New/deleted sources have no existing module node. Notify through
-			// the shared project dependency so Vitest can find all importers.
+			// the shared project dependency on Vite 5 or with HMR disabled.
 			const catalogueChanged = (file: string) => {
 				file = normalizePath(file);
 				if (
 					(file.startsWith(`${projectRoot}/`) && file.endsWith(".veryl")) ||
-					CONFIG_FILES.slice(1).some(
-						(name) => resolve(projectRoot, name) === file,
-					)
+					CONFIG_FILES.slice(1).some((name) => projectFile(name) === file)
 				) {
-					server.watcher.emit("change", resolve(projectRoot, "Veryl.toml"));
+					server.watcher.emit("change", projectFile("Veryl.toml"));
 				}
 			};
 			server.watcher.on("add", catalogueChanged);
 			server.watcher.on("unlink", catalogueChanged);
 			server.httpServer?.once("close", () => {
+				server.watcher.off("change", sourceChanged);
 				server.watcher.off("add", catalogueChanged);
 				server.watcher.off("unlink", catalogueChanged);
 			});
@@ -215,14 +236,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		load(id) {
 			const [absPath, queryStr] = id.split("?", 2);
 			if (queryStr === WATCH_QUERY) {
-				this.addWatchFile(absPath!);
+				// Vite 5 also adds watch files to import analysis, which requires
+				// them to exist. configureServer watches optional configs separately.
+				if (existsSync(absPath!)) this.addWatchFile(absPath!);
 				return "export {};";
 			}
 			if (id === projectId) {
 				cache.get();
 				const files = new Set([
 					...cache.sourceFiles.map(normalizePath),
-					...CONFIG_FILES.map((name) => resolve(projectRoot, name)),
+					...CONFIG_FILES.map(projectFile),
 					...testbenchComponentDependencies,
 				]);
 				return [...files]

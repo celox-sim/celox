@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startVitest } from "vitest/node";
 import { build } from "vite";
@@ -37,8 +37,8 @@ async function waitForRun(previous) {
 function writeExpected(output, ports) {
   writeFileSync(join(root, "expected.json"), JSON.stringify({ output, ports }));
 }
-function sourceA(extra = false) {
-  return `module A(a: input logic<8>, o: output logic<8>${extra ? ", flag: input logic" : ""}) {
+function sourceA(extra = "") {
+  return `module A(a: input logic<8>, o: output logic<8>${extra ? `, ${extra}: input logic` : ""}) {
     inst child: B(a: a, o: o);
   }\n`;
 }
@@ -50,6 +50,7 @@ try {
   writeFileSync(join(root, "Veryl.toml"), '[project]\nname="watch_e2e"\nversion="0.1.0"\n[build]\nsources=["src"]\n');
   writeFileSync(join(root, "src/A.veryl"), sourceA());
   writeFileSync(join(root, "src/B.veryl"), sourceB(1));
+  utimesSync(join(root, "src/B.veryl"), 1_700_000_000, 1_700_000_000);
   writeExpected(4, ["a", "o"]);
   writeFileSync(join(root, "entry.test.ts"), `
     import { test, expect } from "vitest";
@@ -73,8 +74,21 @@ try {
   }, { plugins: [celox({ projectRoot: root })] });
   await waitForRun(0);
   for (const [name, edit] of [
-    ["imported source ports", () => { writeExpected(4, ["a", "flag", "o"]); writeFileSync(join(root, "src/A.veryl"), sourceA(true)); }],
-    ["non-imported source body", () => { writeExpected(5, ["a", "flag", "o"]); writeFileSync(join(root, "src/B.veryl"), sourceB(2)); }],
+    ["imported source ports", () => {
+      writeExpected(4, ["a", "flag", "o"]);
+      writeFileSync(join(root, "src/A.veryl"), sourceA("flag"));
+      utimesSync(join(root, "src/A.veryl"), 1_700_000_000, 1_700_000_000);
+    }],
+    ["imported source ports with unchanged mtime and size", () => {
+      writeExpected(4, ["a", "mark", "o"]);
+      writeFileSync(join(root, "src/A.veryl"), sourceA("mark"));
+      utimesSync(join(root, "src/A.veryl"), 1_700_000_000, 1_700_000_000);
+    }],
+    ["non-imported source body with unchanged mtime and size", () => {
+      writeExpected(5, ["a", "mark", "o"]);
+      writeFileSync(join(root, "src/B.veryl"), sourceB(2));
+      utimesSync(join(root, "src/B.veryl"), 1_700_000_000, 1_700_000_000);
+    }],
     ["configuration creation", () => writeFileSync(join(root, "celox.toml"), "[test]\nsources=[]\n")],
     ["configuration edit", () => writeFileSync(join(root, "Veryl.toml"), '[project]\nname="watch_e2e"\nversion="0.1.1"\n[build]\nsources=["src"]\n')],
     ["source creation", () => writeFileSync(join(root, "src/Extra.veryl"), "module Extra {}\n")],
@@ -84,8 +98,14 @@ try {
     const previous = runs.length;
     edit();
     await waitForRun(previous);
+    // A second HMR transaction used to be emitted for add/unlink events.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(runs.length, previous + 1, `${name} reran more than once`);
+    if (name === "source creation") assert.ok(existsSync(join(root, ".celox/src/Extra.d.veryl.ts")));
+    if (name === "source deletion") assert.ok(!existsSync(join(root, ".celox/src/Extra.d.veryl.ts")));
     console.log(`passed: ${name}`);
   }
+  assert.ok(readFileSync(join(root, ".celox/src/A.d.veryl.ts"), "utf8").includes("mark"));
   await ctx.close();
   ctx = undefined;
   writeFileSync(join(root, "entry.ts"), 'export { A } from "./src/A.veryl?dse=preserveAllPorts";');
@@ -96,7 +116,7 @@ try {
   });
   const outputs = (Array.isArray(bundle) ? bundle : [bundle]).flatMap((result) => result.output);
   const code = outputs.find((output) => output.type === "chunk").code;
-  assert.ok(code.includes("flag") && code.includes("preserveAllPorts"));
+  assert.ok(code.includes("mark") && code.includes("preserveAllPorts"));
   console.log("passed: client build preserves Veryl exports and query options");
 } finally {
   await ctx?.close();
