@@ -736,10 +736,8 @@ impl<B: SimBackend> SimulationState<B> {
                 // Drain active evaluations before promoting another inactive
                 // batch, including evaluations a combinational settle woke.
                 let mut inactive_samples = None;
-                let active_ran = self.run_processes(executor, current_time, Vec::new())?;
-                let progressed = if active_ran {
-                    true
-                } else {
+                let mut active_ran = self.run_processes(executor, current_time, Vec::new())?;
+                if !active_ran {
                     // Drain active combinational effects of blocking FF stores
                     // before either inactive continuations or NBA publication.
                     if !self.inactive.is_empty()
@@ -764,6 +762,14 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                         executor.backend_mut().clear_triggered_bits();
                     }
+                    active_ran = self.run_processes(executor, current_time, Vec::new())?;
+                }
+                if self.finished && self.finish_round {
+                    return Ok(true);
+                }
+                let progressed = if active_ran {
+                    true
+                } else {
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
