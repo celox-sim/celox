@@ -88,6 +88,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Keep fingerprint checks for generator-owned lockfile notifications.
 			if (file !== projectFile("Veryl.lock")) cache.invalidate();
 			const data = cache.get();
+			if (file === projectFile("Veryl.lock") && data === generatedData)
+				return false;
 			if (data !== generatedData) {
 				const nextPaths = generateSidecars(data, projectRoot);
 				const retained = new Set(nextPaths);
@@ -179,8 +181,28 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		configureServer(server) {
 			server.watcher.add([projectRoot, ...CONFIG_FILES.map(projectFile)]);
 			const hmrDisabled = server.config.server.hmr === false;
+			let notifyingProject = false;
+			const notifyProject = () => {
+				// Generation already completed for this lockfile notification.
+				notifyingProject = true;
+				try {
+					server.watcher.emit("change", projectFile("Veryl.toml"));
+				} finally {
+					notifyingProject = false;
+				}
+			};
+			const reportError = (file: string, error: unknown) => {
+				server.config.logger.error(String(error));
+				// Vitest must also rerun and report failed dependency resolution.
+				if (normalizePath(file) === projectFile("Veryl.lock")) notifyProject();
+			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
+				if (
+					notifyingProject &&
+					normalizePath(file) === projectFile("Veryl.toml")
+				)
+					return;
 				// Raw events have no shared per-environment timestamp to deduplicate.
 				void regenerate(file)
 					.then((changed) => {
@@ -191,8 +213,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						} else {
 							affectedModules(server.moduleGraph);
 						}
+						if (normalizePath(file) === projectFile("Veryl.lock"))
+							notifyProject();
 					})
-					.catch((error) => server.config.logger.error(String(error)));
+					.catch((error) => reportError(file, error));
 			};
 			if (hmrDisabled) server.watcher.on("change", sourceChanged);
 			// Vite 6+ with HMR invokes hotUpdate for create/delete itself.
@@ -201,6 +225,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// the shared project dependency on Vite 5 or with HMR disabled.
 			const catalogueChanged = (file: string) => {
 				file = normalizePath(file);
+				if (file === projectFile("Veryl.lock")) {
+					void regenerate(file)
+						.then((changed) => {
+							if (changed) notifyProject();
+						})
+						.catch((error) => reportError(file, error));
+					return;
+				}
 				if (
 					(file.startsWith(projectPrefix) && file.endsWith(".veryl")) ||
 					CONFIG_FILES.some((name) => projectFile(name) === file)
@@ -255,7 +287,11 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				cache.get();
 				const files = new Set([
 					...cache.sourceFiles.map(normalizePath),
-					...CONFIG_FILES.map(projectFile),
+					// Lockfiles are watched directly. Only changed resolutions notify
+					// the project, avoiding no-op generator writes rerunning Vitest.
+					...CONFIG_FILES.filter((name) => name !== "Veryl.lock").map(
+						projectFile,
+					),
 					...testbenchComponentDependencies,
 				]);
 				return [...files]
@@ -327,13 +363,19 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		async hotUpdate({ file, timestamp, modules }) {
-			if ((await regenerate(file, timestamp)) === false) return;
+			if ((await regenerate(file, timestamp)) === false)
+				return normalizePath(file) === projectFile("Veryl.lock")
+					? []
+					: undefined;
 			return affectedModules(this.environment.moduleGraph, modules);
 		},
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
-		async handleHotUpdate({ file, timestamp, server, modules }) {
-			if ((await regenerate(file, timestamp)) === false) return;
+		async handleHotUpdate({ file, server, modules }) {
+			if ((await regenerate(file)) === false)
+				return normalizePath(file) === projectFile("Veryl.lock")
+					? []
+					: undefined;
 			return affectedModules(server.moduleGraph, modules);
 		},
 	};

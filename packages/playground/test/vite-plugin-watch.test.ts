@@ -119,6 +119,7 @@ test("Windows project imports resolve to a loadable dependency module", async ()
 	const code = (plugin.load as Function).call(context, resolved);
 	expect(code).toContain('import "C:/project/Veryl.toml?celox-watch"');
 	expect(code).toContain('import "C:/project/celox.toml?celox-watch"');
+	expect(code).not.toContain("Veryl.lock?celox-watch");
 	const moduleGraph = graph();
 	const result = await (plugin.hotUpdate as Function).call(
 		{ environment: { moduleGraph } },
@@ -150,17 +151,57 @@ test.each(["Main.veryl", "Veryl.toml", "celox.toml", "Veryl.lock"])(
 	},
 );
 
-test("unchanged lockfile notifications reuse generation", async () => {
-	const root = mkdtempSync(join(tmpdir(), "celox-watch-lock-"));
+test.each(["hotUpdate", "handleHotUpdate"] as const)(
+	"%s suppresses unchanged lockfile notifications",
+	async (hook) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-lock-"));
+		roots.push(root);
+		const file = join(root, "Veryl.lock");
+		writeFileSync(file, "lock");
+		const { plugin } = await initialize(root);
+		const moduleGraph = graph();
+		const result = await (plugin[hook] as Function).call(
+			{ environment: { moduleGraph } },
+			{ file, timestamp: 1, modules: [{ id: file }], server: { moduleGraph } },
+		);
+		expect(result).toEqual([]);
+		expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+		expect(runGenTs).toHaveBeenCalledTimes(1);
+	},
+);
+
+test("HMR-disabled lockfile changes notify once and unchanged writes remain silent", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-lock-notify-"));
 	roots.push(root);
 	const file = join(root, "Veryl.lock");
-	writeFileSync(file, "lock");
+	writeFileSync(file, "before");
 	const { plugin } = await initialize(root);
-	await (plugin.hotUpdate as Function).call(
-		{ environment: { moduleGraph: graph() } },
-		{ file, timestamp: 1 },
-	);
-	expect(runGenTs).toHaveBeenCalledTimes(1);
+	const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+	const changes = vi.fn();
+	watcher.on("change", changes);
+	const moduleGraph = graph();
+	const logger = { error: vi.fn() };
+	const httpServer = new EventEmitter();
+	(plugin.configureServer as Function)({
+		watcher,
+		httpServer,
+		config: { server: { hmr: false }, logger },
+		environments: { ssr: { moduleGraph } },
+	});
+	writeFileSync(file, "edited");
+	watcher.emit("change", file);
+	await Promise.resolve();
+	expect(changes).toHaveBeenCalledWith(join(root, "Veryl.toml"));
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+	changes.mockClear();
+	moduleGraph.invalidateModule.mockClear();
+	watcher.emit("change", file);
+	await Promise.resolve();
+	expect(changes).toHaveBeenCalledTimes(1); // Only the original raw event.
+	expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+	expect(logger.error).not.toHaveBeenCalled();
+	httpServer.emit("close");
 });
 
 test("watch modules omit absent optional configs from import-analysis dependencies", async () => {
