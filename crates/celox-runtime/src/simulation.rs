@@ -540,6 +540,9 @@ impl<B: SimBackend> SimulationState<B> {
         let Some(current_time) = self.next_event_time() else {
             return Ok(None);
         };
+        if current_time > limit {
+            return Ok(None);
+        }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -828,6 +831,11 @@ impl<B: SimBackend> SimulationState<B> {
         // edge.
         executor.eval_comb()?;
         Ok(true)
+    }
+
+    /// Whether any process is suspended on an event or a condition.
+    pub fn has_waiting_processes(&self) -> bool {
+        !self.waiting.is_empty()
     }
 
     /// Resume the processes waiting for an event or a condition at the

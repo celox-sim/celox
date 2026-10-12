@@ -45,6 +45,8 @@ export interface RawNapiSimulationHandle {
 	schedule(eventId: number, time: number, value: number): void;
 	runUntil(endTime: number): void;
 	step(): number | null;
+	stepUntil?(endTime: number): number | null;
+	hasWaitingProcesses?(): boolean;
 	time(): number;
 	nextEventTime(): number | null;
 	/** Whether a process requested the end of the simulation. */
@@ -849,6 +851,12 @@ export function wrapDirectSimulationHandle(
 	raw: RawNapiSimulationHandle,
 ): NativeSimulationHandle {
 	return {
+		...(raw.hasWaitingProcesses
+			? { hasWaitingProcesses: () => raw.hasWaitingProcesses!() }
+			: {}),
+		...(raw.stepUntil
+			? { stepUntil: (endTime: number) => raw.stepUntil!(endTime) }
+			: {}),
 		addClock(eventId: number, period: number, initialDelay: number): void {
 			raw.addClock(eventId, period, initialDelay);
 		},

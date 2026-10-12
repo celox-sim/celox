@@ -609,6 +609,8 @@ pub struct RuntimeSchema<A> {
     /// derived from the other state, so state files recompute rather than
     /// compare them.
     pub comb_writes: HashSet<A>,
+    /// Combinational execution reads a clock, so both phases must settle.
+    pub clock_phase_sensitive_comb: bool,
     /// Dead store elimination policy the program was compiled with. Together
     /// with `live_signals` and the design it decides which combinationally
     /// written state the host may observe.
@@ -633,6 +635,7 @@ impl<A> Default for RuntimeSchema<A> {
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
+            clock_phase_sensitive_comb: false,
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),

@@ -132,7 +132,10 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     fn fused_ticks_allowed(&self) -> bool {
-        self.vcd_writer.is_none() && !self.components.has_scheduled_components()
+        self.vcd_writer.is_none()
+            && !self.components.has_scheduled_components()
+            && self.program.runtime_schema.comb_observers.is_empty()
+            && !self.program.runtime_schema.clock_phase_sensitive_comb
     }
 
     fn host_request(
@@ -576,6 +579,32 @@ impl<B: SimBackend> Simulation<B> {
             self.simulator.eval_comb()?;
         }
         Ok(())
+    }
+
+    /// Whether a process is suspended on an event or a condition.
+    pub fn has_waiting_processes(&self) -> bool {
+        self.state.has_waiting_processes()
+    }
+
+    /// Run one step at or before `limit`, including processes a host write
+    /// woke at the current time. Leave a later event queued.
+    pub fn step_until(&mut self, limit: u64) -> Result<Option<u64>, RuntimeErrorCode> {
+        if self.state.time() > limit {
+            return Ok(None);
+        }
+        self.settle_host_writes()?;
+        if self.state.poll_waiting_until(&mut self.simulator, limit)? {
+            return Ok(Some(self.state.time()));
+        }
+        if self
+            .state
+            .next_event_time()
+            .is_some_and(|time| time <= limit)
+        {
+            self.state.step_until(&mut self.simulator, limit)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Advance time and run until `end_time` (inclusive). As for
@@ -1435,5 +1464,114 @@ mod process_review_tests {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_clock_phase_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let enable = module.output("enable", bit).unwrap();
+        let v = module.output("v", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let zero = module.constant(Constant::two_state(0u8, 1).unwrap());
+        let target = module.whole(enable).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let clock = module.read(clk).unwrap();
+        let enabled = module.read(enable).unwrap();
+        let previous = module.read(v).unwrap();
+        let low = module.unary(UnaryOp::BitNot, clock, bit).unwrap();
+        let active = module.binary(BinaryOp::And, low, enabled, bit).unwrap();
+        let toggled = module.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let next = module.mux(active, toggled, zero).unwrap();
+        let target = module.whole(v).unwrap();
+        module.assign(target, next).unwrap();
+        let count = module.constant(Constant::two_state(10u8, 64).unwrap());
+        module
+            .process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        assert!(sim.run_until(40).is_err());
+        assert_eq!(sim.time(), 2);
+        assert_eq!(sim.ticks(), 1);
+    }
+
+    #[test]
+    fn low_phase_comb_failures_stop_before_later_fused_edges() {
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_native()
+                .unwrap(),
+        );
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn step_until_leaves_later_events_queued() {
+        let source =
+            "module Top(input bit clk, output bit q); always_ff @(posedge clk) q<=1; endmodule";
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("limit.sv"))], "Top")
+                .build()
+                .unwrap();
+        sim.schedule("clk", 5, 1).unwrap();
+        assert_eq!(sim.state.step_until(&mut sim.simulator, 4).unwrap(), None);
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.next_event_time(), Some(5));
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(
+            sim.state.step_until(&mut sim.simulator, 5).unwrap(),
+            Some(5)
+        );
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
     }
 }
