@@ -48,6 +48,7 @@ pub(super) struct ProcModule<'a> {
     pub event_watchers: Vec<EventWatcher>,
     pub combinational: HashSet<String>,
     pub hidden_comb_pulses: HashSet<String>,
+    pub comb_bodies: Vec<Vec<sv::ir::Stmt>>,
     pub event_signals: Vec<String>,
     pub ff_processes: Vec<sv::ir::FfProcess>,
     /// The watchers whose expression reads each variable, by index.
@@ -222,6 +223,11 @@ impl<'a> ProcModule<'a> {
                 .collect(),
             combinational,
             hidden_comb_pulses,
+            comb_bodies: module
+                .comb_processes()
+                .iter()
+                .map(|process| process.body().to_vec())
+                .collect(),
             watchers_by_var: HashMap::default(),
             event_counter_ids: Vec::new(),
             static_initial_values: Vec::new(),

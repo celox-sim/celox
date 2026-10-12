@@ -1204,3 +1204,38 @@ mod rtl_finish_backend_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod finish_and_cotrigger_tests {
+    use super::*;
+    #[test]
+    fn process_finish_prevents_a_scheduled_domains_publication() {
+        let source = "module Top(input bit clk,output bit q);initial #5 $finish;always @(posedge clk)q<=1;endmodule";
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("finish.sv"))], "Top")
+                .build()
+                .unwrap();
+        sim.schedule("clk", 5, 1).unwrap();
+        sim.run_until(5).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    }
+    #[test]
+    fn cotriggered_syntactic_cascades_record_nba_expression_pulses() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.schedule("c1", 5, 1).unwrap();
+            sim.schedule("c2", 5, 1).unwrap();
+            sim.run_until(5).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        }
+        let source = "module Top(input bit c1,output bit c2,seen);bit a,b;always @(posedge c1)begin c2<=1;a<=1;end always @(posedge c2)b<=1;initial begin @(a^b);seen=1;end endmodule";
+        let builder = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("cascade.sv"))], "Top")
+        };
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
