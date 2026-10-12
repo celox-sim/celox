@@ -1822,6 +1822,7 @@ fn single_iteration_comb_loops_do_not_hide_event_edges() {
         "repeat(1) q=a;",
         "repeat(N) q=a;",
         "for(int i=0;i<1;i++) q=a;",
+        "for(int i=-1;i<0;i++) q=a;",
         "do q=a; while(0);",
     ] {
         let code = format!(

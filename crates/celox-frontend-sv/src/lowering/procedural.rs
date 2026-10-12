@@ -2292,13 +2292,17 @@ pub(super) fn known_loop_value(
     ids: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
-) -> Option<usize> {
+) -> Option<i128> {
     let mut arena = SLTNodeArena::new();
     let (node, _) = lower_expr_with_context(
         expr, variables, ids, constants, types, &mut arena, None, None,
     )?;
-    let (value, _) = slt_const(&arena, &mut ConstCache::default(), node)?;
-    value.to_usize()
+    let (value, width) = slt_const(&arena, &mut ConstCache::default(), node)?;
+    let mut value = num_bigint::BigInt::from(value);
+    if node_is_signed(&arena, node) && value.bit(width.saturating_sub(1) as u64) {
+        value -= num_bigint::BigInt::from(1u8) << width;
+    }
+    value.to_i128()
 }
 
 /// Maximum relevant iterations, capped at two for hidden-pulse analysis.
@@ -2307,11 +2311,11 @@ pub(super) fn loop_trip_cap(
     init: &[sv::ir::Stmt],
     condition: Option<&sv::ir::Expr>,
     step: &[sv::ir::Stmt],
-    eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
 ) -> usize {
     use sv::ir::LoopKind;
     match kind {
-        LoopKind::Repeat(count) => eval(count).unwrap_or(2).min(2),
+        LoopKind::Repeat(count) => eval(count).unwrap_or(2).clamp(0, 2) as usize,
         LoopKind::While if condition.and_then(eval) == Some(0) => 0,
         LoopKind::DoWhile if condition.and_then(eval) == Some(0) => 1,
         LoopKind::For => {
@@ -2339,9 +2343,9 @@ pub(super) fn loop_trip_cap(
                 return 2;
             }
             let next = if loop_.decreasing {
-                start.checked_sub(loop_.step)
+                start.checked_sub(loop_.step as i128)
             } else {
-                start.checked_add(loop_.step)
+                start.checked_add(loop_.step as i128)
             };
             if next.is_some_and(|value| !holds(value)) {
                 1
@@ -2357,13 +2361,13 @@ pub(super) fn loop_trip_cap(
 fn combinational_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
-    eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
 ) -> HashMap<String, usize> {
     fn counts(
         stmts: &[sv::ir::Stmt],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
-        eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
     ) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
@@ -2439,7 +2443,7 @@ fn combinational_write_counts(
         args: &[Option<sv::ir::Expr>],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
-        eval: &dyn Fn(&sv::ir::Expr) -> Option<usize>,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
     ) -> HashMap<String, usize> {
         if !visiting.insert(name.to_string()) {
             return HashMap::default();
