@@ -1,5 +1,7 @@
 //! What a suite supplies to build its designs with an external simulator.
 
+mod timed_ff;
+
 use crate::process::write_if_changed;
 use crate::script::ScriptCase;
 use crate::script::sv::{DesignInfo, TESTBENCH_TOP, testbench as generate_testbench};
@@ -83,7 +85,7 @@ pub(crate) fn stage(
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
         let source = if design.timed {
-            timed_source(source, &control_names)
+            timed_source(source, &control_names)?
         } else {
             source.clone()
         };
@@ -215,10 +217,28 @@ impl TimedNames {
     }
 }
 
-fn timed_source(source: &str, names: &TimedNames) -> String {
-    let mut output = format!("import {}::*;\n", names.package);
+fn timed_source(source: &str, names: &TimedNames) -> Result<String> {
+    Ok(format!(
+        "import {}::*;\n{}",
+        names.package,
+        timed_content(source, names)?
+    ))
+}
+
+fn timed_content(source: &str, names: &TimedNames) -> Result<String> {
+    let mut output = String::new();
     let mut previous = 0;
     for (start, end, word) in sv_words(source) {
+        if start < previous {
+            continue;
+        }
+        if word == "always_ff" {
+            let (body_end, replacement) = timed_ff::gated(source, start, end, names)?;
+            output.push_str(&source[previous..start]);
+            output.push_str(&replacement);
+            previous = body_end;
+            continue;
+        }
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
             "always" => {
@@ -233,5 +253,5 @@ fn timed_source(source: &str, names: &TimedNames) -> String {
         previous = end;
     }
     output.push_str(&source[previous..]);
-    output
+    Ok(output)
 }

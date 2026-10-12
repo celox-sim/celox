@@ -97,3 +97,18 @@ sv_backends! {
         @case "timing::event_always_processes_start_after_host_inputs";
     }
 }
+
+sv_backends! {
+    fn ff_actions_wait_for_staged_startup(sim) {
+        @case "timing::ff_actions_wait_for_staged_startup";
+    }
+    fn ff_startup_does_not_invent_an_unstaged_edge(sim) {
+        @case "timing::ff_startup_does_not_invent_an_unstaged_edge";
+    }
+}
+
+sv_backends! {
+    fn ff_startup_preserves_nested_if_case_actions(sim) {
+        @case "timing::ff_startup_preserves_nested_if_case_actions";
+    }
+}

@@ -259,7 +259,8 @@ Reads, output collection and `eval` settle processes due at the current
 timestamp without advancing time. External scripted adapters use an Icarus
 read/write synchronization callback or a Verilator clocking event sampled in
 the observed region. Initial blocks and all `always` processes start after
-pre-run input writes settle. Internal control names are chosen to avoid source
+pre-run input writes settle. `always_ff` listeners retain setup edges and defer
+their actions until startup, preserving initial reads before queued NBAs. Internal control names are chosen to avoid source
 identifiers.
 `run_until` drains its target timestamp before subsequent writes. Only checks
 may follow `run_to_finish`; they run in a `final` block that sees the script's

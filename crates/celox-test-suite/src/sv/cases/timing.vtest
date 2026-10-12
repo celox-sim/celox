@@ -426,3 +426,49 @@
   (set a 1)
   (run_until 0)
   (assert_eq y 0))
+
+(case ff_actions_wait_for_staged_startup
+  (source "ff_start.sv" #"module Top(input bit clk, output bit y, output bit seen);
+    always_ff @(posedge clk) seen<=1;
+    initial y=seen;
+  endmodule"#)
+  (top Top)
+  (set clk 1)
+  (run_until 0)
+  (assert_eq y 0)
+  (assert_eq seen 1))
+
+(case ff_startup_does_not_invent_an_unstaged_edge
+  (source "ff_idle.sv" #"module Top(input bit clk, output bit seen);
+    always_ff @(posedge clk) begin if (clk) seen<=1; end
+  endmodule"#)
+  (top Top)
+  (set clk 0)
+  (run_until 0)
+  (assert_eq seen 0)
+  (set clk 1)
+  (run_until 0)
+  (assert_eq seen 1))
+
+(case ff_startup_preserves_nested_if_case_actions
+  (source "ff_nested.sv" #"module Top(input bit clk, en, output bit [7:0] seen, output bit flag, y);
+    always_ff @(posedge clk) if (en) begin : update
+      seen<=seen+1;
+      case(en) 1: flag<=1; default: flag<=0; endcase
+    end else begin seen<=0; flag<=0; end
+    initial y=flag;
+  endmodule"#)
+  (top Top)
+  (set en 1)
+  (set clk 1)
+  (run_until 0)
+  (assert_eq y 0)
+  (assert_eq seen 1)
+  (assert_eq flag 1)
+  (set en 0)
+  (set clk 0)
+  (eval)
+  (set clk 1)
+  (run_until 0)
+  (assert_eq seen 0)
+  (assert_eq flag 0))
