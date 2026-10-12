@@ -639,7 +639,7 @@ impl<B: SimBackend> SimulationState<B> {
         let committed = rising
             .into_iter()
             .filter(|id| {
-                result.is_ok()
+                (result.is_ok() && !self.finished)
                     || self
                         .round_published_domains
                         .contains(self.event_info[*id].canonical_id)
@@ -1128,6 +1128,12 @@ impl<B: SimBackend> SimulationState<B> {
                     process_driven.push((*id, value != 0));
                 }
             }
+        }
+
+        if self.finished {
+            // Suppress generated edges queued before a ready process finished.
+            self.round_new_rising.make_empty();
+            return Ok(false);
         }
 
         // Ready processes may activate a clock at this timestamp. Join it

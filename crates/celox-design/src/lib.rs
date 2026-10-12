@@ -393,7 +393,7 @@ pub struct RuntimeSchema<A> {
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
-    /// FF evaluation domains that publish blocking stores into active state.
+    /// FF domains with blocking stores or finish effects in the active region.
     pub active_ff_events: HashSet<A>,
 }
 
