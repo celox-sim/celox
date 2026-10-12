@@ -1106,3 +1106,31 @@ mod process_review_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod ff_counter_regressions {
+    use super::*;
+
+    #[test]
+    fn blocking_ff_pulses_trigger_other_ff_domains() {
+        let source = r#"module Top(input bit clk, output bit q);
+        bit c=0;
+        always @(posedge clk) begin c=1; c=0; end
+        always @(posedge c) q<=1;
+    endmodule"#;
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("c")), 0u8.into());
+        }
+        let builder = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("ff-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}

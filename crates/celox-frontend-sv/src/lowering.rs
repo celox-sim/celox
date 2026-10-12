@@ -2064,14 +2064,12 @@ fn lower_module_with_overrides(
             &parameter_types,
             four_state,
         );
-        if !module.initial_processes().is_empty() {
-            let bodies = module
-                .initial_processes()
-                .iter()
-                .map(|process| process.body())
-                .collect::<Vec<_>>();
-            ff::declare_event_counters(&mut pm, &bodies, &package_aliases)?;
-        }
+        let bodies = module
+            .initial_processes()
+            .iter()
+            .map(|process| process.body())
+            .collect::<Vec<_>>();
+        ff::declare_event_counters(&mut pm, &bodies, &package_aliases)?;
         let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
         initial_memory_values.append(&mut pm.static_initial_values);
         (
@@ -2810,9 +2808,6 @@ fn lower_initial_processes(
     ),
     sv::AnalyzerError,
 > {
-    if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
-    }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
     let mut pm = procedural::ProcModule::new(
@@ -2852,9 +2847,6 @@ fn lower_initial_processes(
         if let Some(variable) = variables.remove(&id) {
             name_to_id.remove(&variable.path.join("."));
         }
-    }
-    if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
