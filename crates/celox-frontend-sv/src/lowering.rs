@@ -6321,7 +6321,8 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
-        let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
+        let (eval_only, apply, targets) =
+            ff::Ff::new(pm).lower_process(process.body(), process.events())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =

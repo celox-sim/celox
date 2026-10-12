@@ -66,6 +66,10 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
 }
 
 impl<B: SimBackend> SimulationExecutor for Simulator<B> {
+    fn finish_requested(&mut self, _time: u64) -> bool {
+        self.has_pending_runtime_finish()
+    }
+
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -1166,6 +1170,33 @@ mod active_ff_metadata_tests {
                 expected,
                 "{body}"
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod rtl_finish_backend_tests {
+    use super::*;
+    #[test]
+    fn finish_stops_ff_and_comb_publication_on_all_backends() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        for body in [
+            "always_comb begin q=0;if(go)begin $finish;q=1;end end",
+            "always @(posedge go)begin q<=1;$finish;q=1;end",
+        ] {
+            let code = format!("module Top(output bit q);bit go;initial #1 go=1;{body} endmodule");
+            let builder = || {
+                Simulator::from_sv_sources(vec![(&code, std::path::Path::new("finish.sv"))], "Top")
+            };
+            check(Simulation::new(builder().build_interpreter().unwrap()));
+            check(Simulation::new(builder().build_cranelift().unwrap()));
+            check(Simulation::new(builder().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(builder().build_native().unwrap()));
         }
     }
 }

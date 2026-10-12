@@ -49,6 +49,7 @@ pub(super) struct ProcModule<'a> {
     pub combinational: HashSet<String>,
     pub hidden_comb_pulses: HashSet<String>,
     pub event_signals: Vec<String>,
+    pub ff_processes: Vec<sv::ir::FfProcess>,
     /// The watchers whose expression reads each variable, by index.
     pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
     /// Every event counter declared, for its zero initial value.
@@ -177,13 +178,16 @@ impl<'a> ProcModule<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        let hidden_comb_pulses = comb_writes
-            .iter()
-            .flat_map(|writes| {
-                writes
-                    .iter()
-                    .filter_map(|(name, count)| (*count > 1).then_some(name.clone()))
-            })
+        let mut total_writes: HashMap<String, usize> = HashMap::default();
+        for writes in &comb_writes {
+            for (name, count) in writes {
+                let total = total_writes.entry(name.clone()).or_default();
+                *total = (*total + count).min(2);
+            }
+        }
+        let hidden_comb_pulses = total_writes
+            .into_iter()
+            .filter_map(|(name, count)| (count > 1).then_some(name))
             .collect();
         let combinational = module
             .assignments()
@@ -209,6 +213,7 @@ impl<'a> ProcModule<'a> {
             runtime_errors: HashMap::default(),
             unpacked_bounds,
             event_watchers: Vec::new(),
+            ff_processes: module.ff_processes().to_vec(),
             event_signals: module
                 .ff_processes()
                 .iter()
