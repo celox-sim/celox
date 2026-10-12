@@ -67,6 +67,7 @@ fn statement_end(source: &str, at: usize) -> Option<usize> {
     let words = sv_words(&source[at..]);
     let keyword = words.first().filter(|word| word.0 == 0).map(|word| word.2);
     match keyword {
+        Some("unique" | "unique0" | "priority") => statement_end(source, at + words.first()?.1),
         Some("begin" | "case" | "casez" | "casex") => {
             let is_block = keyword == Some("begin");
             let mut depth = 0;
@@ -163,4 +164,74 @@ pub(super) fn gated(
             "always @({event} or posedge {package}::started) begin\n  bit {armed}=0;\n  bit {pending}=0;\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
         ),
     ))
+}
+
+/// The frontend classifies an ordinary always as FF only when every leaf
+/// of its event list is explicitly edge-qualified.
+pub(super) fn edge_control(source: &str, end: usize) -> bool {
+    let at = trivia(source, end);
+    if source.as_bytes().get(at) != Some(&b'@') {
+        return false;
+    }
+    let begin = trivia(source, at + 1);
+    let Some(end) = parens(source, begin) else {
+        return false;
+    };
+    let event = &source[begin + 1..end - 1];
+    let ors = sv_words(event)
+        .into_iter()
+        .filter_map(|(start, _, word)| (word == "or").then_some(start))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut at = 0;
+    let mut start = 0;
+    let mut depth = 0;
+    let mut leaves = Vec::new();
+    while at < event.len() {
+        if skip_token(event, &mut at) {
+            continue;
+        }
+        if depth == 0 && (event.as_bytes()[at] == b',' || ors.contains(&at)) {
+            leaves.push(&event[start..at]);
+            at += if ors.contains(&at) { 2 } else { 1 };
+            start = at;
+            continue;
+        }
+        match event.as_bytes()[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        at += 1;
+    }
+    leaves.push(&event[start..]);
+    leaves.into_iter().all(|leaf| {
+        let leaf = after_trivia(leaf);
+        matches!(sv_words(leaf).first(), Some((0, _, "posedge" | "negedge")))
+    })
+}
+
+/// Multiline macro replacements must keep every generated line in the
+/// original definition. Existing continuation lines already have a slash.
+pub(super) fn in_macro(source: &str, start: usize, replacement: String) -> String {
+    let lines = source[..start].split('\n').collect::<Vec<_>>();
+    let mut first = lines.len() - 1;
+    while first > 0 && lines[first - 1].trim_end().ends_with('\\') {
+        first -= 1;
+    }
+    if !lines[first].trim_start().starts_with("`define") {
+        return replacement;
+    }
+    let mut output = String::new();
+    for line in replacement.split_inclusive('\n') {
+        if let Some(content) = line.strip_suffix('\n') {
+            output.push_str(content);
+            if !content.trim_end().ends_with('\\') {
+                output.push_str(" \\");
+            }
+            output.push('\n');
+        } else {
+            output.push_str(line);
+        }
+    }
+    output
 }

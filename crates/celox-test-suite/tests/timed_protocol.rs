@@ -52,3 +52,24 @@ fn early_finish_and_event_exhaustion_do_not_skip_script_checks() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires Verilator and a C++ compiler; Icarus rejects unique-if syntax"]
+fn qualified_ff_if_actions_are_not_truncated_during_staging() {
+    let text = r##"(group qualified (category sequential))
+        (case startup (source "qualified.sv" #"module Top(input bit clk, en, output bit q, y);
+            always_ff @(posedge clk) unique if(en) q<=1; else q<=0;
+            initial y=q;
+        endmodule"#) (top Top) (set en 1) (set clk 1) (run_until 0) (assert_eq y 0) (assert_eq q 1))"##;
+    let case = load_group("qualified.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/qualified-ff-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut backend =
+        celox_test_suite::verilator::Verilator::build_script(&frontend, case, &root).unwrap();
+    backend.run_testbench().unwrap();
+    let log = std::fs::read_to_string(root.join("protocol.log")).unwrap();
+    celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

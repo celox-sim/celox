@@ -472,3 +472,28 @@
   (run_until 0)
   (assert_eq seen 0)
   (assert_eq flag 0))
+
+(case qualified_ff_startup_actions
+  (source "qualified.sv" #"module Top(input bit clk, en, output bit q, y);
+    always_ff @(posedge clk) priority case(en) 1: q<=1; default: q<=0; endcase
+    initial y=q;
+  endmodule"#)
+  (top Top) (set en 1) (set clk 1) (run_until 0)
+  (assert_eq y 0) (assert_eq q 1))
+
+(case ordinary_edge_always_retains_staged_startup_edges
+  (source "ordinary.sv" #"module Top(input bit clk, output bit q, y);
+    always @(posedge clk) q<=1;
+    initial y=q;
+  endmodule"#)
+  (top Top) (set clk 1) (run_until 0)
+  (assert_eq y 0) (assert_eq q 1))
+
+(case macro_ff_startup_actions
+  (source "macro.sv" #"`define FF always_ff @(posedge clk) q<=1;
+    module Top(input bit clk, output bit q, y);
+    `FF
+    initial y=q;
+    endmodule"#)
+  (top Top) (set clk 1) (run_until 0)
+  (assert_eq y 0) (assert_eq q 1))

@@ -232,10 +232,10 @@ fn timed_content(source: &str, names: &TimedNames) -> Result<String> {
         if start < previous {
             continue;
         }
-        if word == "always_ff" {
+        if word == "always_ff" || (word == "always" && timed_ff::edge_control(source, end)) {
             let (body_end, replacement) = timed_ff::gated(source, start, end, names)?;
             output.push_str(&source[previous..start]);
-            output.push_str(&replacement);
+            output.push_str(&timed_ff::in_macro(source, start, replacement));
             previous = body_end;
             continue;
         }
