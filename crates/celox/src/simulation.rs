@@ -146,6 +146,15 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         )
     }
 
+    fn finish_stops_round(&self, process: usize) -> bool {
+        // Veryl testbench stores already executed before finish retain their
+        // clock/reset effects. SV and SDK finish stop the current time slot.
+        self.program
+            .runtime_schema
+            .testbench_kernels
+            .is_none_or(|first| process < first)
+    }
+
     fn fused_ticks_allowed(&self) -> bool {
         self.vcd_writer.is_none()
             && !self.components.has_scheduled_components()
