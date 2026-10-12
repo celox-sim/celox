@@ -231,6 +231,7 @@ pub struct SimulationState<B: SimBackend> {
     scheduled_clock_drives: BitSet,
     scheduled_clock_time: u64,
     round_evaluated: bool,
+    round_new_rising: BitSet,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     topo_signals: Vec<(SignalRef, usize, usize)>,
@@ -351,6 +352,7 @@ impl<B: SimBackend> SimulationState<B> {
             scheduled_clock_drives: BitSet::new(),
             scheduled_clock_time: 0,
             round_evaluated: false,
+            round_new_rising: BitSet::new(),
         }
     }
 
@@ -571,9 +573,11 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 break;
             }
-            if !self.step_round(executor, current_time, Vec::new(), Vec::new(), ready, false)?
-                && !fired
-            {
+            let result =
+                self.step_round(executor, current_time, Vec::new(), Vec::new(), ready, false);
+            let progressed = result.as_ref().is_ok_and(|ran| *ran);
+            self.finish_clock_round(current_time, Vec::new(), &[], result)?;
+            if !progressed && !fired {
                 break;
             }
         }
@@ -625,6 +629,10 @@ impl<B: SimBackend> SimulationState<B> {
         falling: &[usize],
         result: Result<bool, SimulatorErrorCode>,
     ) -> Result<(), SimulatorErrorCode> {
+        let rising: BTreeSet<_> = rising
+            .into_iter()
+            .chain(self.round_new_rising.iter())
+            .collect();
         let committed = rising
             .into_iter()
             .filter(|id| {
@@ -841,7 +849,10 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let time = self.scheduler.time;
-        if !self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false)? {
+        let result = self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false);
+        let progressed = result.as_ref().is_ok_and(|ran| *ran);
+        self.finish_clock_round(time, Vec::new(), &[], result)?;
+        if !progressed {
             return Ok(false);
         }
         self.run_remaining_rounds(executor, time, limit)?;
@@ -1026,7 +1037,8 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(None);
         }
         let ready = self.take_ready_processes(time);
-        self.step_round(executor, time, Vec::new(), Vec::new(), ready, true)?;
+        let result = self.step_round(executor, time, Vec::new(), Vec::new(), ready, true);
+        self.finish_clock_round(time, Vec::new(), &[], result)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
         self.run_remaining_rounds(executor, time, time)?;
@@ -1043,7 +1055,7 @@ impl<B: SimBackend> SimulationState<B> {
         executor: &mut E,
         current_time: u64,
         mut events_to_process: Vec<SimEvent<B>>,
-        generated_events: Vec<SimEvent<B>>,
+        mut generated_events: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
         settle_idle: bool,
     ) -> Result<bool, SimulatorErrorCode>
@@ -1054,6 +1066,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.round_published_domains.make_empty();
         self.round_triggered_domains.make_empty();
         self.round_evaluated = false;
+        self.round_new_rising.make_empty();
 
         // Keep periodic provenance private so the public SimEvent shape stays
         // stable. Consume matching sidecar counts before fallible work so an
@@ -1110,6 +1123,35 @@ impl<B: SimBackend> SimulationState<B> {
                 let value: u8 = executor.backend().get_as(*signal);
                 if value != before {
                     process_driven.push((*id, value != 0));
+                }
+            }
+        }
+
+        // Ready processes may activate a clock at this timestamp. Join it
+        // to existing source events before any coincident FF domain commits.
+        // With no other event, retain the later fused-tick path.
+        if !events_to_process.is_empty() || !process_driven.is_empty() {
+            for (id, clock) in &self.tick_clocks {
+                if clock.next_edge == current_time
+                    && self.clock_has_waiters(*id)
+                    && executor.backend().get_as::<u8>(clock.signal) == 0
+                    && !events_to_process
+                        .iter()
+                        .any(|event| event.signal == clock.signal && event.next_val == 0)
+                    && !generated_events
+                        .iter()
+                        .any(|event| event.event_ref.id() == *id)
+                {
+                    current_time
+                        .checked_add(clock.period)
+                        .ok_or_else(|| clock_overflow(*id))?;
+                    generated_events.push(SimEvent {
+                        time: current_time,
+                        event_ref: clock.event,
+                        signal: clock.signal,
+                        next_val: 1,
+                    });
+                    self.round_new_rising.insert(*id);
                 }
             }
         }
