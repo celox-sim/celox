@@ -548,11 +548,13 @@ impl<B: SimBackend> SimulationState<B> {
         if current_time > limit {
             return Ok(None);
         }
-        for (id, clock) in &self.tick_clocks {
-            if clock.next_edge == current_time && self.clock_has_waiters(*id) {
-                current_time
-                    .checked_add(clock.period)
-                    .ok_or_else(|| clock_overflow(*id))?;
+        if !self.tick_budget_spent() {
+            for (id, clock) in &self.tick_clocks {
+                if clock.next_edge == current_time && self.clock_has_waiters(*id) {
+                    current_time
+                        .checked_add(clock.period)
+                        .ok_or_else(|| clock_overflow(*id))?;
+                }
             }
         }
         let mut events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
@@ -719,6 +721,10 @@ impl<B: SimBackend> SimulationState<B> {
         if rising.is_empty() {
             return Ok(());
         }
+        for id in &rising {
+            time.checked_add(self.tick_clocks[id].period)
+                .ok_or_else(|| clock_overflow(*id))?;
+        }
         self.ticks += 1;
         if let Some(budget) = &mut self.tick_budget {
             *budget -= 1;
@@ -728,7 +734,6 @@ impl<B: SimBackend> SimulationState<B> {
             let next_edge = time
                 .checked_add(clock.period)
                 .ok_or_else(|| clock_overflow(id))?;
-            self.ticks += 1;
             clock.next_edge = next_edge;
             clock.falling_edge = Some(next_edge - clock.period / 2);
             let resume_at = clock.next_edge;
