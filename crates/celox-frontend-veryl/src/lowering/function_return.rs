@@ -28,7 +28,7 @@ pub(super) fn implicit_return_body(body: &FunctionBody) -> Cow<'_, FunctionBody>
             .0
             .last()
             .is_some_and(|name| name.to_string() == "return.active")
-        || !active.index.0.is_empty()
+        || !active.index.indices.is_empty()
         || !active.select.0.is_empty()
         || active.select.1.is_some()
     {
@@ -149,7 +149,7 @@ fn refresh_destination(dst: &mut AssignDestination) {
 }
 
 fn refresh_selects(index: &mut VarIndex, select: &mut VarSelect) {
-    for expr in index.0.iter_mut().chain(select.0.iter_mut()) {
+    for expr in index.expressions_mut().chain(select.0.iter_mut()) {
         refresh_expression(expr);
     }
     if let Some((_, expr)) = &mut select.1 {
