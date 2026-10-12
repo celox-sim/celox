@@ -179,6 +179,282 @@ describe("createDut — scalar ports", () => {
 		dut.a = 0xffn; // Only lower 4 bits should be stored
 		expect(dut.a).toBe(0x0fn);
 	});
+
+	// The native layout allocates ceil(width/8) bytes per signal and packs the
+	// next state object directly after that range (crates/celox-state-layout).
+	// A write for a scalar port must therefore touch only its own bytes.
+	test.each([
+		[24, 3, 0xab_cdefn],
+		[25, 4, 0x1ff_ffffn],
+		[31, 4, 0x7fff_ffffn],
+		[40, 5, 0x12_3456_789an],
+		[49, 7, 0x1_2345_6789_abcdn],
+		[53, 7, 0x12_3456_789a_bcdn],
+	])(
+		"%i-bit scalar writes stay inside the signal's %i bytes",
+		(width, byteSize, value) => {
+			const signalOffset = 4;
+			const buffer = makeBuffer(32);
+			const bytes = new Uint8Array(buffer);
+			bytes.fill(0xa5);
+			const layout: Record<string, SignalLayout> = {
+				a: {
+					offset: signalOffset,
+					width,
+					byteSize,
+					is4state: false,
+					direction: "input",
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				a: { direction: "input", type: "logic", width },
+			};
+			const state: DirtyState = { dirty: false };
+			const dut = createDut<{ a: bigint }>(
+				buffer,
+				layout,
+				ports,
+				mockHandle(),
+				state,
+			);
+
+			dut.a = value;
+
+			expect(dut.a).toBe(value);
+			for (let i = 0; i < signalOffset; i++) {
+				expect(bytes[i]).toBe(0xa5);
+			}
+			for (let i = signalOffset + byteSize; i < bytes.length; i++) {
+				expect(bytes[i]).toBe(0xa5);
+			}
+		},
+	);
+
+	test.each([
+		[17, 3],
+		[24, 3],
+		[25, 4],
+		[31, 4],
+		[33, 5],
+		[40, 5],
+		[49, 7],
+		[53, 7],
+	])(
+		"%i-bit scalar write/read stays in bounds when the buffer ends at the signal",
+		(width, byteSize) => {
+			const signalOffset = 4;
+			// Tight buffer: the last byte of the signal is the last byte of memory,
+			// so an over-wide DataView access would throw RangeError.
+			const buffer = makeBuffer(signalOffset + byteSize);
+			const layout: Record<string, SignalLayout> = {
+				a: {
+					offset: signalOffset,
+					width,
+					byteSize,
+					is4state: false,
+					direction: "input",
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				a: { direction: "input", type: "logic", width },
+			};
+			const dut = createDut<{ a: bigint }>(
+				buffer,
+				layout,
+				ports,
+				mockHandle(),
+				{ dirty: false },
+			);
+			const allOnes = (1n << BigInt(width)) - 1n;
+
+			dut.a = allOnes;
+
+			expect(dut.a).toBe(allOnes);
+		},
+	);
+
+	test.each([
+		[20, 3],
+		[40, 5],
+		[49, 7],
+		[53, 7],
+	])(
+		"%i-bit 4-state scalar write/read stays in the value and mask planes",
+		(width, byteSize) => {
+			const signalOffset = 2;
+			const buffer = makeBuffer(signalOffset + byteSize * 2);
+			const layout: Record<string, SignalLayout> = {
+				a: {
+					offset: signalOffset,
+					width,
+					byteSize,
+					is4state: true,
+					direction: "input",
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				a: { direction: "input", type: "logic", width, is4state: true },
+			};
+			const dut = createDut<WritableFourStatePort>(
+				buffer,
+				layout,
+				ports,
+				mockHandle(),
+				{ dirty: false },
+			);
+			const allOnes = (1n << BigInt(width)) - 1n;
+			const maskValue = allOnes >> 1n;
+
+			dut.a = FourState(allOnes, maskValue);
+
+			const [value, mask] = readFourState(buffer, layout.a);
+			expect(value).toBe(allOnes);
+			expect(mask).toBe(maskValue);
+		},
+	);
+
+	test("20-bit 4-state scalar writes stay inside the value and mask planes", () => {
+		const signalOffset = 2;
+		const byteSize = 3;
+		const buffer = makeBuffer(32);
+		const bytes = new Uint8Array(buffer);
+		bytes.fill(0xa5);
+		const layout: Record<string, SignalLayout> = {
+			a: {
+				offset: signalOffset,
+				width: 20,
+				byteSize,
+				is4state: true,
+				direction: "input",
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			a: { direction: "input", type: "logic", width: 20, is4state: true },
+		};
+		const dut = createDut<WritableFourStatePort>(
+			buffer,
+			layout,
+			ports,
+			mockHandle(),
+			{ dirty: false },
+		);
+
+		dut.a = FourState(0xa_bcden, 0xf);
+
+		const [value, mask] = readFourState(buffer, layout.a);
+		expect(value).toBe(0xa_bcden);
+		expect(mask).toBe(0xfn);
+		for (let i = 0; i < signalOffset; i++) {
+			expect(bytes[i]).toBe(0xa5);
+		}
+		for (let i = signalOffset + byteSize * 2; i < bytes.length; i++) {
+			expect(bytes[i]).toBe(0xa5);
+		}
+	});
+	test.each([1, 3, 7, 9, 12, 15, 17, 24, 33, 40, 49, 53])(
+		"%i-bit roomy reads mask padding and neighbouring bytes",
+		(width) => {
+			const buffer = new ArrayBuffer(16);
+			new Uint8Array(buffer).fill(0xff);
+			const sig: SignalLayout = {
+				offset: 0,
+				width,
+				byteSize: Math.ceil(width / 8),
+				is4state: false,
+				direction: "input",
+			};
+			const dut = createDut<{ a: bigint }>(
+				buffer,
+				{ a: sig },
+				{ a: { direction: "input", type: "logic", width } },
+				mockHandle(),
+				{ dirty: false },
+			);
+			expect(dut.a).toBe((1n << BigInt(width)) - 1n);
+		},
+	);
+
+	test("resizing a buffer keeps valid scalar reads inside their storage", () => {
+		const buffer = Reflect.construct(ArrayBuffer, [
+			16,
+			{ maxByteLength: 16 },
+		]) as ArrayBuffer & { resize(length: number): void };
+		new Uint8Array(buffer).fill(0xff);
+		const sig: SignalLayout = {
+			offset: 4,
+			width: 24,
+			byteSize: 3,
+			is4state: false,
+			direction: "input",
+		};
+		const dut = createDut<{ a: bigint }>(
+			buffer,
+			{ a: sig },
+			{ a: { direction: "input", type: "logic", width: 24 } },
+			mockHandle(),
+			{ dirty: false },
+		);
+		expect(dut.a).toBe(0xff_ffffn);
+		buffer.resize(7);
+		expect(dut.a).toBe(0xff_ffffn);
+		dut.a = 0xab_cdefn;
+		expect(dut.a).toBe(0xab_cdefn);
+	});
+	test.each([1, 8, 17, 24, 25, 31, 32, 40, 49, 53, 54, 63, 65, 128])(
+		"%i-bit scalar writes truncate BigInt before converting to number",
+		(width) => {
+			const byteSize = Math.ceil(width / 8);
+			const buffer = makeBuffer(byteSize * 2);
+			const sig: SignalLayout = {
+				offset: 0,
+				width,
+				byteSize,
+				is4state: true,
+				direction: "input",
+			};
+			const dut = createDut<WritableFourStatePort>(
+				buffer,
+				{ a: sig },
+				{ a: { direction: "input", type: "logic", width, is4state: true } },
+				mockHandle(),
+				{ dirty: false },
+			);
+			const widthMask = (1n << BigInt(width)) - 1n;
+			for (const value of [(1n << 200n) | 1n, -1n, -(1n << 200n) - 3n]) {
+				dut.a = value;
+				expect(dut.a).toBe(value & widthMask);
+				expect(readFourState(buffer, sig)).toEqual([value & widthMask, 0n]);
+				dut.a = FourState(value, (1n << 201n) | 1n);
+				expect(readFourState(buffer, sig)).toEqual([value & widthMask, 1n]);
+			}
+		},
+	);
+
+	test.each([54, 63, 65, 127])(
+		"%i-bit wide reads mask unused padding",
+		(width) => {
+			const byteSize = Math.ceil(width / 8);
+			const buffer = makeBuffer(byteSize * 2);
+			new Uint8Array(buffer).fill(0xff);
+			const sig: SignalLayout = {
+				offset: 0,
+				width,
+				byteSize,
+				is4state: true,
+				direction: "input",
+			};
+			const dut = createDut<WritableFourStatePort>(
+				buffer,
+				{ a: sig },
+				{ a: { direction: "input", type: "logic", width, is4state: true } },
+				mockHandle(),
+				{ dirty: false },
+			);
+			const expected = (1n << BigInt(width)) - 1n;
+			expect(dut.a).toBe(expected);
+			expect(readFourState(buffer, sig)).toEqual([expected, expected]);
+		},
+	);
 });
 
 // ---------------------------------------------------------------------------

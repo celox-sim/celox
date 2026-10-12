@@ -291,7 +291,7 @@ impl<W: Write> VcdWriter<W> {
                 "cannot add external VCD signals after the first dump",
             ));
         }
-        self.external_descs = descs.to_vec();
+        self.external_descs.extend_from_slice(descs);
         for desc in descs {
             let index = self.external_count;
             self.external_count += 1;
@@ -710,6 +710,47 @@ const BINARY: [[u8; 8]; 256] = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_external_signals_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.vcd");
+        let second_path = dir.path().join("second.vcd");
+        let desc = |name: &str, width| VcdExternalSignalDesc {
+            scope: "component".into(),
+            name: name.into(),
+            width,
+        };
+        let descriptors = [desc("state", 8), desc("count", 4), desc("ready", 1)];
+        let mut writer = VcdWriter::new(&first_path, &[]).unwrap();
+        writer.add_external_signals(&descriptors[..2]).unwrap();
+        writer.add_external_signals(&descriptors[..2]).unwrap();
+        writer.add_external_signals(&descriptors[2..]).unwrap();
+        writer.add_external_signals(&descriptors).unwrap();
+        writer.add_external_signals(&[]).unwrap();
+        let values = [
+            (BigUint::from(0xabu8), BigUint::default()),
+            (BigUint::from(5u8), BigUint::default()),
+            (BigUint::from(1u8), BigUint::default()),
+        ];
+        writer.dump_with_external(0, &[], &values).unwrap();
+        writer.add_external_signals(&descriptors).unwrap();
+        assert!(writer.add_external_signals(&[desc("late", 1)]).is_err());
+        writer.restart(&second_path).unwrap();
+        writer.dump_with_external(0, &[], &values).unwrap();
+        writer.flush().unwrap();
+
+        // Restart changes the date, but preserves declarations and values.
+        let records = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .split("$version")
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(records(&first_path), records(&second_path));
+    }
 
     #[test]
     fn external_values_are_masked_to_their_declared_width() {
