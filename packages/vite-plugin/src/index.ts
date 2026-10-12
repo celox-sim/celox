@@ -51,9 +51,13 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		return normalizePath(resolve(projectRoot, name));
 	}
 
-	function regenerate(file: string, timestamp: number): Promise<boolean> {
+	function regenerate(file: string, timestamp?: number): Promise<boolean> {
 		file = normalizePath(file);
-		if (lastUpdate?.file === file && lastUpdate.timestamp === timestamp)
+		if (
+			timestamp !== undefined &&
+			lastUpdate?.file === file &&
+			lastUpdate.timestamp === timestamp
+		)
 			return lastUpdate.result;
 		const result = (async () => {
 			const componentChanged = testbenchComponentDependencies.has(
@@ -92,23 +96,24 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 			return true;
 		})();
-		lastUpdate = { file, timestamp, result };
+		if (timestamp !== undefined) lastUpdate = { file, timestamp, result };
 		return result;
 	}
 
-	function affectedModules<T>(graph: {
-		getModuleById(id: string): T | undefined;
-		invalidateModule(mod: T): void;
-	}) {
-		const modules: T[] = [];
+	function affectedModules<T>(
+		graph: {
+			getModuleById(id: string): T | undefined;
+			invalidateModule(mod: T): void;
+		},
+		changed: T[] = [],
+	) {
+		const modules = new Set(changed);
 		for (const id of [projectId, ...loadedIds]) {
 			const mod = graph.getModuleById(id);
-			if (mod) {
-				graph.invalidateModule(mod);
-				modules.push(mod);
-			}
+			if (mod) modules.add(mod);
 		}
-		return modules;
+		for (const mod of modules) graph.invalidateModule(mod);
+		return [...modules];
 	}
 
 	return {
@@ -172,7 +177,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const hmrDisabled = server.config.server.hmr === false;
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
-				void regenerate(file, Date.now())
+				// Raw events have no shared per-environment timestamp to deduplicate.
+				void regenerate(file)
 					.then((changed) => {
 						if (!changed) return;
 						if (server.environments) {
@@ -193,7 +199,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				file = normalizePath(file);
 				if (
 					(file.startsWith(`${projectRoot}/`) && file.endsWith(".veryl")) ||
-					CONFIG_FILES.slice(1).some((name) => projectFile(name) === file)
+					CONFIG_FILES.some((name) => projectFile(name) === file)
 				) {
 					server.watcher.emit("change", projectFile("Veryl.toml"));
 				}
@@ -316,15 +322,15 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async hotUpdate({ file, timestamp }) {
+		async hotUpdate({ file, timestamp, modules }) {
 			if ((await regenerate(file, timestamp)) === false) return;
-			return affectedModules(this.environment.moduleGraph);
+			return affectedModules(this.environment.moduleGraph, modules);
 		},
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
-		async handleHotUpdate({ file, timestamp, server }) {
+		async handleHotUpdate({ file, timestamp, server, modules }) {
 			if ((await regenerate(file, timestamp)) === false) return;
-			return affectedModules(server.moduleGraph);
+			return affectedModules(server.moduleGraph, modules);
 		},
 	};
 }

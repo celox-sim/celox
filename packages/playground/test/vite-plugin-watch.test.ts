@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 
 const platform = vi.hoisted(() => ({ windows: false }));
@@ -25,20 +25,36 @@ vi.mock("../../vite-plugin/src/generator.js", () => ({
 		fileModules: {},
 	})),
 }));
+vi.mock(
+	"../../vite-plugin/src/testbench-components.js",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("../../vite-plugin/src/testbench-components.js")
+		>()),
+		loadTestbenchComponentModule: vi.fn(async (entry: string) => ({
+			manifests: {},
+			dependencies: new Set([entry, join(dirname(entry), "helper.ts")]),
+		})),
+		writeTestbenchComponentSidecar: vi.fn(),
+	}),
+);
 
 import { runGenTs } from "../../vite-plugin/src/generator.js";
 import celox from "../../vite-plugin/src/index.js";
+import { loadTestbenchComponentModule } from "../../vite-plugin/src/testbench-components.js";
 
 const roots: string[] = [];
 afterEach(() => {
 	platform.windows = false;
 	vi.mocked(runGenTs).mockClear();
+	vi.mocked(loadTestbenchComponentModule).mockClear();
+	vi.restoreAllMocks();
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
 });
 
-async function initialize(root: string) {
-	const plugin = celox({ projectRoot: root });
+async function initialize(root: string, testbenchComponents?: string) {
+	const plugin = celox({ projectRoot: root, testbenchComponents });
 	const context = { addWatchFile: vi.fn(), warn: vi.fn() };
 	await (plugin.configResolved as Function)({ root });
 	await (plugin.buildStart as Function).call(context);
@@ -77,7 +93,7 @@ test("Windows project imports resolve to a loadable dependency module", async ()
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 });
 
-test.each(["Main.veryl", "Veryl.toml", "celox.toml"])(
+test.each(["Main.veryl", "Veryl.toml", "celox.toml", "Veryl.lock"])(
 	"watch edits of %s invalidate unchanged mtime/size fingerprints once across environments",
 	async (name) => {
 		const root = mkdtempSync(join(tmpdir(), "celox-watch-"));
@@ -149,8 +165,9 @@ test.each([
 		for (const event of ["add", "unlink"]) {
 			watcher.emit(event, join(root, "Extra.veryl"));
 			watcher.emit(event, join(root, "celox.toml"));
+			watcher.emit(event, join(root, "Veryl.toml"));
 		}
-		const expected = hasEnvironments && hmr ? 0 : 4;
+		const expected = hasEnvironments && hmr ? 0 : 6;
 		expect(changes).toHaveBeenCalledTimes(expected);
 		httpServer.emit("close");
 		watcher.emit("add", join(root, "Extra.veryl"));
@@ -184,3 +201,64 @@ test("HMR-disabled watch edits refresh data and stop updating after server close
 	watcher.emit("change", file);
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 });
+
+test("raw watch events in the same millisecond each refresh generated data", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-rapid-"));
+	roots.push(root);
+	const file = join(root, "Main.veryl");
+	writeFileSync(file, "before");
+	const { plugin } = await initialize(root);
+	const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+	const httpServer = new EventEmitter();
+	(plugin.configureServer as Function)({
+		watcher,
+		httpServer,
+		config: { server: { hmr: false }, logger: { error: vi.fn() } },
+		environments: { ssr: { moduleGraph: graph() } },
+	});
+	vi.spyOn(Date, "now").mockReturnValue(42);
+	for (const value of ["first edit", "second edit"]) {
+		writeFileSync(file, value);
+		watcher.emit("change", file);
+		await Promise.resolve();
+	}
+	expect(runGenTs).toHaveBeenCalledTimes(3);
+	httpServer.emit("close");
+});
+
+test.each(["hotUpdate", "handleHotUpdate"] as const)(
+	"%s keeps changed component dependencies alongside HDL import variants",
+	async (hook) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-component-"));
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const helper = join(root, "helper.ts");
+		writeFileSync(entry, "export {};");
+		writeFileSync(helper, "export const step = 1;");
+		const { plugin, context } = await initialize(root, entry);
+		const plain = join(root, "Main.veryl");
+		const query = `${plain}?dse=preserveAllPorts`;
+		for (const id of [plain, query])
+			(plugin.load as Function).call(context, id);
+		const changed = { id: helper };
+		const moduleGraph = graph();
+		const result = await (plugin[hook] as Function).call(
+			{ environment: { moduleGraph } },
+			{
+				file: helper,
+				timestamp: 1,
+				modules: [changed],
+				server: { moduleGraph },
+			},
+		);
+		expect(result).toContain(changed);
+		expect(result.map((mod: { id: string }) => mod.id)).toEqual([
+			helper,
+			`${root}/Veryl.toml?celox-project`,
+			plain,
+			query,
+		]);
+		expect(moduleGraph.invalidateModule).toHaveBeenCalledWith(changed);
+		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(2);
+	},
+);
