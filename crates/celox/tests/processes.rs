@@ -1247,3 +1247,52 @@ fn one_shot_events_conflict_with_new_process_clock_generators() {
         assert_eq!(sim.get(sim.signal("count")), 0u32.into());
     }
 }
+
+#[test]
+fn newly_started_process_clocks_share_scheduled_domains_pre_edge_state() {
+    fn design() -> FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let a = m.internal("a", bit).unwrap();
+        let b = m.input("b", bit).unwrap();
+        let qa = m.output("qa", bit).unwrap();
+        let qb = m.output("qb", bit).unwrap();
+        let one = constant(&mut m, 1, 1);
+        let qb_read = m.read(qb).unwrap();
+        let qa_target = m.whole(qa).unwrap();
+        let qb_target = m.whole(qb).unwrap();
+        m.register(qa_target, qb_read, a, Edge::Posedge, None, None)
+            .unwrap();
+        m.register(qb_target, one, b, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(a, 4).unwrap();
+        let four = constant(&mut m, 4, 64);
+        let count = constant(&mut m, 1, 64);
+        m.process(vec![
+            Statement::Delay { amount: four },
+            Statement::ClockCycles { clock: a, count },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: celox::SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("b", 4, 1).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("qb")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("qa")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    check(
+        Simulation::from_frontend(design())
+            .build_interpreter()
+            .unwrap(),
+    );
+    check(
+        Simulation::from_frontend(design())
+            .build_cranelift()
+            .unwrap(),
+    );
+    check(Simulation::from_frontend(design()).build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulation::from_frontend(design()).build_native().unwrap());
+}

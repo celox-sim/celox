@@ -1410,16 +1410,23 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        // A newly asserted reset and the first edge of its clock wait
-        // belong to one batch, including consecutive reset helpers.
+        // Ready processes can activate a clock at this timestamp. Join
+        // its first rise with existing events and reset assertions before
+        // any coincident domain publishes its FF updates. An isolated
+        // ordinary clock wait retains the fused-tick path.
         let reset_edge_due = self.clock_waits.values().any(|wait| {
             wait.release.is_some() && self.tick_clocks[&wait.clock].next_edge == current_time
         });
-        if !self.tick_budget_spent() && reset_edge_due {
+        if !self.tick_budget_spent()
+            && (reset_edge_due || !events_to_process.is_empty() || !process_driven.is_empty())
+        {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
                     && self.clock_has_waiters(*id)
                     && executor.backend().get_as::<u8>(clock.signal) == 0
+                    && !events_to_process
+                        .iter()
+                        .any(|event| event.signal == clock.signal && event.next_val == 0)
                     && !generated_events
                         .iter()
                         .any(|event| event.event_ref.id() == *id)
