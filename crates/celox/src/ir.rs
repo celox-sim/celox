@@ -445,7 +445,19 @@ pub struct UnoptimizedSir {
 }
 
 impl UnoptimizedSir {
-    pub(crate) fn new(sir: SirProgram, runtime: RuntimeProgram) -> Self {
+    pub(crate) fn new(sir: SirProgram, mut runtime: RuntimeProgram) -> Self {
+        runtime.runtime_schema.active_ff_events = sir.eval_only_ffs.iter()
+            .filter(|(_, units)| {
+                units.iter().any(|unit| {
+                    unit.blocks.values().any(|block| {
+                        block.instructions.iter().any(|inst| {
+                            matches!(inst, SIRInstruction::Store(addr, ..) if addr.region == STABLE_REGION)
+                        })
+                    })
+                })
+            })
+            .map(|(event, _)| *event)
+            .collect();
         Self {
             sir,
             layout_requirements: Default::default(),

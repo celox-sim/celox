@@ -136,6 +136,7 @@ pub struct SimulationState<B: SimBackend> {
     signal_to_id: FxHashMap<SignalRef, usize>,
     processes: Vec<ProcessRefs>,
     process_event_counters: Vec<(usize, SignalRef, SignalRef)>,
+    active_ff_domains: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     /// Processes suspended at an event or level wait, which their kernels
     /// re-check whenever the state may have changed.
@@ -218,6 +219,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             processes,
             process_event_counters: Vec::new(),
+            active_ff_domains: BitSet::new(),
             waiting: BTreeSet::new(),
             inactive: BTreeSet::new(),
             finished: false,
@@ -259,6 +261,15 @@ impl<B: SimBackend> SimulationState<B> {
             .entry(PeriodicEventKey::from_event(&event))
             .or_default() += 1;
         self.scheduler.push(event);
+    }
+
+    /// Mark domains whose evaluation publishes blocking stores before NBA application.
+    pub fn with_active_ff_events(mut self, events: Vec<B::Event>) -> Self {
+        self.active_ff_domains = events
+            .into_iter()
+            .map(|event| self.event_info[event.id()].canonical_id)
+            .collect();
+        self
     }
 
     /// Attach exact kernel edge counters to their runtime event domains.
@@ -698,20 +709,24 @@ impl<B: SimBackend> SimulationState<B> {
                 } else {
                     // Drain active combinational effects of blocking FF stores
                     // before either inactive continuations or NBA publication.
-                    executor.eval_comb()?;
-                    self.replace_triggers_with_stable_edges(executor.backend_mut());
-                    for id in ff_body_edges.iter() {
-                        executor.backend_mut().mark_triggered_bit(id);
-                    }
-                    if executor
-                        .backend()
-                        .get_triggered_bits()
-                        .iter()
-                        .any(|id| !discovered_in_this_step.contains(id))
+                    if !self.inactive.is_empty()
+                        || !triggered_domains.is_disjoint(&self.active_ff_domains)
                     {
-                        continue;
+                        executor.eval_comb()?;
+                        self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        for id in ff_body_edges.iter() {
+                            executor.backend_mut().mark_triggered_bit(id);
+                        }
+                        if executor
+                            .backend()
+                            .get_triggered_bits()
+                            .iter()
+                            .any(|id| !discovered_in_this_step.contains(id))
+                        {
+                            continue;
+                        }
+                        executor.backend_mut().clear_triggered_bits();
                     }
-                    executor.backend_mut().clear_triggered_bits();
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();

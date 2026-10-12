@@ -1740,3 +1740,39 @@ fn blocking_ff_effects_settle_before_nbas_without_inactive_processes() {
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
     assert_eq!(sim.get(sim.signal("c")), 0u8.into());
 }
+
+#[test]
+fn repeated_watched_nbas_require_an_ordered_update_queue() {
+    for target in ["a", "a[0]"] {
+        let source = format!(
+            r#"module Top(input bit clk, output bit seen);
+            bit a;
+            always @(posedge clk) begin {target}<=1; {target}<=0; end
+            initial begin @(posedge a); seen=1; end
+        endmodule"#
+        );
+        let error =
+            Simulation::from_sv_sources(vec![(&source, Path::new("ordered_nba.sv"))], "Top")
+                .build()
+                .err()
+                .expect("collapsed watched NBA pulse must be rejected")
+                .to_string();
+        assert!(error.contains("require ordered NBA updates"), "{error}");
+    }
+}
+
+#[test]
+fn output_formal_writes_publish_only_the_returned_value() {
+    let mut sim = simulation(
+        r#"module Top(output bit seen);
+        bit q;
+        task pulse(output bit out); out=1; out=0; endtask
+        always_comb pulse(q);
+        initial begin @(posedge q); seen=1; end
+        initial begin #1; $finish; end
+    endmodule"#,
+    );
+    sim.run_until(1).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+}
