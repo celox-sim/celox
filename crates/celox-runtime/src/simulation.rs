@@ -227,6 +227,9 @@ impl PeriodicEventKey {
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
     round_published_domains: BitSet,
+    round_triggered_domains: BitSet,
+    scheduled_clock_drives: BitSet,
+    scheduled_clock_time: u64,
     round_evaluated: bool,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
@@ -342,6 +345,9 @@ impl<B: SimBackend> SimulationState<B> {
             inactive: BTreeSet::new(),
             finished: false,
             round_published_domains: BitSet::new(),
+            round_triggered_domains: BitSet::new(),
+            scheduled_clock_drives: BitSet::new(),
+            scheduled_clock_time: 0,
             round_evaluated: false,
         }
     }
@@ -449,6 +455,14 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
+        self.scheduled_clock_drives.make_empty();
+        self.scheduled_clock_time = current_time;
+        for event in &events_to_process {
+            self.scheduled_clock_drives.insert(event.event_ref.id());
+            if let Some(id) = self.signal_to_id.get(&event.signal) {
+                self.scheduled_clock_drives.insert(*id);
+            }
+        }
         let mut falling = Vec::new();
         for (id, clock) in &self.tick_clocks {
             if clock.falling_edge == Some(current_time) {
@@ -465,10 +479,12 @@ impl<B: SimBackend> SimulationState<B> {
             .tick_clocks
             .iter()
             .filter(|(id, clock)| {
-                !events_to_process.is_empty()
+                let high = executor.backend().get_as::<u8>(clock.signal) != 0;
+                let pending_rise = high && !self.last_clock_values.contains(**id);
+                (!events_to_process.is_empty() || pending_rise)
                     && clock.next_edge == current_time
                     && self.clock_has_waiters(**id)
-                    && executor.backend().get_as::<u8>(clock.signal) == 0
+                    && (!high || pending_rise)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -606,7 +622,12 @@ impl<B: SimBackend> SimulationState<B> {
             })
             .collect();
         self.credit_rising_edges(time, committed)?;
-        if self.round_evaluated {
+        if result.is_ok()
+            || (self.round_evaluated
+                && self
+                    .round_triggered_domains
+                    .is_subset(&self.round_published_domains))
+        {
             for id in falling {
                 self.tick_clocks
                     .get_mut(id)
@@ -758,6 +779,19 @@ impl<B: SimBackend> SimulationState<B> {
         if self.scheduler.clocks.get(id).is_some_and(Option::is_some) {
             return Err(SimulatorErrorCode::Runtime {
                 message: format!("process clock {id} is already driven by add_clock"),
+                signals: Vec::new(),
+            });
+        }
+        if (self.scheduled_clock_time == self.scheduler.time
+            && self.scheduled_clock_drives.contains(id))
+            || self
+                .scheduler
+                .event_queue
+                .iter()
+                .any(|event| event.event_ref.id() == id)
+        {
+            return Err(SimulatorErrorCode::Runtime {
+                message: format!("process clock {id} is already driven by schedule"),
                 signals: Vec::new(),
             });
         }
@@ -1005,6 +1039,7 @@ impl<B: SimBackend> SimulationState<B> {
     {
         self.scheduler.time = current_time;
         self.round_published_domains.make_empty();
+        self.round_triggered_domains.make_empty();
         self.round_evaluated = false;
 
         // Keep periodic provenance private so the public SimEvent shape stays
@@ -1140,9 +1175,10 @@ impl<B: SimBackend> SimulationState<B> {
                             discovered_in_this_step.insert(single_id);
                             triggered_domains.insert(info.canonical_id);
                             any_new_outer_loop_trigger = true;
+                            self.round_triggered_domains.insert(info.canonical_id);
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
-                            self.round_published_domains.insert(info.canonical_id);
+                            self.record_domain_publication(executor.backend(), info.canonical_id);
                             executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
                             if track_stable_edges {
@@ -1168,6 +1204,7 @@ impl<B: SimBackend> SimulationState<B> {
                     triggered_domains.insert(info.canonical_id);
                     newly_triggered.push(info.canonical_id);
 
+                    self.round_triggered_domains.insert(info.canonical_id);
                     let before = self.event_counter_values(executor.backend());
                     if let Some(event) = info.eval_only_event {
                         executor.stage_external_event(
@@ -1178,7 +1215,7 @@ impl<B: SimBackend> SimulationState<B> {
                     } else if let Some(event) = info.eval_ff_event {
                         executor.stage_external_event(event, current_time)?;
                         executor.eval_apply_ff_at(event)?;
-                        self.round_published_domains.insert(info.canonical_id);
+                        self.record_domain_publication(executor.backend(), info.canonical_id);
                     } else {
                         unreachable!(
                             "FF trigger discovered without a corresponding execution unit"
@@ -1253,7 +1290,7 @@ impl<B: SimBackend> SimulationState<B> {
             for id in &newly_triggered {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
-                    self.round_published_domains.insert(*id);
+                    self.record_domain_publication(executor.backend(), *id);
                 }
             }
             for id in &newly_triggered {
@@ -1325,6 +1362,19 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         Ok(true)
+    }
+
+    fn record_domain_publication(&mut self, backend: &B, canonical: usize) {
+        self.round_published_domains.insert(canonical);
+        for (signal, id, _) in &self.topo_signals {
+            if *id != usize::MAX && self.event_info[*id].canonical_id == canonical {
+                if backend.get_as::<u8>(*signal) != 0 {
+                    self.last_clock_values.insert(*id);
+                } else {
+                    self.last_clock_values.remove(*id);
+                }
+            }
+        }
     }
 
     fn event_counter_values(&self, backend: &B) -> Vec<(u32, u32)> {
