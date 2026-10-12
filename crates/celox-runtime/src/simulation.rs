@@ -1522,24 +1522,22 @@ impl<B: SimBackend> SimulationState<B> {
                 let progressed = if active_ran {
                     true
                 } else {
-                    if !self.inactive.is_empty() {
-                        // Blocking FF stores publish in the active region;
-                        // settle them and drain new active edges before #0.
-                        executor.eval_comb()?;
-                        self.replace_triggers_with_stable_edges(executor.backend_mut());
-                        for id in ff_body_edges.iter() {
-                            executor.backend_mut().mark_triggered_bit(id);
-                        }
-                        if executor
-                            .backend()
-                            .get_triggered_bits()
-                            .iter()
-                            .any(|id| !discovered_in_this_step.contains(id))
-                        {
-                            continue;
-                        }
-                        executor.backend_mut().clear_triggered_bits();
+                    // Drain active combinational effects of blocking FF stores
+                    // before either inactive continuations or NBA publication.
+                    executor.eval_comb()?;
+                    self.replace_triggers_with_stable_edges(executor.backend_mut());
+                    for id in ff_body_edges.iter() {
+                        executor.backend_mut().mark_triggered_bit(id);
                     }
+                    if executor
+                        .backend()
+                        .get_triggered_bits()
+                        .iter()
+                        .any(|id| !discovered_in_this_step.contains(id))
+                    {
+                        continue;
+                    }
+                    executor.backend_mut().clear_triggered_bits();
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
