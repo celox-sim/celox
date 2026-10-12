@@ -19,11 +19,6 @@ use crate::{
 /// decoration and waveform capture outside the backend-independent scheduler.
 pub trait SimulationExecutor {
     type Backend: SimBackend;
-    /// Whether a process finish stops already queued domains in this round.
-    fn finish_stops_round(&self, _process: usize) -> bool {
-        true
-    }
-
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
@@ -459,7 +454,7 @@ impl<B: SimBackend> SimulationState<B> {
             scheduled_clock_time: 0,
             round_evaluated: false,
             round_new_rising: BitSet::new(),
-            finish_round: true,
+            finish_round: false,
         }
     }
 
@@ -1134,6 +1129,7 @@ impl<B: SimBackend> SimulationState<B> {
                         .collect::<Vec<_>>();
                     executor.run_process(process, current_time)?;
                     if executor.finish_requested(current_time) {
+                        self.finish_round = true;
                         self.finished = true;
                         return Ok(true);
                     }
@@ -1195,7 +1191,7 @@ impl<B: SimBackend> SimulationState<B> {
                             any_ran = true;
                         }
                         Some(ProcessStatus::Finish) => {
-                            self.finish_round = executor.finish_stops_round(process);
+                            self.finish_round = executor.finish_requested(current_time);
                             self.waiting.remove(&process);
                             self.done.insert(process);
                             self.finished = true;

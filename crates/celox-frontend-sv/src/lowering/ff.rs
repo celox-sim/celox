@@ -2133,12 +2133,6 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
-        // A process ends the simulation itself; the rest of its body does not
-        // run.
-        if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
-            self.with_kernel(ProcessKernelBuilder::finish);
-            return Ok(false);
-        }
         let (template, values) = system_task_template(&kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -2193,7 +2187,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             args: regs,
         });
         if matches!(kind, SystemTaskKind::Finish) {
-            self.b.seal_block(SIRTerminator::Return);
+            if self.kernel.is_some() {
+                self.with_kernel(ProcessKernelBuilder::finish);
+            } else {
+                self.b.seal_block(SIRTerminator::Return);
+            }
             return Ok(false);
         }
         if matches!(kind, SystemTaskKind::Fatal) {
