@@ -1065,6 +1065,9 @@ mod host {
         }
 
         /// Sets a signal value and marks combinational logic as dirty.
+        /// Copies the value's little-endian bytes, zero-extending shorter
+        /// values and truncating bits beyond the signal width. Integer type
+        /// size does not need to match the signal storage size.
         pub fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
             self.backend.set(signal, val);
             self.dirty = true;
