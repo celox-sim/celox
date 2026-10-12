@@ -434,7 +434,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
-		const needsHostPoll = this._state.pendingHostWrites ?? this._state.dirty;
+		const needsHostPoll = this.needsHostPoll();
 		this.settleSharedWrites();
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
@@ -499,6 +499,13 @@ export class Simulation<P = Record<string, unknown>> {
 		return t;
 	}
 
+	private needsHostPoll(): boolean {
+		return (
+			(this._state.pendingHostWrites ?? this._state.dirty) &&
+			(this._handle.hasWaitingProcesses?.() ?? true)
+		);
+	}
+
 	private settleSharedWrites(): void {
 		if (this._state.dirty) {
 			this._handle.evalComb();
@@ -546,8 +553,7 @@ export class Simulation<P = Record<string, unknown>> {
 			// already spent. Preserve that behavior instead of reporting a timeout.
 			if (
 				steps >= max &&
-				(this._handle.nextEventTime() != null ||
-					(this._state.pendingHostWrites ?? this._state.dirty))
+				(this._handle.nextEventTime() != null || this.needsHostPoll())
 			) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
@@ -732,7 +738,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.restore(checkpoint._native);
 		this.syncClocks();
 		this._state.dirty = false;
-		this._state.pendingHostWrites = false;
+		this._state.pendingHostWrites = true;
 	}
 
 	/**
