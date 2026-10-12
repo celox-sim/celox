@@ -508,9 +508,20 @@ impl<B: SimBackend> Simulation<B> {
     /// follow, as [`Self::step`] does before advancing. Time does not
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.simulator.eval_comb()?;
         let time = self.state.time();
-        self.state.settle_at(&mut self.simulator, time)?;
+        if self.simulator.dirty
+            || !self.simulator.backend.get_triggered_bits().is_empty()
+            || self.state.has_unsettled_edges(&self.simulator.backend)
+            || self
+                .state
+                .next_event_time()
+                .is_some_and(|next| next <= time)
+        {
+            self.settle_host_writes()?;
+            self.state.settle_at(&mut self.simulator, time)?;
+        } else {
+            self.state.poll_waiting(&mut self.simulator)?;
+        }
         Ok(())
     }
 
@@ -2174,6 +2185,59 @@ mod finish_and_cotrigger_tests {
         let builder = || {
             Simulator::from_sv_sources(vec![(source, std::path::Path::new("cascade.sv"))], "Top")
         };
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod idle_settle_tests {
+    use super::*;
+    #[test]
+    fn settled_reads_do_not_repeat_comb_side_effects() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let a = sim.signal("a");
+            sim.set_wide(a, 1u8.into());
+            sim.run_until(0).unwrap();
+            assert!(
+                sim.drain_runtime_events()
+                    .iter()
+                    .any(|e| matches!(e,crate::RuntimeEvent::Display { message } if message=="x"))
+            );
+            sim.settle().unwrap();
+            sim.settle().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert!(sim.drain_runtime_events().is_empty());
+        }
+        let source = "module Top(input bit a,output bit q);always @* begin q=a;if(a)$display(\"x\");end endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("settle.sv"))], "Top");
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_comb_nba_tests {
+    use super::*;
+    #[test]
+    fn blocking_comb_waiters_run_before_nbas_on_every_backend() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+        }
+        let source = "module Top(input bit clk,output bit q,observed);bit a;wire c=a;always @(posedge clk)begin a=1;q<=1;end initial begin @(posedge c);observed=q;end endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("active.sv"))], "Top");
         check(Simulation::new(builder().build_interpreter().unwrap()));
         check(Simulation::new(builder().build_cranelift().unwrap()));
         check(Simulation::new(builder().build_wasm().unwrap()));

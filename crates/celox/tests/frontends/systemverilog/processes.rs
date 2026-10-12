@@ -41,6 +41,7 @@ fn displays(sim: &mut Simulation) -> Vec<(u64, String)> {
             match event {
                 RuntimeEvent::Display { message } => lines.push((time, message)),
                 RuntimeEvent::Write { message } => lines.push((time, message)),
+                RuntimeEvent::Finish => {}
                 other => panic!("unexpected runtime event {other:?}"),
             }
         }
@@ -1914,4 +1915,19 @@ fn disjoint_combinational_slices_do_not_hide_a_watched_bit() {
     sim.modify(|sim| sim.set(a, 1u8)).unwrap();
     sim.step().unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn blocking_ff_comb_events_wake_waiters_before_nba() {
+    let source = r#"module Top(input bit clk, output bit q, observed);
+        bit a; wire c = a;
+        always @(posedge clk) begin a = 1; q <= 1; end
+        initial begin @(posedge c); observed = q; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
 }

@@ -93,6 +93,9 @@ Every construct above is covered by tests that compare the result with a
 software model. The shared Veryl conformance suite also runs against the
 SystemVerilog emitted by Veryl.
 
+`$finish` in an SV process emits `RuntimeEvent::Finish` and stops the current
+time slot before pending sequential updates, as it does in RTL logic.
+
 ## What is not supported
 
 Celox reports an `Unsupported` error naming the construct instead of ignoring
