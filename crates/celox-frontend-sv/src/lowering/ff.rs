@@ -4,8 +4,8 @@
 //! and `case`, loop blocks for loops whose trip count is not known, and
 //! inlined subroutine bodies. Nonblocking targets are read from the stable
 //! region and written to the working region, so every process of a trigger
-//! observes the pre-edge state; blocking targets and procedural locals are
-//! published in stable state in the active region; procedural scratch
+//! observes pre-NBA state; blocking module targets publish in stable state
+//! in the active region, while procedural scratch
 //! stays in the working region (IEEE 1800-2023 10.4).
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
@@ -37,7 +37,7 @@ struct FunctionBlocks {
 pub(super) struct Ff<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
     b: SIRBuilder<Addr>,
-    /// Variables read from the working region.
+    /// Variables assigned with blocking stores.
     working: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
@@ -129,8 +129,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
     }
 
-    /// Where a write of `id`, and a read of a value the process wrote, go:
-    /// the working region, or stable state in a process kernel.
+    /// Active module state stays stable; FF scratch uses working state,
+    /// and process kernels address stable state.
     fn target(&self, id: SourceVarId) -> Addr {
         let variable = self.aliases.get(&id).copied().unwrap_or(id);
         if self.kernel.is_some()

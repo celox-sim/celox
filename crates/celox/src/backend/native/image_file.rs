@@ -301,3 +301,25 @@ mod process_metadata_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod runtime_schema_version_tests {
+    use super::*;
+
+    #[test]
+    fn previous_native_schema_is_rejected_before_postcard_decoding() {
+        let payload = b"not a NativeProgramImage";
+        let previous = CONTAINER_VERSION - 1;
+        let mut bytes = payload.to_vec();
+        bytes.extend_from_slice(TRAILER_MAGIC);
+        bytes.extend_from_slice(&previous.to_le_bytes());
+        bytes.push(NativeImageArchitecture::current() as u8);
+        bytes.push(0);
+        bytes.extend_from_slice(&(TRAILER_SIZE as u32).to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&checksum(payload).to_le_bytes());
+        assert!(
+            matches!(NativeProgramImage::from_container_bytes(&bytes),Err(NativeImageContainerError::UnsupportedVersion(version)) if version==previous)
+        );
+    }
+}
