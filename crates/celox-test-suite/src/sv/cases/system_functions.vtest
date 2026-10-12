@@ -2336,3 +2336,30 @@ Time scale of (P) is 100ns / 10ps
   (assert_eq bits_c 48)
   (assert_eq size_e 2)
   (assert_eq body_bits 16))
+
+(case time_format_consumes_its_expression_argument
+  (source "time_format.sv" #"
+module Top(input logic clk);
+    always_ff @(posedge clk) begin
+        $display("t:[%t] d:[%d]", 32'd7, 8'shfe);
+        $display("small:[%0t] padded:[%5t] next:[%0h] %%t", 32'd17, 32'd9, 8'haf);
+    end
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output "t:[                   7] d:[  -2]\nsmall:[17] padded:[    9] next:[af] %t\n"))
+
+(case string_literals_follow_numeric_format_specifiers
+  (source "string_format.sv" #"
+module Top(input logic clk);
+    always_ff @(posedge clk) begin
+        $display("decimal:[%d] hex:[%h] binary:[%b] text:[%3s]", "9", "A", "B", "C");
+        $display("leading:[%s] minimal:[%0s] nibble:[%s]", 16'h0041, 16'h0041, 4'ha);
+        $display("plain:", "AB", 8'd9);
+    end
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output "decimal:[ 57] hex:[41] binary:[01000010] text:[  C]\nleading:[ A] minimal:[A] nibble:[\n]\nplain:AB  9\n"))

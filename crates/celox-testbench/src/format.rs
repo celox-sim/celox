@@ -200,6 +200,32 @@ pub fn format_sized_display_arg(
     // Table 21-1 gives each uppercase specifier the meaning of its lowercase
     // one, so `%H` prints lowercase digits like `%h`.
     let spec = spec.to_ascii_lowercase();
+    // Packed string literals still undergo an explicit numeric conversion.
+    let arg = &DisplayFormatArg {
+        value: arg.value,
+        mask: arg.mask,
+        width: arg.width,
+        signed: arg.signed,
+        is_string: arg.is_string && spec == 's',
+    };
+    if spec == 's' && !has_mask(arg) {
+        // Integral %s is right-justified byte data; omit leading zero bytes
+        // and include a partial most-significant byte (21.2.1.7).
+        let bytes = masked_value(arg.value, arg.width).to_bytes_be();
+        let start = bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(bytes.len());
+        let text = String::from_utf8(bytes[start..].to_vec())
+            .unwrap_or_else(|_| format_display_arg(arg, Some(spec)));
+        let len = text.len();
+        return pad_counted(
+            text,
+            ' ',
+            field_width.unwrap_or_else(|| arg.width.div_ceil(8)),
+            len,
+        );
+    }
     let text = format_display_arg(arg, Some(spec));
     if arg.is_string {
         // A string is a sequence of 8-bit character codes (IEEE 1800-2023
