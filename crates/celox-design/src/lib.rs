@@ -261,6 +261,8 @@ pub enum ProcessStatus {
     /// the runtime settles the combinational logic and resumes the process
     /// at once, before any other process runs.
     Settle,
+    /// Return control to drain events without evaluating combinational logic.
+    Yield,
 }
 
 impl ProcessStatus {
@@ -277,6 +279,7 @@ impl ProcessStatus {
             Self::WaitClock => 6,
             Self::Host => 7,
             Self::Settle => 8,
+            Self::Yield => 10,
         }
     }
 
@@ -291,6 +294,7 @@ impl ProcessStatus {
             6 => Some(Self::WaitClock),
             7 => Some(Self::Host),
             8 => Some(Self::Settle),
+            10 => Some(Self::Yield),
             _ => None,
         }
     }

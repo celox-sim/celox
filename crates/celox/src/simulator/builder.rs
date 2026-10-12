@@ -2834,6 +2834,9 @@ mod host {
             let sim_res = program_res.and_then(|(program, warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+                if !laid_out.runtime().runtime_schema.processes.is_empty() {
+                    self.options.emit_triggers = true;
+                }
                 if self.vcd_path.is_some() {
                     laid_out.enable_vcd_tracking();
                 }

@@ -1157,6 +1157,11 @@ impl<B: SimBackend> SimulationState<B> {
                     let refs = &self.processes[process];
                     let status: u8 = executor.backend().get_as(refs.status);
                     match ProcessStatus::from_code(status) {
+                        Some(ProcessStatus::Yield) => {
+                            self.waiting.remove(&process);
+                            any_ran = true;
+                            continue;
+                        }
                         Some(ProcessStatus::Settle) => {
                             executor.eval_comb()?;
                             if executor.finish_requested(current_time) {
@@ -1282,6 +1287,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
             progressed = true;
         }
+    }
+
+    /// Whether all processes at or beyond the testbench boundary are done.
+    pub fn processes_done_from(&self, first: usize) -> bool {
+        first <= self.processes.len()
+            && self.done.range(first..).count() == self.processes.len() - first
     }
 
     /// Whether a process requested the end of the simulation.

@@ -1197,3 +1197,69 @@ fn tick_limit_settles_reset_releases_without_domains() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(Simulator::builder(code, "Top").build_native().unwrap());
 }
+
+#[test]
+fn assignment_selection_helpers_use_process_semantics() {
+    let code = r#"#[test(Top)] module Top { inst clk:$tb::clock_gen; var words:u8[2];
+   function index()->u32 { clk.next(); $assert(1,"selected"); return 1; }
+   initial { words[index()]=7; $assert(words[1]==7); $finish(); }
+ }"#;
+    check_passes_on_every_backend(code);
+}
+#[cfg(feature = "systemverilog")]
+#[test]
+fn testbench_fallthrough_ignores_background_design_processes() {
+    let veryl =
+        "#[test(Top)] module Top { var x:logic; inst dut:$sv::Worker(x); initial { $assert(1); } }";
+    let sv = "module Worker(output logic x);initial forever #1 x=~x;endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, std::path::Path::new("top.veryl"))],
+        vec![(sv, std::path::Path::new("worker.sv"))],
+        "Top",
+    )
+    .build_interpreter()
+    .unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+}
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn traced_builds_preserve_kernel_clock_pulses() {
+    let code = r#"#[test(Top)] module Top {var clk:clock;var q:logic;
+ function pulse(a:output clock,b:output clock) {a=1;b=0;} always_ff(clk){q=1;}
+ initial{clk=0;pulse(clk,clk);$finish();} }"#;
+    let mut sim = Simulator::builder(code, "Top")
+        .build_with_trace()
+        .res
+        .unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn private_assignments_and_event_yields_do_not_replay_clean_comb_logic() {
+    let count = |body: &str| {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+          always_comb {{ $assert(1,"comb"); }}
+          function helper()->u32 {{var tmp:u32;tmp=1;return tmp;}}
+          initial {{ {body} $finish(); }}
+        }}"#
+        );
+        let result = Simulator::builder(&code, "Top")
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        result
+            .assertions
+            .iter()
+            .filter(|a| a.message.as_deref() == Some("comb"))
+            .count()
+    };
+    assert_eq!(count("helper();"), count(""));
+    assert_eq!(count(&"$assert(1);".repeat(600)), count(""));
+}

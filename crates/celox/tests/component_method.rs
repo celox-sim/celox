@@ -307,7 +307,7 @@ unsafe extern "C" fn clock_call_method(
     name: sys::VrlStr,
     args: *const sys::VrlValue,
     nargs: usize,
-    _ret: *mut sys::VrlValue,
+    ret: *mut sys::VrlValue,
 ) -> i32 {
     let state = unsafe { &mut *state.cast::<ClockState>() };
     let api = unsafe { &*state.api };
@@ -359,6 +359,12 @@ unsafe extern "C" fn clock_call_method(
         "drive" if args.len() == 1 => {
             let value = argument(0).unwrap_or_default();
             unsafe { (api.write_output)(ctx, state.output, &value, std::ptr::null()) };
+            0
+        }
+        "drive_lying" if args.is_empty() => {
+            let value = 1;
+            unsafe { (api.write_output)(ctx, state.output, &value, std::ptr::null()) };
+            unsafe { write_return(ret, 1, 16) };
             0
         }
         "check_clocks" if args.len() == 1 && argument(0) == Some(state.clocks) => 0,
@@ -3145,4 +3151,34 @@ fn clean_component_calls_do_not_replay_comb_assertions() {
             .count()
     };
     assert_eq!(count("c.get(); c.get();"), count(""));
+}
+
+#[test]
+fn invalid_component_returns_precede_output_assertions() {
+    register_component();
+    for kernels in [false, true] {
+        let (dir, _) = component_metadata();
+        let path = dir.path().join("component/veryl.manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        manifest["types"]["celox_clocked"]["methods"] =
+            serde_json::json!([{"name":"drive_lying","args":[],"ret":"value","ret_width":8}]);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let metadata = veryl_metadata::Metadata::load(dir.path().join("Veryl.toml")).unwrap();
+        let code = r#"#[test(t)] module t {
+          inst clk:$tb::clock_gen;var d:u8;var q:u8;var value:u8;
+          inst c:$comp::celox_clocked #(STEP:0)(clk:clk,d,q);
+          always_comb { $assert(q!=1,"output assertion"); }
+          initial { value=c.drive_lying();$finish(); }
+        }"#;
+        let result = Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .testbench_kernels(kernels)
+            .run_test()
+            .unwrap();
+        assert!(
+            matches!(result,TestResult::Fail(ref message) if message.contains("declares a 8-bit return value but returned 16 bits")),
+            "{result:?}"
+        );
+    }
 }

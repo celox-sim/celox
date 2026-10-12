@@ -1646,7 +1646,11 @@ impl<'a> BlockLowering<'a> {
         match statement {
             Statement::Assign(assign) => {
                 self.lower_assign(assign)?;
-                self.dirty = true;
+                self.dirty |= assign.hier_dst.is_some()
+                    || assign
+                        .dst
+                        .iter()
+                        .any(|destination| !self.private.contains_key(&destination.id));
                 Ok(Flow::Continue)
             }
             Statement::If(stmt) => {
@@ -1876,16 +1880,9 @@ impl<'a> BlockLowering<'a> {
         } else {
             assign
         };
-        let prepared = if expressions::has_call(&assign.expr) {
-            Some(self.expression(&assign.expr)?)
-        } else {
-            None
-        };
-        if let Some(value) = prepared {
-            self.parser.push_process_expression_values(
-                [(assign.expr.token_range(), value)].into_iter().collect(),
-            );
-        }
+        let statement = Statement::Assign(assign.clone());
+        let bindings = self.expression_bindings(&expressions::statement_inputs(&statement))?;
+        self.parser.push_process_expression_values(bindings);
         let (parser, kernel, targets, sources, convert) = parts!(self);
         let result = parser.parse_assign_statement(
             assign,
@@ -1895,9 +1892,7 @@ impl<'a> BlockLowering<'a> {
             sources,
             kernel.builder(),
         );
-        if prepared.is_some() {
-            self.parser.pop_process_expression_values();
-        }
+        self.parser.pop_process_expression_values();
         result
     }
 
@@ -2521,8 +2516,12 @@ impl<'a> BlockLowering<'a> {
         self.kernel.builder().switch_to_block(yield_block);
         self.store_scratch(slot, EVENT_YIELD_WIDTH, zero);
         let dirty = self.dirty;
-        self.kernel
-            .settle()
+        let yielded = if dirty {
+            self.kernel.settle()
+        } else {
+            self.kernel.yield_events()
+        };
+        yielded
             .map_err(|error| self.error("testbench process lowering", error.to_string(), None))?;
         self.kernel
             .builder()

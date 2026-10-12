@@ -228,6 +228,11 @@ impl<A: Clone> ProcessKernelBuilder<A> {
     /// Have the runtime settle the combinational logic, then continue at
     /// once. A process stores to design state directly, so a read of a
     /// combinational result after such a store needs this first.
+    /// Drain host events and resume without reevaluating clean logic.
+    pub fn yield_events(&mut self) -> Result<(), ProcessKernelError> {
+        self.suspend(ProcessStatus::Yield)
+    }
+
     pub fn settle(&mut self) -> Result<(), ProcessKernelError> {
         self.suspend(ProcessStatus::Settle)
     }

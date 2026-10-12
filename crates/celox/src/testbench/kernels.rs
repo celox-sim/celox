@@ -188,7 +188,16 @@ fn run<B: SimBackend>(
             finished = true;
         }
         match stepped {
-            Ok(Some(_)) => {}
+            Ok(Some(_)) => {
+                if sim
+                    .program
+                    .runtime_schema
+                    .testbench_kernels
+                    .is_some_and(|first| state.processes_done_from(first))
+                {
+                    finished = true;
+                }
+            }
             Ok(None) => finished = true,
             Err(code) => {
                 if error.is_none() {
@@ -367,13 +376,11 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             if sim.components.finish_requested() {
                 return Ok(false);
             }
-            // The outputs the method wrote feed the design: the process
-            // resumes at once and reads the logic derived from them.
-            if sim.dirty {
-                sim.eval_comb_checked().map_err(|error| error.to_string())?;
-                sim.dirty = false;
-            }
             let Some(result) = result else {
+                if sim.dirty {
+                    sim.eval_comb_checked().map_err(|error| error.to_string())?;
+                    sim.dirty = false;
+                }
                 return Ok(true);
             };
             let Some((value, width)) = crate::component::host_bits(&returned) else {
@@ -395,6 +402,11 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             }
             let value = resize_component_return(value, width as usize, result.signed, result.width);
             write(sim, &result, value);
+            // Invalid return contracts must not expose derived output effects.
+            if sim.dirty {
+                sim.eval_comb_checked().map_err(|error| error.to_string())?;
+                sim.dirty = false;
+            }
         }
     }
     Ok(true)
