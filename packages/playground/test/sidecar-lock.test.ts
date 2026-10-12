@@ -1,12 +1,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "vitest";
@@ -173,4 +178,74 @@ test("a failed generation releases its claim", async () => {
 		}),
 	).rejects.toThrow("generation failed");
 	expect(await withSidecarLock(path, () => "next")).toBe("next");
+});
+
+function abandoned(path: string, local: boolean, legacy = false) {
+	const host = local
+		? createHash("sha256")
+				.update(`${process.platform}:${hostname()}`)
+				.digest("hex")
+				.slice(0, 16)
+		: "0000000000000000";
+	const claim = join(
+		path,
+		".celox/.generation-locks",
+		`${host}-${process.pid}-${randomUUID()}`,
+	);
+	mkdirSync(claim, { recursive: true });
+	if (!legacy) {
+		writeFileSync(join(claim, "ticket"), "1");
+		writeFileSync(join(claim, "lease"), "");
+	}
+	return { claim, timestamp: legacy ? claim : join(claim, "lease") };
+}
+
+test.each([
+	["a changed hostname", false, false],
+	["a reused live PID", true, false],
+	["a legacy claim interrupted before publishing its ticket", false, true],
+])("an expired claim from %s is reclaimed", async (_name, local, legacy) => {
+	const path = root();
+	const { claim, timestamp } = abandoned(path, local, legacy);
+	const old = new Date(Date.now() - 120_000);
+	utimesSync(timestamp, old, old);
+	const contender = child(
+		path,
+		`await withSidecarLock(path, () => writeFileSync(join(path, 'recovered'), 'yes'));`,
+	);
+	await Promise.race([
+		contender.exited,
+		delay(3000).then(() => {
+			throw new Error("Expired claim was not reclaimed");
+		}),
+	]);
+	expect(existsSync(join(path, "recovered"))).toBe(true);
+	expect(existsSync(claim)).toBe(false);
+});
+
+test("a fresh foreign claim remains exclusive until its lease expires", async () => {
+	const path = root();
+	const { timestamp } = abandoned(path, false);
+	let entered = false;
+	const waiting = withSidecarLock(path, () => {
+		entered = true;
+	});
+	await delay(100);
+	expect(entered).toBe(false);
+	const old = new Date(Date.now() - 120_000);
+	utimesSync(timestamp, old, old);
+	await waiting;
+	expect(entered).toBe(true);
+});
+
+test("synchronous generation does not prevent lease renewal", async () => {
+	const path = root();
+	await withSidecarLock(path, () => {
+		const directory = join(path, ".celox/.generation-locks");
+		const [claim] = readdirSync(directory);
+		const lease = join(directory, claim, "lease");
+		const before = statSync(lease).mtimeMs;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+		expect(statSync(lease).mtimeMs).toBeGreaterThan(before);
+	});
 });

@@ -5,10 +5,12 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { SIDECAR_DIR } from "./sidecar.js";
 
 const host = createHash("sha256")
@@ -16,8 +18,24 @@ const host = createHash("sha256")
 	.digest("hex")
 	.slice(0, 16);
 const claimPattern = /^([a-f0-9]{16})-([1-9][0-9]*)-([a-f0-9-]{36})$/;
+const leaseDuration = 60_000;
 
-function alive(name: string): boolean {
+function alive(name: string, directory: string): boolean {
+	const claim = join(directory, name);
+	let updated: number;
+	try {
+		try {
+			updated = statSync(join(claim, "lease")).mtimeMs;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			// Also recover claims left by versions without a lease file.
+			updated = statSync(claim).mtimeMs;
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+	if (Date.now() - updated > leaseDuration) return false;
 	const match = claimPattern.exec(name)!;
 	// PIDs are meaningful only within the same host and operating system.
 	if (match[1] !== host) return true;
@@ -52,14 +70,39 @@ export async function withSidecarLock<T>(
 	const id = `${host}-${process.pid}-${randomUUID()}`;
 	const claim = join(directory, id);
 	mkdirSync(claim);
+	let heartbeat: Worker | undefined;
+	let renewalError: unknown;
 	try {
+		const lease = join(claim, "lease");
+		writeFileSync(lease, "");
+		// Native catalogue generation is synchronous. Renew from another thread
+		// so it cannot expire a live claim by blocking the main event loop.
+		heartbeat = new Worker(
+			`const { utimesSync } = require('node:fs');
+			const { parentPort, workerData } = require('node:worker_threads');
+			const renew = () => {
+				const now = new Date();
+				utimesSync(workerData, now, now);
+			};
+			renew();
+			parentPort.postMessage('ready');
+			setInterval(renew, 1000);`,
+			{ eval: true, workerData: lease, execArgv: [] },
+		);
+		heartbeat.on("error", (error) => {
+			renewalError = error;
+		});
+		await new Promise<void>((resolve, reject) => {
+			heartbeat!.once("message", () => resolve());
+			heartbeat!.once("error", reject);
+		});
 		const claims = () =>
 			readdirSync(directory).filter(
 				(name) => claimPattern.test(name) && name !== id,
 			);
 		let largest = 0;
 		for (const name of claims()) {
-			if (alive(name))
+			if (alive(name, directory))
 				largest = Math.max(largest, ticket(join(directory, name)) ?? 0);
 		}
 		const number = largest + 1;
@@ -69,11 +112,12 @@ export async function withSidecarLock<T>(
 		renameSync(join(claim, "choosing"), join(claim, "ticket"));
 		const started = Date.now();
 		for (;;) {
+			if (renewalError) throw renewalError;
 			let waiting = false;
 			for (const name of claims()) {
 				const other = join(directory, name);
-				if (!alive(name)) {
-					// Each claim has a unique name: removing a dead process's claim
+				if (!alive(name, directory)) {
+					// Each claim has a unique name: removing an abandoned claim
 					// cannot remove a subsequent owner's lock.
 					rmSync(other, { recursive: true, force: true });
 					continue;
@@ -86,7 +130,11 @@ export async function withSidecarLock<T>(
 				)
 					waiting = true;
 			}
-			if (!waiting) return await run();
+			if (!waiting) {
+				const result = await run();
+				if (renewalError) throw renewalError;
+				return result;
+			}
 			if (Date.now() - started > 120_000)
 				throw new Error(
 					`Timed out waiting for declaration generation in ${projectRoot}`,
@@ -94,6 +142,7 @@ export async function withSidecarLock<T>(
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
 	} finally {
+		await heartbeat?.terminate();
 		rmSync(claim, { recursive: true, force: true });
 	}
 }
