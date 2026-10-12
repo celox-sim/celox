@@ -2363,3 +2363,17 @@ endmodule
   (top Top)
   (tick clk)
   (expect_output "decimal:[ 57] hex:[41] binary:[01000010] text:[  C]\nleading:[ A] minimal:[A] nibble:[\n]\nplain:AB  9\n"))
+
+; IEEE 1800-2023 21.2.1.6/7: %c and %s produce 8-bit character codes.
+(case character_formats_preserve_non_utf8_bytes
+  (source "binary_output.sv" #"
+module Top(input logic clk);
+    always_ff @(posedge clk) begin
+        $write("%c%c|%0s|%3s|%s", 8'h80, 8'hff, 24'hff0180, 8'hfe, 16'h0f80);
+        $display("%0s", 16'hc3a9);
+    end
+endmodule
+"#)
+  (top Top)
+  (tick clk)
+  (expect_output (bytes 128 255 124 255 1 128 124 32 32 254 124 15 128 195 169 10)))

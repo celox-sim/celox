@@ -56,12 +56,16 @@ impl ProcessBackend {
         writeln!(self.input, "{command}")?;
         self.input.flush()?;
         loop {
-            let mut line = String::new();
-            if self.output.read_line(&mut line)? == 0 {
+            let mut line = Vec::new();
+            if self.output.read_until(b'\n', &mut line)? == 0 {
                 return Err(format!("simulator exited while processing {command}").into());
             }
-            write!(self.transcript, "< {line}")?;
-            if let Some(reply) = line.trim_end().strip_prefix("@suite ") {
+            self.transcript.write_all(b"< ")?;
+            self.transcript.write_all(&line)?;
+            if let Some(reply) = std::str::from_utf8(&line)
+                .ok()
+                .and_then(|line| line.trim_end().strip_prefix("@suite "))
+            {
                 if let Some(error) = reply.strip_prefix("error ") {
                     return Err(error.to_owned().into());
                 }
@@ -89,11 +93,11 @@ impl Backend for ProcessBackend {
             return Err("no pending native testbench execution".into());
         }
         loop {
-            let mut line = String::new();
-            if self.output.read_line(&mut line)? == 0 {
+            let mut line = Vec::new();
+            if self.output.read_until(b'\n', &mut line)? == 0 {
                 break;
             }
-            write!(self.transcript, "{line}")?;
+            self.transcript.write_all(&line)?;
         }
         // The harness reports missing finish and runtime failures through its
         // exit status. HDL output (including protocol-looking text) is only

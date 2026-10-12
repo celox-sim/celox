@@ -741,7 +741,10 @@ fn test_hierarchical_assert_message_argument_preserves_selected_width() {
         .unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("got b"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"got b".as_slice())
+    );
 }
 
 #[test]
@@ -2440,7 +2443,7 @@ fn test_assert_continue_records_failure_and_continues() {
     assert!(!detailed.assertions[0].passed);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("first failure: cnt=0"),
+        Some(b"first failure: cnt=0".as_slice()),
     );
     assert!(detailed.assertions[1].passed);
 
@@ -2528,7 +2531,7 @@ fn test_assert_format_args_render_runtime_values() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("mismatch: a=3 b=7"),
+        Some(b"mismatch: a=3 b=7".as_slice()),
     );
 }
 
@@ -2558,7 +2561,7 @@ fn test_assert_format_args_follow_veryl_field_widths() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=3 hex=0000000f"),
+        Some(b"cnt=3 hex=0000000f".as_slice()),
     );
 }
 
@@ -2579,7 +2582,7 @@ fn test_passing_assert_uses_runtime_event_formatting() {
     assert!(detailed.assertions[0].passed);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("cnt=3 hex=0000000f"),
+        Some(b"cnt=3 hex=0000000f".as_slice()),
     );
 }
 
@@ -2598,7 +2601,10 @@ fn test_passing_assert_preserves_single_character_format_specifiers() {
     assert!(detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
     assert!(detailed.assertions[0].passed);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("a=3 b=7"),);
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"a=3 b=7".as_slice()),
+    );
 }
 
 #[test]
@@ -2620,7 +2626,7 @@ fn test_message_less_testbench_assert_uses_default_message() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("assertion failed"),
+        Some(b"assertion failed".as_slice()),
     );
 }
 
@@ -2640,7 +2646,7 @@ fn test_message_less_testbench_assert_continue_uses_default_message() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("assertion failed"),
+        Some(b"assertion failed".as_slice()),
     );
 }
 
@@ -2660,7 +2666,7 @@ fn test_assert_format_args_render_percent_m_and_t_without_args() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("loc=<hierarchy> time=0"),
+        Some(b"loc=<hierarchy> time=0".as_slice()),
     );
 }
 
@@ -2692,7 +2698,11 @@ fn test_ff_runtime_events_drain_with_per_tick_time() {
             .iter()
             .map(|a| a.message.as_deref())
             .collect::<Vec<_>>(),
-        vec![Some("ff time=1"), Some("ff time=2"), Some("ff time=3")],
+        vec![
+            Some(b"ff time=1".as_slice()),
+            Some(b"ff time=2".as_slice()),
+            Some(b"ff time=3".as_slice())
+        ],
     );
 }
 
@@ -2712,7 +2722,10 @@ fn test_assert_format_args_render_current_time_for_percent_t() {
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("time=3"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"time=3".as_slice())
+    );
 }
 
 #[test]
@@ -2730,7 +2743,10 @@ fn test_assert_format_args_render_const_string_template() {
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("x=3"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"x=3".as_slice())
+    );
 }
 
 #[test]
@@ -2747,7 +2763,10 @@ fn test_assert_dynamic_args_follow_display_style_formatting() {
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("ab a"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"ab a".as_slice())
+    );
 }
 
 #[test]
@@ -2766,7 +2785,7 @@ fn test_assert_format_args_render_char_and_hex_alias() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("char=A hex=ab"),
+        Some(b"char=A hex=ab".as_slice()),
     );
 }
 
@@ -2786,7 +2805,7 @@ fn test_assert_format_args_render_uppercase_aliases_like_lowercase() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("1010 017 12 34 A")
+        Some(b"1010 017 12 34 A".as_slice())
     );
 }
 
@@ -2806,7 +2825,7 @@ fn test_assert_format_args_preserve_binary_width_and_hex_alias() {
     assert_eq!(detailed.assertions.len(), 1);
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some("bin=00000001 hex=2a")
+        Some(b"bin=00000001 hex=2a".as_slice())
     );
 }
 
@@ -2826,7 +2845,10 @@ fn test_run_test_detailed_stops_on_plain_assert_failure() {
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
     assert!(!detailed.assertions[0].passed);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("first"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"first".as_slice())
+    );
 }
 
 #[test]
@@ -2853,7 +2875,10 @@ fn test_run_test_detailed_collects_ff_assert_runtime_events() {
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
     assert!(!detailed.assertions[0].passed);
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("ff a=0"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"ff a=0".as_slice())
+    );
 }
 
 #[test]
@@ -3184,4 +3209,29 @@ fn test_design_finish_ends_testbench() {
         Simulator::builder(code, "t").run_test().unwrap(),
         TestResult::Pass,
     );
+}
+
+#[test]
+fn assertion_messages_preserve_binary_character_output() {
+    let source = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $assert(1'b1, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                $assert_continue(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                $assert(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                $finish();
+            }
+        }
+    "#;
+    let detailed = Simulator::builder(source, "t").run_test_detailed().unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 3);
+    for assertion in &detailed.assertions {
+        assert_eq!(
+            assertion.message.as_deref(),
+            Some([255, 0, 128, 254, 0].as_slice())
+        );
+    }
+    assert_eq!(detailed.error.as_deref(), Some(r"\xff\x00\x80\xfe\x00"));
 }

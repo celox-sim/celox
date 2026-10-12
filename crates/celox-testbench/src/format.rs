@@ -46,19 +46,34 @@ fn value_to_signed_bigint(value: &BigUint, width: usize) -> BigInt {
     }
 }
 
-fn value_to_utf8(value: &BigUint, width: usize) -> Option<String> {
-    if !width.is_multiple_of(8) {
-        return None;
+fn packed_bytes(value: &BigUint, width: usize) -> Vec<u8> {
+    let mut bytes = masked_value(value, width).to_bytes_be();
+    let count = width.div_ceil(8);
+    if bytes.len() < count {
+        let mut padded = vec![0; count - bytes.len()];
+        padded.extend(bytes);
+        bytes = padded;
     }
-    let num_bytes = width / 8;
-    let mut bytes = vec![0u8; num_bytes];
-    let mut payload = masked_value(value, width);
-    let byte_mask = BigUint::from(0xffu64);
-    for idx in (0..num_bytes).rev() {
-        bytes[idx] = (&payload & &byte_mask).to_u64().unwrap_or(0) as u8;
-        payload >>= 8;
+    bytes.truncate(count);
+    bytes
+}
+
+/// Format an argument as bytes. Character conversions never decode UTF-8.
+pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> Vec<u8> {
+    if arg.is_string {
+        return packed_bytes(arg.value, arg.width);
     }
-    String::from_utf8(bytes).ok()
+    match spec.unwrap_or('d').to_ascii_lowercase() {
+        'c' if !has_mask(arg) => {
+            vec![
+                (masked_value(arg.value, arg.width) & BigUint::from(0xffu8))
+                    .to_u8()
+                    .unwrap(),
+            ]
+        }
+        's' if !has_mask(arg) => packed_bytes(arg.value, arg.width),
+        _ => format_numeric_arg(arg, spec).into_bytes(),
+    }
 }
 
 fn format_binary(arg: &DisplayFormatArg<'_>) -> String {
@@ -106,10 +121,7 @@ fn format_masked_radix(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> Str
     out
 }
 
-pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> String {
-    if arg.is_string {
-        return value_to_utf8(arg.value, arg.width).unwrap_or_else(|| format!("{:?}", arg.value));
-    }
+fn format_numeric_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> String {
     match spec.unwrap_or('d') {
         'b' | 'B' => format_binary(arg),
         'o' | 'O' => {
@@ -144,21 +156,7 @@ pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> Str
                 masked_value(arg.value, arg.width).to_string()
             }
         }
-        'c' | 'C' => {
-            if has_mask(arg) {
-                "x".to_string()
-            } else {
-                char::from((masked_value(arg.value, arg.width).to_u64().unwrap_or(0) & 0xff) as u8)
-                    .to_string()
-            }
-        }
-        's' | 'S' => {
-            if has_mask(arg) {
-                "x".to_string()
-            } else {
-                value_to_utf8(arg.value, arg.width).unwrap_or_else(|| format!("{:?}", arg.value))
-            }
-        }
+        'c' | 'C' | 's' | 'S' => "x".to_string(),
         _ => {
             if has_mask(arg) {
                 "x".to_string()
@@ -196,7 +194,7 @@ pub fn format_sized_display_arg(
     arg: &DisplayFormatArg<'_>,
     spec: char,
     field_width: Option<usize>,
-) -> String {
+) -> Vec<u8> {
     // Table 21-1 gives each uppercase specifier the meaning of its lowercase
     // one, so `%H` prints lowercase digits like `%h`.
     let spec = spec.to_ascii_lowercase();
@@ -211,28 +209,25 @@ pub fn format_sized_display_arg(
     if spec == 's' && !has_mask(arg) {
         // Integral %s is right-justified byte data; omit leading zero bytes
         // and include a partial most-significant byte (21.2.1.7).
-        let bytes = masked_value(arg.value, arg.width).to_bytes_be();
+        let bytes = packed_bytes(arg.value, arg.width);
         let start = bytes
             .iter()
             .position(|byte| *byte != 0)
             .unwrap_or(bytes.len());
-        let text = String::from_utf8(bytes[start..].to_vec())
-            .unwrap_or_else(|_| format_display_arg(arg, Some(spec)));
-        let len = text.len();
-        return pad_counted(
-            text,
-            ' ',
+        return pad_bytes(
+            bytes[start..].to_vec(),
+            b' ',
             field_width.unwrap_or_else(|| arg.width.div_ceil(8)),
-            len,
         );
     }
-    let text = format_display_arg(arg, Some(spec));
-    if arg.is_string {
-        // A string is a sequence of 8-bit character codes (IEEE 1800-2023
-        // 21.2.1.7), so a multibyte UTF-8 character fills several columns.
-        let len = text.len();
-        return pad_counted(text, ' ', field_width.unwrap_or(0), len);
+    if spec == 'c' {
+        return pad_bytes(
+            format_display_arg(arg, Some(spec)),
+            b' ',
+            field_width.unwrap_or(0),
+        );
     }
+    let text = format_numeric_arg(arg, Some(spec));
     let bits_per_digit = match spec {
         'b' => Some(1),
         'o' => Some(3),
@@ -261,6 +256,7 @@ pub fn format_sized_display_arg(
         }
         None => pad(text, ' ', field_width.unwrap_or(0)),
     }
+    .into_bytes()
 }
 
 /// The character IEEE 1800-2023 21.2.1.3 displays for the bits `start..end`
@@ -359,7 +355,7 @@ pub fn format_veryl_display_arg(
     arg: &DisplayFormatArg<'_>,
     spec: char,
     field: FieldSpec,
-) -> String {
+) -> Vec<u8> {
     let spec = spec.to_ascii_lowercase();
     let bits_per_digit = match spec {
         'b' => Some(1),
@@ -377,9 +373,10 @@ pub fn format_veryl_display_arg(
             } else {
                 digits
             }
+            .into_bytes()
         }
         // Veryl prints a lowercase x for a decimal value with any unknown bit.
-        None if matches!(spec, 'd' | 'i') && has_mask(arg) => "x".to_string(),
+        None if matches!(spec, 'd' | 'i') && has_mask(arg) => b"x".to_vec(),
         None => format_display_arg(arg, Some(spec)),
     };
     pad_veryl_field(body, spec, field)
@@ -388,25 +385,33 @@ pub fn format_veryl_display_arg(
 /// Pads a converted value to its field width as Veryl's simulator does: on
 /// the left with spaces, on the right with `-`, or with zeros behind the sign
 /// for a number with a leading `0`. A longer value is never truncated.
-pub fn pad_veryl_field(mut body: String, spec: char, field: FieldSpec) -> String {
+pub fn pad_veryl_field(mut body: Vec<u8>, spec: char, field: FieldSpec) -> Vec<u8> {
     let Some(width) = field.width else {
         return body;
     };
-    let len = body.chars().count();
-    if len >= width {
+    if body.len() >= width {
         return body;
     }
-    let count = width - len;
+    let count = width - body.len();
     let numeric = matches!(spec.to_ascii_lowercase(), 'd' | 'i' | 'h' | 'x' | 'o' | 'b');
     if field.left_justify {
-        body.push_str(&" ".repeat(count));
-    } else if field.zero_pad && numeric {
-        let at = usize::from(body.starts_with('-'));
-        body.insert_str(at, &"0".repeat(count));
+        body.extend(std::iter::repeat_n(b' ', count));
     } else {
-        body.insert_str(0, &" ".repeat(count));
+        let zero = field.zero_pad && numeric;
+        let at = usize::from(zero && body.starts_with(b"-"));
+        body.splice(
+            at..at,
+            std::iter::repeat_n(if zero { b'0' } else { b' ' }, count),
+        );
     }
     body
+}
+
+fn pad_bytes(mut bytes: Vec<u8>, fill: u8, width: usize) -> Vec<u8> {
+    if bytes.len() < width {
+        bytes.splice(0..0, std::iter::repeat_n(fill, width - bytes.len()));
+    }
+    bytes
 }
 
 fn pad(text: String, fill: char, width: usize) -> String {
@@ -427,6 +432,46 @@ fn pad_counted(text: String, fill: char, width: usize, len: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn character_conversions_preserve_each_byte_and_count_byte_columns() {
+        let value = BigUint::from(0xff0080u32);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 24,
+            signed: false,
+            is_string: false,
+        };
+        assert_eq!(format_sized_display_arg(&arg, 's', None), [255, 0, 128]);
+        assert_eq!(
+            format_sized_display_arg(&arg, 's', Some(5)),
+            [32, 32, 255, 0, 128]
+        );
+        assert_eq!(format_sized_display_arg(&arg, 'c', None), [128]);
+        assert_eq!(
+            format_veryl_display_arg(&arg, 's', FieldSpec::default()),
+            [255, 0, 128]
+        );
+        let value = (BigUint::from(1u8) << 64) | BigUint::from(0xfeu8);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 65,
+            signed: false,
+            is_string: false,
+        };
+        assert_eq!(format_sized_display_arg(&arg, 'c', None), [254]);
+        let value = BigUint::from(0u8);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 0,
+            signed: false,
+            is_string: false,
+        };
+        assert_eq!(format_sized_display_arg(&arg, 's', Some(0)), []);
+    }
+
     fn sized(value: u32, width: usize, signed: bool, spec: char, field: Option<usize>) -> String {
         let value = BigUint::from(value);
         let arg = DisplayFormatArg {
@@ -436,7 +481,7 @@ mod tests {
             signed,
             is_string: false,
         };
-        format_sized_display_arg(&arg, spec, field)
+        String::from_utf8(format_sized_display_arg(&arg, spec, field)).unwrap()
     }
 
     #[test]
@@ -461,7 +506,10 @@ mod tests {
             signed: false,
             is_string: true,
         };
-        assert_eq!(format_sized_display_arg(&arg, 's', Some(3)), " \u{e9}");
+        assert_eq!(
+            format_sized_display_arg(&arg, 's', Some(3)),
+            " \u{e9}".as_bytes()
+        );
     }
 
     fn four_state(payload: u32, mask: u32, width: usize, spec: char) -> String {
@@ -473,7 +521,7 @@ mod tests {
             signed: false,
             is_string: false,
         };
-        format_sized_display_arg(&arg, spec, None)
+        String::from_utf8(format_sized_display_arg(&arg, spec, None)).unwrap()
     }
 
     #[test]
@@ -505,7 +553,7 @@ mod tests {
         };
         let mut chars = spec.chars().peekable();
         let field = FieldSpec::parse(&mut chars, true);
-        format_veryl_display_arg(&arg, chars.next().unwrap(), field)
+        String::from_utf8(format_veryl_display_arg(&arg, chars.next().unwrap(), field)).unwrap()
     }
 
     #[test]
@@ -554,7 +602,7 @@ mod tests {
             signed: false,
             is_string: false,
         };
-        assert_eq!(format_sized_display_arg(&arg, 'h', None), "0z0");
-        assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), "z0");
+        assert_eq!(format_sized_display_arg(&arg, 'h', None), b"0z0");
+        assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), b"z0");
     }
 }
