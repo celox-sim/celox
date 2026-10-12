@@ -85,6 +85,11 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_to_finish(&mut self) -> Result<()> {
+        if self.0.is_finished() {
+            return Err(
+                "run_to_finish: the design already finished before the operation began".into(),
+            );
+        }
         while !self.0.is_finished() && self.0.step()?.is_some() {}
         if !self.0.is_finished() {
             return Err(
@@ -235,4 +240,40 @@ fn run_to_finish_reaches_the_last_scheduler_timestamp() {
     backend.run_to_finish().unwrap();
     assert_eq!(backend.0.time(), u64::MAX);
     assert_eq!(backend.0.get(backend.0.signal("done")), 1u8.into());
+}
+
+#[test]
+fn run_to_finish_rejects_a_finish_during_an_earlier_settle() {
+    for operation in 0..3 {
+        let source = "module Top(input bit go, output bit done); initial begin wait(go); done=1; $finish; end endmodule";
+        let simulation =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("early.sv"))], "Top")
+                .build()
+                .unwrap();
+        let mut backend = TimedBackend(simulation);
+        backend.run_until(0).unwrap();
+        let go = backend.0.signal("go");
+        backend.0.set_wide(go, 1u8.into());
+        match operation {
+            0 => backend.eval_comb().unwrap(),
+            1 => {
+                backend
+                    .read(&SignalPath {
+                        instances: Vec::new(),
+                        name: "done".into(),
+                    })
+                    .unwrap();
+            }
+            _ => {
+                backend.take_output().unwrap();
+            }
+        }
+        assert!(
+            backend
+                .run_to_finish()
+                .unwrap_err()
+                .to_string()
+                .contains("already finished")
+        );
+    }
 }

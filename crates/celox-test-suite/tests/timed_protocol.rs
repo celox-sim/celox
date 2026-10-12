@@ -15,6 +15,11 @@ fn early_finish_and_event_exhaustion_do_not_skip_script_checks() {
             "(run_until 10) (assert_eq done 1) (run_to_finish)",
         ),
         (
+            "finish_on_eval",
+            "module Top(input bit go); initial begin wait(go); $finish; end endmodule",
+            "(run_until 0) (set go 1) (eval) (run_to_finish)",
+        ),
+        (
             "idle",
             "module Top(output bit done); initial done = 1; endmodule",
             "(run_to_finish) (assert_eq done 1)",

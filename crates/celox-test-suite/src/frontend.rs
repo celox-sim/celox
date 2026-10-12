@@ -221,7 +221,7 @@ fn timed_source(source: &str, names: &TimedNames) -> String {
     for (start, end, word) in sv_words(source) {
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
-            "always" if !after_trivia(&source[end..]).starts_with('@') => {
+            "always" => {
                 format!("always wait ({}::started)", names.package)
             }
             "$finish" if after_trivia(&source[end..]).starts_with('(') => names.finish.clone(),

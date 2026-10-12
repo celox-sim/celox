@@ -434,6 +434,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		this.settleSharedWrites();
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
 			this._state.dirty = false;
@@ -474,9 +475,17 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	step(): number | null {
 		this.ensureAlive();
+		this.settleSharedWrites();
 		const t = this._handle.step();
 		this._state.dirty = false;
 		return t;
+	}
+
+	private settleSharedWrites(): void {
+		if (this._state.dirty) {
+			this._handle.evalComb();
+			this._state.dirty = false;
+		}
 	}
 
 	/** Current simulation time. */
@@ -524,8 +533,7 @@ export class Simulation<P = Record<string, unknown>> {
 					steps,
 				);
 			}
-			const t = this._handle.step();
-			this._state.dirty = false;
+			const t = this.step();
 			if (t == null) break;
 			steps++;
 		}

@@ -565,7 +565,7 @@ describe("Simulation", () => {
 		sim.reset("rst");
 
 		expect(sim.dut.q).toBe(0n);
-		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(2);
 	});
 
 	test("reset: throws when no associatedClock and no duration", () => {
@@ -612,9 +612,9 @@ describe("Simulation", () => {
 
 		expect(() => sim.reset("rst")).toThrow("step failed");
 		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
-		expect(mock.handle.evalComb).not.toHaveBeenCalled();
-		void sim.dut.q;
 		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+		void sim.dut.q;
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(2);
 	});
 
 	test("reset: releases the signal when duration-based advancement fails", () => {
@@ -668,4 +668,28 @@ describe("Simulation", () => {
 			"tiered execution is not supported",
 		);
 	});
+});
+
+describe("shared writes before timed polling", () => {
+	test.each(["step", "runUntil", "waitUntil"])(
+		"%s settles derived values before polling",
+		(method) => {
+			const { create, handle, buffer } = createMockNative({
+				emptyEventQueue: true,
+			});
+			const sim = Simulation.create(TopModule, { __nativeCreate: create });
+			sim.dut.d = 7n;
+			const readDerived = () => {
+				expect(new DataView(buffer).getUint8(4)).toBe(7);
+				return null;
+			};
+			vi.mocked(handle.step).mockImplementation(readDerived);
+			vi.mocked(handle.runUntil).mockImplementation(readDerived);
+			if (method === "step") sim.step();
+			else if (method === "runUntil") sim.runUntil(1);
+			else sim.waitUntil(() => false);
+			expect(handle.evalComb).toHaveBeenCalledTimes(1);
+			sim.dispose();
+		},
+	);
 });
