@@ -215,3 +215,9 @@ fn simulates_systemverilog_always_ff() {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
 }
+
+sv_backends! {
+ fn multiple_import_items_preserve_untimed_edges(sim) { @case "timing::multiple_import_items_preserve_untimed_edges"; }
+ fn escaped_timed_tasks_do_not_replay_setup_edges(sim) { @case "timing::escaped_timed_tasks_do_not_replay_setup_edges"; }
+ fn control_names_do_not_rewrite_the_dut_type(sim) { @case "timing::control_names_do_not_rewrite_the_dut_type"; }
+}

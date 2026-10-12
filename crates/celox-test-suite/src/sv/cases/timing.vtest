@@ -696,3 +696,19 @@
  `endif
  endmodule"#)
  (top Top)(run_to_finish)(assert_eq q 1))
+
+(case multiple_import_items_preserve_untimed_edges
+ (source "imports.sv" #"package A; task other; #1; endtask endpackage
+ package B; int result; task tick; result=1; endtask endpackage
+ module Top(input bit clk,output int q); import A::other, B::tick;
+ always @(posedge clk) tick(); assign q=B::result; endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+(case escaped_timed_tasks_do_not_replay_setup_edges
+ (source "escaped.sv" #"module Top(input bit clk,output bit q);
+ task \pause.task ; #1 q=1; endtask
+ always @(posedge clk) \pause.task ; endmodule"#)
+ (top Top)(set clk 1)(run_until 1)(assert_eq q 0)
+ (set clk 0)(eval)(set clk 1)(run_until 2)(assert_eq q 1))
+(case control_names_do_not_rewrite_the_dut_type
+ (source "collision.sv" #"module celox_suite_timed_control(output bit q);initial q=1;endmodule"#)
+ (top celox_suite_timed_control)(run_until 0)(assert_eq q 1))

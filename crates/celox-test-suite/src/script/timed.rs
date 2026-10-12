@@ -52,10 +52,12 @@ pub(crate) fn sv_words(source: &str) -> Vec<(usize, usize, &str)> {
                 }
             }
             b'\\' => {
+                let start = at;
                 at += 1;
                 while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
                     at += 1;
                 }
+                words.push((start, at, &source[start..at]));
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
                 let start = at;
