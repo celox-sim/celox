@@ -691,10 +691,29 @@ impl<B: SimBackend> SimulationState<B> {
                 // FF evaluations and before the pending NBA publications.
                 // Drain active evaluations before promoting another inactive
                 // batch, including evaluations a combinational settle woke.
+                let mut inactive_samples = None;
                 let active_ran = self.run_processes(executor, current_time, Vec::new())?;
                 let progressed = if active_ran {
                     true
                 } else {
+                    if !self.inactive.is_empty() {
+                        // Blocking FF stores publish in the active region;
+                        // settle them and drain new active edges before #0.
+                        executor.eval_comb()?;
+                        self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        for id in ff_body_edges.iter() {
+                            executor.backend_mut().mark_triggered_bit(id);
+                        }
+                        if executor
+                            .backend()
+                            .get_triggered_bits()
+                            .iter()
+                            .any(|id| !discovered_in_this_step.contains(id))
+                        {
+                            continue;
+                        }
+                        executor.backend_mut().clear_triggered_bits();
+                    }
                     let ready = std::mem::take(&mut self.inactive)
                         .into_iter()
                         .collect::<Vec<_>>();
@@ -709,14 +728,43 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                     // A new inactive batch may create a fresh occurrence of
                     // a domain already evaluated in this time slot.
+                    let processed = discovered_in_this_step.clone();
                     discovered_in_this_step.make_empty();
                     triggered_domains.make_empty();
+                    let before = self
+                        .topo_signals
+                        .iter()
+                        .map(|(signal, _, _)| executor.backend().get_as::<u8>(*signal))
+                        .collect::<Vec<_>>();
+                    for ((_, id, _), value) in self.topo_signals.iter().zip(&before) {
+                        if *id != usize::MAX && processed.contains(*id) {
+                            if *value != 0 {
+                                self.last_clock_values.insert(*id);
+                            } else {
+                                self.last_clock_values.remove(*id);
+                            }
+                        }
+                    }
+                    inactive_samples = Some(before);
                     self.run_processes(executor, current_time, ready)?
                 };
                 if progressed {
                     let driven = executor.backend().get_triggered_bits();
                     executor.eval_comb()?;
-                    if track_stable_edges {
+                    if let Some(before) = inactive_samples {
+                        executor.backend_mut().clear_triggered_bits();
+                        for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
+                            if *id != usize::MAX
+                                && self.edge_triggers(
+                                    *id,
+                                    before != 0,
+                                    executor.backend().get_as::<u8>(*signal) != 0,
+                                )
+                            {
+                                executor.backend_mut().mark_triggered_bit(*id);
+                            }
+                        }
+                    } else if track_stable_edges {
                         self.replace_triggers_with_stable_edges(executor.backend_mut());
                     }
                     for id in driven.iter() {
