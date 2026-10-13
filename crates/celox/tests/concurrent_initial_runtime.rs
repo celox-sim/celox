@@ -1490,6 +1490,33 @@ fn file_methods_execute_and_evaluate_arguments() {
     );
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn native_images_preserve_file_host_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("image.txt");
+    let code = format!(
+        r#"#[test(Top)] module Top {{var f:$tb::file;initial{{f.open("{}");f.write("image");f.flush();f.close();$finish();}}}}"#,
+        path.display()
+    );
+    let original = Simulator::builder(&code, "Top").build_native().unwrap();
+    let bytes = original
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
+    let mut sim = Simulator::builder("invalid", "unused")
+        .build_native_from_image(image)
+        .unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"image");
+}
+
 #[test]
 fn file_io_failures_stop_later_kernel_effects() {
     let code = r#"#[test(Top)] module Top(after:output u32) {var f:$tb::file;initial {f.write("closed");after=1;$finish();}}"#;
