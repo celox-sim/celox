@@ -3179,3 +3179,75 @@ mod staged_edge_review_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod normalizing_fall_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        m.set_initial(clk, Constant::two_state(1u8, 1).unwrap())
+            .unwrap();
+        let enable = m.input("enable", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let v = m.output("v", bit).unwrap();
+        m.set_initial(q, Constant::two_state(1u8, 1).unwrap())
+            .unwrap();
+        let clock_value = m.read(clk).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 1).unwrap());
+        m.register(
+            m.whole(q).unwrap(),
+            clock_value,
+            clk,
+            Edge::Negedge,
+            None,
+            None,
+        )
+        .unwrap();
+        m.clock_period(clk, 4).unwrap();
+
+        let low = m.unary(UnaryOp::BitNot, clock_value, bit).unwrap();
+        let enabled = m.read(enable).unwrap();
+        let active = m.binary(BinaryOp::And, low, enabled, bit).unwrap();
+        let previous = m.read(v).unwrap();
+        let toggled = m.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let next = m.mux(active, toggled, zero).unwrap();
+        m.assign(m.whole(v).unwrap(), next).unwrap();
+        let count = m.constant(Constant::two_state(1u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        assert_eq!(sim.get(sim.signal("clk")), 1u8.into());
+        sim.set_wide(sim.signal("enable"), 1u8.into());
+        assert!(sim.run_until(0).is_err());
+        assert_eq!(sim.ticks(), 0);
+        let parts = sim.state.export_schedule(&sim.simulator.backend);
+        assert_eq!(parts.process_clocks[0].falling_edge, Some(0));
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.set_wide(sim.signal("enable"), 0u8.into());
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn failed_initial_falls_publish_before_the_first_rise_on_retry() {
+        let build = || {
+            Simulator::from_frontend(design()).true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}

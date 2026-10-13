@@ -597,6 +597,7 @@ impl<B: SimBackend> SimulationState<B> {
                     && (!self.last_clock_values.contains(**id)
                         || self.unknown_clock_values.contains(**id));
                 (!events_to_process.is_empty() || pending_rise)
+                    && !falling.contains(*id)
                     && clock.next_edge == current_time
                     && self.clock_has_waiters(**id)
                     && (!high || pending_rise)
@@ -705,6 +706,7 @@ impl<B: SimBackend> SimulationState<B> {
         // edge that counts is then a real one.
         let mut events = Vec::with_capacity(due.len());
         let mut rising = Vec::with_capacity(due.len());
+        let mut falling = Vec::new();
         for id in due {
             let clock = &self.tick_clocks[id];
             let high = sample_event_signal(executor.backend(), clock.signal) == (true, false);
@@ -716,10 +718,18 @@ impl<B: SimBackend> SimulationState<B> {
             });
             if !high {
                 rising.push(*id);
+            } else {
+                falling.push(*id);
             }
         }
+        for id in &falling {
+            self.tick_clocks
+                .get_mut(id)
+                .expect("a normalizing clock")
+                .falling_edge = Some(time);
+        }
         let result = self.step_round(executor, time, events, Vec::new(), Vec::new(), true);
-        self.finish_clock_round(time, rising, &[], result)
+        self.finish_clock_round(time, rising, &falling, result)
     }
 
     fn finish_clock_round(
