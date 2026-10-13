@@ -2069,7 +2069,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 counted.push((counter, sample));
             }
         }
-        self.with_kernel(ProcessKernelBuilder::begin_wait)
+        self.with_kernel(ProcessKernelBuilder::begin_event_wait)
             .map_err(kernel_error)?;
         let occurred = items
             .iter()
@@ -2103,7 +2103,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 &sv::ir::Expr::Ident(counter.clone()),
             )?;
         }
-        self.with_kernel(|kernel| kernel.wake_if(woken));
+        self.with_kernel(|kernel| kernel.wake_event_if(woken));
         Ok(())
     }
 

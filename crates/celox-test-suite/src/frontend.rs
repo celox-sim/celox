@@ -75,8 +75,12 @@ pub(crate) fn stage(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
     if design.timed {
-        for source in &mut prepared.sources {
-            *source = expanded_timed_source(source, defines)?;
+        for (index, source) in prepared.sources.iter_mut().enumerate() {
+            let path = design
+                .sources
+                .get(index)
+                .map_or(Path::new("timed.sv"), |source| source.path.as_path());
+            *source = expanded_timed_source(source, defines, path)?;
         }
     }
     let task_timing = timed_ff::TaskTiming::new(&prepared.sources);
@@ -175,7 +179,11 @@ struct TimedNames {
 fn timed_names(sources: &[String]) -> TimedNames {
     let words = sources
         .iter()
-        .flat_map(|source| sv_words(source).into_iter().map(|(_, _, word)| word))
+        .flat_map(|source| {
+            sv_words(source)
+                .into_iter()
+                .map(|(_, _, word)| word.strip_prefix('\\').unwrap_or(word))
+        })
         .collect::<std::collections::BTreeSet<_>>();
     for suffix in 0u64.. {
         let name = |base: &str| {
@@ -232,12 +240,8 @@ impl TimedNames {
     }
 }
 
-fn expanded_timed_source(source: &str, defines: &[&str]) -> Result<String> {
-    let syntax = celox_sv_analyzer::syntax::parse_source_with_defines(
-        source,
-        Path::new("timed.sv"),
-        defines,
-    )?;
+fn expanded_timed_source(source: &str, defines: &[&str], path: &Path) -> Result<String> {
+    let syntax = celox_sv_analyzer::syntax::parse_source_with_defines(source, path, defines)?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
     Ok(syntax
         .get_str(vec![root])
@@ -483,8 +487,9 @@ mod adapter_define_tests {
     #[test]
     fn timed_macro_expansion_uses_the_adapter_define_set() {
         let source = "module Top;\n`ifdef CELOX_SUITE_ICARUS\ninitial q=1;\n`else\ninitial q=0;\n`endif\nendmodule";
-        let icarus = expanded_timed_source(source, &["CELOX_SUITE_ICARUS"]).unwrap();
-        let other = expanded_timed_source(source, &[]).unwrap();
+        let icarus =
+            expanded_timed_source(source, &["CELOX_SUITE_ICARUS"], Path::new("timed.sv")).unwrap();
+        let other = expanded_timed_source(source, &[], Path::new("timed.sv")).unwrap();
         assert!(icarus.contains("q=1"));
         assert!(!icarus.contains("q=0"));
         assert!(other.contains("q=0"));

@@ -263,6 +263,8 @@ pub enum ProcessStatus {
     Settle,
     /// Return control to drain events without evaluating combinational logic.
     Yield,
+    /// An event occurred while sampling queued drives; resume its body after the batch.
+    Ready,
 }
 
 impl ProcessStatus {
@@ -280,6 +282,7 @@ impl ProcessStatus {
             Self::Host => 7,
             Self::Settle => 8,
             Self::Yield => 10,
+            Self::Ready => 11,
         }
     }
 
@@ -295,6 +298,7 @@ impl ProcessStatus {
             7 => Some(Self::Host),
             8 => Some(Self::Settle),
             10 => Some(Self::Yield),
+            11 => Some(Self::Ready),
             _ => None,
         }
     }

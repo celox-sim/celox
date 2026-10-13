@@ -338,14 +338,14 @@ fn transition_edges(was: (bool, bool), is: (bool, bool)) -> (bool, bool) {
     }
 }
 
-/// Whether an event signal is nonzero, and whether it is x or z.
+/// The event signal's least significant bit and its X/Z mask.
 fn sample_event_signal<B: SimBackend>(backend: &B, signal: SignalRef) -> (bool, bool) {
     if backend.layout().four_state && signal.is_4state {
         let (value, mask) = backend.get_four_state(signal);
-        (value.bits() != 0, mask.bits() != 0)
+        (value.bit(0), mask.bit(0))
     } else {
         let value: u8 = backend.get_as(signal);
-        (value != 0, false)
+        (value & 1 != 0, false)
     }
 }
 
@@ -573,6 +573,31 @@ impl<B: SimBackend> SimulationState<B> {
             })
             .collect();
         self
+    }
+
+    fn sample_waiting_events<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        for &process in &self.waiting {
+            let refs = &self.processes[process];
+            if !matches!(
+                ProcessStatus::from_code(executor.backend().get_as(refs.status)),
+                Some(ProcessStatus::Wait | ProcessStatus::Pending)
+            ) {
+                continue;
+            }
+            let delay = executor.backend().get_as::<u64>(refs.delay);
+            executor.backend_mut().set(refs.delay, 1u64);
+            let result = executor.run_process(process, time);
+            executor.backend_mut().set(refs.delay, delay);
+            result?;
+        }
+        Ok(())
     }
 
     pub fn step<E>(&mut self, executor: &mut E) -> Result<Option<u64>, SimulatorErrorCode>
@@ -1169,6 +1194,9 @@ impl<B: SimBackend> SimulationState<B> {
                             )
                         })
                         .collect::<Vec<_>>();
+                    executor
+                        .backend_mut()
+                        .set(self.processes[process].delay, 0u64);
                     executor.run_process(process, current_time)?;
                     if executor.finish_requested(current_time) {
                         self.finish_round = true;
@@ -1313,7 +1341,9 @@ impl<B: SimBackend> SimulationState<B> {
                         // The kernel found its wait condition unmet and ran
                         // nothing; it stays waiting.
                         Some(ProcessStatus::Pending) => {}
-                        None => return Err(SimulatorErrorCode::InternalError),
+                        Some(ProcessStatus::Ready) | None => {
+                            return Err(SimulatorErrorCode::InternalError);
+                        }
                     }
                     break;
                 }
@@ -1422,8 +1452,17 @@ impl<B: SimBackend> SimulationState<B> {
         );
 
         let num_events = executor.backend().num_events();
+        let mut scheduled_edges = BitSet::with_capacity(num_events);
         for event in &events_to_process {
+            let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
+            let after = sample_event_signal(executor.backend(), event.signal);
+            if let Some(&id) = self.signal_to_id.get(&event.signal)
+                && self.edge_triggers(id, before, after)
+            {
+                scheduled_edges.insert(id);
+            }
+            self.sample_waiting_events(executor, current_time)?;
         }
         if std::mem::take(&mut self.settle_before_processes)
             && (!ready_processes.is_empty() || !self.waiting.is_empty())
@@ -1530,6 +1569,7 @@ impl<B: SimBackend> SimulationState<B> {
         // Counter-recorded kernel edges survive later blocking stores that
         // restored the signal before the kernel returned.
         let mut recorded_edges = self.process_counter_edges(executor.backend(), &counter_values);
+        recorded_edges.union_with(&scheduled_edges);
         let mut scheduled_trigger_ids = recorded_edges.clone();
         // An external drive may already have been combinationally evaluated
         // by a testbench read. Compare against our saved baseline even if that
@@ -1540,7 +1580,7 @@ impl<B: SimBackend> SimulationState<B> {
             .filter_map(|event| {
                 self.signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, (event.next_val != 0, false)))
+                    .map(|&id| (id, (event.next_val & 1 != 0, false)))
             })
             .chain(process_driven);
         for (id, is) in scheduled {
@@ -2215,6 +2255,10 @@ impl<B: SimBackend> SimulationState<B> {
         }
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
+        }
+        self.unknown_clock_values.make_empty();
+        for event in parts.unknown_events {
+            self.unknown_clock_values.insert(event.id());
         }
         self.process_wakeups = parts
             .process_wakeups
