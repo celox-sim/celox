@@ -1937,3 +1937,44 @@ fn blocking_ff_comb_events_wake_waiters_before_nba() {
     assert_eq!(sim.get(sim.signal("q")), 1u8.into());
     assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
 }
+
+#[test]
+fn loop_condition_calls_with_hidden_comb_pulses_are_rejected() {
+    for (condition, body) in [
+        ("q=(i==0); return i<1;", "i=0; while(condition(i)) i++;"),
+        ("q=(i==1); return i<2;", "i=0; do i++; while(condition(i));"),
+        (
+            "q=(i==0); return i<1;",
+            "for(i=0;condition(i);i++) begin end",
+        ),
+    ] {
+        let source = format!(
+            "module Top(output bit seen); bit q;
+            function automatic bit condition(input int i); {condition} endfunction
+            always_comb begin int i; {body} end
+            initial begin @(posedge q); seen=1; end
+        endmodule"
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("multiple blocking writes"),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
+fn repeat_count_calls_publish_one_combinational_write() {
+    let mut sim = simulation(
+        "module Top(input bit go, output bit seen); bit q,unused;
+        function automatic int count(); q=go; return 0; endfunction
+        always_comb begin unused=0; repeat(count()) unused=1; end
+        initial begin @(posedge q); seen=1; end
+    endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}

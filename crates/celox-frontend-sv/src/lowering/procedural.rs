@@ -2394,6 +2394,20 @@ pub(super) fn loop_trip_cap(
     }
 }
 
+/// Condition/count evaluations, capped at two for hidden-pulse analysis.
+pub(super) fn loop_condition_eval_cap(
+    kind: &sv::ir::LoopKind<sv::ir::Expr>,
+    trips: usize,
+) -> usize {
+    match kind {
+        // Repeat evaluates its count once, even when the body runs zero times.
+        sv::ir::LoopKind::Repeat(_) => 1,
+        sv::ir::LoopKind::DoWhile => trips,
+        // Pre-test loops also evaluate the final false condition.
+        _ => (trips + 1).min(2),
+    }
+}
+
 /// Variables whose combinational process can write them repeatedly in one run.
 fn combinational_write_counts(
     stmts: &[sv::ir::Stmt],
@@ -2409,6 +2423,7 @@ fn combinational_write_counts(
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
             let mut next: HashMap<String, usize> = HashMap::default();
+            let mut call_evaluations = 1;
             match stmt {
                 sv::ir::Stmt::Assign { lhs, .. } => {
                     next.insert(lhs.name().to_string(), 1);
@@ -2450,6 +2465,7 @@ fn combinational_write_counts(
                 } => {
                     next = counts(init, subroutines, visiting, eval);
                     let trips = loop_trip_cap(kind, init, condition.as_ref(), step, eval);
+                    call_evaluations = loop_condition_eval_cap(kind, trips);
                     for (name, count) in counts(body, subroutines, visiting, eval)
                         .into_iter()
                         .chain(counts(step, subroutines, visiting, eval))
@@ -2465,7 +2481,7 @@ fn combinational_write_counts(
             for (name, args) in calls {
                 for (name, count) in call_counts(&name, &args, subroutines, visiting, eval) {
                     let entry = next.entry(name).or_default();
-                    *entry = (*entry + count).min(2);
+                    *entry = (*entry + count * call_evaluations).min(2);
                 }
             }
             for (name, count) in next {
