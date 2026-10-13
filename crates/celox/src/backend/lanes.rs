@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn selector_identity_survives_table_growth_and_is_unique_per_simulator() {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = fxhash::FxHashSet::default();
         for _ in 0..2 {
             let mut selectors = LaneSelectors::default();
             for slot in [LaneKernelSlot::Event(0), LaneKernelSlot::Fused(0)] {
