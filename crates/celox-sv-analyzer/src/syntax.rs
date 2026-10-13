@@ -9,7 +9,22 @@ use crate::AnalyzerError;
 
 /// Parse a SystemVerilog source string into an `sv-parser` syntax tree.
 pub fn parse_source(code: &str, path: &Path) -> Result<SyntaxTree, AnalyzerError> {
-    let defines: Defines<FxBuildHasher> = HashMap::<String, Option<Define>>::default();
+    parse_source_with_defines(code, path, &[])
+}
+
+/// Parse with predefined empty macros without adding lines to the source.
+pub fn parse_source_with_defines(
+    code: &str,
+    path: &Path,
+    names: &[&str],
+) -> Result<SyntaxTree, AnalyzerError> {
+    let mut defines: Defines<FxBuildHasher> = HashMap::default();
+    for name in names {
+        defines.insert(
+            (*name).to_owned(),
+            Some(Define::new((*name).to_owned(), Vec::new(), None)),
+        );
+    }
     let includes: Vec<&Path> = Vec::new();
     let (syntax_tree, _) = parse_sv_str(code, path, &defines, &includes, true, false)
         .map_err(|error| AnalyzerError::Parse(error.to_string()))?;

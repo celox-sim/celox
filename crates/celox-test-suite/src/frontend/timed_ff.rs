@@ -202,13 +202,36 @@ fn single_generate_body(source: &str, start: usize) -> bool {
     })
 }
 
+// Keep attributes on the generated always item, inside a generated block
+// when the original listener was a single generate arm.
+fn attributes_start(source: &str, start: usize) -> usize {
+    let mut at = 0;
+    let mut attributes = start;
+    while at < start {
+        at = trivia(source, at);
+        if at >= start {
+            break;
+        }
+        if source[at..].starts_with("(*") {
+            attributes = attributes.min(at);
+            at = parens(source, at).expect("parsed attribute");
+        } else {
+            attributes = start;
+            if !skip_token(source, &mut at) {
+                at += 1;
+            }
+        }
+    }
+    attributes
+}
+
 pub(super) fn gated(
     source: &str,
     start: usize,
     end: usize,
     names: &TimedNames,
     tasks: &TaskTiming,
-) -> Result<(usize, String)> {
+) -> Result<(usize, usize, String)> {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
         return Err("timed always_ff requires an explicit event control".into());
@@ -236,8 +259,10 @@ pub(super) fn gated(
     let pending = fresh("pending");
     let package = &names.package;
     let event = &source[begin + 1..event_end - 1];
+    let replacement_start = attributes_start(source, start);
+    let attributes = &source[replacement_start..start];
     let staged = format!(
-        "bit {armed}=0;\nbit {pending}=0;\nalways @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
+        "bit {armed}=0;\nbit {pending}=0;\n{attributes}always @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
     );
     // A single generate item needs a block for the additional declarations.
     // Reuse that construct's unnamed body rather than inserting another if,
@@ -247,7 +272,7 @@ pub(super) fn gated(
     } else {
         staged
     };
-    Ok((body_end, format!("{staged}\n")))
+    Ok((replacement_start, body_end, format!("{staged}\n")))
 }
 
 /// The frontend classifies an ordinary always as FF only when every leaf
