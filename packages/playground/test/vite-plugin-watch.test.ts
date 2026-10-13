@@ -2,15 +2,20 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { normalizePath } from "vite";
 import { afterEach, expect, test, vi } from "vitest";
 
-const platform = vi.hoisted(() => ({ windows: false }));
+const platform = vi.hoisted(() => ({
+	paths: "native" as "native" | "posix" | "win32",
+}));
 vi.mock("node:path", async (importOriginal) => {
 	const path = await importOriginal<typeof import("node:path")>();
 	return {
 		...path,
 		resolve: (...paths: string[]) =>
-			platform.windows ? path.win32.resolve(...paths) : path.resolve(...paths),
+			(platform.paths === "native" ? path : path[platform.paths]).resolve(
+				...paths,
+			),
 	};
 });
 vi.mock("vite", async (importOriginal) => ({
@@ -27,27 +32,39 @@ vi.mock("../../vite-plugin/src/generator.js", () => ({
 }));
 vi.mock(
 	"../../vite-plugin/src/testbench-components.js",
-	async (importOriginal) => ({
-		...(await importOriginal<
-			typeof import("../../vite-plugin/src/testbench-components.js")
-		>()),
-		loadTestbenchComponentModule: vi.fn(async (entry: string) => ({
-			manifests: {},
-			dependencies: new Set([entry, join(dirname(entry), "helper.ts")]),
-		})),
-		writeTestbenchComponentSidecar: vi.fn(),
-	}),
+	async (importOriginal) => {
+		const original =
+			await importOriginal<
+				typeof import("../../vite-plugin/src/testbench-components.js")
+			>();
+		return {
+			...original,
+			loadTestbenchComponentModule: vi.fn(async (entry: string) => ({
+				manifests: {},
+				// Match the real loader's dependency-key contract on every OS.
+				dependencies: new Set(
+					[entry, join(dirname(entry), "helper.ts")].map(
+						original.normalizeTestbenchComponentPath,
+					),
+				),
+			})),
+			writeTestbenchComponentSidecar: vi.fn(),
+		};
+	},
 );
 
 import { runGenTs } from "../../vite-plugin/src/generator.js";
 import celox from "../../vite-plugin/src/index.js";
-import { loadTestbenchComponentModule } from "../../vite-plugin/src/testbench-components.js";
+import {
+	loadTestbenchComponentModule,
+	normalizeTestbenchComponentPath,
+} from "../../vite-plugin/src/testbench-components.js";
 
 const roots: string[] = [];
 afterEach(() => {
-	platform.windows = false;
+	platform.paths = "native";
 	vi.mocked(runGenTs).mockClear();
-	vi.mocked(loadTestbenchComponentModule).mockClear();
+	vi.mocked(loadTestbenchComponentModule).mockReset();
 	vi.restoreAllMocks();
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
@@ -75,7 +92,7 @@ function graph() {
 test.each(["/", "C:/"])(
 	"build-watch output filters recognize the filesystem root %s",
 	(root) => {
-		platform.windows = root === "C:/";
+		platform.paths = root === "C:/" ? "win32" : "posix";
 		const plugin = celox({ projectRoot: root });
 		const config = (plugin.config as Function)(
 			{ root, build: { watch: {} } },
@@ -90,7 +107,7 @@ test.each(["/", "C:/"])(
 test.each(["/", "C:/"])(
 	"catalogue events recognize the filesystem root %s",
 	async (root) => {
-		platform.windows = root === "C:/";
+		platform.paths = root === "C:/" ? "win32" : "posix";
 		const plugin = celox({ projectRoot: root });
 		await (plugin.configResolved as Function)({ root });
 		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
@@ -119,11 +136,13 @@ test("the watcher includes a custom project directory outside the Vite root", as
 		config: { server: { hmr: true } },
 		environments: {},
 	});
-	expect(watcher.add).toHaveBeenCalledWith(expect.arrayContaining([root]));
+	expect(watcher.add).toHaveBeenCalledWith(
+		expect.arrayContaining([normalizePath(root)]),
+	);
 });
 
 test("Windows project imports resolve to a loadable dependency module", async () => {
-	platform.windows = true;
+	platform.paths = "win32";
 	const { plugin, context } = await initialize("C:/project");
 	const sourceId = "C:/project/Main.veryl";
 	// A source with no exported modules still needs the project module loaded
@@ -206,7 +225,7 @@ test("HMR-disabled lockfile changes notify once and unchanged writes remain sile
 	writeFileSync(file, "edited");
 	watcher.emit("change", file);
 	await Promise.resolve();
-	expect(changes).toHaveBeenCalledWith(join(root, "Veryl.toml"));
+	expect(changes).toHaveBeenCalledWith(normalizePath(join(root, "Veryl.toml")));
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 	changes.mockClear();
 	moduleGraph.invalidateModule.mockClear();
@@ -276,7 +295,7 @@ test("build watch registers the project catalogue and lockfile outside the Vite 
 	const context = { addWatchFile: vi.fn(), meta: { watchMode: true } };
 	await (plugin.buildStart as Function).call(context);
 	for (const path of [root, join(root, "Veryl.lock")])
-		expect(context.addWatchFile).toHaveBeenCalledWith(path);
+		expect(context.addWatchFile).toHaveBeenCalledWith(normalizePath(path));
 });
 
 test("HMR-disabled watcher suppresses generation-owned lockfile creation", async () => {
@@ -297,7 +316,7 @@ test("HMR-disabled watcher suppresses generation-owned lockfile creation", async
 	});
 	const projectChanged = vi.fn();
 	watcher.on("change", (changed) => {
-		if (changed === join(root, "Veryl.toml")) projectChanged();
+		if (changed === normalizePath(join(root, "Veryl.toml"))) projectChanged();
 	});
 	watcher.emit("add", file);
 	await Promise.resolve();
@@ -359,12 +378,15 @@ test("HMR-disabled component updates notify the project after asynchronous regen
 		expect(moduleGraph.invalidateModule).toHaveBeenCalled();
 	});
 	watcher.on("change", (file) => {
-		if (file === join(root, "Veryl.toml")) projectChanged();
+		if (file === normalizePath(join(root, "Veryl.toml"))) projectChanged();
 	});
 	watcher.emit("change", helper);
 	await Promise.resolve();
 	expect(projectChanged).not.toHaveBeenCalled();
-	finish({ manifests: {}, dependencies: new Set([entry, helper]) });
+	finish({
+		manifests: {},
+		dependencies: new Set([entry, helper].map(normalizeTestbenchComponentPath)),
+	});
 	await vi.waitFor(() => expect(projectChanged).toHaveBeenCalledTimes(1));
 	expect(runGenTs).toHaveBeenCalledTimes(2);
 });
@@ -482,7 +504,7 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 		expect(result).toContain(changed);
 		expect(result.map((mod: { id: string }) => mod.id)).toEqual([
 			helper,
-			`${root}/Veryl.toml?celox-project`,
+			`${normalizePath(root)}/Veryl.toml?celox-project`,
 			plain,
 			query,
 		]);
@@ -514,17 +536,24 @@ test.each([false, true])(
 					finish = () =>
 						failFirst
 							? reject(new Error("incomplete first edit"))
-							: resolve({ manifests: {}, dependencies: new Set([entry]) });
+							: resolve({
+									manifests: {},
+									dependencies: new Set([
+										normalizeTestbenchComponentPath(entry),
+									]),
+								});
 				}),
 		);
-		const latestDependencies = new Set([entry, join(root, "latest.ts")]);
+		const latestDependencies = new Set(
+			[entry, join(root, "latest.ts")].map(normalizeTestbenchComponentPath),
+		);
 		vi.mocked(loadTestbenchComponentModule).mockResolvedValueOnce({
 			manifests: {},
 			dependencies: latestDependencies,
 		});
 		const notifications = vi.fn();
 		watcher.on("change", (file) => {
-			if (file === join(root, "Veryl.toml")) notifications();
+			if (file === normalizePath(join(root, "Veryl.toml"))) notifications();
 		});
 		watcher.emit("change", helper);
 		watcher.emit("change", helper);
