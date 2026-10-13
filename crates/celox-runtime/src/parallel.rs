@@ -790,7 +790,12 @@ mod tests {
             }
         }
         let events = Arc::new(Mutex::new(Vec::new()));
-        tracing::subscriber::with_default(Capture(events.clone()), || {
+        // Other tests first register these callsites without a thread-local
+        // subscriber. Keep both dispatchers alive so tracing combines their
+        // interests instead of caching the registering thread's lone default.
+        let capture = tracing::Dispatch::new(Capture(events.clone()));
+        let _untraced = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tracing::dispatcher::with_default(&capture, || {
             let (schedule, predecessors) = chain_schedule();
             let mut pool = LanePool::new(3).unwrap();
             assert!(
