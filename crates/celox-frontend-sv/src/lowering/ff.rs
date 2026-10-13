@@ -3179,6 +3179,7 @@ fn watched_write_count(
     };
     let mut total = 0usize;
     for stmt in stmts {
+        let mut call_evaluations = 1;
         let mut count = match stmt {
             sv::ir::Stmt::Assign {
                 lhs,
@@ -3226,6 +3227,7 @@ fn watched_write_count(
                         pm.parameter_types,
                     )
                 });
+                call_evaluations = loop_condition_eval_cap(kind, trips);
                 watched_write_count(init, pm, expr, visiting, nonblocking)
                     + trips
                         * (watched_write_count(body, pm, expr, visiting, nonblocking)
@@ -3233,6 +3235,7 @@ fn watched_write_count(
             }
             _ => 0,
         };
+        let before_calls = count;
         let mut calls = Vec::new();
         stmt_calls(stmt, &mut calls);
         for (name, args) in calls {
@@ -3272,6 +3275,7 @@ fn watched_write_count(
                 visiting.remove(&name);
             }
         }
+        count = before_calls + (count - before_calls) * call_evaluations;
         total = (total + count).min(2);
     }
     total
