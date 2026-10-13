@@ -1,5 +1,11 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizePath } from "vite";
@@ -94,10 +100,12 @@ test.each(["/", "C:/"])(
 	(root) => {
 		platform.paths = root === "C:/" ? "win32" : "posix";
 		const plugin = celox({ projectRoot: root });
-		const config = (plugin.config as Function)(
-			{ root, build: { watch: {} } },
-			{ command: "build" },
-		);
+		const config = {
+			root,
+			command: "build",
+			build: { outDir: "dist", watch: {} as Record<string, any> },
+		};
+		(plugin.configResolved as Function)(config);
 		const excluded = [`${root}.celox/**`, `${root}target/**`, `${root}dist/**`];
 		expect(config.build.watch.exclude).toEqual(excluded);
 		expect(config.build.watch.chokidar.ignored).toEqual(excluded);
@@ -249,12 +257,12 @@ test("watch modules omit absent optional configs from import-analysis dependenci
 	roots.push(root);
 	const { plugin, context } = await initialize(root);
 	const file = join(root, "celox.toml");
-	const id = `${file}?celox-watch`;
+	const id = (plugin.resolveId as Function)(`${file}?celox-watch`);
 	expect((plugin.load as Function).call(context, id)).toBe("export {};");
 	expect(context.addWatchFile).not.toHaveBeenCalledWith(file);
 	writeFileSync(file, "[test]\nsources=[]\n");
 	expect((plugin.load as Function).call(context, id)).toBe("export {};");
-	expect(context.addWatchFile).toHaveBeenCalledWith(file);
+	expect(context.addWatchFile).toHaveBeenCalledWith(normalizePath(file));
 });
 
 test.each(
@@ -271,9 +279,13 @@ test.each(
 			writeFileSync(file, "generated lock");
 			return { projectPath, modules: [], fileModules: {} };
 		});
+		writeFileSync(join(root, "Main.veryl"), "module Main {}\n");
 		const { plugin, context } = await initialize(root);
 		if (loaded)
-			(plugin.load as Function).call(context, join(root, "Main.veryl"));
+			(plugin.load as Function).call(
+				context,
+				(plugin.resolveId as Function)(join(root, "Main.veryl")),
+			);
 		const moduleGraph = graph();
 		const update = (timestamp: number) =>
 			(plugin[hook] as Function).call(
@@ -297,11 +309,15 @@ test("build watch registers the project catalogue and lockfile outside the Vite 
 	await (plugin.configResolved as Function)({
 		root: join(root, "tests"),
 		command: "build",
+		build: { watch: {}, outDir: "dist" },
 	});
 	const context = { addWatchFile: vi.fn(), meta: { watchMode: true } };
 	await (plugin.buildStart as Function).call(context);
-	for (const path of [root, join(root, "Veryl.lock")])
-		expect(context.addWatchFile).toHaveBeenCalledWith(normalizePath(path));
+	expect(context.addWatchFile).not.toHaveBeenCalledWith(normalizePath(root));
+	const signal = context.addWatchFile.mock.calls[0][0];
+	expect(existsSync(signal)).toBe(true);
+	(plugin.closeWatcher as Function)();
+	expect(existsSync(signal)).toBe(false);
 });
 
 test("HMR-disabled watcher suppresses generation-owned lockfile creation", async () => {
@@ -491,11 +507,15 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 		const helper = join(root, "helper.ts");
 		writeFileSync(entry, "export {};");
 		writeFileSync(helper, "export const step = 1;");
+		writeFileSync(join(root, "Main.veryl"), "module Main {}\n");
 		const { plugin, context } = await initialize(root, entry);
-		const plain = join(root, "Main.veryl");
+		const plain = normalizePath(join(root, "Main.veryl"));
 		const query = `${plain}?dse=preserveAllPorts`;
 		for (const id of [plain, query])
-			(plugin.load as Function).call(context, id);
+			(plugin.load as Function).call(
+				context,
+				(plugin.resolveId as Function)(id),
+			);
 		const changed = { id: helper };
 		const moduleGraph = graph();
 		const result = await (plugin[hook] as Function).call(
@@ -718,9 +738,13 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 			writeFileSync(file, "generated lock");
 			return { projectPath, modules: [], fileModules: {} };
 		});
+		writeFileSync(join(root, "Main.veryl"), "module Main {}\n");
 		const { plugin, context } = await initialize(root);
 		const source = normalizePath(join(root, "Main.veryl"));
-		(plugin.load as Function).call(context, source);
+		(plugin.load as Function).call(
+			context,
+			(plugin.resolveId as Function)(source),
+		);
 		const direct = { id: `${normalizePath(file)}?raw` };
 		const moduleGraph = graph();
 		const modules = [
@@ -824,10 +848,12 @@ test.each([undefined, "output", "../artifacts"])(
 		roots.push(root);
 		const viteRoot = join(root, "client");
 		const plugin = celox({ projectRoot: root });
-		const config = (plugin.config as Function)(
-			{ root: viteRoot, build: { watch: {}, outDir } },
-			{ command: "build" },
-		);
+		const config = {
+			root: viteRoot,
+			command: "build",
+			build: { outDir: outDir ?? "dist", watch: {} as Record<string, any> },
+		};
+		(plugin.configResolved as Function)(config);
 		const expected = `${normalizePath(join(viteRoot, outDir ?? "dist"))}/**`;
 		expect(config.build.watch.exclude).toContain(expected);
 		expect(config.build.watch.chokidar.ignored).toContain(expected);
@@ -884,5 +910,93 @@ test.each(
 		await events[1];
 		expect(runGenTs).toHaveBeenCalledTimes(interveningEdit ? 4 : 3);
 		expect(logger.error).not.toHaveBeenCalled();
+	},
+);
+
+test("resolved configuration supplies roots and preserves user watch filters", () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-final-root-"));
+	roots.push(root);
+	writeFileSync(join(root, "Veryl.toml"), "[project]");
+	const plugin = celox();
+	expect(plugin.config).toBeUndefined();
+	const ignored = () => false;
+	const config = {
+		root,
+		command: "build",
+		build: {
+			outDir: "dist",
+			watch: {
+				exclude: /existing/,
+				chokidar: { ignored, usePolling: true },
+			} as Record<string, any>,
+		},
+	};
+	(plugin.configResolved as Function)(config);
+	expect(config.build.watch.exclude).toContainEqual(/existing/);
+	expect(config.build.watch.exclude).toContain(
+		`${normalizePath(root)}/dist/**`,
+	);
+	expect(config.build.watch.chokidar.ignored).toContain(ignored);
+	expect(config.build.watch.chokidar.usePolling).toBe(true);
+});
+
+test("load leaves another plugin's Veryl-like virtual and unresolved IDs alone", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-module-owner-"));
+	roots.push(root);
+	writeFileSync(join(root, "Main.veryl"), "module Main {}\n");
+	const { plugin, context } = await initialize(root);
+	for (const id of [
+		"\0virtual:fixture.veryl",
+		join(root, "Main.veryl"),
+		"\0virtual:fixture.veryl?celox-watch",
+	]) {
+		expect((plugin.load as Function).call(context, id)).toBeUndefined();
+	}
+	expect(context.addWatchFile).not.toHaveBeenCalled();
+	expect(
+		(plugin.resolveId as Function)("\0virtual:fixture.veryl"),
+	).toBeUndefined();
+	const id = (plugin.resolveId as Function)(join(root, "Main.veryl"));
+	expect((plugin.load as Function).call(context, id)).toBe("export {};");
+});
+
+test.each([true, false])(
+	"register refreshed external component dependencies with HMR=%s",
+	async (hmr) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-component-project-"));
+		const external = mkdtempSync(join(tmpdir(), "celox-external-components-"));
+		roots.push(root, external);
+		const entry = join(external, "components.ts");
+		const added = join(external, "new-helper.ts");
+		writeFileSync(entry, "export {};");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const httpServer = new EventEmitter();
+		const moduleGraph = graph();
+		(plugin.configureServer as Function)({
+			watcher,
+			httpServer,
+			config: { server: { hmr } },
+			environments: { ssr: { moduleGraph } },
+		});
+		const dependencies = new Set(
+			[entry, added].map(normalizeTestbenchComponentPath),
+		);
+		vi.mocked(loadTestbenchComponentModule).mockResolvedValueOnce({
+			manifests: {},
+			dependencies,
+		});
+		await (plugin.hotUpdate as Function).call(
+			{ environment: { moduleGraph } },
+			{ file: entry, type: "update", read: () => "edited" },
+		);
+		expect(watcher.add).toHaveBeenCalledWith([...dependencies]);
+		httpServer.emit("close");
+		watcher.add.mockClear();
+		await (plugin.hotUpdate as Function).call(
+			{ environment: { moduleGraph } },
+			{ file: added, type: "update", read: () => "edited" },
+		);
+		expect(watcher.add).not.toHaveBeenCalled();
 	},
 );

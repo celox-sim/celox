@@ -1,7 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
+import {
+	normalizePath,
+	type Plugin,
+	type ResolvedConfig,
+	type ViteDevServer,
+} from "vite";
+import { watchBuildCatalogue } from "./build-watch.js";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars, SIDECAR_DIR } from "./sidecar.js";
 import {
@@ -47,6 +53,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let viteConfig: ResolvedConfig;
 	let projectId: string;
 	const loadedIds = new Set<string>();
+	const resolvedIds = new Set<string>();
+	let devWatcher: ViteDevServer["watcher"] | undefined;
+	let buildCatalogue: ReturnType<typeof watchBuildCatalogue> | undefined;
 	let pendingRegeneration: Promise<void> | undefined;
 	let componentLoadFailed = false;
 	const projectNotifications: (string | undefined)[] = [];
@@ -106,6 +115,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				});
 				componentLoadFailed = false;
 				testbenchComponentDependencies = loaded.dependencies;
+				devWatcher?.add([...loaded.dependencies]);
 				writeTestbenchComponentSidecar(
 					projectRoot,
 					testbenchComponents,
@@ -183,32 +193,6 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		name: "vite-plugin-celox",
 		enforce: "pre",
 
-		config(config, { command }) {
-			if (command !== "build" || !config.build?.watch) return;
-			const root = normalizePath(
-				resolve(
-					options?.projectRoot ??
-						findVerylProjectRoot(resolve(config.root ?? process.cwd())),
-				),
-			);
-			const excluded = [SIDECAR_DIR, "target"].map(
-				(dir) => `${normalizePath(resolve(root, dir))}/**`,
-			);
-			// Vite 5.0 does not exclude outDir from recursive watch itself.
-			const outDir = config.build.outDir ?? "dist";
-			if (outDir)
-				excluded.push(
-					`${normalizePath(resolve(config.root ?? process.cwd(), outDir))}/**`,
-				);
-			// Rollup's directory watcher needs the Chokidar filter; Rolldown
-			// uses watch.exclude. Vite merges these with the user's filters.
-			return {
-				build: {
-					watch: { exclude: excluded, chokidar: { ignored: excluded } },
-				},
-			};
-		},
-
 		configResolved(config) {
 			viteConfig = config;
 			// Determine project root
@@ -223,6 +207,30 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				? projectRoot
 				: `${projectRoot}/`;
 			projectId = `${projectFile("Veryl.toml")}?${PROJECT_QUERY}`;
+			if (config.command === "build" && config.build.watch) {
+				const excluded = [SIDECAR_DIR, "target"].map(
+					(dir) => `${normalizePath(resolve(projectRoot, dir))}/**`,
+				);
+				if (config.build.outDir)
+					excluded.push(
+						`${normalizePath(resolve(config.root, config.build.outDir))}/**`,
+					);
+				const watch = config.build.watch as typeof config.build.watch & {
+					chokidar?: { ignored?: unknown; [key: string]: unknown };
+				};
+				const append = (value: unknown) => [
+					...(value == null ? [] : Array.isArray(value) ? value : [value]),
+					...excluded,
+				];
+				// Preserve user filters; discovery and output resolution use the final root.
+				Object.assign(watch, {
+					exclude: append(watch.exclude),
+					chokidar: {
+						...watch.chokidar,
+						ignored: append(watch.chokidar?.ignored),
+					},
+				});
+			}
 
 			if (options?.testbenchComponents) {
 				const componentsModule = options.testbenchComponents;
@@ -239,11 +247,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 		async buildStart() {
 			if (viteConfig.command === "build" && this.meta.watchMode) {
-				// configureServer is not called by vite build --watch. Watch the
-				// catalogue too, including sources/configuration that don't exist yet.
-				this.addWatchFile(projectRoot);
-				for (const name of CONFIG_FILES) this.addWatchFile(projectFile(name));
+				buildCatalogue ??= watchBuildCatalogue(
+					projectRoot,
+					viteConfig.build?.outDir
+						? resolve(viteConfig.root, viteConfig.build.outDir)
+						: undefined,
+					(error) => viteConfig.logger.error(String(error)),
+				);
+				this.addWatchFile(buildCatalogue.signal);
 			}
+
 			let componentManifests: TestbenchComponentManifests | undefined;
 			if (testbenchComponents) {
 				const loaded = await loadTestbenchComponentModule(
@@ -253,6 +266,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				);
 				componentManifests = loaded.manifests;
 				testbenchComponentDependencies = loaded.dependencies;
+				devWatcher?.add([...loaded.dependencies]);
 				for (const dependency of testbenchComponentDependencies) {
 					this.addWatchFile(dependency);
 				}
@@ -270,9 +284,28 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
 			sidecarPaths = nextPaths;
 			generatedData = data;
+			if (buildCatalogue) {
+				const inputs = [
+					...cache.sourceFiles,
+					...CONFIG_FILES.map(projectFile),
+					...testbenchComponentDependencies,
+				].filter(existsSync);
+				for (const file of inputs) this.addWatchFile(file);
+				buildCatalogue.setWatched(inputs);
+			}
+		},
+
+		closeWatcher() {
+			buildCatalogue?.close();
+			buildCatalogue = undefined;
 		},
 
 		configureServer(server) {
+			devWatcher = server.watcher;
+			server.watcher.add([...testbenchComponentDependencies]);
+			server.httpServer?.once("close", () => {
+				if (devWatcher === server.watcher) devWatcher = undefined;
+			});
 			server.watcher.add([projectRoot, ...CONFIG_FILES.map(projectFile)]);
 			const hmrDisabled = server.config.server.hmr === false;
 			let notifyingProject = false;
@@ -370,8 +403,12 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		resolveId(source, importer) {
 			// Split off query string (e.g. "?dse=preserveAllPorts")
 			const [rawPath, queryStr] = source.split("?", 2);
-			if (queryStr === PROJECT_QUERY || queryStr === WATCH_QUERY)
-				return normalizePath(source);
+			if (source.startsWith("\0")) return;
+			if (queryStr === PROJECT_QUERY || queryStr === WATCH_QUERY) {
+				const id = normalizePath(source);
+				resolvedIds.add(id);
+				return id;
+			}
 			if (!rawPath!.endsWith(".veryl")) return;
 
 			// Resolve to absolute path
@@ -390,10 +427,13 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			if (!existsSync(absPath)) return;
 
 			// Preserve the real file identity so Vite/Vitest can trace changes.
-			return absPath + (queryStr ? `?${queryStr}` : "");
+			const id = absPath + (queryStr ? `?${queryStr}` : "");
+			resolvedIds.add(id);
+			return id;
 		},
 
 		load(id) {
+			if (!resolvedIds.has(id)) return;
 			const [absPath, queryStr] = id.split("?", 2);
 			if (queryStr === WATCH_QUERY) {
 				// Vite 5 also adds watch files to import analysis, which requires
