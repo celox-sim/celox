@@ -2249,10 +2249,6 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(event, count)| (PeriodicEventKey::from_event(&event), count as usize))
             .collect();
         self.last_clock_values.make_empty();
-        self.unknown_clock_values.make_empty();
-        for event in parts.unknown_events {
-            self.unknown_clock_values.insert(event.id());
-        }
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
         }

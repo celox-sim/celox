@@ -288,7 +288,7 @@ impl<A: Clone> ProcessKernelBuilder<A> {
         let request = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
         self.builder.emit(SIRInstruction::Load(
             request,
-            stable(self.slots.delay.clone()),
+            self.delay.clone(),
             SIROffset::Static(0),
             PROCESS_DELAY_WIDTH,
         ));
@@ -307,7 +307,7 @@ impl<A: Clone> ProcessKernelBuilder<A> {
         let status = self.builder.alloc_bit(PROCESS_STATUS_WIDTH, false);
         self.builder.emit(SIRInstruction::Load(
             status,
-            stable(self.slots.status.clone()),
+            self.status.clone(),
             SIROffset::Static(0),
             PROCESS_STATUS_WIDTH,
         ));
