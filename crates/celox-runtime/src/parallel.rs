@@ -30,6 +30,32 @@ pub fn new_diagnostic_id() -> String {
     id.to_string()
 }
 
+// Use one metadata identity for the execution tracing gate.
+static TRACE_GATE: tracing::callsite::DefaultCallsite =
+    tracing::callsite::DefaultCallsite::new(&TRACE_METADATA);
+static TRACE_METADATA: tracing::Metadata<'static> = tracing::Metadata::new(
+    "parallel execution tracing",
+    "celox::parallel",
+    tracing::Level::TRACE,
+    Some(file!()),
+    Some(line!()),
+    Some(module_path!()),
+    tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&TRACE_GATE)),
+    tracing::metadata::Kind::HINT,
+);
+
+fn execution_tracing_enabled() -> bool {
+    if tracing::Level::TRACE > tracing::level_filters::STATIC_MAX_LEVEL
+        || !tracing::dispatcher::has_been_set()
+    {
+        return false;
+    }
+    TRACE_GATE.register();
+    // A callsite first registered on an untraced thread may cache "never".
+    // Profiling belongs to the caller's dispatcher, not that cached default.
+    tracing::dispatcher::get_default(|dispatch| dispatch.enabled(&TRACE_METADATA))
+}
+
 #[derive(Default)]
 struct TaskTiming {
     waits: Vec<(u32, u32, u64, u64)>,
@@ -385,15 +411,12 @@ impl LanePool {
             tracing::trace!(target: "celox::parallel", event = "pool_fallback", reason = "insufficient_workers", requested = schedule.lanes, available = self.shared.lanes);
             return schedule.run_sequential(runner);
         }
-        let trace =
-            tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE).then(|| {
-                ExecutionTrace {
-                    start: Instant::now(),
-                    tasks: (0..schedule.tasks.len())
-                        .map(|_| Mutex::new(TaskTiming::default()))
-                        .collect(),
-                }
-            });
+        let trace = execution_tracing_enabled().then(|| ExecutionTrace {
+            start: Instant::now(),
+            tasks: (0..schedule.tasks.len())
+                .map(|_| Mutex::new(TaskTiming::default()))
+                .collect(),
+        });
         let shared = &*self.shared;
         // Progress words hold `epoch << 32 | count`, so the epoch must fit 32
         // bits. Every lane is idle between runs; clearing the words before
@@ -790,12 +813,25 @@ mod tests {
             }
         }
         let events = Arc::new(Mutex::new(Vec::new()));
-        // Other tests first register these callsites without a thread-local
-        // subscriber. Keep both dispatchers alive so tracing combines their
-        // interests instead of caching the registering thread's lone default.
-        let capture = tracing::Dispatch::new(Capture(events.clone()));
-        let _untraced = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        tracing::dispatcher::with_default(&capture, || {
+        tracing::subscriber::with_default(Capture(events.clone()), || {
+            use tracing::callsite::Callsite;
+            // Reproduce a callsite cached by a thread without this subscriber.
+            TRACE_GATE.register();
+            TRACE_GATE.set_interest(tracing::subscriber::Interest::never());
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let concurrent = std::thread::spawn({
+                let barrier = barrier.clone();
+                move || {
+                    let (schedule, predecessors) = chain_schedule();
+                    let mut pool = LanePool::new(3).unwrap();
+                    barrier.wait();
+                    for _ in 0..32 {
+                        pool.run(&schedule, &recorder(predecessors.clone(), None))
+                            .unwrap();
+                    }
+                }
+            });
+            barrier.wait();
             let (schedule, predecessors) = chain_schedule();
             let mut pool = LanePool::new(3).unwrap();
             assert!(
@@ -803,6 +839,7 @@ mod tests {
                     .is_err()
             );
             pool.run(&schedule, &recorder(predecessors, None)).unwrap();
+            concurrent.join().unwrap();
         });
         let events = events.lock().unwrap();
         let rows = |name: &str| {
