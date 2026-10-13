@@ -141,7 +141,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						findVerylProjectRoot(resolve(config.root ?? process.cwd())),
 				),
 			);
-			const excluded = [`${root}/${SIDECAR_DIR}/**`, `${root}/target/**`];
+			const excluded = [SIDECAR_DIR, "target"].map(
+				(dir) => `${normalizePath(resolve(root, dir))}/**`,
+			);
 			// Rollup's directory watcher needs the Chokidar filter; Rolldown
 			// uses watch.exclude. Vite merges these with the user's filters.
 			return {

@@ -73,6 +73,21 @@ function graph() {
 }
 
 test.each(["/", "C:/"])(
+	"build-watch output filters recognize the filesystem root %s",
+	(root) => {
+		platform.windows = root === "C:/";
+		const plugin = celox({ projectRoot: root });
+		const config = (plugin.config as Function)(
+			{ root, build: { watch: {} } },
+			{ command: "build" },
+		);
+		const excluded = [`${root}.celox/**`, `${root}target/**`];
+		expect(config.build.watch.exclude).toEqual(excluded);
+		expect(config.build.watch.chokidar.ignored).toEqual(excluded);
+	},
+);
+
+test.each(["/", "C:/"])(
 	"catalogue events recognize the filesystem root %s",
 	async (root) => {
 		platform.windows = root === "C:/";
