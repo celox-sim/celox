@@ -285,10 +285,14 @@ pub(crate) fn plan_parallel_ff_kernels(
     // Keep a written range in one lane across events for locality.
     let mut range_lanes = HashMap::<(AbsoluteAddr, usize), u32>::default();
     for event in events {
+        let _diagnostic =
+            tracing::trace_span!(target: "celox::parallel", "ff_partition", clock = %event)
+                .entered();
         let Some(mut event_parts) = parts.remove(event) else {
             continue;
         };
         if event_parts.len() < 2 {
+            tracing::trace!(target: "celox::parallel", event = "ff_declined", reason = "fewer_than_two_parts");
             continue;
         }
         // Runtime events (such as `$display`) of different parts must keep
@@ -303,6 +307,7 @@ pub(crate) fn plan_parallel_ff_kernels(
             .count()
             > 1
         {
+            tracing::trace!(target: "celox::parallel", event = "ff_declined", reason = "multiple_runtime_event_emitters");
             continue;
         }
         // Instance order keeps the unit order independent of map iteration;
@@ -380,6 +385,9 @@ pub(crate) fn plan_parallel_ff_kernels(
             } else if group_lanes[group].is_none() {
                 group_lanes[group] = previous;
             }
+            tracing::trace!(target: "celox::parallel", event = "ff_unit", unit = index, group,
+                cost = unit_cost(units[index], sizes), pinned_lane0 = pinned,
+                previous_lane = ?previous, writes = ?writes[index], sir = ?units[index]);
         }
 
         // Longest-processing-time placement of the free groups. A group
@@ -417,9 +425,15 @@ pub(crate) fn plan_parallel_ff_kernels(
             };
             loads[lane] = loads[lane].saturating_add(group_costs[group]);
             group_lanes[group] = Some(lane as u32);
+            tracing::trace!(target: "celox::parallel", event = "ff_placement", group, lane,
+                cost = group_costs[group], preferred = ?preferred, least_loaded, share,
+                votes = ?group_votes[group], loads = ?loads);
         }
 
         let makespan = loads.iter().copied().max().unwrap_or(0);
+        tracing::trace!(target: "celox::parallel", event = "ff_decision", makespan, total,
+            groups = ?group_of_unit, lanes = ?group_lanes, loads = ?loads,
+            accepted = makespan != 0 && total.saturating_mul(100) >= makespan.saturating_mul(options.minimum_speedup_percent));
         if makespan == 0
             || total.saturating_mul(100) < makespan.saturating_mul(options.minimum_speedup_percent)
         {
