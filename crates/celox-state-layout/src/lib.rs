@@ -116,10 +116,10 @@ impl<A> LayoutRequirements<A> {
     }
 }
 
-/// Alignment of a lane's storage segment. Two 64-byte lines keep segments of
-/// different lanes out of each other's spatial-prefetch pairs and out of
-/// shared 128-byte lines on targets that use them.
-pub const LANE_SEGMENT_ALIGN: usize = 128;
+/// Common coherence-isolation boundary, including CPUs with 256-byte lines.
+/// Smaller-line CPUs use the same layout; objects within a lane segment
+/// remain packed rather than each receiving this alignment.
+pub const LANE_SEGMENT_ALIGN: usize = 256;
 /// Minimum gap after a lane segment. Native code may widen a sub-word
 /// read-modify-write past the end of an object (up to eight bytes for a
 /// dynamic store plus its trailing byte); the gap keeps such accesses inside
