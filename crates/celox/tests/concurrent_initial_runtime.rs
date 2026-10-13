@@ -871,7 +871,10 @@ fn reset_duration_reads_the_value_before_assertion() {
     }"#;
     let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
     assert!(detailed.passed, "{detailed:?}");
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some("time=6"));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"time=6".as_slice())
+    );
     check_passes_on_every_backend(code);
 }
 
@@ -918,7 +921,10 @@ fn display_and_assertion_arguments_use_process_helper_effects() {
     let detailed = Simulator::builder(code, "Top").run_test_detailed().unwrap();
     assert!(detailed.passed, "{detailed:?}");
     assert_eq!(detailed.assertions.len(), 4);
-    assert_eq!(detailed.assertions[2].message.as_deref(), Some("value=2"));
+    assert_eq!(
+        detailed.assertions[2].message.as_deref(),
+        Some(b"value=2".as_slice())
+    );
     check_passes_on_every_backend(code);
 }
 
@@ -1261,7 +1267,7 @@ fn private_assignments_and_event_yields_do_not_replay_clean_comb_logic() {
         result
             .assertions
             .iter()
-            .filter(|a| a.message.as_deref() == Some("comb"))
+            .filter(|a| a.message.as_deref() == Some(b"comb".as_slice()))
             .count()
     };
     assert_eq!(count("helper();"), count(""));
