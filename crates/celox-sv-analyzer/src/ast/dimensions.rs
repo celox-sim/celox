@@ -1342,7 +1342,7 @@ fn containing_function_return_types(
 }
 
 /// Return types alone do not provide the context for an untyped argument pattern.
-fn containing_subroutine_param_shapes(
+pub(super) fn containing_subroutine_param_shapes(
     target: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,

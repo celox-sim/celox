@@ -9,6 +9,9 @@ sv_backends! {
     fn constant_parameter_initializers_short_circuit_wide_operands(sim) {
         @case "indexed_select::constant_parameter_initializers_short_circuit_wide_operands";
     }
+    fn constant_parameter_initializers_short_circuit_repetitions_and_selections(sim) {
+        @case "indexed_select::constant_parameter_initializers_short_circuit_repetitions_and_selections";
+    }
     fn constant_parameter_initializers_short_circuit_four_state_bindings(sim) {
         @case "indexed_select::constant_parameter_initializers_short_circuit_four_state_bindings";
     }

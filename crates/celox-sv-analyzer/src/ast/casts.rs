@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn cast_target_type(
+pub(super) fn cast_target_type(
     casting_type: &sv_parser::CastingType,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,

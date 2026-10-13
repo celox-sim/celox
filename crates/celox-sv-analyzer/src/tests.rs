@@ -1034,6 +1034,129 @@ fn folded_array_queries_allow_out_of_range_dimensions() {
 }
 
 #[test]
+fn bounded_parameter_proofs_preserve_left_associative_power() {
+    // IEEE 1800-2023 Table 11-2: ** is left-associative.
+    for expression in [
+        "((2 ** 3 ** 2) == 512) && 1000000000'bx",
+        "((2 ** 3 ** 2) == 64) || 1000000000'bx",
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("bounded_power.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(i128::from(expression.contains("||")))
+        );
+    }
+    for expression in [
+        "((2 ** 3 ** 2) == 64) && 1000000000'bx",
+        "((2 ** (3 ** 2)) == 512) && 1000000000'bx",
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        assert!(
+            analyze_source(&source, Path::new("evaluated_power.sv")).is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn bounded_parameter_proofs_skip_computed_repetitions() {
+    for (expression, expected) in [
+        ("0 && {1000000000{1'b0}}", 0),
+        ("1 || {1000000000{1'bx}}", 1),
+        ("0 && {2{65536'b0}}", 0),
+        ("0 && {2{{1000000000{1'b0}}}}", 0),
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("bounded_repetition.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(expected),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn bounded_parameter_proofs_use_typed_constant_selections() {
+    for (declaration, selected, expected) in [
+        ("localparam P = 2'b00;", "P[0]", 0),
+        ("localparam P = 2'b10;", "P[1]", 1),
+        ("localparam logic [4:3] P = 2'b10;", "P[3]", 0),
+        ("localparam logic [3:4] P = 2'b10;", "P[3]", 1),
+        ("localparam logic [1:0][1:0] P = 4'b0011;", "P[1]", 0),
+        ("localparam P = 4'b1000;", "P[2:1]", 0),
+        ("localparam P = 4'b1000;", "P[0 +: 2]", 0),
+    ] {
+        let operator = if expected == 0 { "&&" } else { "||" };
+        let source = format!(
+            "module Top; {declaration} localparam N = {selected} {operator} 1000000000'd0; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("bounded_parameter_select.sv"))
+            .unwrap_or_else(|error| panic!("{selected}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(expected)
+        );
+    }
+    for selected in ["P[0]", "P[2]", "P['x]"] {
+        let source = format!(
+            "module Top; localparam P = 2'b1x; localparam N = {selected} && 1000000000'd0; endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("bounded_unknown_select.sv")).is_err(),
+            "{selected}"
+        );
+    }
+}
+
+#[test]
+fn folded_parameter_patterns_validate_target_shapes() {
+    for pattern in [
+        "pair_t'('{1'b0})",
+        "pair_t'('{1'b0, 1'b1, 1'b0})",
+        "pair_t'('{missing: 1'b0, default: 1'b0})",
+        "pair_t'('{a: 1'b0})",
+        "pair_t'{a: 1'b0}",
+        "nested_t'{p: '{a: 1'b0}}",
+        "f('{a: 1'b0})",
+        "word_t'('{2: 1'b0, default: 1'b0})",
+        "word_t'('{0: 1'b0})",
+        "word_t'('{1000000000{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef struct packed {{ logic a; logic b; }} pair_t; typedef logic [1:0] word_t; typedef struct packed {{ pair_t p; }} nested_t; typedef logic [999999999:0] giant_t; function automatic int f(input pair_t p); return p.a; endfunction localparam N = 0 && ({pattern} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_pattern_shape.sv")).is_err(),
+            "{pattern}"
+        );
+    }
+    for pattern in [
+        "pair_t'('{1'b0, 1'b1})",
+        "pair_t'('{a: 1'b0, default: 1'b1})",
+        "pair_t'{default: 1000000000'd0}",
+        "word_t'('{2{1000000000'd0}})",
+        "word_t'('{0: 1'b0, default: 1'b0})",
+        "nested_t'{p: '{default: 1'b0}}",
+        "f('{default: 1000000000'd0})",
+        "giant_t'('{default: 1'b0})",
+        "giant_t'('{1000000000{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef struct packed {{ logic a; logic b; }} pair_t; typedef logic [1:0] word_t; typedef struct packed {{ pair_t p; }} nested_t; typedef logic [999999999:0] giant_t; function automatic int f(input pair_t p); return p.a; endfunction localparam N = 0 && ({pattern} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_pattern_shape_valid.sv"))
+            .unwrap_or_else(|error| panic!("{pattern}: {error}"));
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
 fn local_values_shadow_imported_bare_function_calls() {
     for declaration in ["localparam f = 0;", "typedef enum logic { f = 0 } E;"] {
         let source = format!(

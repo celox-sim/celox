@@ -433,8 +433,12 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 const_env,
                 type_aliases,
                 &|name| indexed_dimensions.parameter_values.get(name).cloned(),
+                &|primary| {
+                    selects::bounded_parameter_selection(primary, syntax_tree, indexed_dimensions)
+                },
             )?;
             if folded.is_some() {
+                patterns::validate_skipped_patterns(expression, syntax_tree, indexed_dimensions)?;
                 selects::validate_parameter_initializer_selections(
                     expression,
                     syntax_tree,

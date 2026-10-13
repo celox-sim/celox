@@ -491,6 +491,19 @@ pub(super) fn parameters_from_ref_node_with_environment(
                             .flatten()
                         })
                     },
+                    &|primary| {
+                        let mut dimensions = PackedDimensions::new(
+                            parameter_packed_dimensions_with_imported(parameters, &imported),
+                            const_env,
+                            type_aliases,
+                        );
+                        dimensions.parameter_values =
+                            parameter_value_env_with_imported(parameters, const_env, &imported)
+                                .into();
+                        dimensions.parameter_values.remove(&name);
+                        dimensions.remove(&name);
+                        selects::bounded_parameter_selection(primary, syntax_tree, &dimensions)
+                    },
                 )? {
                     Some(value)
                 } else if selects::parameter_initializer_needs_typed_lowering(expr) {
@@ -599,6 +612,7 @@ pub(super) fn validate_parameter_initializer_literal_widths(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literal: &impl Fn(&str) -> Option<Expr>,
+    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
 ) -> Result<Option<ConstExpr>, AnalyzerError> {
     let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
     let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
@@ -606,6 +620,7 @@ pub(super) fn validate_parameter_initializer_literal_widths(
     let mut evaluation_stack = vec![true];
     let mut shape_stack = vec![false];
     let mut oversized_value = None;
+    let mut has_replication_value = false;
     for event in initializer.into_iter().event() {
         let (entering, node) = match event {
             sv_parser::NodeEvent::Enter(node) => (true, node),
@@ -705,6 +720,14 @@ pub(super) fn validate_parameter_initializer_literal_widths(
         let shape = !query_operand && (shape_operand || *shape_stack.last().unwrap());
         evaluation_stack.push(evaluated);
         shape_stack.push(shape);
+        // A replication can be enormous without any oversized Size token.
+        // Give the bounded proof a chance before ordinary concatenation lowering.
+        has_replication_value |= evaluated
+            && !shape
+            && matches!(
+                node,
+                RefNode::MultipleConcatenation(_) | RefNode::ConstantMultipleConcatenation(_)
+            );
         // Inspect a sized literal's prefix without parsing its payload.
         // Query operands are types; trailing dimension arguments are values.
         if evaluated && let RefNode::Size(size) = node {
@@ -720,15 +743,19 @@ pub(super) fn validate_parameter_initializer_literal_widths(
             }
         }
     }
-    if let Some(width) = oversized_value {
+    if oversized_value.is_some() || has_replication_value {
         // Build a bounded proof, preserving precedence and associativity.
         // Oversized/unsupported operands cannot produce a proof value, but
         // logical short circuiting can skip them without parsing their bits.
         if let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(initializer) =
             initializer
             && let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer
-            && let Some(proof) =
-                expr_to_const(bounded_parameter_proof(expression, tree, parameter_literal))
+            && let Some(proof) = expr_to_const(bounded_parameter_proof(
+                expression,
+                tree,
+                parameter_literal,
+                parameter_selection,
+            ))
             && let Some(ty) = infer_const_expr_type_inner(
                 &proof,
                 &parameter_types_from_const_env(const_env),
@@ -766,7 +793,7 @@ pub(super) fn validate_parameter_initializer_literal_widths(
                 value, ty.width, ty.signed,
             ))));
         }
-        validate_parameter_materialization_width(Some(width))?;
+        validate_parameter_materialization_width(oversized_value)?;
     }
     Ok(None)
 }
@@ -775,6 +802,7 @@ fn bounded_parameter_proof(
     expression: &sv_parser::ConstantExpression,
     tree: &SyntaxTree,
     parameter_literal: &impl Fn(&str) -> Option<Expr>,
+    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
 ) -> Expr {
     // NUL cannot occur in an HDL binding. The unresolved proof operand is
     // never published: it either stays unevaluated or makes the proof fail.
@@ -800,6 +828,9 @@ fn bounded_parameter_proof(
                 .map(binding)
                 .unwrap_or_else(unknown)
         }
+        sv_parser::ConstantPrimary::PsParameter(_) => {
+            parameter_selection(primary).unwrap_or_else(unknown)
+        }
         sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
             // The parser also represents bare parameter names as TfCall nodes.
             if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
@@ -816,7 +847,7 @@ fn bounded_parameter_proof(
             if let sv_parser::ConstantMintypmaxExpression::Unary(expression) =
                 &grouped.nodes.0.nodes.1
             {
-                bounded_parameter_proof(expression, tree, parameter_literal)
+                bounded_parameter_proof(expression, tree, parameter_literal, parameter_selection)
             } else {
                 unknown()
             }
@@ -840,12 +871,14 @@ fn bounded_parameter_proof(
                     &value.nodes.0,
                     tree,
                     parameter_literal,
+                    parameter_selection,
                 )),
                 op,
                 right: Box::new(bounded_parameter_proof(
                     &value.nodes.3,
                     tree,
                     parameter_literal,
+                    parameter_selection,
                 )),
             };
             if matches!(&value.nodes.3, sv_parser::ConstantExpression::ConstantPrimary(primary)

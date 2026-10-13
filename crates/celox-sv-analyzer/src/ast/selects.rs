@@ -1818,6 +1818,38 @@ pub(super) fn validate_parameter_initializer_selections(
     Ok(())
 }
 
+/// Evaluate only a resolved parameter selection, with both its source and
+/// result bounded. Reuse typed lowering for declared directions and ranks.
+pub(super) fn bounded_parameter_selection(
+    primary: &sv_parser::ConstantPrimary,
+    tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let sv_parser::ConstantPrimary::PsParameter(parameter) = primary else {
+        return None;
+    };
+    let name = reference_name(RefNode::PsParameterIdentifier(&parameter.nodes.0), tree)?;
+    if !dimensions.parameter_values.contains_key(&name) && !dimensions.const_env.contains_key(&name)
+    {
+        return None;
+    }
+    if expr_static_width(&Expr::Ident(name), dimensions)?
+        > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
+        return None;
+    }
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
+    let expression =
+        indexed_constant_expression(RefNode::ConstantPrimary(primary), tree, &dimensions).ok()?;
+    let expression = substitute_indexed_parameter_values(expression, &dimensions);
+    if expr_static_width(&expression, &dimensions)? > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+        return None;
+    }
+    let expression = fold_const_integral_expr_preserving_mask(expression, &dimensions.const_env);
+    matches!(expression, Expr::Literal(_)).then_some(expression)
+}
+
 // Parameter arithmetic receives the assignment width after self-determined
 // selection operands have been folded, rather than the index expression context.
 pub(super) fn selected_parameter_initializer(
