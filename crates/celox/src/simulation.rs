@@ -2882,3 +2882,74 @@ mod scheduled_pulse_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod budget_resume_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let done = m.output("done", bit).unwrap();
+        let delayed = m.output("delayed", bit).unwrap();
+        for signal in [q, done, delayed] {
+            m.set_initial(signal, Constant::two_state(0u8, 1).unwrap())
+                .unwrap();
+        }
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let q_target = m.whole(q).unwrap();
+        m.register(q_target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let delay = m.constant(Constant::two_state(4u8, 64).unwrap());
+        let done_target = m.whole(done).unwrap();
+        let delayed_target = m.whole(delayed).unwrap();
+        m.process(vec![
+            Statement::ClockCycles { clock: clk, count },
+            Statement::Assign {
+                target: done_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+        m.process(vec![
+            Statement::Delay { amount: delay },
+            Statement::Assign {
+                target: delayed_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.state.set_tick_budget(Some(1));
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("done")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("delayed")), 0u8.into());
+        assert!(!sim.is_finished());
+        let blocked = sim.checkpoint().unwrap();
+        for budget in [Some(1), None] {
+            sim.restore(&blocked).unwrap();
+            sim.state.set_tick_budget(budget);
+            sim.run_until(4).unwrap();
+            assert!(sim.state.all_processes_done());
+            assert_eq!(sim.get(sim.signal("delayed")), 1u8.into());
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        }
+    }
+    #[test]
+    fn exhausted_budgets_preserve_clock_resumptions_and_unrelated_delays() {
+        let build = || Simulator::from_frontend(design());
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}

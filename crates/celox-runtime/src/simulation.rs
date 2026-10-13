@@ -296,6 +296,7 @@ pub struct SimulationState<B: SimBackend> {
     process_event_counters: Vec<(usize, SignalRef, SignalRef)>,
     active_ff_domains: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    budget_blocked_processes: BTreeSet<usize>,
     /// Processes suspended at an event or level wait, which their kernels
     /// re-check whenever the state may have changed.
     waiting: BTreeSet<usize>,
@@ -459,6 +460,7 @@ impl<B: SimBackend> SimulationState<B> {
             process_wakeups: (0..processes.len())
                 .map(|process| Reverse((0, process)))
                 .collect(),
+            budget_blocked_processes: BTreeSet::new(),
             processes,
             process_event_counters: Vec::new(),
             active_ff_domains: BitSet::new(),
@@ -492,6 +494,12 @@ impl<B: SimBackend> SimulationState<B> {
     /// run; `None` lifts the limit.
     pub fn set_tick_budget(&mut self, budget: Option<u64>) {
         self.tick_budget = budget;
+        if !self.tick_budget_spent() {
+            for process in std::mem::take(&mut self.budget_blocked_processes) {
+                self.process_wakeups
+                    .push(Reverse((self.scheduler.time, process)));
+            }
+        }
     }
 
     /// Whether the tick budget is spent.
@@ -1119,6 +1127,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
             if self.tick_budget_spent() {
+                self.budget_blocked_processes.insert(process);
                 continue;
             }
             ready.push(process);
@@ -2039,6 +2048,7 @@ impl<B: SimBackend> SimulationState<B> {
             last_clock_values: self.last_clock_values.clone(),
             unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            budget_blocked_processes: self.budget_blocked_processes.clone(),
             waiting: self.waiting.clone(),
             tick_clocks: self.tick_clocks.clone(),
             clock_waits: self.clock_waits.clone(),
@@ -2098,6 +2108,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.unknown_clock_values
             .clone_from(&snapshot.unknown_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
+        self.budget_blocked_processes
+            .clone_from(&snapshot.budget_blocked_processes);
         self.waiting.clone_from(&snapshot.waiting);
         self.tick_clocks = tick_clocks;
         self.clock_waits.clone_from(&snapshot.clock_waits);
@@ -2130,6 +2142,7 @@ pub struct ScheduleParts<B: SimBackend> {
     pub unknown_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
+    pub budget_blocked_processes: Vec<usize>,
     /// Processes waiting for an event or a condition, in ascending order.
     pub waiting_processes: Vec<usize>,
     /// Process clocks that have been waited on.
@@ -2143,6 +2156,7 @@ pub struct ScheduleParts<B: SimBackend> {
     pub done_processes: Vec<usize>,
     /// Rising edges of process clocks so far.
     pub ticks: u64,
+    pub tick_budget: Option<u64>,
     /// Timestamp and one-shot clock drives already consumed at that time.
     pub scheduled_clock_time: u64,
     pub scheduled_clock_drives: Vec<B::Event>,
@@ -2195,6 +2209,7 @@ impl<B: SimBackend> SimulationState<B> {
                 wakeups.sort_unstable();
                 wakeups
             },
+            budget_blocked_processes: self.budget_blocked_processes.iter().copied().collect(),
             waiting_processes: self.waiting.iter().copied().collect(),
             process_clocks: self
                 .tick_clocks
@@ -2219,6 +2234,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             done_processes: self.done.iter().copied().collect(),
             ticks: self.ticks,
+            tick_budget: self.tick_budget,
             scheduled_clock_time: self.scheduled_clock_time,
             scheduled_clock_drives: self
                 .scheduled_clock_drives
@@ -2261,6 +2277,7 @@ impl<B: SimBackend> SimulationState<B> {
             .into_iter()
             .map(|(process, time)| Reverse((time, process)))
             .collect();
+        self.budget_blocked_processes = parts.budget_blocked_processes.into_iter().collect();
         self.waiting = parts.waiting_processes.into_iter().collect();
         self.tick_clocks = parts
             .process_clocks
@@ -2295,6 +2312,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.pending_releases = parts.pending_releases.into_iter().collect();
         self.done = parts.done_processes.into_iter().collect();
         self.ticks = parts.ticks;
+        self.tick_budget = parts.tick_budget;
         self.scheduled_clock_time = parts.scheduled_clock_time;
         self.scheduled_clock_drives = parts
             .scheduled_clock_drives
@@ -2315,6 +2333,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     last_clock_values: BitSet,
     unknown_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    budget_blocked_processes: BTreeSet<usize>,
     waiting: BTreeSet<usize>,
     tick_clocks: BTreeMap<usize, TickClock<B>>,
     clock_waits: BTreeMap<usize, ClockWait>,
@@ -2338,6 +2357,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             last_clock_values: self.last_clock_values.clone(),
             unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            budget_blocked_processes: self.budget_blocked_processes.clone(),
             waiting: self.waiting.clone(),
             tick_clocks: self.tick_clocks.clone(),
             clock_waits: self.clock_waits.clone(),

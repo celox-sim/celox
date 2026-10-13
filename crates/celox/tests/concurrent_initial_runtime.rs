@@ -2,7 +2,7 @@ use celox::testbench::{
     compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_to_finish,
     run_compiled_testbench_with_tick_limit,
 };
-use celox::{Simulator, TestResult};
+use celox::{SimBackend, Simulator, TestResult};
 
 // These runtime-specific tests use package-local snapshots of the shared suite's
 // testbench fixtures. Keep them in celox's archive: sibling crate directories
@@ -1339,4 +1339,35 @@ fn unselected_constant_case_arms_leave_host_clocks_unchanged() {
     let tb = compile_initial_testbench(&sim).unwrap();
     assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
     assert_eq!(sim.get(clk), 1u8.into());
+}
+
+#[test]
+fn fatal_settle_stops_the_continuation_and_other_processes() {
+    let code = r#"#[test(Top)] module Top {
+        var go: logic;
+        var marker: u32;
+        var later: u32;
+        var observed: u32;
+        always_comb { observed = marker + later; $assert(go == 0, "fatal settle"); }
+        initial { go = 1; if go { marker = 1; } $finish(); }
+        initial { later = 2; }
+    }"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let testbench = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench(&mut sim, &testbench);
+        assert!(
+            matches!(&result, TestResult::Fail(message) if message.contains("fatal settle")),
+            "{result:?}"
+        );
+        let marker = sim.signal("marker");
+        assert_eq!(sim.backend_ref().get(marker), 0u8.into());
+        let later = sim.signal("later");
+        assert_eq!(sim.backend_ref().get(later), 0u8.into());
+    }
+    let build = || Simulator::builder(code, "Top");
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
 }
