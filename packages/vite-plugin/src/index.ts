@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
-import { cleanSidecars, generateSidecars } from "./sidecar.js";
+import { cleanSidecars, generateSidecars, SIDECAR_DIR } from "./sidecar.js";
 import {
 	loadTestbenchComponentModule,
 	normalizeTestbenchComponentPath,
@@ -87,9 +88,18 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Watch events can detect edits that preserve both mtime and size.
 			// Keep fingerprint checks for generator-owned lockfile notifications.
 			if (file !== projectFile("Veryl.lock")) cache.invalidate();
+			const pendingLockfileWrite = cache.hasPendingLockfileWrite;
 			const data = cache.get();
-			if (file === projectFile("Veryl.lock") && data === generatedData)
+			if (
+				file === projectFile("Veryl.lock") &&
+				(data === generatedData ||
+					(pendingLockfileWrite && isDeepStrictEqual(data, generatedData)))
+			) {
+				// Preserve the conservative cache refresh without publishing a
+				// second update for equivalent output from a generation-time write.
+				generatedData = data;
 				return false;
+			}
 			if (data !== generatedData) {
 				const nextPaths = generateSidecars(data, projectRoot);
 				const retained = new Set(nextPaths);
@@ -123,6 +133,24 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		name: "vite-plugin-celox",
 		enforce: "pre",
 
+		config(config, { command }) {
+			if (command !== "build" || !config.build?.watch) return;
+			const root = normalizePath(
+				resolve(
+					options?.projectRoot ??
+						findVerylProjectRoot(resolve(config.root ?? process.cwd())),
+				),
+			);
+			const excluded = [`${root}/${SIDECAR_DIR}/**`, `${root}/target/**`];
+			// Rollup's directory watcher needs the Chokidar filter; Rolldown
+			// uses watch.exclude. Vite merges these with the user's filters.
+			return {
+				build: {
+					watch: { exclude: excluded, chokidar: { ignored: excluded } },
+				},
+			};
+		},
+
 		configResolved(config) {
 			viteConfig = config;
 			// Determine project root
@@ -152,6 +180,12 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		async buildStart() {
+			if (viteConfig.command === "build" && this.meta.watchMode) {
+				// configureServer is not called by vite build --watch. Watch the
+				// catalogue too, including sources/configuration that don't exist yet.
+				this.addWatchFile(projectRoot);
+				for (const name of CONFIG_FILES) this.addWatchFile(projectFile(name));
+			}
 			let componentManifests: TestbenchComponentManifests | undefined;
 			if (testbenchComponents) {
 				const loaded = await loadTestbenchComponentModule(
@@ -173,8 +207,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			cache = new GenTsCache(projectRoot, componentManifests);
 			// Run generator and create type sidecars
 			const data = cache.get();
-			cleanSidecars(sidecarPaths);
-			sidecarPaths = generateSidecars(data, projectRoot);
+			const nextPaths = generateSidecars(data, projectRoot);
+			const retained = new Set(nextPaths);
+			cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
+			sidecarPaths = nextPaths;
 			generatedData = data;
 		},
 
@@ -183,7 +219,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const hmrDisabled = server.config.server.hmr === false;
 			let notifyingProject = false;
 			const notifyProject = () => {
-				// Generation already completed for this lockfile notification.
+				// Generation already completed before this project notification.
 				notifyingProject = true;
 				try {
 					server.watcher.emit("change", projectFile("Veryl.toml"));
@@ -198,6 +234,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
+				const componentChanged = testbenchComponentDependencies.has(
+					normalizeTestbenchComponentPath(file),
+				);
 				if (
 					notifyingProject &&
 					normalizePath(file) === projectFile("Veryl.toml")
@@ -213,7 +252,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						} else {
 							affectedModules(server.moduleGraph);
 						}
-						if (normalizePath(file) === projectFile("Veryl.lock"))
+						if (
+							componentChanged ||
+							normalizePath(file) === projectFile("Veryl.lock")
+						)
 							notifyProject();
 					})
 					.catch((error) => reportError(file, error));
