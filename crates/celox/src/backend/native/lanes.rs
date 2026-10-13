@@ -38,6 +38,9 @@ pub(super) struct NativeLaneImage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct NativeLaneKernelImage {
+    // Keep the wire format unchanged; loading an image starts a fresh identity.
+    #[serde(skip, default = "celox_runtime::parallel::new_diagnostic_id")]
+    diagnostic_id: String,
     pub(super) tasks: Vec<LaneTaskSpec>,
     /// Image offset of every task function.
     pub(super) offsets: Vec<usize>,
@@ -89,6 +92,7 @@ impl NativeLaneImage {
 
 /// One partitioned kernel whose task functions are compiled but not packed.
 pub(super) struct CompiledLaneKernel {
+    diagnostic_id: String,
     tasks: Vec<LaneTaskSpec>,
     functions: Vec<CompiledNativeFunction>,
 }
@@ -156,6 +160,7 @@ impl CompiledLaneKernels {
                 }
             }
             images.push(NativeLaneKernelImage {
+                diagnostic_id: kernel.diagnostic_id,
                 tasks: kernel.tasks,
                 offsets,
             });
@@ -269,7 +274,7 @@ pub(super) fn compile_lane_kernels(
     let mut compiled_index: Vec<usize> = Vec::with_capacity(planned.len());
     let mut slots = Vec::with_capacity(planned.len());
     for (mut planned, functions) in planned.into_iter().zip(functions) {
-        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "final_native_plan", kind = ?planned.kind).entered();
+        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "final_native_plan", schedule = planned.diagnostic_id.as_str(), hazard_level = "tasks", kind = ?planned.kind).entered();
         if let Some(original) = planned.same_as {
             let index = compiled_index[original];
             for (task, final_task) in planned.tasks.iter_mut().zip(&kernels[index].tasks) {
@@ -284,7 +289,7 @@ pub(super) fn compile_lane_kernels(
                     )
                     .collect();
             }
-            planned.trace_schedule(lanes);
+            planned.trace_schedule("tasks");
             compiled_index.push(index);
             slots.push((planned.kind, index));
             continue;
@@ -305,10 +310,11 @@ pub(super) fn compile_lane_kernels(
         for (task, final_task) in planned.tasks.iter_mut().zip(final_tasks) {
             task.waits = final_task.waits;
         }
-        planned.trace_schedule(lanes);
+        planned.trace_schedule("tasks");
         compiled_index.push(kernels.len());
         slots.push((planned.kind, kernels.len()));
         kernels.push(CompiledLaneKernel {
+            diagnostic_id: planned.diagnostic_id.clone(),
             tasks: planned.task_specs(),
             functions,
         });
@@ -387,13 +393,13 @@ impl NativeLaneKernels {
         event_ids: impl Fn(&AbsoluteAddr) -> Option<usize>,
         event_count: usize,
     ) -> Result<Self, SimulatorError> {
-        let kernel = |kernel: &NativeLaneKernelImage, kind: LaneKernelKind| {
+        let kernel = |kernel: &NativeLaneKernelImage, _kind: LaneKernelKind| {
             Ok::<_, SimulatorError>(NativeLaneKernel {
                 schedule: LaneSchedule::new(image.lanes, kernel.tasks.clone())
                     .map_err(|error| {
                         codegen_message(format!("invalid native lane schedule: {error}"))
                     })?
-                    .with_diagnostic_name(format!("{kind:?}")),
+                    .with_diagnostic_id(kernel.diagnostic_id.clone()),
                 functions: kernel
                     .offsets
                     .iter()
@@ -448,5 +454,33 @@ impl LaneTaskRunner for NativeTaskRunner<'_> {
         // SAFETY: `memory` is the backend's live state image, sized for every
         // compiled function including the per-lane arenas.
         unsafe { (self.functions[task])(self.memory) }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn image_diagnostic_identity_is_not_persisted_or_reused_on_load() {
+        let image = NativeLaneKernelImage {
+            diagnostic_id: celox_runtime::parallel::new_diagnostic_id(),
+            tasks: vec![LaneTaskSpec {
+                lane: 0,
+                waits: vec![],
+            }],
+            offsets: vec![16],
+        };
+        assert_eq!(image.clone().diagnostic_id, image.diagnostic_id);
+        let bytes = postcard::to_allocvec(&image).unwrap();
+        // The wire layout remains the original (tasks, offsets) pair.
+        assert_eq!(
+            bytes,
+            postcard::to_allocvec(&(image.tasks.clone(), image.offsets.clone())).unwrap()
+        );
+        let first: NativeLaneKernelImage = postcard::from_bytes(&bytes).unwrap();
+        let second: NativeLaneKernelImage = postcard::from_bytes(&bytes).unwrap();
+        assert_ne!(first.diagnostic_id, image.diagnostic_id);
+        assert_ne!(first.diagnostic_id, second.diagnostic_id);
     }
 }

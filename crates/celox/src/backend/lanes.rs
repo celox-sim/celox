@@ -25,6 +25,8 @@ pub(crate) enum LaneKernelKind {
 /// One partitioned kernel with its concurrency plan.
 pub(crate) struct PlannedLaneKernel<'a> {
     pub(crate) kind: LaneKernelKind,
+    pub(crate) diagnostic_id: String,
+    pub(crate) diagnostic_program: String,
     units: Vec<&'a LaneUnit<RegionedAbsoluteAddr>>,
     pub(crate) tasks: Vec<LaneTask>,
     /// Index of an earlier planned kernel with the same units, whose
@@ -36,18 +38,14 @@ pub(crate) struct PlannedLaneKernel<'a> {
 
 impl<'a> PlannedLaneKernel<'a> {
     /// Link the final runtime schedule to the units from which it was made.
-    pub(crate) fn trace_schedule(&self, lanes: u32) {
+    pub(crate) fn trace_schedule(&self, hazard_level: &str) {
         if !tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
             return;
         }
-        let specs = self.task_specs();
-        let schedule = celox_runtime::parallel::schedule_diagnostic_id(
-            &format!("{:?}", self.kind),
-            lanes,
-            &specs,
-        );
+        let schedule = &self.diagnostic_id;
+        let program = &self.diagnostic_program;
         for (task, spec) in self.tasks.iter().enumerate() {
-            tracing::trace!(target: "celox::parallel", event = "compiled_task", schedule,
+            tracing::trace!(target: "celox::parallel", event = "compiled_task", schedule, program, hazard_level,
                 kind = ?self.kind, task, lane = spec.lane, units = ?spec.items,
                 waits = ?spec.waits.iter().map(|wait| [wait.lane, wait.completed_tasks]).collect::<Vec<_>>(),
                 sir = ?self.task_units(task));
@@ -91,10 +89,11 @@ pub(crate) fn plan_lane_kernels(
         return Ok((1, Vec::new()));
     };
     let lanes = parallel.lanes;
+    let program = celox_runtime::parallel::new_diagnostic_id();
     if tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
         let layout = laid_out.layout();
         for (address, offset) in &layout.offsets {
-            tracing::trace!(target: "celox::parallel", event = "signal", address = %address,
+            tracing::trace!(target: "celox::parallel", event = "signal", program, address = %address,
                 name = laid_out.runtime().design.get_path(address), instance = address.instance_id.0,
                 object = address.var_id.0, offset, width = layout.widths.get(address).copied().unwrap_or(0),
                 working_offset = ?layout.working_offsets.get(address).map(|offset| layout.working_base_offset + offset),
@@ -130,11 +129,18 @@ pub(crate) fn plan_lane_kernels(
     }
     let mut planned: Vec<PlannedLaneKernel<'_>> = Vec::new();
     for (kind, units) in candidates {
-        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "kernel_plan", kind = ?kind, codegen = ?codegen).entered();
+        let diagnostic_id = planned
+            .iter()
+            .find(|kernel| kernel.units == units)
+            .map(|kernel| kernel.diagnostic_id.clone())
+            .unwrap_or_else(celox_runtime::parallel::new_diagnostic_id);
+        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "kernel_plan", schedule = diagnostic_id.as_str(), hazard_level = "units", kind = ?kind, codegen = ?codegen).entered();
         if let Some(index) = planned.iter().position(|kernel| kernel.units == units) {
             let tasks = planned[index].tasks.clone();
             planned.push(PlannedLaneKernel {
                 kind,
+                diagnostic_id,
+                diagnostic_program: program.clone(),
                 units,
                 tasks,
                 same_as: Some(index),
@@ -165,6 +171,8 @@ pub(crate) fn plan_lane_kernels(
         if used_lanes.len() > 1 {
             planned.push(PlannedLaneKernel {
                 kind,
+                diagnostic_id,
+                diagnostic_program: program.clone(),
                 units,
                 tasks,
                 same_as: None,
