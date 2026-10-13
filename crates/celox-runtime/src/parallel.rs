@@ -854,8 +854,9 @@ pub enum KernelSelection {
 /// with every check, so a choice made while the host was busy, or before the
 /// simulation reached its steady state, does not stay wrong for the whole
 /// run. Checks become rare quickly and cost a few dozen calls each.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KernelSelector {
+    diagnostic_id: String,
     state: SelectorState,
     /// Calls between the next decision and its check; zero for a fixed
     /// selection.
@@ -874,6 +875,16 @@ enum SelectorState {
         /// Calls left until the decision is measured again.
         remaining: u64,
     },
+}
+
+impl Clone for KernelSelector {
+    fn clone(&self) -> Self {
+        Self {
+            diagnostic_id: new_diagnostic_id(),
+            state: self.state.clone(),
+            recheck_interval: self.recheck_interval,
+        }
+    }
 }
 
 impl KernelSelector {
@@ -898,18 +909,26 @@ impl KernelSelector {
         };
         match selection {
             KernelSelection::Measured => Self {
+                diagnostic_id: new_diagnostic_id(),
                 state: Self::calibrating(),
                 recheck_interval: Self::FIRST_RECHECK,
             },
             KernelSelection::Parallel => Self {
+                diagnostic_id: new_diagnostic_id(),
                 state: decided(KernelChoice::Parallel),
                 recheck_interval: 0,
             },
             KernelSelection::Sequential => Self {
+                diagnostic_id: new_diagnostic_id(),
                 state: decided(KernelChoice::Sequential),
                 recheck_interval: 0,
             },
         }
+    }
+
+    /// Process-local identity preserved across moves, but not across clones.
+    pub fn diagnostic_id(&self) -> &str {
+        &self.diagnostic_id
     }
 
     fn calibrating() -> SelectorState {
@@ -997,7 +1016,7 @@ impl KernelSelector {
             KernelChoice::Sequential
         };
         tracing::debug!(target: "celox::parallel::selection", event = "selector_decision",
-            selector = format!("{:p}", self), parallel_ns = parallel, sequential_ns = sequential, choice = ?choice);
+            selector = self.diagnostic_id.as_str(), parallel_ns = parallel, sequential_ns = sequential, choice = ?choice);
         tracing::debug!(
             "[parallel] kernel selection: parallel median {parallel} ns, sequential median {sequential} ns -> {choice:?}"
         );
@@ -1030,6 +1049,29 @@ mod selector_tests {
             );
         }
         selector.decided().unwrap()
+    }
+
+    #[test]
+    fn selector_identity_survives_moves_without_reuse() {
+        let selector = KernelSelector::new(KernelSelection::Measured);
+        let id = selector.diagnostic_id().to_owned();
+        let mut moved = Box::new(selector);
+        assert_eq!(moved.diagnostic_id(), id);
+        let cloned = moved.clone();
+        assert_ne!(cloned.diagnostic_id(), id);
+        assert_eq!(cloned.next(), moved.next());
+        while moved.decided().is_none() {
+            let (choice, _) = moved.next();
+            moved.record(choice, 100);
+        }
+        assert_eq!(moved.diagnostic_id(), id);
+        let decided_clone = moved.clone();
+        assert_ne!(decided_clone.diagnostic_id(), id);
+        assert_eq!(decided_clone.next(), moved.next());
+        drop(moved);
+        let replacement = KernelSelector::new(KernelSelection::Measured);
+        assert_ne!(replacement.diagnostic_id(), id);
+        assert_ne!(replacement.diagnostic_id(), cloned.diagnostic_id());
     }
 
     #[test]
