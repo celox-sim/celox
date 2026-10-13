@@ -99,6 +99,13 @@ export function physicalPlanKey(event) {
         : `legacy:${scopeKey(event)}`;
 }
 
+// Partition IDs are unique across programs and repeated builds in this process.
+export function sourcePlanKey(event) {
+    const partition = event.source_partition ?? [...(event.scopes ?? [])].reverse()
+        .find(s => s.source_partition !== undefined)?.source_partition;
+    return partition !== undefined ? `partition:${partition}` : `legacy:${scopeKey(event)}`;
+}
+
 export function scopeKey(event) {
 	return (event.scopes ?? []).map((s) => s.id).join("/");
 }
@@ -543,17 +550,17 @@ function startViewer(data) {
 		},
 	);
 	const initialCandidate = candidates.find(c => events.some(e =>
-        e.event === "partition_decision" && scopeKey(e) === scopeKey(c) && e.estimated_makespan === c.makespan)) ?? candidates[0];
+        e.event === "partition_decision" && sourcePlanKey(e) === sourcePlanKey(c) && e.estimated_makespan === c.makespan)) ?? candidates[0];
     let currentCandidate = initialCandidate;
     const allocation = document.createElement("div");
     $("candidates").after(allocation);
 	function showItems(candidate) {
 		currentCandidate = candidate;
 		const scopedItems = candidate
-			? items.filter((e) => scopeKey(e) === scopeKey(candidate))
+			? items.filter((e) => sourcePlanKey(e) === sourcePlanKey(candidate))
 			: items;
 		const scopedPaths = candidate
-			? paths.filter((e) => scopeKey(e) === scopeKey(candidate))
+			? paths.filter((e) => sourcePlanKey(e) === sourcePlanKey(candidate))
 			: paths;
 		const pathById = new Map(scopedPaths.map(p => [p.path, p]));
         allocation.replaceChildren();
@@ -615,14 +622,14 @@ function startViewer(data) {
 					merges: events.filter(
 						(e) =>
 							e.event === "merge" &&
-							scopeKey(e) === scopeKey(n.record) &&
+							sourcePlanKey(e) === sourcePlanKey(n.record) &&
 							(n.record.work.includes(e.first) ||
 								n.record.work.includes(e.second)),
 					),
 					lowering: events.filter(
 						(e) =>
 							e.event === "lowered_task" &&
-							scopeKey(e) === scopeKey(n.record) &&
+							sourcePlanKey(e) === sourcePlanKey(n.record) &&
 							e.items.includes(n.id),
 					),
 				});
@@ -659,7 +666,7 @@ function startViewer(data) {
 							expression: events.find(
 								(e) =>
 									e.event === "slt_node" &&
-									scopeKey(e) === scopeKey(p.record) &&
+									sourcePlanKey(e) === sourcePlanKey(p.record) &&
 									e.node === p.record.expression,
 							),
 						}),

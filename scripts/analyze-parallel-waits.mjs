@@ -41,6 +41,11 @@ export function explainWaits(events) {
     const producer = laneTasks.get(d?.schedule)?.get(w.other)?.[w.completed - 1];
     const consumer = schedules.get(d?.schedule)?.get(w.task);
     const p = producer && runs.get(`${execution(w)}/${producer.task}`);
+    const c = runs.get(`${execution(w)}/${w.task}`);
+    if (!c || c.skipped) {
+      issues.push({wait:w, reason:"Missing or skipped consumer execution"});
+      continue;
+    }
     if (!d || !producer || !consumer || !p || p.skipped || (p.code ?? 0) !== 0
         || w.end_ns < w.start_ns || p.end_ns > w.end_ns) {
       issues.push({wait:w, reason:"Missing or inconsistent producer, schedule or timing"});

@@ -5,6 +5,7 @@ import {
     partitionLanes,
 	dependenciesForPaths,
 	scopeKey,
+    sourcePlanKey,
 } from "./parallel-report.mjs";
 
 test("measures concurrency and checks cross-lane producer completion", () => {
@@ -137,4 +138,17 @@ test('physical plan grouping ignores recycled span IDs and distinguishes program
  const footprint={...event('p','s','units','different'),event:'footprint'};
  const hazard={event:'hazard',program:'p',schedule:'s',hazard_level:'units'};
  assert.deepEqual([second,footprint,final,hazard,other].filter(e=>physicalPlanKey(e)===physicalPlanKey(first)),[footprint,hazard]);
+});
+
+test('source plans isolate reused spans and local item IDs across builds', () => {
+ const candidate={event:'candidate',scopes:[{id:'reused',source_partition:'first'}]};
+ const events=['item','path','merge','lowered_task','slt_node','partition_decision'].flatMap(event=>[
+  {event,scopes:[{id:'reused',source_partition:'second'}]},
+  {event,scopes:[{id:'different',source_partition:'first'}]},
+ ]);
+ const joined=events.filter(e=>sourcePlanKey(e)===sourcePlanKey(candidate));
+ assert.equal(joined.length,6);
+ assert.ok(joined.every(e=>e.scopes[0].source_partition==='first'));
+ assert.equal(sourcePlanKey({source_partition:'first'}),sourcePlanKey(candidate));
+ assert.equal(sourcePlanKey({scopes:[{id:'old'}]}),'legacy:old');
 });
