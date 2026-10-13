@@ -588,6 +588,7 @@ impl JitBackend {
                 };
                 let mut compiled: Vec<Vec<SimFunc>> = Vec::with_capacity(planned.len());
                 for planned_kernel in &planned {
+                    planned_kernel.trace_schedule(lanes);
                     let functions = if let Some(original) = planned_kernel.same_as {
                         compiled[original].clone()
                     } else {
@@ -617,7 +618,8 @@ impl JitBackend {
                             SimulatorError::from(crate::CodegenError::message(format!(
                                 "invalid lane schedule: {error}"
                             )))
-                        })?,
+                        })?
+                        .with_diagnostic_name(format!("{:?}", planned_kernel.kind)),
                         functions,
                     };
                     match planned_kernel.kind {

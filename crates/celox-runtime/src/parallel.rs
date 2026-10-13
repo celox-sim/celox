@@ -20,6 +20,40 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+/// Diagnostic fingerprint of a task table, shared by compiler and runtime.
+/// Only meaningful within the same executable; not a persistent format ID.
+pub fn schedule_diagnostic_id(name: &str, lanes: u32, tasks: &[LaneTaskSpec]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hash);
+    lanes.hash(&mut hash);
+    for task in tasks {
+        task.lane.hash(&mut hash);
+        task.waits.hash(&mut hash);
+    }
+    format!("{:016x}", hash.finish())
+}
+
+#[derive(Default)]
+struct TaskTiming {
+    waits: Vec<(u32, u32, u64, u64)>,
+    start: u64,
+    end: u64,
+    code: Option<i64>,
+}
+
+struct ExecutionTrace {
+    start: Instant,
+    // Each cell has one writer. Read only after all workers have finished.
+    tasks: Vec<Mutex<TaskTiming>>,
+}
+
+impl ExecutionTrace {
+    fn nanos(&self) -> u64 {
+        self.start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+    }
+}
+
 /// One task of a lane-partitioned kernel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneTaskSpec {
@@ -49,6 +83,7 @@ pub struct LaneSchedule {
     tasks: Vec<LaneTaskSpec>,
     /// Global task indices of every lane, in execution order.
     lane_tasks: Vec<Vec<usize>>,
+    diagnostic_name: String,
 }
 
 impl LaneSchedule {
@@ -85,7 +120,14 @@ impl LaneSchedule {
             lanes,
             tasks,
             lane_tasks,
+            diagnostic_name: String::new(),
         })
+    }
+
+    /// Give reports a phase identity so equal task topologies do not alias.
+    pub fn with_diagnostic_name(mut self, name: String) -> Self {
+        self.diagnostic_name = name;
+        self
     }
 
     pub fn lanes(&self) -> u32 {
@@ -135,6 +177,7 @@ struct Padded<T>(T);
 struct Job {
     schedule: *const LaneSchedule,
     runner: *const (dyn LaneTaskRunner + 'static),
+    trace: *const ExecutionTrace,
 }
 
 /// Progress value of a lane that has finished every task of its epoch.
@@ -188,11 +231,14 @@ impl Shared {
         // SAFETY: the dispatching thread keeps both referents alive until
         // every lane of this epoch has finished.
         let (schedule, runner) = unsafe { (&*job.schedule, &*job.runner) };
+        // SAFETY: the optional trace is owned by run until every lane finishes.
+        let trace = unsafe { job.trace.as_ref() };
         let base = epoch << 32;
         let Some(tasks) = schedule.lane_tasks.get(lane) else {
             return;
         };
         for (sequence, &task) in tasks.iter().enumerate() {
+            let mut timing = trace.map(|_| TaskTiming::default());
             let mut aborted = self.abort.0.load(Ordering::Acquire);
             for &(other, completed) in &schedule.tasks[task].waits {
                 if aborted {
@@ -201,6 +247,7 @@ impl Shared {
                 let target = base | u64::from(completed);
                 let progress = &self.progress[other as usize].0;
                 let mut spins = 0u32;
+                let wait_start = trace.map(ExecutionTrace::nanos);
                 while progress.load(Ordering::Acquire) < target {
                     if self.abort.0.load(Ordering::Acquire) {
                         aborted = true;
@@ -208,13 +255,26 @@ impl Shared {
                     }
                     wait_pause(&mut spins);
                 }
+                if let (Some(trace), Some(timing), Some(start)) = (trace, &mut timing, wait_start) {
+                    timing.waits.push((other, completed, start, trace.nanos()));
+                }
             }
             if !aborted {
+                if let (Some(trace), Some(timing)) = (trace, &mut timing) {
+                    timing.start = trace.nanos();
+                }
                 let code = catch_unwind(AssertUnwindSafe(|| runner.run_task(task)))
                     .unwrap_or(LANE_TASK_PANICKED);
+                if let (Some(trace), Some(timing)) = (trace, &mut timing) {
+                    timing.end = trace.nanos();
+                    timing.code = Some(code);
+                }
                 if code != 0 {
                     self.record_failure(LaneTaskFailure { task, code });
                 }
+            }
+            if let (Some(trace), Some(timing)) = (trace, timing) {
+                *trace.tasks[task].lock().unwrap_or_else(|e| e.into_inner()) = timing;
             }
             self.progress[lane]
                 .0
@@ -314,8 +374,18 @@ impl LanePool {
         runner: &dyn LaneTaskRunner,
     ) -> Result<(), LaneTaskFailure> {
         if schedule.lanes as usize > self.shared.lanes {
+            tracing::trace!(target: "celox::parallel", event = "pool_fallback", reason = "insufficient_workers", requested = schedule.lanes, available = self.shared.lanes);
             return schedule.run_sequential(runner);
         }
+        let trace =
+            tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE).then(|| {
+                ExecutionTrace {
+                    start: Instant::now(),
+                    tasks: (0..schedule.tasks.len())
+                        .map(|_| Mutex::new(TaskTiming::default()))
+                        .collect(),
+                }
+            });
         let shared = &*self.shared;
         // Progress words hold `epoch << 32 | count`, so the epoch must fit 32
         // bits. Every lane is idle between runs; clearing the words before
@@ -336,6 +406,9 @@ impl LanePool {
         let job = Job {
             schedule: schedule as *const LaneSchedule,
             runner: runner as *const dyn LaneTaskRunner,
+            trace: trace
+                .as_ref()
+                .map_or(std::ptr::null(), |trace| trace as *const ExecutionTrace),
         };
         // SAFETY: every worker finished the previous epoch (see the wait at
         // the end of the previous call) and reads `job` only after acquiring
@@ -361,6 +434,25 @@ impl LanePool {
             let mut spins = 0u32;
             while shared.progress[lane].0.load(Ordering::Acquire) != done {
                 wait_pause(&mut spins);
+            }
+        }
+        if let Some(trace) = &trace {
+            let elapsed_ns = trace.nanos();
+            let schedule_id =
+                schedule_diagnostic_id(&schedule.diagnostic_name, schedule.lanes, &schedule.tasks);
+            let pool = format!("{:p}", Arc::as_ptr(&self.shared));
+            tracing::trace!(target: "celox::parallel", event = "dispatch", pool, epoch,
+                schedule = schedule_id, lanes = schedule.lanes, elapsed_ns);
+            // Emit after joining: no subscriber locks or I/O on worker threads.
+            for (task, timing) in trace.tasks.iter().enumerate() {
+                let timing = timing.lock().unwrap_or_else(|e| e.into_inner());
+                tracing::trace!(target: "celox::parallel", event = "task_run", pool, epoch,
+                    schedule = schedule_id, task, lane = schedule.tasks[task].lane,
+                    start_ns = timing.start, end_ns = timing.end, skipped = timing.code.is_none(), code = timing.code.unwrap_or(0));
+                for &(other, completed, start_ns, end_ns) in &timing.waits {
+                    tracing::trace!(target: "celox::parallel", event = "task_wait", pool, epoch,
+                        task, lane = schedule.tasks[task].lane, other, completed, start_ns, end_ns);
+                }
             }
         }
         // SAFETY: every worker is idle again.
@@ -628,6 +720,82 @@ mod tests {
         schedule.run_sequential(&runner).unwrap();
         assert_eq!(*runner.log.lock().unwrap(), vec![0, 1, 2, 3]);
     }
+
+    #[test]
+    fn diagnostic_ids_distinguish_equal_topologies_in_different_phases() {
+        let (schedule, _) = chain_schedule();
+        assert_ne!(
+            schedule_diagnostic_id("comb", 3, schedule.tasks()),
+            schedule_diagnostic_id("ff", 3, schedule.tasks())
+        );
+    }
+
+    #[test]
+    fn traced_failure_and_recovery_record_skips_and_real_waits() {
+        use std::collections::BTreeMap;
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+        struct Fields(BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().into(), format!("{value:?}"));
+            }
+        }
+        impl tracing::Subscriber for Capture {
+            fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+                Some(tracing::metadata::LevelFilter::TRACE)
+            }
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == "celox::parallel"
+            }
+            fn register_callsite(
+                &self,
+                _: &'static tracing::Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                tracing::subscriber::Interest::sometimes()
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut fields = Fields(BTreeMap::new());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Capture(events.clone()), || {
+            let (schedule, predecessors) = chain_schedule();
+            let mut pool = LanePool::new(3).unwrap();
+            assert!(
+                pool.run(&schedule, &recorder(predecessors.clone(), Some(0)))
+                    .is_err()
+            );
+            pool.run(&schedule, &recorder(predecessors, None)).unwrap();
+        });
+        let events = events.lock().unwrap();
+        let rows = |name: &str| {
+            let name = format!("{name:?}");
+            events.iter().filter(move |e| e["event"] == name)
+        };
+        assert_eq!(rows("dispatch").count(), 2, "{events:?}");
+        let runs = rows("task_run").collect::<Vec<_>>();
+        assert_eq!(runs.len(), 8);
+        assert!(runs.iter().any(|e| e["skipped"] == "true"));
+        for event in runs.iter().filter(|e| e["epoch"] == "2") {
+            assert_eq!(event["skipped"], "false");
+            assert_eq!(event["code"], "0");
+            assert!(
+                event["end_ns"].parse::<u64>().unwrap()
+                    >= event["start_ns"].parse::<u64>().unwrap()
+            );
+        }
+        assert_eq!(rows("task_wait").filter(|e| e["epoch"] == "2").count(), 3);
+    }
 }
 
 /// Which implementation of a kernel to run next.
@@ -806,6 +974,8 @@ impl KernelSelector {
         } else {
             KernelChoice::Sequential
         };
+        tracing::debug!(target: "celox::parallel::selection", event = "selector_decision",
+            selector = format!("{:p}", self), parallel_ns = parallel, sequential_ns = sequential, choice = ?choice);
         tracing::debug!(
             "[parallel] kernel selection: parallel median {parallel} ns, sequential median {sequential} ns -> {choice:?}"
         );

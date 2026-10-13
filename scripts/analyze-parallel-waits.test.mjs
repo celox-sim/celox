@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { explainWaits, renderWaitAnalysis } from './analyze-parallel-waits.mjs';
+function fixture(){return [
+ {event:'compiled_task',schedule:'s',task:0,lane:0,scopes:[{id:'a'}]},
+ {event:'compiled_task',schedule:'s',task:1,lane:1,scopes:[{id:'a'}]},
+ {event:'dispatch',schedule:'s',pool:'p',epoch:1},
+ {event:'task_run',task:0,pool:'p',epoch:1,start_ns:10,end_ns:30,code:0},
+ {event:'task_wait',task:1,pool:'p',epoch:1,lane:1,other:0,completed:1,start_ns:15,end_ns:35},
+ {event:'signal',name:'dut.control',address:'a',offset:100,width:8,working_offset:'Some(200)'},
+ {event:'hazard',hazard:'RAW',predecessor:0,unit:1,scopes:[{id:'a'}],producer:'Exact(MemoryLocation { object: State, offset: 200, byte_len: 1 })',consumer:'Exact(MemoryLocation { object: State, offset: 200, byte_len: 1 })'},
+];}
+test('separates producer blocking from ready-tail and resolves working storage',()=>{
+ const a=explainWaits(fixture());assert.deepEqual(a.issues,[]);const r=a.rows[0];
+ assert.equal(r.blocked_ns,15);assert.equal(r.ready_tail_ns,5);assert.equal(r.producer_work_ns,20);
+ assert.equal(r.conflicts[0].signals[0].name,'dut.control');assert.equal(r.conflicts[0].signals[0].region,'working_offset');
+});
+test('keeps already-ready waits distinct and never assigns conflicts from another scope',()=>{
+ const es=fixture();es.find(x=>x.event==='task_wait').start_ns=31;
+ es.find(x=>x.event==='hazard').scopes=[{id:'other'}];
+ const r=explainWaits(es).rows[0];assert.equal(r.blocked_ns,0);assert.equal(r.ready_tail_ns,4);assert.deepEqual(r.conflicts,[]);
+});
+test('missing or failed producer is not treated as a valid dependency explanation',()=>{
+ const es=fixture();es.find(x=>x.event==='task_run').code=1;assert.equal(explainWaits(es).issues.length,1);
+ assert.equal(explainWaits(es.filter(x=>x.event!=='compiled_task')).rows.length,0);
+});
+test('signal literals cannot close the embedded report script',()=>{
+ const a={rows:[],issues:[],note:'</script><script>alert(1)</script>'};
+ const html=renderWaitAnalysis(a);assert.ok(!html.includes(a.note));
+ const payload=html.split('id="data">')[1].split('</script>')[0];assert.deepEqual(JSON.parse(payload),a);
+});
+test('identical task numbers in another pool do not change attribution',()=>{
+ const es=fixture();es.push({event:'task_run',task:0,pool:'different',epoch:1,start_ns:0,end_ns:999});
+ assert.equal(explainWaits(es).rows[0].blocked_ns,15);
+});

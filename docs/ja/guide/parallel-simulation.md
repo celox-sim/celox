@@ -73,3 +73,75 @@ WebAssembly バックエンドとインタプリタは常に逐次実行です�
 （たとえば同じ配列の別要素）を除き、レーン同士が同じキャッシュラインに書き込む
 ことはありません。設計の詳細は [並列実行](/internals/parallel-simulation) を
 参照してください。
+
+## スケジューラーの可視化とデバッグ
+
+次のコマンドで、ブラウザーで開ける単一 HTML と元の JSON を生成できます。
+
+```sh
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --output work/parallel-auto
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --always --output work/parallel-forced
+```
+
+出力先の `report.html` を開いてください。組み込み例は 16 個の独立した
+クロック付きデータパスです。通常設定と `--always` を比較すると、実際の
+自動選択と、並列実行を強制した場合を確認できます。
+
+- **Source partition**: 配置候補・推定コストと依存グラフ。ノードを選ぶと、
+  個々の LogicPath、読み書きする信号、共有式による結合、配置制約を確認できます。
+- **Memory dependencies**: 最適化後の物理バイト範囲に基づく RAW/WAR/WAW、
+  書き込み幅の拡大、最終タスク間の依存関係を確認できます。
+- **Execution**: タスク本体と依存先ごとの待機時間、レーン間の重なり、
+  順序違反の検査結果を表示します。タスクを選ぶと SIR と信号名を確認できます。
+- **Event inspector**: 信号名などで検索し、SLT の式、FF の配置判断、逐次／並列の
+  実測中央値と選択結果まで追えます。
+
+速度比はトレースを無効にした 6 ブロックの計測中央値です。詳細トレースには
+計測負荷があり、タイムラインの重なりは CPU 上での同時稼働を保証しません。
+組み込み例では各キャプチャ tick の後に全 16 出力を逐次版と照合します。
+独自の設計は `--source`、`--top`、`--clock`、`--set name=123`、
+`--observe signal` を指定できます。固定入力で指定イベントを繰り返すランナーなので、
+任意のテストベンチやリセット手順を自動実行するものではありません。
+詳細と制約は [英語ガイド](../../guide/parallel-simulation.md#inspecting-partitioning-and-execution)
+を参照してください。
+
+Veryl プロジェクトの実テストベンチも実行できます。
+
+```sh
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --project /path/to/heliodor --top test_soc_smp_linux_boot_4hart \
+  --threads 4 --testbench-ticks 10000 --warmup 256 --capture 16 \
+  --omit-sir --output work/heliodor-4core
+```
+
+このモードでは `--warmup` と `--capture` は tick 数ではなく、選択対象の
+カーネル呼び出し回数です。実際のリセット、メモリイメージ、initial の刺激を
+使い、指定区間だけワーカーの詳細トレースを有効にします。逐次／並列の選択記録は
+全区間で保存しますが、採取中の校正値にはトレースの負荷が含まれ得ます。
+指定 tick で打ち切るため、Linux 起動完了や逐次版との同値性を保証するものではなく、
+速度向上率も表示しません。`--source` を繰り返すと、プロジェクトルートからの
+相対パスで対象ファイルを限定できます。
+
+`--omit-sir` は巨大な展開済み SIR 文字列を省き、ソース式・配置候補・物理的な
+読み書き範囲・実行時の待ちを保持します。各メモリ依存には代表的な衝突範囲を
+1組示し、全読み書き範囲は footprint に残します。グラフは最大300ノードずつ
+表示し、名前の絞り込みで残りを調べられます。RTL インスタンス別の割り当て表は
+パス数を数えており、CPU の hart とシミュレーターのレーン、実測時間を区別します。
+テストベンチモードの `--observe SIGNAL` は終了時の値を16進数で保存します。
+別のシミュレーターとの比較ではありません。入力刺激はテストベンチに任せるため、
+このモードと定数入力を設定する `--set` は併用できません。
+
+長い待ちを、待ち先タスクと物理メモリの衝突まで逆引きできます。
+
+```sh
+node scripts/analyze-parallel-waits.mjs work/heliodor-4core/report.json
+```
+
+同じディレクトリの `wait-analysis.html` で依存待ちを順位付けし、待ち先の完了までと
+完了後の通知・確認の時間を分離します。行を選ぶと実際の RAW / WAR / WAW の範囲、
+重なる信号名、コンパイルされたユニットを確認できます。記録が欠けた場合は不整合として
+表示します。信号名は別名も含む候補であり、ストライドを持つ配列では正確なアドレス対応に
+ならない場合があります。物理的な順序制約がそのまま回路本来の依存とは限りません。
+複数レーンの待ち時間の合計は、実行時間や削減できる時間ではありません。
