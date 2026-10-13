@@ -297,10 +297,52 @@ pub(crate) fn run_selected<B, R>(
             selector.record(choice, nanos);
             if let Some(decision) = selector.decided() {
                 tracing::debug!(target: "celox::parallel::selection", event = "selector_slot",
-                    selector = format!("{:p}", selector), slot = ?slot, decision = ?decision);
+                    selector = selector.diagnostic_id(), slot = ?slot, decision = ?decision);
             }
         }
         _ => selector.advance(1),
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_runtime::parallel::KernelSelection;
+
+    #[test]
+    fn selector_identity_survives_table_growth_and_is_unique_per_simulator() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let mut selectors = LaneSelectors::default();
+            for slot in [LaneKernelSlot::Event(0), LaneKernelSlot::Fused(0)] {
+                let id = selectors
+                    .selector(slot, KernelSelection::Measured)
+                    .diagnostic_id()
+                    .to_owned();
+                assert!(seen.insert(id.clone()));
+                // Grow both tables after recording the first slot's identity.
+                for index in 1..64 {
+                    selectors.selector(LaneKernelSlot::Event(index), KernelSelection::Measured);
+                    selectors.selector(LaneKernelSlot::Fused(index), KernelSelection::Measured);
+                }
+                while selectors.decided(slot).is_none() {
+                    run_selected(
+                        &mut selectors,
+                        |selectors| selectors,
+                        slot,
+                        KernelSelection::Measured,
+                        |_| (),
+                        |_| (),
+                    );
+                }
+                assert_eq!(
+                    selectors
+                        .selector(slot, KernelSelection::Measured)
+                        .diagnostic_id(),
+                    id
+                );
+            }
+        }
+    }
 }
