@@ -233,13 +233,10 @@ impl TimedNames {
 }
 
 fn expanded_timed_source(source: &str, defines: &[&str]) -> Result<String> {
-    let prefix = defines
-        .iter()
-        .map(|name| format!("`define {name}\n"))
-        .collect::<String>();
-    let syntax = celox_sv_analyzer::syntax::parse_source(
-        &format!("{prefix}`line 1 \"timed.sv\" 0\n{source}"),
+    let syntax = celox_sv_analyzer::syntax::parse_source_with_defines(
+        source,
         Path::new("timed.sv"),
+        defines,
     )?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
     Ok(syntax
@@ -265,9 +262,10 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             continue;
         }
         if word == "always_ff" || (word == "always" && timed_ff::edge_control(source, end, tasks)) {
-            let (body_end, replacement) = timed_ff::gated(source, start, end, names, tasks)?;
-            output.push_str(&source[previous..start]);
-            output.push_str(&timed_ff::in_macro(source, start, replacement));
+            let (replacement_start, body_end, replacement) =
+                timed_ff::gated(source, start, end, names, tasks)?;
+            output.push_str(&source[previous..replacement_start]);
+            output.push_str(&timed_ff::in_macro(source, replacement_start, replacement));
             previous = body_end;
             continue;
         }
