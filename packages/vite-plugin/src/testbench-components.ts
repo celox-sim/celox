@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import {
 	createServer,
@@ -139,10 +139,8 @@ export function writeTestbenchComponentSidecar(
 	);
 	const source = relative(projectRoot, modulePath).replace(/\\/g, "/");
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(
-		path,
-		`${JSON.stringify({ source, types }, null, 2)}\n`,
-		"utf8",
-	);
+	const content = `${JSON.stringify({ source, types }, null, 2)}\n`;
+	if (!existsSync(path) || readFileSync(path, "utf8") !== content)
+		writeFileSync(path, content, "utf8");
 	return path;
 }
