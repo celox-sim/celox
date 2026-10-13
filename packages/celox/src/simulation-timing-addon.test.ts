@@ -72,6 +72,40 @@ describe("timed Simulation through the addon", () => {
 		expect(sim.dut.cnt).toBe(4n);
 	});
 
+	test.each([undefined, { maxSteps: 0 }])(
+		"an earlier run preserves pending combinational inputs (%j)",
+		(opts) => {
+			const Wire: ModuleDefinition<{ d: bigint; readonly q: bigint }> = {
+				__celox_module: true,
+				name: "Wire",
+				sources: [
+					{
+						path: "Wire.veryl",
+						content:
+							"module Wire (d: input logic<8>, q: output logic<8>) { assign q = d + 1; }",
+					},
+				],
+				ports: {
+					d: { direction: "input", type: "logic", width: 8 },
+					q: { direction: "output", type: "logic", width: 8 },
+				},
+				events: [],
+			};
+			const sim = Simulation.create(Wire, {
+				__nativeCreate: createSimulationBridge(loadNativeAddon()),
+			});
+			try {
+				sim.runUntil(10);
+				sim.dut.d = 42n;
+				sim.runUntil(5, opts);
+				expect(sim.time()).toBe(10);
+				expect(sim.dut.q).toBe(43n);
+			} finally {
+				sim.dispose();
+			}
+		},
+	);
+
 	test("a degenerate period still advances time", () => {
 		const sim = counter();
 		sim.addClock("clk", { period: 0 });

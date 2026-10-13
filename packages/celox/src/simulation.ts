@@ -443,6 +443,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		// A skipped run must preserve pending input changes for lazy evaluation.
+		if (endTime < this._handle.time()) return;
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
 			this._state.dirty = false;
@@ -451,7 +453,6 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts.maxSteps;
 		let steps = 0;
 		if (this._handle.time() >= endTime) {
-			this._state.dirty = false;
 			return;
 		}
 		while (true) {
