@@ -17,7 +17,7 @@ const vanishedDirectories = vi.hoisted(() => new Set<string>());
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
 	// Emulate filesystem aliases left by a case-only rename. readdirSync keeps
-	// returning the old entry while writes and stats through either name work.
+	// returning the old entry while reads, writes and stats through either name work.
 	function alias(path: any) {
 		return aliases.get(String(path)) ?? path;
 	}
@@ -27,6 +27,7 @@ vi.mock("node:fs", async (importOriginal) => {
 		mkdirSync: (path: any, options: any) => fs.mkdirSync(alias(path), options),
 		writeFileSync: (path: any, data: any, options: any) =>
 			fs.writeFileSync(alias(path), data, options),
+		readFileSync: (path: any, options: any) => fs.readFileSync(alias(path), options),
 		statSync: (path: any, options: any) => fs.statSync(alias(path), options),
 		unlinkSync: (path: any) => {
 			const code = unlinkFailures.get(String(path));

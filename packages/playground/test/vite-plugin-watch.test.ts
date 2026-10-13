@@ -76,6 +76,21 @@ function graph() {
 }
 
 test.each(["/", "C:/"])(
+	"build-watch output filters recognize the filesystem root %s",
+	(root) => {
+		platform.windows = root === "C:/";
+		const plugin = celox({ projectRoot: root });
+		const config = (plugin.config as Function)(
+			{ root, build: { watch: {} } },
+			{ command: "build" },
+		);
+		const excluded = [`${root}.celox/**`, `${root}target/**`];
+		expect(config.build.watch.exclude).toEqual(excluded);
+		expect(config.build.watch.chokidar.ignored).toEqual(excluded);
+	},
+);
+
+test.each(["/", "C:/"])(
 	"catalogue events recognize the filesystem root %s",
 	async (root) => {
 		platform.windows = root === "C:/";
@@ -220,6 +235,143 @@ test("watch modules omit absent optional configs from import-analysis dependenci
 	expect(context.addWatchFile).toHaveBeenCalledWith(file);
 });
 
+test.each(
+	(["hotUpdate", "handleHotUpdate"] as const).flatMap((hook) =>
+		[false, true].map((loaded) => ({ hook, loaded })),
+	),
+)(
+	"$hook suppresses the first generated lockfile notification with modules loaded=$loaded",
+	async ({ hook, loaded }) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-generated-lock-"));
+		roots.push(root);
+		const file = join(root, "Veryl.lock");
+		vi.mocked(runGenTs).mockImplementationOnce((projectPath) => {
+			writeFileSync(file, "generated lock");
+			return { projectPath, modules: [], fileModules: {} };
+		});
+		const { plugin, context } = await initialize(root);
+		if (loaded)
+			(plugin.load as Function).call(context, join(root, "Main.veryl"));
+		const moduleGraph = graph();
+		const update = (timestamp: number) =>
+			(plugin[hook] as Function).call(
+				{ environment: { moduleGraph } },
+				{ file, timestamp, modules: [], server: { moduleGraph } },
+			);
+		expect(await update(1)).toEqual([]);
+		expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+		// An external lockfile edit still matters when port metadata is equal.
+		writeFileSync(file, "external lock");
+		await update(2);
+		expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+		expect(runGenTs).toHaveBeenCalledTimes(3);
+	},
+);
+
+test("build watch registers the project catalogue and lockfile outside the Vite root", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-build-watch-"));
+	roots.push(root);
+	const plugin = celox({ projectRoot: root });
+	await (plugin.configResolved as Function)({
+		root: join(root, "tests"),
+		command: "build",
+	});
+	const context = { addWatchFile: vi.fn(), meta: { watchMode: true } };
+	await (plugin.buildStart as Function).call(context);
+	for (const path of [root, join(root, "Veryl.lock")])
+		expect(context.addWatchFile).toHaveBeenCalledWith(path);
+});
+
+test("HMR-disabled watcher suppresses generation-owned lockfile creation", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-own-lock-"));
+	roots.push(root);
+	const file = join(root, "Veryl.lock");
+	vi.mocked(runGenTs).mockImplementationOnce((projectPath) => {
+		writeFileSync(file, "generated lock");
+		return { projectPath, modules: [], fileModules: {} };
+	});
+	const { plugin } = await initialize(root);
+	const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+	const moduleGraph = graph();
+	(plugin.configureServer as Function)({
+		watcher,
+		config: { server: { hmr: false }, logger: { error: vi.fn() } },
+		environments: { ssr: { moduleGraph } },
+	});
+	const projectChanged = vi.fn();
+	watcher.on("change", (changed) => {
+		if (changed === join(root, "Veryl.toml")) projectChanged();
+	});
+	watcher.emit("add", file);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	watcher.emit("change", file);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(projectChanged).not.toHaveBeenCalled();
+	expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+});
+
+test("a generation-time lockfile write still publishes changed generated metadata", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-lock-metadata-"));
+	roots.push(root);
+	const file = join(root, "Veryl.lock");
+	vi.mocked(runGenTs).mockImplementationOnce((projectPath) => {
+		writeFileSync(file, "generated lock");
+		return { projectPath, modules: [], fileModules: {} };
+	});
+	const { plugin } = await initialize(root);
+	vi.mocked(runGenTs).mockReturnValueOnce({
+		projectPath: root,
+		modules: [],
+		fileModules: { "Empty.veryl": [] },
+	});
+	const moduleGraph = graph();
+	await (plugin.hotUpdate as Function).call(
+		{ environment: { moduleGraph } },
+		{ file, timestamp: 1 },
+	);
+	expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+});
+
+test("HMR-disabled component updates notify the project after asynchronous regeneration", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-async-components-"));
+	roots.push(root);
+	const entry = join(root, "components.ts");
+	const helper = join(root, "helper.ts");
+	writeFileSync(entry, "export {};");
+	const { plugin } = await initialize(root, entry);
+	let finish!: (
+		value: Awaited<ReturnType<typeof loadTestbenchComponentModule>>,
+	) => void;
+	vi.mocked(loadTestbenchComponentModule).mockImplementationOnce(
+		() =>
+			new Promise((resolve) => {
+				finish = resolve;
+			}),
+	);
+	const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+	const moduleGraph = graph();
+	(plugin.configureServer as Function)({
+		watcher,
+		config: { server: { hmr: false }, logger: { error: vi.fn() } },
+		environments: { ssr: { moduleGraph } },
+	});
+	const projectChanged = vi.fn(() => {
+		expect(runGenTs).toHaveBeenCalledTimes(2);
+		expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+	});
+	watcher.on("change", (file) => {
+		if (file === join(root, "Veryl.toml")) projectChanged();
+	});
+	watcher.emit("change", helper);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(projectChanged).not.toHaveBeenCalled();
+	finish({ manifests: {}, dependencies: new Set([entry, helper]) });
+	await vi.waitFor(() => expect(projectChanged).toHaveBeenCalledTimes(1));
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+});
+
 test.each([
 	{ hasEnvironments: false, hmr: true },
 	{ hasEnvironments: true, hmr: true },
@@ -339,5 +491,108 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 		]);
 		expect(moduleGraph.invalidateModule).toHaveBeenCalledWith(changed);
 		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(2);
+	},
+);
+
+test.each([false, true])(
+	"raw component regenerations serialize and recover after failure=%s",
+	async (failFirst) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-queued-"));
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const helper = join(root, "helper.ts");
+		writeFileSync(entry, "export {};");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const logger = { error: vi.fn() };
+		(plugin.configureServer as Function)({
+			watcher,
+			config: { server: { hmr: false }, logger },
+			environments: { ssr: { moduleGraph: graph() } },
+		});
+		let finish!: () => void;
+		vi.mocked(loadTestbenchComponentModule).mockImplementationOnce(
+			() =>
+				new Promise((resolve, reject) => {
+					finish = () =>
+						failFirst
+							? reject(new Error("incomplete first edit"))
+							: resolve({ manifests: {}, dependencies: new Set([entry]) });
+				}),
+		);
+		const latestDependencies = new Set([entry, join(root, "latest.ts")]);
+		vi.mocked(loadTestbenchComponentModule).mockResolvedValueOnce({
+			manifests: {},
+			dependencies: latestDependencies,
+		});
+		const notifications = vi.fn();
+		watcher.on("change", (file) => {
+			if (file === join(root, "Veryl.toml")) notifications();
+		});
+		watcher.emit("change", helper);
+		watcher.emit("change", helper);
+		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(2);
+		finish();
+		await vi.waitFor(() => {
+			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(3);
+			expect(notifications).toHaveBeenCalledTimes(failFirst ? 1 : 2);
+		});
+		expect(logger.error).toHaveBeenCalledTimes(failFirst ? 1 : 0);
+		// The final dependency set, rather than the older load's set, is active.
+		watcher.emit("change", join(root, "latest.ts"));
+		await vi.waitFor(() =>
+			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(4),
+		);
+	},
+);
+
+test.each(
+	(["hotUpdate", "handleHotUpdate"] as const).flatMap((hook) =>
+		["Veryl.toml", "celox.toml", "Veryl.lock"].map((name) => ({ hook, name })),
+	),
+)("$hook waits for stabilized $name contents", async ({ hook, name }) => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-read-"));
+	roots.push(root);
+	const file = join(root, name);
+	writeFileSync(file, "before");
+	const { plugin } = await initialize(root);
+	writeFileSync(file, "");
+	let finish!: () => void;
+	const read = vi.fn(
+		() =>
+			new Promise<string>((resolve) => {
+				finish = () => {
+					writeFileSync(file, "complete edit");
+					resolve("complete edit");
+				};
+			}),
+	);
+	const moduleGraph = graph();
+	const result = (plugin[hook] as Function).call(
+		{ environment: { moduleGraph } },
+		{ file, type: "update", timestamp: 1, read, server: { moduleGraph } },
+	);
+	expect(read).toHaveBeenCalledTimes(1);
+	expect(runGenTs).toHaveBeenCalledTimes(1);
+	expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+	finish();
+	await result;
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+	expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+});
+
+test.each(["create", "delete"])(
+	"hotUpdate does not read %s events",
+	async (type) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-no-read-"));
+		roots.push(root);
+		const { plugin } = await initialize(root);
+		const read = vi.fn(() => Promise.reject(new Error("file unavailable")));
+		await (plugin.hotUpdate as Function).call(
+			{ environment: { moduleGraph: graph() } },
+			{ file: join(root, "celox.toml"), timestamp: 1, type, read },
+		);
+		expect(read).not.toHaveBeenCalled();
+		expect(runGenTs).toHaveBeenCalledTimes(2);
 	},
 );

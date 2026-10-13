@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
-import { cleanSidecars, generateSidecars } from "./sidecar.js";
+import { cleanSidecars, generateSidecars, SIDECAR_DIR } from "./sidecar.js";
 import { withSidecarLock } from "./sidecar-lock.js";
 import {
 	loadTestbenchComponentModule,
@@ -45,6 +46,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let viteConfig: ResolvedConfig;
 	let projectId: string;
 	const loadedIds = new Set<string>();
+	let pendingRegeneration: Promise<void> | undefined;
 	let lastUpdate:
 		| { file: string; timestamp: number; result: Promise<boolean> }
 		| undefined;
@@ -53,7 +55,11 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		return normalizePath(resolve(projectRoot, name));
 	}
 
-	function regenerate(file: string, timestamp?: number): Promise<boolean> {
+	function regenerate(
+		file: string,
+		timestamp?: number,
+		read?: () => string | Promise<string>,
+	): Promise<boolean> {
 		file = normalizePath(file);
 		if (
 			timestamp !== undefined &&
@@ -61,16 +67,19 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			lastUpdate.timestamp === timestamp
 		)
 			return lastUpdate.result;
-		const result = (async () => {
-			const componentChanged = testbenchComponentDependencies.has(
-				normalizeTestbenchComponentPath(file),
-			);
+		// Capture membership before an earlier load replaces its dependency set.
+		const componentChanged = testbenchComponentDependencies.has(
+			normalizeTestbenchComponentPath(file),
+		);
+		const run = async () => {
 			if (
 				!file.endsWith(".veryl") &&
 				!componentChanged &&
 				!CONFIG_FILES.some((name) => projectFile(name) === file)
 			)
 				return false;
+			// Vite waits for editor writes to stabilize before this read resolves.
+			if (read) await read();
 			if (componentChanged && testbenchComponents) {
 				const loaded = await loadTestbenchComponentModule(
 					testbenchComponents,
@@ -89,9 +98,18 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Keep fingerprint checks for generator-owned lockfile notifications.
 			if (file !== projectFile("Veryl.lock")) cache.invalidate();
 			return withSidecarLock(projectRoot, () => {
+				const pendingLockfileWrite = cache.hasPendingLockfileWrite;
 				const data = cache.get();
-				if (file === projectFile("Veryl.lock") && data === generatedData)
+				if (
+					file === projectFile("Veryl.lock") &&
+					(data === generatedData ||
+						(pendingLockfileWrite && isDeepStrictEqual(data, generatedData)))
+				) {
+					// Preserve the conservative cache refresh without publishing a
+					// second update for equivalent output from a generation-time write.
+					generatedData = data;
 					return false;
+				}
 				if (data !== generatedData) {
 					const nextPaths = generateSidecars(data, projectRoot, {
 						removeOrphans: false,
@@ -102,7 +120,15 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				}
 				return true;
 			});
-		})();
+		};
+		// Share one queue across raw watcher and HMR events. A failed edit must
+		// still allow the next edit to regenerate and recover.
+		const result = pendingRegeneration ? pendingRegeneration.then(run) : run();
+		const settled = () => {
+			if (pendingRegeneration === pending) pendingRegeneration = undefined;
+		};
+		const pending = result.then(settled, settled);
+		pendingRegeneration = pending;
 		if (timestamp !== undefined) lastUpdate = { file, timestamp, result };
 		return result;
 	}
@@ -126,6 +152,26 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	return {
 		name: "vite-plugin-celox",
 		enforce: "pre",
+
+		config(config, { command }) {
+			if (command !== "build" || !config.build?.watch) return;
+			const root = normalizePath(
+				resolve(
+					options?.projectRoot ??
+						findVerylProjectRoot(resolve(config.root ?? process.cwd())),
+				),
+			);
+			const excluded = [SIDECAR_DIR, "target"].map(
+				(dir) => `${normalizePath(resolve(root, dir))}/**`,
+			);
+			// Rollup's directory watcher needs the Chokidar filter; Rolldown
+			// uses watch.exclude. Vite merges these with the user's filters.
+			return {
+				build: {
+					watch: { exclude: excluded, chokidar: { ignored: excluded } },
+				},
+			};
+		},
 
 		configResolved(config) {
 			viteConfig = config;
@@ -156,6 +202,12 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		async buildStart() {
+			if (viteConfig.command === "build" && this.meta.watchMode) {
+				// configureServer is not called by vite build --watch. Watch the
+				// catalogue too, including sources/configuration that don't exist yet.
+				this.addWatchFile(projectRoot);
+				for (const name of CONFIG_FILES) this.addWatchFile(projectFile(name));
+			}
 			let componentManifests: TestbenchComponentManifests | undefined;
 			if (testbenchComponents) {
 				const loaded = await loadTestbenchComponentModule(
@@ -190,7 +242,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const hmrDisabled = server.config.server.hmr === false;
 			let notifyingProject = false;
 			const notifyProject = () => {
-				// Generation already completed for this lockfile notification.
+				// Generation already completed before this project notification.
 				notifyingProject = true;
 				try {
 					server.watcher.emit("change", projectFile("Veryl.toml"));
@@ -205,6 +257,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
+				const componentChanged = testbenchComponentDependencies.has(
+					normalizeTestbenchComponentPath(file),
+				);
 				if (
 					notifyingProject &&
 					normalizePath(file) === projectFile("Veryl.toml")
@@ -220,7 +275,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						} else {
 							affectedModules(server.moduleGraph);
 						}
-						if (normalizePath(file) === projectFile("Veryl.lock"))
+						if (
+							componentChanged ||
+							normalizePath(file) === projectFile("Veryl.lock")
+						)
 							notifyProject();
 					})
 					.catch((error) => reportError(file, error));
@@ -369,8 +427,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async hotUpdate({ file, timestamp, modules }) {
-			if ((await regenerate(file, timestamp)) === false)
+		async hotUpdate({ file, timestamp, modules, type, read }) {
+			if (
+				(await regenerate(
+					file,
+					timestamp,
+					type === "update" ? read : undefined,
+				)) === false
+			)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
 					: undefined;
@@ -378,8 +442,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
-		async handleHotUpdate({ file, server, modules }) {
-			if ((await regenerate(file)) === false)
+		async handleHotUpdate({ file, server, modules, read }) {
+			if ((await regenerate(file, undefined, read)) === false)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
 					: undefined;

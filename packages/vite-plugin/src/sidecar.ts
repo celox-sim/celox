@@ -3,6 +3,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -52,7 +53,11 @@ export function generateSidecars(
 		const content = combineDtsContents(modules.map((m) => m.dtsContent));
 
 		mkdirSync(dirname(sidecarPath), { recursive: true });
-		writeFileSync(sidecarPath, content, "utf-8");
+		if (
+			!existsSync(sidecarPath) ||
+			readFileSync(sidecarPath, "utf8") !== content
+		)
+			writeFileSync(sidecarPath, content, "utf-8");
 		written.push(sidecarPath);
 	}
 
