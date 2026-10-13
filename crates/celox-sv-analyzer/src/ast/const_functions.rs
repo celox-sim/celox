@@ -482,6 +482,30 @@ pub(super) fn resolved_arguments(name: &str, args: &[Option<Expr>]) -> Option<Ve
         .collect()
 }
 
+/// Check arity and defaults without evaluating any actual argument.
+pub(super) fn validate_argument_bindings(name: &str, present: &[bool]) -> Converted<()> {
+    FUNCTIONS.with(|functions| {
+        let functions = functions.borrow();
+        let Some(function) = functions.get(name) else {
+            // The raw syntax validator reports functions that cannot be used
+            // in constant expressions, including conversion errors.
+            return Ok(());
+        };
+        if present.len() > function.params.len() {
+            return Err(unsupported(format!("too many arguments of `{name}`")));
+        }
+        for (position, default) in function.argument_defaults.iter().enumerate() {
+            if !present.get(position).copied().unwrap_or(false) && default.is_none() {
+                return Err(unsupported(format!(
+                    "omitted argument {} of `{name}`",
+                    position + 1
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
 /// A named constant call can be folded only when its body and actuals evaluate.
 pub(super) fn eval_expression_literal(
     expr: &Expr,

@@ -27,7 +27,8 @@ vi.mock("node:fs", async (importOriginal) => {
 		mkdirSync: (path: any, options: any) => fs.mkdirSync(alias(path), options),
 		writeFileSync: (path: any, data: any, options: any) =>
 			fs.writeFileSync(alias(path), data, options),
-		readFileSync: (path: any, options: any) => fs.readFileSync(alias(path), options),
+		readFileSync: (path: any, options: any) =>
+			fs.readFileSync(alias(path), options),
 		statSync: (path: any, options: any) => fs.statSync(alias(path), options),
 		unlinkSync: (path: any) => {
 			const code = unlinkFailures.get(String(path));

@@ -616,6 +616,7 @@ fn template_arguments(template: &str) -> usize {
         if ch != '%' {
             continue;
         }
+        chars.next_if_eq(&'-');
         while chars.next_if(char::is_ascii_digit).is_some() {}
         if let Some(spec) = chars.next()
             && "bBoOhHxXdDiIcCsStT".contains(spec)

@@ -407,7 +407,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 * Register a periodic clock.
 	 *
 	 * @param name    Clock event name (must match a `clock` port).
-	 * @param opts    `period` in time units; optional `initialDelay`.
+	 * @param opts    Full `period` in time units; 0/1 use the minimum period 2.
+	 *               Optional `initialDelay` locates the first rising edge.
 	 */
 	addClock(
 		name: string,
@@ -415,8 +416,9 @@ export class Simulation<P = Record<string, unknown>> {
 	): void {
 		this.ensureAlive();
 		const eventId = this.resolveEvent(name);
-		this._handle.addClock(eventId, opts.period, opts.initialDelay ?? 0);
-		this._clocks.set(name, { period: opts.period, eventId });
+		const period = opts.period === 0 || opts.period === 1 ? 2 : opts.period;
+		this._handle.addClock(eventId, period, opts.initialDelay ?? 0);
+		this._clocks.set(name, { period, eventId });
 	}
 
 	/**
@@ -441,6 +443,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		// A skipped run must preserve pending input changes for lazy evaluation.
+		if (endTime < this._handle.time()) return;
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
 			this._state.dirty = false;
@@ -449,7 +453,6 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts.maxSteps;
 		let steps = 0;
 		if (this._handle.time() >= endTime) {
-			this._state.dirty = false;
 			return;
 		}
 		while (true) {
