@@ -723,7 +723,7 @@ impl<'a> FfParser<'a> {
         )
     }
 
-    pub(super) fn coerce_function_input_expression(
+    pub(crate) fn coerce_function_input_expression(
         &self,
         expr: Expression,
         formal_id: VarId,
@@ -1760,7 +1760,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    pub(super) fn coerce_register_to_variable_type<A>(
+    pub(crate) fn coerce_register_to_variable_type<A>(
         &self,
         reg: RegisterId,
         var_id: VarId,

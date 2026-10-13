@@ -18,6 +18,21 @@ use celox_design::{HostRequest, HostValue};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive as _;
 
+pub(crate) struct FileTable {
+    files: crate::HashMap<String, std::fs::File>,
+    base: Option<std::path::PathBuf>,
+}
+
+impl FileTable {
+    fn flush(&mut self) -> Result<(), String> {
+        use std::io::Write;
+        for file in self.files.values_mut() {
+            file.flush().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 /// Whether the simulator's testbench runs as process kernels: the schema
 /// marks them (a design's own processes alone do not make a kernel
 /// testbench).
@@ -131,6 +146,10 @@ fn run<B: SimBackend>(
     }
     apply_component_writes(sim, initial_writes);
     sim.testbench_random = Some(RandomTable::new(seed));
+    sim.testbench_files = Some(FileTable {
+        files: crate::HashMap::default(),
+        base: testbench.component_file_base().map(|base| base.to_owned()),
+    });
     // A run starts every process at its beginning, whatever an earlier run
     // of the same simulator left in the control slots, and every process
     // clock low, as the bytecode testbench does: the first `clk.next()`
@@ -155,6 +174,7 @@ fn run<B: SimBackend>(
             // The components were installed above; take them down again.
             let _ = sim.components.finish(0);
             sim.testbench_random = None;
+            sim.testbench_files = None;
             return failed(error.to_string());
         }
         sim.dirty = false;
@@ -213,6 +233,13 @@ fn run<B: SimBackend>(
         }
     }
     sim.testbench_random = None;
+    if let Some(mut files) = sim.testbench_files.take()
+        && let Err(message) = files.flush()
+        && error.is_none()
+    {
+        error = Some(message);
+    }
+
     // A completion a component requested is read before the teardown
     // clears the components.
     let component_finished = sim.components.finish_requested();
@@ -228,7 +255,11 @@ fn run<B: SimBackend>(
         finished,
         ticks: state.ticks(),
         tick_limit_reached: tick_limit.is_some_and(|limit| state.ticks() >= limit)
-            && !state.all_processes_done()
+            && !sim
+                .program
+                .runtime_schema
+                .testbench_kernels
+                .is_some_and(|first| state.processes_done_from(first))
             && !finished,
     }
 }
@@ -321,7 +352,71 @@ pub(crate) fn serve_host_request<B: SimBackend>(
         .and_then(|slots| slots.host_requests.get(request))
         .cloned()
         .ok_or_else(|| format!("process {process} made unknown host request {request}"))?;
+    let close_file = matches!(request, HostRequest::FileClose { .. });
     match request {
+        HostRequest::FileOpen {
+            handle,
+            path,
+            append,
+        } => {
+            let bytes = read(sim, &path).to_bytes_be();
+            let path = String::from_utf8(bytes)
+                .map_err(|error| format!("testbench file path: {error}"))?;
+            let files = sim
+                .testbench_files
+                .as_mut()
+                .ok_or("files are only available while a testbench runs")?;
+            let path = match &files.base {
+                Some(base) => base.join(path),
+                None => path.into(),
+            };
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(append)
+                .truncate(!append)
+                .open(&path)
+                .map_err(|error| format!("testbench file {}: {error}", path.display()))?;
+            if let Some(mut previous) = files.files.insert(handle, file) {
+                use std::io::Write;
+                previous.flush().map_err(|error| error.to_string())?;
+            }
+        }
+        HostRequest::FileWrite {
+            handle,
+            template,
+            args,
+        } => {
+            use std::io::Write;
+            let bytes = crate::simulator::render_host_message(sim, template, &args, time);
+            let files = sim
+                .testbench_files
+                .as_mut()
+                .ok_or("files are only available while a testbench runs")?;
+            files
+                .files
+                .get_mut(&handle)
+                .ok_or_else(|| format!("testbench file {handle} is not open"))?
+                .write_all(&bytes)
+                .map_err(|error| error.to_string())?;
+        }
+        HostRequest::FileFlush { handle } | HostRequest::FileClose { handle } => {
+            use std::io::Write;
+
+            let files = sim
+                .testbench_files
+                .as_mut()
+                .ok_or("files are only available while a testbench runs")?;
+            let file = files
+                .files
+                .get_mut(&handle)
+                .ok_or_else(|| format!("testbench file {handle} is not open"))?;
+            file.flush().map_err(|error| error.to_string())?;
+            if close_file {
+                files.files.remove(&handle);
+            }
+        }
+
         HostRequest::RandomSeed { handle, value } => {
             let seed = read(sim, &value).to_u64().unwrap_or(u64::MAX);
             random(sim)?.seed(&handle, seed);

@@ -337,6 +337,7 @@ mod expression;
 pub(crate) use expression::expression_has_side_effect;
 mod function_call;
 mod inline_call;
+pub(crate) use inline_call::collect_statement_variables;
 
 pub enum Domain {
     Ff, // TODO: add clock

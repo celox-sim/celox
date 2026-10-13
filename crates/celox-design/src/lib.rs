@@ -372,7 +372,10 @@ impl<A> HostValue<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HostRequest<A> {
     /// Seed the random stream `handle` from `value`.
-    RandomSeed { handle: String, value: HostValue<A> },
+    RandomSeed {
+        handle: String,
+        value: HostValue<A>,
+    },
     /// A random value of the result's width from the stream `handle`.
     RandomGet {
         handle: String,
@@ -403,11 +406,49 @@ pub enum HostRequest<A> {
         /// expression form of the call carries at most 64 bits.
         strict: bool,
     },
+    /// Open a testbench file, replacing any previously open file of this handle.
+    FileOpen {
+        handle: String,
+        path: HostValue<A>,
+        append: bool,
+    },
+    /// Write formatted bytes to an open testbench file, without a newline.
+    FileWrite {
+        handle: String,
+        template: Option<String>,
+        args: Vec<HostValue<A>>,
+    },
+    FileFlush {
+        handle: String,
+    },
+    FileClose {
+        handle: String,
+    },
 }
 
 impl<A> HostRequest<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> HostRequest<B> {
         match self {
+            Self::FileOpen {
+                handle,
+                path,
+                append,
+            } => HostRequest::FileOpen {
+                handle,
+                path: path.map(&mut map),
+                append,
+            },
+            Self::FileWrite {
+                handle,
+                template,
+                args,
+            } => HostRequest::FileWrite {
+                handle,
+                template,
+                args: args.into_iter().map(|arg| arg.map(&mut map)).collect(),
+            },
+            Self::FileFlush { handle } => HostRequest::FileFlush { handle },
+            Self::FileClose { handle } => HostRequest::FileClose { handle },
             Self::RandomSeed { handle, value } => HostRequest::RandomSeed {
                 handle,
                 value: value.map(&mut map),

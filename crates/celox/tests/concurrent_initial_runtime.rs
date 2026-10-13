@@ -1371,3 +1371,134 @@ fn fatal_settle_stops_the_continuation_and_other_processes() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(build().build_native().unwrap());
 }
+
+#[test]
+fn automatic_function_storage_is_reset_on_every_call() {
+    let code = r#"#[test(Top)] module Top(value:output logic<8>,out:output logic<8>) {
+        function only_zero(x:input u32, o:output logic<8>) -> logic<8> {
+            var tmp:logic<8>;
+            if x==0 { tmp=7; o=tmp; return tmp; }
+            o=tmp;
+        }
+        initial {value=only_zero(0,out);value=only_zero(5,out);$finish();}
+    }"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        for name in ["value", "out"] {
+            assert_eq!(
+                sim.get_four_state(sim.signal(name)).1,
+                255u8.into(),
+                "{name}"
+            );
+        }
+    }
+    check(
+        Simulator::builder(code, "Top")
+            .four_state(true)
+            .build_interpreter()
+            .unwrap(),
+    );
+    check(
+        Simulator::builder(code, "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap(),
+    );
+    check(
+        Simulator::builder(code, "Top")
+            .four_state(true)
+            .build_wasm()
+            .unwrap(),
+    );
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(
+        Simulator::builder(code, "Top")
+            .four_state(true)
+            .build_native()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn specialized_helpers_preserve_expression_storage() {
+    let code = r#"#[test(Top)] module Top(a:output u32,b:output u32) {
+        function leaf(x:input u32) -> u32 {return x+20;}
+        function helper::<N:u32>(x:input logic<N>) -> u32 {return x*10+leaf(x);}
+        initial {a=helper::<2>(2);b=helper::<1>(1);$assert(helper::<2>(2)==42,"two");$assert(helper::<1>(1)==31,"one");$finish();}
+    }"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("a")), 42u8.into(), "a");
+        assert_eq!(sim.get(sim.signal("b")), 31u8.into(), "b");
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}
+
+#[test]
+fn file_methods_execute_and_evaluate_arguments() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("kernel.txt");
+    let code = format!(
+        r#"#[test(Top)] module Top {{
+        var f:$tb::file; var calls:u32;
+        function value()->u32 {{calls+=1;return 42;}}
+        function emit() {{f.write("value=%d",value());}}
+        initial {{calls=0;f.open("{}");emit();f.flush();f.close();
+            f.append("{}");f.write("!");f.close();$assert(calls==1);$finish();}}
+    }}"#,
+        path.display(),
+        path.display()
+    );
+    fn check<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"value=42!");
+    }
+    check(
+        Simulator::builder(&code, "Top")
+            .build_interpreter()
+            .unwrap(),
+        &path,
+    );
+    check(
+        Simulator::builder(&code, "Top").build_cranelift().unwrap(),
+        &path,
+    );
+    check(
+        Simulator::builder(&code, "Top").build_wasm().unwrap(),
+        &path,
+    );
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(
+        Simulator::builder(&code, "Top").build_native().unwrap(),
+        &path,
+    );
+}
+
+#[test]
+fn file_io_failures_stop_later_kernel_effects() {
+    let code = r#"#[test(Top)] module Top(after:output u32) {var f:$tb::file;initial {f.write("closed");after=1;$finish();}}"#;
+    let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    let result = run_compiled_testbench_to_finish(&mut sim, &tb);
+    assert!(
+        matches!(result,TestResult::Fail(ref message) if message.contains("not open")),
+        "{result:?}"
+    );
+    assert_eq!(sim.get(sim.signal("after")), 0u8.into());
+}

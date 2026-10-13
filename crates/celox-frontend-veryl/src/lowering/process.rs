@@ -42,7 +42,7 @@ use crate::{
 };
 use celox_frontend_core::ScheduledRtl;
 
-mod expressions;
+pub(crate) mod expressions;
 use veryl_parser::token_range::TokenRange;
 
 type SourceAddr = AbsoluteAddrBase<SourceVarId>;
@@ -71,7 +71,7 @@ pub struct BlockStorage {
     /// the function.
     pub private: HashMap<VarId, SourceVarId>,
     /// Values preserved while nested expression calls suspend.
-    pub expression_values: HashMap<TokenRange, (usize, SourceVarId)>,
+    pub expression_values: HashMap<ExpressionStorageKey, (usize, SourceVarId)>,
 }
 
 /// The hidden state of a module's `initial` blocks, in declaration order.
@@ -162,11 +162,13 @@ pub(crate) fn declare_storage(
             ir,
             statements,
             &mut HashSet::default(),
+            None,
             &mut expression_needs,
         );
         let mut expression_needs = expression_needs.into_iter().collect::<Vec<_>>();
-        expression_needs.sort_by_key(|(token, _)| {
+        expression_needs.sort_by_key(|((frame, token), _)| {
             (
+                frame.clone(),
                 token
                     .beg
                     .source
@@ -252,6 +254,7 @@ fn constant_truth(expr: &Expression) -> Option<bool> {
 }
 
 type FunctionKey = (VarId, Option<Vec<usize>>);
+type ExpressionStorageKey = (Option<FunctionKey>, TokenRange);
 fn function_key(call: &veryl_analyzer::ir::FunctionCall) -> FunctionKey {
     (call.id, call.index.clone())
 }
@@ -486,29 +489,43 @@ fn collect_expression_storage(
     ir: &Module,
     statements: &[Statement],
     active: &mut HashSet<FunctionKey>,
-    values: &mut HashMap<TokenRange, usize>,
+    frame: Option<FunctionKey>,
+    values: &mut HashMap<ExpressionStorageKey, usize>,
 ) {
     fn expr(
         ir: &Module,
         value: &Expression,
         active: &mut HashSet<FunctionKey>,
-        values: &mut HashMap<TokenRange, usize>,
+        frame: Option<FunctionKey>,
+        values: &mut HashMap<ExpressionStorageKey, usize>,
     ) {
         if expressions::has_call(value) {
-            values.insert(value.token_range(), expressions::storage_width(value));
+            values.insert(
+                (frame.clone(), value.token_range()),
+                expressions::storage_width(value),
+            );
             for child in expressions::children(value) {
-                values.insert(child.token_range(), expressions::storage_width(child));
+                values.insert(
+                    (frame.clone(), child.token_range()),
+                    expressions::storage_width(child),
+                );
             }
         }
         for child in expressions::children(value) {
-            expr(ir, child, active, values);
+            expr(ir, child, active, frame.clone(), values);
         }
         if let Expression::Term(factor) = value
             && let veryl_analyzer::ir::Factor::FunctionCall(call) = factor.as_ref()
             && active.insert(function_key(call))
         {
             if let Some(body) = function_body(&ir.functions, call) {
-                collect_expression_storage(ir, &body.statements, active, values);
+                collect_expression_storage(
+                    ir,
+                    &body.statements,
+                    active,
+                    Some(function_key(call)),
+                    values,
+                );
             }
             active.remove(&function_key(call));
         }
@@ -517,15 +534,18 @@ fn collect_expression_storage(
         let inputs = expressions::statement_inputs(statement);
         if inputs.iter().any(|expr| expressions::has_call(expr)) {
             for input in &inputs {
-                values.insert(input.token_range(), expressions::storage_width(input));
+                values.insert(
+                    (frame.clone(), input.token_range()),
+                    expressions::storage_width(input),
+                );
             }
         }
         for value in inputs {
-            expr(ir, value, active, values);
+            expr(ir, value, active, frame.clone(), values);
         }
         if let Statement::Case(stmt) = statement {
             values.insert(
-                stmt.case_target.token_range(),
+                (frame.clone(), stmt.case_target.token_range()),
                 expressions::storage_width(&stmt.case_target),
             );
         }
@@ -533,19 +553,28 @@ fn collect_expression_storage(
             && call.inputs.values().any(expressions::has_call)
         {
             for input in call.inputs.values() {
-                values.insert(input.token_range(), expressions::storage_width(input));
+                values.insert(
+                    (frame.clone(), input.token_range()),
+                    expressions::storage_width(input),
+                );
             }
         }
         if let Statement::FunctionCall(call) = statement
             && active.insert(function_key(call))
         {
             if let Some(body) = function_body(&ir.functions, call) {
-                collect_expression_storage(ir, &body.statements, active, values);
+                collect_expression_storage(
+                    ir,
+                    &body.statements,
+                    active,
+                    Some(function_key(call)),
+                    values,
+                );
             }
             active.remove(&function_key(call));
         }
         for body in expressions::statement_bodies(statement) {
-            collect_expression_storage(ir, body, active, values);
+            collect_expression_storage(ir, body, active, frame.clone(), values);
         }
     }
 }
@@ -670,6 +699,16 @@ fn collect_scratch_needs(
                 }
             }
             Statement::TbMethodCall(tb) => match &tb.method {
+                TbMethod::FileOpen { name, .. } => need(needs, "file_arg", argument_width(name)),
+                TbMethod::FileWrite { args } => {
+                    let skip = usize::from(
+                        args.first()
+                            .is_some_and(|arg| FfParser::static_string_expr(&arg.0).is_some()),
+                    );
+                    for arg in &args[skip..] {
+                        need(needs, "file_arg", argument_width(arg));
+                    }
+                }
                 TbMethod::RandomSeed { .. } => need(needs, "random_seed", 64),
                 TbMethod::RandomGet { width, .. } => {
                     need(needs, "random_value", (*width as usize).max(1));
@@ -694,8 +733,6 @@ fn collect_scratch_needs(
                 }
                 TbMethod::ClockNext { .. }
                 | TbMethod::ResetAssert { .. }
-                | TbMethod::FileOpen { .. }
-                | TbMethod::FileWrite { .. }
                 | TbMethod::FileClose
                 | TbMethod::FileFlush => {}
             },
@@ -766,7 +803,7 @@ struct BlockLowering<'a> {
     module_id: celox_design::ModuleId,
     hierarchical: HashMap<VarId, SourceAddr>,
     private: HashMap<VarId, SourceVarId>,
-    expression_values: HashMap<TokenRange, (usize, SourceVarId)>,
+    expression_values: HashMap<ExpressionStorageKey, (usize, SourceVarId)>,
     scratch: Vec<(ScratchNeed, SourceVarId)>,
     clocks: Vec<(StrId, ProcessClock<SourceAddr>)>,
     releases: Vec<ProcessRelease<SourceAddr>>,
@@ -774,6 +811,7 @@ struct BlockLowering<'a> {
     clock_periods: &'a HashMap<StrId, u64>,
     resource_prefix: String,
     active_functions: HashSet<FunctionKey>,
+    expression_frame: Option<FunctionKey>,
     site_base: u32,
     targets: Vec<VarAtomBase<RegionedSourceAddr>>,
     sources: Vec<VarAtomBase<RegionedSourceAddr>>,
@@ -877,6 +915,7 @@ fn lower_block(
         clock_periods: &source.clock_periods,
         resource_prefix,
         active_functions: HashSet::default(),
+        expression_frame: None,
         site_base,
         targets: Vec::new(),
         sources: Vec::new(),
@@ -2668,7 +2707,11 @@ impl<'a> BlockLowering<'a> {
         let freeze = inputs.iter().any(|(_, expr)| expressions::has_call(expr));
         let mut values = Vec::new();
         for (path, expr) in &inputs {
-            let value = self.expression(expr)?;
+            let actual = body.arg_map.get(*path).map(|formal| {
+                self.parser
+                    .coerce_function_input_expression((*expr).clone(), *formal)
+            });
+            let value = self.expression(actual.as_ref().unwrap_or(expr))?;
             if freeze {
                 self.save_expression(expr, value)?;
             }
@@ -2681,6 +2724,33 @@ impl<'a> BlockLowering<'a> {
                 Some(&call.comptime.token),
             ));
         }
+        let mut storage = HashSet::default();
+        super::ff::collect_statement_variables(&body.statements, &mut storage);
+        storage.extend(body.arg_map.values().copied());
+        storage.extend(body.ret);
+        let mut storage = storage
+            .into_iter()
+            .filter(|id| self.ir.variables[id].affiliation == Affiliation::Function)
+            .collect::<Vec<_>>();
+        storage.sort();
+        for id in storage {
+            let variable = &self.ir.variables[&id];
+            let width = resolve_total_width(self.ir, variable)?.max(1);
+            let two_state = variable.r#type.is_2state();
+            let builder = self.kernel.builder();
+            let reg = if two_state {
+                builder.alloc_bit(width, variable.r#type.signed)
+            } else {
+                builder.alloc_logic(width)
+            };
+            let value = if two_state {
+                SIRValue::new(0u8)
+            } else {
+                SIRValue::new_four_state(0u8, (BigUint::from(1u8) << width) - BigUint::from(1u8))
+            };
+            builder.emit(SIRInstruction::Imm(reg, value));
+            self.store(&self.destination(id, call.comptime.token), reg)?;
+        }
         for (path, expr, value) in values {
             if let Some(&formal) = body.arg_map.get(path) {
                 let value = if freeze {
@@ -2688,11 +2758,20 @@ impl<'a> BlockLowering<'a> {
                 } else {
                     value
                 };
+                let value = self.parser.coerce_register_to_variable_type(
+                    value,
+                    formal,
+                    expression_signed(expr),
+                    self.kernel.builder(),
+                )?;
                 let destination = self.destination(formal, call.comptime.token);
                 self.store(&destination, value)?;
             }
         }
-        let flow = self.lower_statements(&body.statements)?;
+        let previous_frame = self.expression_frame.replace(function_key(call));
+        let flow = self.lower_statements(&body.statements);
+        self.expression_frame = previous_frame;
+        let flow = flow?;
         self.active_functions.remove(&function_key(call));
         if let Flow::Ended = flow {
             return Ok(Flow::Ended);
@@ -2712,6 +2791,38 @@ impl<'a> BlockLowering<'a> {
             }
         }
         Ok(Flow::Continue)
+    }
+
+    fn file_argument(
+        &mut self,
+        arg: &SystemFunctionInput,
+    ) -> Result<HostValue<SourceAddr>, ParserError> {
+        let width = argument_width(arg);
+        let signed = expression_signed(&arg.0);
+        let (mut value, slot) = self.host_scratch(
+            "file_arg",
+            width,
+            signed,
+            arg.0.comptime().r#type.is_string(),
+        )?;
+        let reg = if let Some(text) = FfParser::static_string_expr(&arg.0) {
+            if text.is_empty() {
+                value.width = 0;
+            }
+            let builder = self.kernel.builder();
+            let reg = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Imm(
+                reg,
+                SIRValue::new(BigUint::from_bytes_be(text.as_bytes())),
+            ));
+            reg
+        } else {
+            let reg = self.expression(&arg.0)?;
+            self.parser
+                .cast_reg_width_ext(self.kernel.builder(), reg, width, signed)
+        };
+        self.store_scratch(slot, width, reg);
+        Ok(value)
     }
 
     fn lower_tb_method(&mut self, tb: &TbMethodCall) -> Result<Flow, ParserError> {
@@ -2934,10 +3045,43 @@ impl<'a> BlockLowering<'a> {
                 }
                 Ok(Flow::Continue)
             }
-            TbMethod::FileOpen { .. }
-            | TbMethod::FileWrite { .. }
-            | TbMethod::FileClose
-            | TbMethod::FileFlush => Ok(Flow::Continue),
+            TbMethod::FileOpen { name, append } => {
+                let path = self.file_argument(name)?;
+                self.host_request(HostRequest::FileOpen {
+                    handle: self.resource_name(tb.inst),
+                    path,
+                    append: *append,
+                })?;
+                Ok(Flow::Continue)
+            }
+            TbMethod::FileWrite { args } => {
+                let template = args
+                    .first()
+                    .and_then(|arg| FfParser::static_string_expr(&arg.0));
+                let skip = usize::from(template.is_some());
+                let mut values = Vec::new();
+                for arg in &args[skip..] {
+                    values.push(self.file_argument(arg)?);
+                }
+                self.host_request(HostRequest::FileWrite {
+                    handle: self.resource_name(tb.inst),
+                    template,
+                    args: values,
+                })?;
+                Ok(Flow::Continue)
+            }
+            TbMethod::FileClose => {
+                self.host_request(HostRequest::FileClose {
+                    handle: self.resource_name(tb.inst),
+                })?;
+                Ok(Flow::Continue)
+            }
+            TbMethod::FileFlush => {
+                self.host_request(HostRequest::FileFlush {
+                    handle: self.resource_name(tb.inst),
+                })?;
+                Ok(Flow::Continue)
+            }
         }
     }
 }

@@ -77,7 +77,7 @@ pub(super) fn has_call(expr: &Expression) -> bool {
     matches!(expr, Expression::Term(factor) if matches!(factor.as_ref(),Factor::FunctionCall(_)))
         || children(expr).into_iter().any(has_call)
 }
-pub(super) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
+pub(crate) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
     match statement {
         Statement::Assign(assign) => std::iter::once(&assign.expr)
             .chain(
@@ -129,6 +129,8 @@ pub(super) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
                 TbMethod::ResetAssert { duration, .. } => duration.iter().collect(),
                 TbMethod::RandomSeed { value, .. } => vec![value],
                 TbMethod::RandomGetRange { min, max, .. } => vec![min, max],
+                TbMethod::FileOpen { name, .. } => vec![&name.0],
+                TbMethod::FileWrite { args } => args.iter().map(|arg| &arg.0).collect(),
                 TbMethod::Component { args, .. } => args.iter().map(|arg| &arg.0).collect(),
                 _ => Vec::new(),
             };
@@ -248,7 +250,7 @@ impl BlockLowering<'_> {
     ) -> Result<(), ParserError> {
         let (width, id) = self
             .expression_values
-            .get(&expr.token_range())
+            .get(&(self.expression_frame.clone(), expr.token_range()))
             .copied()
             .ok_or_else(|| {
                 self.error(
@@ -267,7 +269,8 @@ impl BlockLowering<'_> {
         Ok(())
     }
     pub(super) fn saved_expression(&mut self, expr: &Expression) -> RegisterId {
-        let (width, id) = self.expression_values[&expr.token_range()];
+        let (width, id) =
+            self.expression_values[&(self.expression_frame.clone(), expr.token_range())];
         let builder = self.kernel.builder();
         let value = if expr.comptime().r#type.is_2state() {
             builder.alloc_bit(width, expression_signed(expr))
@@ -291,8 +294,12 @@ impl BlockLowering<'_> {
         expr: &Expression,
         values: HashMap<TokenRange, RegisterId>,
     ) -> Result<RegisterId, ParserError> {
+        // The bound children are runtime results. Analyzer constant values
+        // of a compound call expression cannot replace those results.
+        let mut evaluated = expr.clone();
+        evaluated.comptime_mut().is_const = false;
         self.parser.push_process_expression_values(values);
-        let result = self.raw_expression(expr);
+        let result = self.raw_expression(&evaluated);
         self.parser.pop_process_expression_values();
         result
     }

@@ -107,6 +107,7 @@ mod host {
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         /// The random number generators of a running kernel testbench.
         pub(crate) testbench_random: Option<crate::testbench::RandomTable>,
+        pub(crate) testbench_files: Option<crate::testbench::kernels::FileTable>,
         /// Runtime events of a running kernel testbench the executor took
         /// out of the ring when a kernel yielded, until the runner drains
         /// them.
@@ -371,6 +372,45 @@ mod host {
             DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
             DisplaySizing::Ieee => format_sv_display_arg(&arg, spec, field),
         }
+    }
+
+    pub(crate) fn render_host_message<B: SimBackend>(
+        sim: &Simulator<B>,
+        template: Option<String>,
+        args: &[celox_design::HostValue<celox_design::StateAddr>],
+        time: u64,
+    ) -> Vec<u8> {
+        let values = args
+            .iter()
+            .map(|arg| {
+                let signal = sim.backend.resolve_signal(&arg.signal);
+                let (value, mask) = sim.backend.get_four_state(signal);
+                RuntimeEventArgValue {
+                    values: value.to_u64_digits(),
+                    masks: mask.to_u64_digits(),
+                    width: arg.width,
+                    signed: arg.signed,
+                    is_string: arg.is_string,
+                }
+            })
+            .collect::<Vec<_>>();
+        render_runtime_event_message(
+            &RuntimeEventSite {
+                kind: RuntimeEventKind::Write,
+                template,
+                sizing: DisplaySizing::Veryl,
+                scope: None,
+                arg_widths: Vec::new(),
+                arg_signed: Vec::new(),
+                arg_is_string: Vec::new(),
+                location: None,
+            },
+            &values,
+            RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            },
+        )
     }
 
     fn render_runtime_event_message(
@@ -726,6 +766,7 @@ mod host {
                 components: Default::default(),
                 component_simulation: None,
                 testbench_random: None,
+                testbench_files: None,
                 testbench_events: Vec::new(),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_finish_state: Arc::new(Mutex::new(RuntimeFinishState::default())),
