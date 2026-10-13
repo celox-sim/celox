@@ -620,6 +620,8 @@ sv_backends! {
         assert!(sim.drain_runtime_events().is_empty());
     }
 
+    fn display_field_flags(sim) { @case "system_functions::display_field_flags"; }
+
     fn display_arguments_are_sized_as_ieee_specifies(sim) {
         @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
     }
