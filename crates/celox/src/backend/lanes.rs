@@ -93,7 +93,14 @@ pub(crate) fn plan_lane_kernels(
     if tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
         let layout = laid_out.layout();
         for (address, offset) in &layout.offsets {
+            let source = laid_out
+                .runtime()
+                .design
+                .variable(address)
+                .map(|v| v.source_id);
             tracing::trace!(target: "celox::parallel", event = "signal", program, address = %address,
+                source_address = source.map(|id| format!("AbsoluteAddr({}, {})", address.instance_id, id)).unwrap_or_default(),
+                source_object = source.map(|id| id.0),
                 name = laid_out.runtime().design.get_path(address), instance = address.instance_id.0,
                 object = address.var_id.0, offset, width = layout.widths.get(address).copied().unwrap_or(0),
                 working_offset = ?layout.working_offsets.get(address).map(|offset| layout.working_base_offset + offset),
