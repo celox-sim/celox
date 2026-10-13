@@ -36,7 +36,7 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
         assert_eq!(
             sim.drain_runtime_events(),
             vec![celox::RuntimeEvent::Display {
-                message: "inside".into()
+                message: b"inside".to_vec()
             },]
         );
         sim.modify(|io| {
@@ -50,10 +50,10 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
             sim.drain_runtime_events(),
             vec![
                 celox::RuntimeEvent::Display {
-                    message: "inside".into()
+                    message: b"inside".to_vec()
                 },
                 celox::RuntimeEvent::AssertContinue {
-                    message: "value=7".into()
+                    message: b"value=7".to_vec()
                 },
             ]
         );
@@ -61,6 +61,9 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
 }
 
 sv_backends! {
+    fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
+    fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
+    fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
     // Veryl extension calls emitted unchanged into SV, not SV assert statements.
     fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
         @setup { let source = r#"
@@ -97,15 +100,15 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
         assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=1".into() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
         ]);
         sim.set(ok, 0u8);
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
         assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=0".into() },
-            celox::RuntimeEvent::AssertContinue { message: "before=0 value=-2 after=1".into() },
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"before=0 value=-2 after=1".to_vec() },
         ]);
     }
 
@@ -133,13 +136,13 @@ sv_backends! {
         sim.modify(|io| { io.set(enabled, 1u8); io.set(ok, 1u8); }).unwrap();
         assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=1".into() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
         ]);
         sim.modify(|io| io.set(ok, 0u8)).unwrap();
         assert_eq!(sim.get(sim.signal("effect")), 1u8.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=0".into() },
-            celox::RuntimeEvent::AssertContinue { message: "before=0 value=-2 after=1".into() },
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"before=0 value=-2 after=1".to_vec() },
         ]);
         sim.modify(|io| io.set(enabled, 0u8)).unwrap();
         assert_eq!(sim.get(sim.signal("effect")), 0u8.into());
@@ -167,13 +170,13 @@ sv_backends! {
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(sim.signal("reached")), 1u8.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside".into() },
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
         ]);
         sim.set(ok, 0u8);
         assert!(sim.tick(clk).is_err());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside".into() },
-            celox::RuntimeEvent::AssertFatal { message: "value=-2".into() },
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::AssertFatal { message: b"value=-2".to_vec() },
         ]);
     }
 
@@ -200,15 +203,15 @@ sv_backends! {
         sim.modify(|io| { io.set(ok, 1u8); io.set(count, 2u8); }).unwrap();
         assert_eq!(sim.get(sim.signal("q")), 2u32.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=0".into() },
-            celox::RuntimeEvent::Display { message: "inside=1".into() },
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
         ]);
         sim.modify(|io| io.set(ok, 0u8)).unwrap();
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside=0".into() },
-            celox::RuntimeEvent::AssertContinue { message: "value=1".into() },
-            celox::RuntimeEvent::Display { message: "inside=1".into() },
-            celox::RuntimeEvent::AssertContinue { message: "value=2".into() },
+            celox::RuntimeEvent::Display { message: b"inside=0".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"value=1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside=1".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"value=2".to_vec() },
         ]);
     }
 
@@ -230,10 +233,10 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("veryl_assert_constant.sv"))], "Top");
         sim.tick(sim.event("clk")).unwrap();
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "inside".into() },
-            celox::RuntimeEvent::Display { message: "inside".into() },
-            celox::RuntimeEvent::AssertContinue { message: "assertion failed".into() },
-            celox::RuntimeEvent::AssertContinue { message: "assertion failed".into() },
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::Display { message: b"inside".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"assertion failed".to_vec() },
+            celox::RuntimeEvent::AssertContinue { message: b"assertion failed".to_vec() },
         ]);
     }
 
@@ -302,7 +305,7 @@ sv_backends! {
         sim.set(sim.signal("enabled"), 1u8);
         sim.tick(sim.event("clk")).unwrap();
         let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
-            celox::RuntimeEvent::Display { message } => message,
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
             event => panic!("unexpected event: {event:?}"),
         }).collect::<Vec<_>>();
         messages.sort();
@@ -337,9 +340,9 @@ sv_backends! {
         sim.tick(sim.event("clk")).unwrap();
         assert_eq!(sim.get(sim.signal("q")), 7u32.into());
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
-            celox::RuntimeEvent::Display { message: "Time scale of (Top.child.nested) is 100ns / 10ps".into() },
-            celox::RuntimeEvent::Display { message: "Time scale of (Top.info) is 100ns / 10ps".into() },
+            celox::RuntimeEvent::Display { message: b"Time scale of (Top.info) is 100ns / 10ps".to_vec() },
+            celox::RuntimeEvent::Display { message: b"Time scale of (Top.child.nested) is 100ns / 10ps".to_vec() },
+            celox::RuntimeEvent::Display { message: b"Time scale of (Top.info) is 100ns / 10ps".to_vec() },
         ]);
     }
 
@@ -368,7 +371,7 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("i_q")), 7u32.into());
         assert_eq!(sim.get(sim.signal("j_q")), 7u32.into());
         let mut messages = sim.drain_runtime_events().into_iter().map(|event| match event {
-            celox::RuntimeEvent::Display { message } => message,
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
             event => panic!("unexpected event: {event:?}"),
         }).collect::<Vec<_>>();
         messages.sort();
@@ -523,7 +526,7 @@ sv_backends! {
             sim.set(d, dimension);
             assert_eq!(sim.get(y), expected.into());
             assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
-                message: "dimension".to_string(),
+                message: b"dimension".to_vec(),
             }]);
         }
     }
@@ -611,8 +614,8 @@ sv_backends! {
         sim.drain_runtime_events();
         sim.set(fail, 1u8);
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "before".to_string() },
-            celox::RuntimeEvent::AssertFatal { message: "boom 1".to_string() },
+            celox::RuntimeEvent::Display { message: b"before".to_vec() },
+            celox::RuntimeEvent::AssertFatal { message: b"boom 1".to_vec() },
         ]);
         assert!(sim.drain_runtime_events().is_empty());
     }
@@ -757,7 +760,7 @@ fn printtimescale_runs_in_initial_blocks_with_all_time_magnitudes() {
         assert_eq!(
             sim.drain_runtime_events(),
             vec![celox::RuntimeEvent::Display {
-                message: format!("Time scale of (Top) is {expected}")
+                message: format!("Time scale of (Top) is {expected}").into_bytes()
             }]
         );
     }
@@ -783,7 +786,7 @@ fn printtimescale_initial_instances_and_interface_arrays_keep_their_names() {
         .drain_runtime_events()
         .into_iter()
         .map(|event| match event {
-            celox::RuntimeEvent::Display { message } => message,
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
             event => panic!("unexpected event: {event:?}"),
         })
         .collect::<Vec<_>>();
@@ -818,7 +821,7 @@ fn printtimescale_interface_arrays_preserve_integer_boundary_indices() {
             .drain_runtime_events()
             .into_iter()
             .map(|event| match event {
-                celox::RuntimeEvent::Display { message } => message,
+                celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
                 event => panic!("unexpected event: {event:?}"),
             })
             .collect::<Vec<_>>();
@@ -1071,7 +1074,7 @@ fn value_functions_called_as_statements_evaluate_their_operands_once() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "g 5".to_string(),
+            message: b"g 5".to_vec(),
         }],
     );
 }
@@ -1109,16 +1112,16 @@ fn initial_blocks_run_their_system_tasks_at_time_zero() {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "b=34".to_string(),
+                message: b"b=34".to_vec(),
             },
             celox::RuntimeEvent::Write {
-                message: "0,".to_string(),
+                message: b"0,".to_vec(),
             },
             celox::RuntimeEvent::Write {
-                message: "1,".to_string(),
+                message: b"1,".to_vec(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "e4".to_string(),
+                message: b"e4".to_vec(),
             },
         ],
     );
@@ -1144,7 +1147,7 @@ fn finish_in_an_initial_block_ends_the_simulation() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "before".to_string(),
+            message: b"before".to_vec(),
         }],
     );
 }
@@ -1168,10 +1171,10 @@ fn fatal_in_an_initial_block_fails_the_simulation() {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "before".to_string(),
+                message: b"before".to_vec(),
             },
             celox::RuntimeEvent::AssertFatal {
-                message: "boom 7".to_string(),
+                message: b"boom 7".to_vec(),
             },
         ],
     );
@@ -1198,7 +1201,7 @@ fn initial_blocks_skip_the_operands_short_circuits_skip() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "1".to_string(),
+            message: b"1".to_vec(),
         }],
     );
 }
@@ -1223,10 +1226,10 @@ fn initial_blocks_that_read_design_state_run_at_time_zero() {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "value=1".to_string(),
+                message: b"value=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "zero".to_string(),
+                message: b"zero".to_vec(),
             },
         ],
     );
@@ -1288,13 +1291,13 @@ fn countbits_called_as_a_statement_evaluates_all_arguments_once() {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "value 5".to_string()
+                message: b"value 5".to_vec()
             },
             celox::RuntimeEvent::Display {
-                message: "control 1".to_string()
+                message: b"control 1".to_vec()
             },
             celox::RuntimeEvent::Display {
-                message: "control 0".to_string()
+                message: b"control 0".to_vec()
             },
         ]
     );

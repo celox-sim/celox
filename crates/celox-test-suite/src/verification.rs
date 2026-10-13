@@ -550,7 +550,7 @@ impl Backend for ObservedBackend {
             .tick(event)
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
-    fn take_output(&mut self) -> Result<String> {
+    fn take_output(&mut self) -> Result<Vec<u8>> {
         self.backend
             .take_output()
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
@@ -606,16 +606,20 @@ fn run_script(
     match backend.run_testbench() {
         Ok(()) => {
             let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
-            match crate::script::sv::check_output(&String::from_utf8_lossy(&log)) {
+            match crate::script::sv::check_output(&log) {
                 Ok(()) => ("passed", "execute", String::new()),
                 Err(detail) => ("mismatch", "execute", detail),
             }
         }
         Err(error) => {
-            let log = std::fs::read_to_string(directory.join("protocol.log")).unwrap_or_default();
-            let assertions: Vec<&str> = log
-                .lines()
-                .filter_map(|line| line.trim_start().strip_prefix("@suite assert "))
+            // HDL output can contain arbitrary bytes. Decode only assertion
+            // diagnostics so unrelated binary output cannot discard markers.
+            let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
+            let assertions: Vec<_> = log
+                .split(|byte| *byte == b'\n')
+                .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+                .filter_map(|line| line.trim_ascii_start().strip_prefix(b"@suite assert "))
+                .map(String::from_utf8_lossy)
                 .collect();
             if assertions.is_empty() {
                 ("runtime_error", "execute", error.to_string())
@@ -801,6 +805,62 @@ fn write_result(directory: &Path, row: Value) -> Value {
         println!("{status}: {name}");
     }
     row
+}
+
+#[cfg(test)]
+mod script_failure_tests {
+    use super::*;
+
+    fn binary_assertion_failure(tool: Tool) {
+        let case = crate::load_group(
+            "binary_failure.vtest",
+            r##"(group binary_failure (category regression))
+            (case output_before_assertion
+              (source "binary.sv" #"
+                module Top(input logic clk, output logic [7:0] value);
+                  assign value = 0;
+                  always_ff @(posedge clk) $display("%c", 8'hff);
+                endmodule
+              "#)
+              (top Top) (tick clk) (assert_eq value 1))"##,
+            crate::no_std_library,
+        )[0];
+        let directory = std::env::temp_dir().join(format!(
+            "celox-binary-assertion-{}-{}",
+            tool.name(),
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let result = run_script(case, &directory, true, &|case, directory| {
+            let frontend = crate::sv::verification::SvFrontend;
+            match tool {
+                Tool::Icarus => Ok(Box::new(crate::icarus::Icarus::build_script(
+                    &frontend, case, directory,
+                )?) as Box<dyn Backend>),
+                Tool::Verilator => Ok(Box::new(crate::verilator::Verilator::build_script(
+                    &frontend, case, directory,
+                )?) as Box<dyn Backend>),
+            }
+        });
+        let log = std::fs::read(directory.join("protocol.log")).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(log.contains(&0xff), "HDL must emit non-UTF-8 output");
+        assert_eq!(result.0, "mismatch", "{result:?}");
+        assert_eq!(result.1, "execute");
+        assert!(result.2.contains("assert_eq value: expected 0x1, got 0x0"));
+    }
+
+    #[test]
+    #[ignore = "requires live Icarus, C++ and timeout tools"]
+    fn binary_assertion_failure_is_mismatch_on_icarus() {
+        binary_assertion_failure(Tool::Icarus);
+    }
+
+    #[test]
+    #[ignore = "requires live Verilator, C++ and timeout tools"]
+    fn binary_assertion_failure_is_mismatch_on_verilator() {
+        binary_assertion_failure(Tool::Verilator);
+    }
 }
 
 #[cfg(test)]

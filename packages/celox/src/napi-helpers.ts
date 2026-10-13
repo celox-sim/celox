@@ -129,7 +129,8 @@ export interface NapiSourceFile {
 
 export interface NapiAssertionResult {
 	passed: boolean;
-	message?: string;
+	/** Byte-exact HDL assertion output. Decode explicitly when text is needed. */
+	message?: Uint8Array;
 	file?: string;
 	line?: number;
 	column?: number;
