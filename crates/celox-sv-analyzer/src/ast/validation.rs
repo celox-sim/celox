@@ -49,7 +49,10 @@ pub(super) enum AlwaysKind {
 /// `always` with timing controls (a leading delay, a level-sensitive event
 /// list, or timing controls inside an edge-sensitive body) is a process.
 /// `always_latch` and an `always` without timing control are not supported.
-pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
+pub(super) fn always_kind(
+    always: &sv_parser::AlwaysConstruct,
+    syntax_tree: &SyntaxTree,
+) -> AlwaysKind {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => AlwaysKind::Comb,
         sv_parser::AlwaysKeyword::AlwaysFf(_) => AlwaysKind::Ff,
@@ -82,7 +85,39 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
                                 _ => None,
                             })
                             .all(|edge| edge);
+                        let supported =
+                            ff_process::ff_event_control_and_body(&always.nodes.1, syntax_tree)
+                                .is_some_and(|(events, body)| {
+                                    if events.len() == 1 {
+                                        return true;
+                                    }
+                                    let mut conditions = HashSet::default();
+                                    for node in RefNode::StatementOrNull(body) {
+                                        if matches!(
+                                            node,
+                                            RefNode::CondPredicate(_) | RefNode::CaseExpression(_)
+                                        ) {
+                                            for child in node {
+                                                if matches!(
+                                                    child,
+                                                    RefNode::HierarchicalIdentifier(_)
+                                                ) && let Some(name) =
+                                                    identifier_text(child, syntax_tree)
+                                                {
+                                                    conditions.insert(name);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    events.first().is_some_and(|clock| {
+                                        !conditions.contains(clock.signal())
+                                            && events[1..]
+                                                .iter()
+                                                .all(|event| conditions.contains(event.signal()))
+                                    })
+                                });
                         if !edge_sensitive
+                            || !supported
                             || has_timing_control(RefNode::StatementOrNull(&timing.nodes.1))
                             || calls_timed_task(always)
                         {
@@ -242,12 +277,15 @@ pub(super) fn install_timed_tasks(
 }
 
 /// The statement an combinational `always` evaluates, without its event control.
-pub(super) fn always_comb_body(
-    always: &sv_parser::AlwaysConstruct,
-) -> Option<&sv_parser::Statement> {
+pub(super) fn always_comb_body<'a>(
+    always: &'a sv_parser::AlwaysConstruct,
+    syntax_tree: &SyntaxTree,
+) -> Option<&'a sv_parser::Statement> {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => Some(&always.nodes.1),
-        sv_parser::AlwaysKeyword::Always(_) if always_kind(always) == AlwaysKind::Comb => {
+        sv_parser::AlwaysKeyword::Always(_)
+            if always_kind(always, syntax_tree) == AlwaysKind::Comb =>
+        {
             let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
                 &always.nodes.1.nodes.2
             else {
@@ -723,13 +761,13 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 return Err(AnalyzerError::Unsupported("enum port".to_string()));
             }
             RefNode::AlwaysConstruct(always) => {
-                if always_kind(always) == AlwaysKind::Unsupported {
+                if always_kind(always, syntax_tree) == AlwaysKind::Unsupported {
                     return Err(AnalyzerError::Unsupported(
                         "always and always_latch processes".to_string(),
                     ));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
-                if always_kind(always) == AlwaysKind::Comb
+                if always_kind(always, syntax_tree) == AlwaysKind::Comb
                     && body
                         .clone()
                         .into_iter()
@@ -739,7 +777,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                         "nonblocking assignment inside always_comb".to_string(),
                     ));
                 }
-                if always_kind(always) == AlwaysKind::Ff
+                if always_kind(always, syntax_tree) == AlwaysKind::Ff
                     && body.clone().into_iter().any(|node| {
                         matches!(
                             node,

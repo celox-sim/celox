@@ -1985,3 +1985,27 @@ fn output_arguments_preserve_cascaded_domain_events() {
         assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{direction}");
     }
 }
+
+#[test]
+fn inactive_generate_waiters_do_not_reject_combinational_events() {
+    let mut sim = simulation(
+        "module Top(input bit i,output bit q);wire a=i,b=~i;assign q=a; if(0)initial @(a^b);endmodule",
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+}
+
+#[test]
+fn computed_and_non_ff_multi_edge_always_controls_run_as_processes() {
+    for control in ["posedge (a | b)", "posedge a or negedge b"] {
+        let source = format!(
+            "module Top(input bit a,b,output bit seen);always @({control}) seen=1;endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{control}");
+    }
+}

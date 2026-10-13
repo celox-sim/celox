@@ -2081,6 +2081,9 @@ fn lower_module_with_overrides(
         let bodies = module
             .initial_processes()
             .iter()
+            .filter(|process| {
+                condition_is_active(process.condition(), &constants, &parameter_types)
+            })
             .map(|process| process.body())
             .collect::<Vec<_>>();
         ff::declare_event_counters(&mut pm, &bodies, &package_aliases)?;
