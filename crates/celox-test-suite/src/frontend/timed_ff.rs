@@ -193,7 +193,9 @@ fn single_generate_body(source: &str, start: usize) -> bool {
     control_end.is_some_and(|end| {
         let mut at = trivia(source, end);
         while source[at..].starts_with("(*") {
-            let Some(end) = parens(source, at) else { return false; };
+            let Some(end) = parens(source, at) else {
+                return false;
+            };
             at = trivia(source, end);
         }
         at == start
@@ -411,7 +413,9 @@ fn lexical_scope_at(source: &str, at: usize) -> Vec<usize> {
 fn callable_key(source: &str, at: usize, name: &str) -> (String, Vec<usize>, String) {
     let container = container_at(source, at);
     let mut scope = lexical_scope_at(source, at);
-    if !container.is_empty() && !scope.is_empty() { scope.remove(0); }
+    if !container.is_empty() && !scope.is_empty() {
+        scope.remove(0);
+    }
     (container, scope, name.to_owned())
 }
 
@@ -478,7 +482,10 @@ impl TaskTiming {
         let prefix = source[..at].trim_end();
         if let Some(prefix) = prefix.strip_suffix("::") {
             let package = sv_words(prefix).last()?.2;
-            return self.tasks.get(&(package.to_owned(), Vec::new(), name.to_owned())).copied();
+            return self
+                .tasks
+                .get(&(package.to_string(), Vec::new(), name.to_owned()))
+                .copied();
         }
         if let Some(prefix) = prefix.strip_suffix('.') {
             let instance = sv_words(prefix).last()?.2;
@@ -486,7 +493,10 @@ impl TaskTiming {
             let words = sv_words(&source[..at]);
             for pair in words.windows(2) {
                 if pair[1].2 == instance && container_at(source, pair[0].0) == scope {
-                    if let Some(value) = self.tasks.get(&(pair[0].2.to_owned(), Vec::new(), name.to_owned())) {
+                    if let Some(value) =
+                        self.tasks
+                            .get(&(pair[0].2.to_owned(), Vec::new(), name.to_owned()))
+                    {
                         return Some(*value);
                     }
                 }
@@ -497,8 +507,12 @@ impl TaskTiming {
         let scope = container_at(source, at);
         let mut key = callable_key(source, at, name);
         loop {
-            if let Some(value) = self.tasks.get(&key) { return Some(*value); }
-            if key.1.pop().is_none() { break; }
+            if let Some(value) = self.tasks.get(&key) {
+                return Some(*value);
+            }
+            if key.1.pop().is_none() {
+                break;
+            }
         }
         let call_scope = lexical_scope_at(source, at);
         let mut imports: BTreeMap<usize, (Option<bool>, Option<bool>)> = BTreeMap::new();
@@ -524,7 +538,10 @@ impl TaskTiming {
                 };
                 let selected = words.get(1).map(|word| word.2);
                 if selected == Some(name) || (selected.is_none() && item.contains('*')) {
-                    if let Some(value) = self.tasks.get(&(package.to_owned(), Vec::new(), name.to_owned())) {
+                    if let Some(value) =
+                        self.tasks
+                            .get(&(package.to_string(), Vec::new(), name.to_owned()))
+                    {
                         if selected == Some(name) {
                             *explicit = Some(*value);
                         } else {
@@ -538,18 +555,18 @@ impl TaskTiming {
             .into_values()
             .rev()
             .find_map(|(explicit, wildcard)| explicit.or(wildcard))
-            .or_else(|| self.tasks.get(&(String::new(), Vec::new(), name.to_owned())).copied())
+            .or_else(|| {
+                self.tasks
+                    .get(&(String::new(), Vec::new(), name.to_owned()))
+                    .copied()
+            })
     }
 
     fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {
         sv_words(&source[start..end])
             .iter()
             .any(|(at, word_end, name)| {
-                if !self
-                    .tasks
-                    .keys()
-                    .any(|key| key.2 == *name)
-                {
+                if !self.tasks.keys().any(|key| key.2 == *name) {
                     return false;
                 }
                 let tail = after_trivia(&source[start + word_end..end]);
