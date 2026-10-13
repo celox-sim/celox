@@ -12,7 +12,7 @@ all_backends! {
 module Top { always_comb { $assert(1'd0, "site zero"); } }
 "#, "Top");
         assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site zero"));
-        assert_eq!(sim.drain_runtime_events(), vec![RuntimeEvent::AssertFatal { message: "site zero".to_string() }]);
+        assert_eq!(sim.drain_runtime_events(), vec![RuntimeEvent::AssertFatal { message: b"site zero".to_vec() }]);
         assert!(sim.drain_runtime_events().is_empty());
     }
 
@@ -30,9 +30,9 @@ module Top {
 "#, "Top");
         assert!(matches!(sim.eval_comb(), Err(RuntimeErrorCode::Runtime { message, .. }) if message == "site two"));
         assert_eq!(sim.drain_runtime_events(), vec![
-            RuntimeEvent::Display { message: "first".to_string() },
-            RuntimeEvent::Display { message: "second".to_string() },
-            RuntimeEvent::AssertFatal { message: "site two".to_string() },
+            RuntimeEvent::Display { message: b"first".to_vec() },
+            RuntimeEvent::Display { message: b"second".to_vec() },
+            RuntimeEvent::AssertFatal { message: b"site two".to_vec() },
         ]);
         assert!(sim.drain_runtime_events().is_empty());
     }
@@ -51,7 +51,7 @@ module Top (a: input logic<8>, w: input logic<128>) {
         sim.modify(|io| { io.set(a, 0u8); io.set(w, 0u8); }).unwrap();
         sim.drain_runtime_events();
         let mut drain = sim.runtime_event_drain().expect("drain handle");
-        let fatal = vec![RuntimeEvent::AssertFatal { message: "input fatal".to_string() }];
+        let fatal = vec![RuntimeEvent::AssertFatal { message: b"input fatal".to_vec() }];
 
         sim.set(a, 1u8);
         assert_eq!(drain.drain(), fatal);
@@ -86,7 +86,7 @@ module Top (a: input logic<8>) {
         sim.drain_runtime_events();
         let mut drain = sim.runtime_event_drain().expect("drain handle");
         sim.restore(&checkpoint).unwrap();
-        assert_eq!(drain.drain(), vec![RuntimeEvent::AssertFatal { message: "restored fatal".to_string() }]);
+        assert_eq!(drain.drain(), vec![RuntimeEvent::AssertFatal { message: b"restored fatal".to_vec() }]);
         assert!(drain.drain().is_empty());
     }
 
@@ -133,8 +133,8 @@ module Top {
 "#, "Top");
 
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "before".to_string() },
-            celox::RuntimeEvent::AssertFatal { message: "initial fatal".to_string() },
+            celox::RuntimeEvent::Display { message: b"before".to_vec() },
+            celox::RuntimeEvent::AssertFatal { message: b"initial fatal".to_vec() },
         ]);
         assert!(sim.drain_runtime_events().is_empty());
     }
@@ -157,11 +157,11 @@ module Top (a: input logic<8>, y: output logic<8>) {
         assert_eq!(sim.drain_runtime_events_with_context(celox::RuntimeFormatContext {
             scope: Some("host.Top"),
             ..Default::default()
-        }), vec![celox::RuntimeEvent::AssertFatal { message: "fatal host.Top".to_string() }]);
+        }), vec![celox::RuntimeEvent::AssertFatal { message: b"fatal host.Top".to_vec() }]);
         assert!(sim.drain_runtime_events().is_empty());
         sim.modify(|io| io.set(a, 2u8)).unwrap();
         assert_eq!(sim.drain_runtime_events(), vec![
-            celox::RuntimeEvent::Display { message: "after".to_string() },
+            celox::RuntimeEvent::Display { message: b"after".to_vec() },
         ]);
     }
 }

@@ -122,7 +122,7 @@ fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
         assert_eq!(
             sim.drain_runtime_events(),
             vec![celox::RuntimeEvent::Display {
-                message: format!("copied={expected}"),
+                message: format!("copied={expected}").into_bytes(),
             }],
         );
     }

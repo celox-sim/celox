@@ -468,3 +468,7 @@ The retained [result matrix](verification/README.md) and
 and what remains unresolved. These extracted regressions include behavior
 specific to Celox; the entire catalogue is not yet a verified Veryl conformance
 suite. Keep the distinctions when reusing it with another compiler.
+
+`(expect_output "text")` compares UTF-8 bytes. For arbitrary output use
+`(expect_output (bytes 128 255 0))`; each decimal value must be in `0..255`.
+The Celox and external simulator adapters compare bytes without UTF-8 replacement.

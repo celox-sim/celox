@@ -15,7 +15,7 @@ pub(super) fn expr_static_width(
                     .map(|r#type| r#type.width)
             }),
         Expr::Literal(literal) => {
-            typecheck::parse_integral_literal(literal).map(|literal| literal.width)
+            typecheck::integral_literal_type_metadata(literal).map(|(width, _)| width)
         }
         Expr::Select { msb, lsb, .. } => typecheck::select_range_width(
             &msb.clone().into(),
@@ -45,6 +45,13 @@ pub(super) fn expr_static_width(
             }
         }
         Expr::Binary { left, op, right } => {
+            // A logical result has a fixed width, but a type query must still
+            // resolve the types of both original operands.
+            if packed_dimensions.type_query && matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
+            {
+                expr_static_width(left, packed_dimensions)?;
+                expr_static_width(right, packed_dimensions)?;
+            }
             if matches!(
                 op,
                 BinaryOp::LogicAnd

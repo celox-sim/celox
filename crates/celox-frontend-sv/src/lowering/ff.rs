@@ -2289,6 +2289,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                             },
                         }],
                     },
+                    (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => {
+                        sv::ir::Expr::Binary {
+                            left: Box::new(sv::ir::Expr::Binary {
+                                left: Box::new(selector.clone()),
+                                op: sv::ir::BinaryOp::EqWildcard,
+                                right: Box::new(value.clone()),
+                            }),
+                            op: sv::ir::BinaryOp::NeCase,
+                            right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
+                        }
+                    }
                     (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
                         left: Box::new(selector.clone()),
                         op: if kind == sv::ir::CaseKind::Exact {

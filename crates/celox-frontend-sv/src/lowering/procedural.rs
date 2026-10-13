@@ -812,7 +812,7 @@ fn template_arguments(template: &str) -> usize {
         }
         while chars.next_if(char::is_ascii_digit).is_some() {}
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsS".contains(spec)
+            && "bBoOhHxXdDiIcCsStT".contains(spec)
         {
             count += 1;
         }
@@ -851,7 +851,14 @@ pub(super) fn system_task_template(
         let rest = values.len().saturating_sub(converted);
         if rest > 0 {
             let mut text = template.unwrap_or_default();
-            text.push_str(&format!("%{radix}").repeat(rest));
+            for value in &values[converted..] {
+                text.push('%');
+                text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
+                    's'
+                } else {
+                    *radix
+                });
+            }
             template = Some(text);
         }
     }

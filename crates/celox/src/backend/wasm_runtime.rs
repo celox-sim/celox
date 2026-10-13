@@ -193,9 +193,8 @@ impl WasmBackend {
         let mut event_map = HashMap::default();
         let mut eval_only_event_map = HashMap::default();
         let mut apply_event_map = HashMap::default();
-        let mut id_to_addr = Vec::new();
-        let mut addr_to_id = HashMap::default();
-        let mut next_id = 0usize;
+        let (mut addr_to_id, mut id_to_addr) = super::event_ids(sir);
+        let mut next_id = id_to_addr.len();
 
         let compile_ffs = |ff_map: &HashMap<
             AbsoluteAddr,
@@ -544,7 +543,7 @@ impl WasmBackend {
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
-        assert!(provided_size <= allocated_size);
+        let copy_size = provided_size.min(allocated_size);
 
         let mem = self.memory.data_mut(&mut self.store);
         // Zero the allocated region
@@ -553,8 +552,12 @@ impl WasmBackend {
         }
         // Write value
         let bytes =
-            unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, provided_size) };
-        mem[signal.offset..signal.offset + provided_size].copy_from_slice(bytes);
+            unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, copy_size) };
+        mem[signal.offset..signal.offset + copy_size].copy_from_slice(bytes);
+
+        if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+            mem[signal.offset + allocated_size - 1] &= (1u8 << (signal.width % 8)) - 1;
+        }
 
         // Clear 4-state mask
         if self.options.four_state && signal.is_4state {
