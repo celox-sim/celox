@@ -231,6 +231,35 @@
   (assert_eq checks 7)
   (assert_eq width 3))
 
+(case constant_parameter_initializers_short_circuit_four_state_bindings
+  ; IEEE 1800-2023 11.3.5: X/Z combined with a deciding logical
+  ; operand produces a known truth value before the wide operand.
+  ; Cross Celox's 65536-bit materialization guard without evaluating it.
+  (four_state)
+  (source "short_circuit_four_state_bindings.sv" #"
+    package flags;
+      localparam IMPORTED_X = 1'bx;
+      localparam IMPORTED_Z = 1'bz;
+    endpackage
+    module Top(output logic [5:0] checks, output int width);
+      import flags::*;
+      localparam FLAG = 1'bx;
+      localparam ZFLAG = 1'bz;
+      localparam A = FLAG && 0 && 65537'd0;
+      localparam B = FLAG || 1 || 65537'd0;
+      localparam C = ZFLAG && 0 && 65537'd0;
+      localparam D = ZFLAG || 1 || 65537'd0;
+      localparam E = IMPORTED_X && 0 && 65537'd0;
+      localparam F = IMPORTED_Z || 1 || 65537'd0;
+      assign checks = {A === 1'b0, B === 1'b1, C === 1'b0,
+                       D === 1'b1, E === 1'b0, F === 1'b1};
+      assign width = $bits(A) + $bits(B) + $bits(C) + $bits(D) + $bits(E) + $bits(F);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 63)
+  (assert_eq width 6))
+
 (case constant_parameter_initializers_preserve_selections
   (source "constant_parameter_selections.sv" #"
     module Top(output int n, down, up, negative, shifted, width, cast_value,

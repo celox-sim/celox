@@ -52,6 +52,34 @@ fn unresolved_local_parameter_masks_imported_bindings() {
 }
 
 #[test]
+fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
+    let tree = crate::syntax::parse_source(
+        "module C #(parameter logic FLAG, parameter N = FLAG && 1000000000'd0); endmodule",
+        Path::new("required_short_circuit_flag.sv"),
+    )
+    .unwrap();
+    let imported = scope::ScopeSymbols {
+        parameter_values: [("FLAG".into(), Expr::Literal("1'b0".into()))]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let _scope = scope::install(Arc::new(imported));
+    let error = parameters_from_module_node(
+        module_node(&tree),
+        &tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        &HashMap::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("constant materialization limit"),
+        "{error}"
+    );
+}
+
+#[test]
 fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() {
     use std::cell::Cell;
 

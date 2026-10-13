@@ -274,6 +274,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 syntax_tree,
                 const_env,
                 type_aliases,
+                &|name| indexed_dimensions.parameter_values.get(name).cloned(),
             )?
             .is_none()
         {

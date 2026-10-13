@@ -811,6 +811,64 @@ fn permits_short_circuited_constant_parameter_operands() {
 }
 
 #[test]
+fn validates_calls_in_short_circuited_constant_parameter_operands() {
+    for call in ["$random()", "$unknown()", "$clog2()", "$bits()"] {
+        let source =
+            format!("module Top; localparam N = 0 && ({call} || 1000000000'd0); endmodule");
+        let error =
+            analyze_source(&source, Path::new("skipped_parameter_call.sv")).expect_err(call);
+        assert!(
+            error.to_string().contains(call.split('(').next().unwrap()),
+            "{error}"
+        );
+    }
+    let ir = analyze_source(
+        "module Top; localparam N = 0 && $clog2(1000000000'd0); endmodule",
+        Path::new("skipped_valid_parameter_call.sv"),
+    )
+    .unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
+fn short_circuits_four_state_parameter_bindings() {
+    for flag in ["1'bx", "1'bz", "4'bx001"] {
+        for (expression, expected) in [
+            ("FLAG && 0 && 1000000000'd0", 0),
+            ("FLAG || 1 || 1000000000'd0", 1),
+        ] {
+            for declaration in [
+                format!("module Top; localparam FLAG = {flag};"),
+                format!("package p; localparam FLAG = {flag}; endpackage module Top; import p::*;"),
+                format!(
+                    "package p; localparam FLAG = 1; endpackage module Top; import p::*; localparam FLAG = {flag};"
+                ),
+            ] {
+                let source = format!("{declaration} localparam N = {expression}; endmodule");
+                let ir = analyze_source(&source, Path::new("four_state_parameter_proof.sv"))
+                    .unwrap_or_else(|error| panic!("{source}: {error}"));
+                let n = ir.modules()[0]
+                    .parameters()
+                    .iter()
+                    .find(|p| p.name() == "N")
+                    .unwrap();
+                assert_eq!(n.resolved_value(), Some(expected), "{source}");
+                assert_eq!(n.resolved_width(), Some(1), "{source}");
+            }
+        }
+        let source = format!(
+            "module Top; localparam FLAG = {flag}; localparam N = FLAG && 1000000000'd0; endmodule"
+        );
+        let error =
+            analyze_source(&source, Path::new("evaluated_four_state_parameter.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("constant materialization limit"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn resolves_constant_parameter_part_selects() {
     for (declaration, selection, expected, width, signed) in [
         ("logic [31:0] W = 18", "W[3:0] + 1", 3, 32, false),

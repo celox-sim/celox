@@ -467,15 +467,23 @@ pub(super) fn parameters_from_ref_node_with_environment(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
+                let imported = scope::imported();
                 if let Some(value) = validate_parameter_initializer_literal_widths(
                     expr,
                     syntax_tree,
                     const_env,
                     type_aliases,
+                    &|name| {
+                        environment.literals.get(name).cloned().or_else(|| {
+                            // An unresolved local binding still shadows imports.
+                            (!parameters.iter().any(|parameter| parameter.name() == name))
+                                .then(|| imported.parameter_values.get(name).cloned())
+                                .flatten()
+                        })
+                    },
                 )? {
                     Some(value)
                 } else if selects::parameter_initializer_needs_typed_lowering(expr) {
-                    let imported = scope::imported();
                     let mut dimensions = PackedDimensions::new(
                         parameter_packed_dimensions_with_imported(parameters, &imported),
                         const_env,
@@ -580,6 +588,7 @@ pub(super) fn validate_parameter_initializer_literal_widths(
     tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    parameter_literal: &impl Fn(&str) -> Option<Expr>,
 ) -> Result<Option<ConstExpr>, AnalyzerError> {
     let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
     let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
@@ -708,13 +717,25 @@ pub(super) fn validate_parameter_initializer_literal_widths(
         if let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(initializer) =
             initializer
             && let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer
-            && let Some(proof) = expr_to_const(bounded_parameter_proof(expression, tree))
+            && let Some(proof) =
+                expr_to_const(bounded_parameter_proof(expression, tree, parameter_literal))
             && let Some(ty) =
                 infer_const_expr_type(&proof, &parameter_types_from_const_env(const_env))
             && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
             && let Some(value) = eval_ast_const_expr(&proof, const_env)
         {
             for node in initializer.into_iter() {
+                // Short circuiting skips evaluation, not catalogue/site/arity
+                // validation. Inspect calls without materializing arguments.
+                if let RefNode::SystemTfCall(call) = node {
+                    let (name, args) = system_tf_call_parts(call, tree)
+                        .ok_or_else(|| unsupported("system call in parameter operand"))?;
+                    system_functions::check_call(
+                        name,
+                        args.as_deref(),
+                        system_functions::CallSite::Expression,
+                    )?;
+                }
                 let target = match node {
                     RefNode::Cast(cast) => Some(&cast.nodes.0),
                     RefNode::ConstantCast(cast) => Some(&cast.nodes.0),
@@ -737,10 +758,15 @@ pub(super) fn validate_parameter_initializer_literal_widths(
     Ok(None)
 }
 
-fn bounded_parameter_proof(expression: &sv_parser::ConstantExpression, tree: &SyntaxTree) -> Expr {
+fn bounded_parameter_proof(
+    expression: &sv_parser::ConstantExpression,
+    tree: &SyntaxTree,
+    parameter_literal: &impl Fn(&str) -> Option<Expr>,
+) -> Expr {
     // NUL cannot occur in an HDL binding. The unresolved proof operand is
     // never published: it either stays unevaluated or makes the proof fail.
     let unknown = || Expr::Ident("\0unmaterialized-parameter-operand".into());
+    let binding = |name: String| parameter_literal(&name).unwrap_or(Expr::Ident(name));
     let primary = |primary: &sv_parser::ConstantPrimary| match primary {
         sv_parser::ConstantPrimary::PrimaryLiteral(literal) => {
             let text = tree.get_str(literal).unwrap_or_default();
@@ -758,14 +784,26 @@ fn bounded_parameter_proof(expression: &sv_parser::ConstantExpression, tree: &Sy
                 && parameter.nodes.1.nodes.2.is_none() =>
         {
             reference_name(RefNode::PsParameterIdentifier(&parameter.nodes.0), tree)
-                .map(Expr::Ident)
+                .map(binding)
                 .unwrap_or_else(unknown)
+        }
+        sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+            // The parser also represents bare parameter names as TfCall nodes.
+            if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
+                && call.nodes.2.is_none()
+            {
+                reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
+                    .map(binding)
+                    .unwrap_or_else(unknown)
+            } else {
+                unknown()
+            }
         }
         sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {
             if let sv_parser::ConstantMintypmaxExpression::Unary(expression) =
                 &grouped.nodes.0.nodes.1
             {
-                bounded_parameter_proof(expression, tree)
+                bounded_parameter_proof(expression, tree, parameter_literal)
             } else {
                 unknown()
             }
@@ -785,9 +823,17 @@ fn bounded_parameter_proof(expression: &sv_parser::ConstantExpression, tree: &Sy
                 return unknown();
             };
             let expression = Expr::Binary {
-                left: Box::new(bounded_parameter_proof(&value.nodes.0, tree)),
+                left: Box::new(bounded_parameter_proof(
+                    &value.nodes.0,
+                    tree,
+                    parameter_literal,
+                )),
                 op,
-                right: Box::new(bounded_parameter_proof(&value.nodes.3, tree)),
+                right: Box::new(bounded_parameter_proof(
+                    &value.nodes.3,
+                    tree,
+                    parameter_literal,
+                )),
             };
             if matches!(&value.nodes.3, sv_parser::ConstantExpression::ConstantPrimary(primary)
                 if matches!(&**primary, sv_parser::ConstantPrimary::MintypmaxExpression(_)))
