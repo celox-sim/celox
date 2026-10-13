@@ -949,7 +949,10 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             );
             tracing::trace!(target: "celox::parallel", event = "candidate", candidate, task_budget, makespan,
             sequential_cost, synchronization_cost = options.synchronization_cost,
-            task_overhead, lanes = ?plan.item_lanes, order = ?plan.order, tasks = ?tasks);
+            task_overhead, lanes = ?plan.item_lanes, order = ?plan.order, tasks = ?tasks,
+            task_lanes = ?tasks.iter().map(|t| t.lane).collect::<Vec<_>>(),
+            task_items = ?tasks.iter().map(|t| &t.items).collect::<Vec<_>>(),
+            task_waits = ?tasks.iter().map(|t| t.waits.iter().map(|w| [w.lane, w.completed_tasks]).collect::<Vec<_>>()).collect::<Vec<_>>());
             tracing::debug!(
                 makespan,
                 tasks = tasks.len(),

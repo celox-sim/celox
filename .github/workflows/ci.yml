@@ -491,7 +491,7 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, sv-tests, napi-linux, napi-wasm, external-suites]
+    needs: [changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     env:
@@ -499,6 +499,9 @@ jobs:
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
+      # ARM64 is intentionally deferred on PRs, but must pass in the queue.
+      ARM64_REQUIRED: ${{ github.event_name != 'pull_request' && needs.changes.outputs.rust != 'false' }}
+      ARM64_RESULT: ${{ needs.arm64-backend.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
       WASM_RESULT: ${{ needs.napi-wasm.result }}
@@ -516,6 +519,9 @@ jobs:
           if [ "$RUST_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
             test "$SV_TESTS_RESULT" = success
           fi
+          if [ "$ARM64_REQUIRED" != false ] || [ "$ARM64_RESULT" != skipped ]; then
+            test "$ARM64_RESULT" = success
+          fi
           if [ "$NAPI_REQUIRED" != false ] || [ "$NATIVE_RESULT" != skipped ]; then
             test "$NATIVE_RESULT" = success
           fi
@@ -530,7 +536,7 @@ jobs:
     name: ARM64 Backend Test
     needs: changes
     # Platform jobs run in merge groups and full runs, not on pull requests.
-    # They almost never fail alone; dispatch ci.yml on a branch to run them.
+    # The required Rust gate enforces this result in merge groups.
     if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-26.04-arm
     steps:

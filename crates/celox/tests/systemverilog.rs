@@ -240,3 +240,8 @@ sv_backends! {
  fn function_return_bounds_do_not_shadow_local_calls(sim) { @case "timing::function_return_bounds_do_not_shadow_local_calls"; }
  fn control_shaped_display_is_design_output(sim) { @case "timing::control_shaped_display_is_design_output"; }
 }
+
+sv_backends! {
+ fn staged_ff_edge_can_finish_without_scheduled_work(sim) { @case "timing::staged_ff_edge_can_finish_without_scheduled_work"; }
+ fn coalesced_setup_writes_do_not_invent_ff_edges(sim) { @case "timing::coalesced_setup_writes_do_not_invent_ff_edges"; }
+}
